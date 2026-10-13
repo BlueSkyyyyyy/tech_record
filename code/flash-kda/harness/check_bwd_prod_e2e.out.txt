@@ -1,0 +1,217 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+B1 flags: -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY
+building CUDA B1 ...
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY -DB1T_SPROXY ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1_tma_deploy.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_PROD=1 -DB2M_HDW=1 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_prod_e2e_hdw.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_PROD=1 -DB2M_HDW=1 -DB2M_INTRA=1 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_prod_e2e_hdw_intra.so
+====================================================================================================
+Part A: CUDA-B2-prod chains vs FLA autograd, and vs the §45 best chain `cf`
+  pc  = CUDA-B1 + (prod_hdw + Triton B3 intra);  pci = CUDA-B1 + prod_hdw_intra (1 launch)
+====================================================================================================
+
+# T=128 H=2  B=1 T=128 H=2 seed=0 g_scale=1.0
+    pc   dq vs FLA           max_abs=8.650e-04  max_rel=1.287e-03  ref_max=6.721e-01
+    pci  dq vs FLA           max_abs=9.049e-04  max_rel=1.346e-03  ref_max=6.721e-01
+    cf   dq vs FLA           max_abs=9.193e-04  max_rel=1.368e-03  ref_max=6.721e-01
+    pc   dq vs cf            max_abs=4.232e-04  max_rel=6.295e-04  ref_max=6.722e-01
+    pci  dq vs cf            max_abs=4.528e-04  max_rel=6.735e-04  ref_max=6.722e-01
+    pc   dk vs FLA           max_abs=1.016e-03  max_rel=1.493e-03  ref_max=6.802e-01
+    pci  dk vs FLA           max_abs=1.072e-03  max_rel=1.576e-03  ref_max=6.802e-01
+    cf   dk vs FLA           max_abs=1.081e-03  max_rel=1.589e-03  ref_max=6.802e-01
+    pc   dk vs cf            max_abs=5.791e-04  max_rel=8.516e-04  ref_max=6.801e-01
+    pci  dk vs cf            max_abs=7.095e-04  max_rel=1.043e-03  ref_max=6.801e-01
+    pc   dv vs FLA           max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    pci  dv vs FLA           max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    cf   dv vs FLA           max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    pc   dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    pci  dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    pc   dbeta vs FLA        max_abs=1.810e-03  max_rel=4.552e-03  ref_max=3.977e-01
+    pci  dbeta vs FLA        max_abs=1.810e-03  max_rel=4.552e-03  ref_max=3.977e-01
+    cf   dbeta vs FLA        max_abs=1.810e-03  max_rel=4.551e-03  ref_max=3.977e-01
+    pc   dbeta vs cf         max_abs=7.641e-06  max_rel=1.913e-05  ref_max=3.994e-01
+    pci  dbeta vs cf         max_abs=6.236e-06  max_rel=1.561e-05  ref_max=3.994e-01
+    pc   dg vs FLA           max_abs=1.157e-04  max_rel=3.341e-03  ref_max=3.462e-02
+    pci  dg vs FLA           max_abs=1.123e-04  max_rel=3.244e-03  ref_max=3.462e-02
+    cf   dg vs FLA           max_abs=9.492e-05  max_rel=2.741e-03  ref_max=3.462e-02
+    pc   dg vs cf            max_abs=8.179e-05  max_rel=2.363e-03  ref_max=3.462e-02
+    pci  dg vs cf            max_abs=1.103e-04  max_rel=3.185e-03  ref_max=3.462e-02
+    pc   dh0 vs FLA          max_abs=1.912e-04  max_rel=4.608e-03  ref_max=4.150e-02
+    pci  dh0 vs FLA          max_abs=1.912e-04  max_rel=4.608e-03  ref_max=4.150e-02
+    cf   dh0 vs FLA          max_abs=1.912e-04  max_rel=4.608e-03  ref_max=4.150e-02
+
+# T=256 H=4  B=1 T=256 H=4 seed=1 g_scale=1.0
+    pc   dq vs FLA           max_abs=1.666e-03  max_rel=2.411e-03  ref_max=6.908e-01
+    pci  dq vs FLA           max_abs=1.669e-03  max_rel=2.416e-03  ref_max=6.908e-01
+    cf   dq vs FLA           max_abs=1.441e-03  max_rel=2.087e-03  ref_max=6.908e-01
+    pc   dq vs cf            max_abs=6.644e-04  max_rel=9.626e-04  ref_max=6.902e-01
+    pci  dq vs cf            max_abs=7.968e-04  max_rel=1.154e-03  ref_max=6.902e-01
+    pc   dk vs FLA           max_abs=1.272e-03  max_rel=1.594e-03  ref_max=7.980e-01
+    pci  dk vs FLA           max_abs=1.273e-03  max_rel=1.595e-03  ref_max=7.980e-01
+    cf   dk vs FLA           max_abs=1.193e-03  max_rel=1.495e-03  ref_max=7.980e-01
+    pc   dk vs cf            max_abs=8.429e-04  max_rel=1.057e-03  ref_max=7.974e-01
+    pci  dk vs cf            max_abs=8.094e-04  max_rel=1.015e-03  ref_max=7.974e-01
+    pc   dv vs FLA           max_abs=2.755e-04  max_rel=4.518e-03  ref_max=6.098e-02
+    pci  dv vs FLA           max_abs=2.755e-04  max_rel=4.518e-03  ref_max=6.098e-02
+    cf   dv vs FLA           max_abs=2.755e-04  max_rel=4.518e-03  ref_max=6.098e-02
+    pc   dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    pci  dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    pc   dbeta vs FLA        max_abs=3.443e-03  max_rel=5.835e-03  ref_max=5.900e-01
+    pci  dbeta vs FLA        max_abs=3.442e-03  max_rel=5.834e-03  ref_max=5.900e-01
+    cf   dbeta vs FLA        max_abs=3.443e-03  max_rel=5.835e-03  ref_max=5.900e-01
+    pc   dbeta vs cf         max_abs=1.860e-05  max_rel=3.142e-05  ref_max=5.919e-01
+    pci  dbeta vs cf         max_abs=1.937e-05  max_rel=3.273e-05  ref_max=5.919e-01
+    pc   dg vs FLA           max_abs=2.497e-04  max_rel=7.268e-03  ref_max=3.436e-02
+    pci  dg vs FLA           max_abs=2.487e-04  max_rel=7.239e-03  ref_max=3.436e-02
+    cf   dg vs FLA           max_abs=2.124e-04  max_rel=6.184e-03  ref_max=3.436e-02
+    pc   dg vs cf            max_abs=7.164e-05  max_rel=2.084e-03  ref_max=3.437e-02
+    pci  dg vs cf            max_abs=9.752e-05  max_rel=2.837e-03  ref_max=3.437e-02
+    pc   dh0 vs FLA          max_abs=3.201e-04  max_rel=9.365e-03  ref_max=3.418e-02
+    pci  dh0 vs FLA          max_abs=3.201e-04  max_rel=9.365e-03  ref_max=3.418e-02
+    cf   dh0 vs FLA          max_abs=3.201e-04  max_rel=9.365e-03  ref_max=3.418e-02
+
+# T=250 H=3 (non-div)  B=1 T=250 H=3 seed=2 g_scale=1.0
+    pc   dq vs FLA           max_abs=1.578e-03  max_rel=3.046e-03  ref_max=5.180e-01
+    pci  dq vs FLA           max_abs=1.575e-03  max_rel=3.040e-03  ref_max=5.180e-01
+    cf   dq vs FLA           max_abs=1.770e-03  max_rel=3.417e-03  ref_max=5.180e-01
+    pc   dq vs cf            max_abs=6.534e-04  max_rel=1.262e-03  ref_max=5.177e-01
+    pci  dq vs cf            max_abs=7.456e-04  max_rel=1.440e-03  ref_max=5.177e-01
+    pc   dk vs FLA           max_abs=9.995e-04  max_rel=1.920e-03  ref_max=5.206e-01
+    pci  dk vs FLA           max_abs=9.942e-04  max_rel=1.910e-03  ref_max=5.206e-01
+    cf   dk vs FLA           max_abs=9.996e-04  max_rel=1.920e-03  ref_max=5.206e-01
+    pc   dk vs cf            max_abs=5.696e-04  max_rel=1.095e-03  ref_max=5.203e-01
+    pci  dk vs cf            max_abs=7.374e-04  max_rel=1.417e-03  ref_max=5.203e-01
+    pc   dv vs FLA           max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    pci  dv vs FLA           max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    cf   dv vs FLA           max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    pc   dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    pci  dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    pc   dbeta vs FLA        max_abs=2.509e-03  max_rel=5.159e-03  ref_max=4.863e-01
+    pci  dbeta vs FLA        max_abs=2.509e-03  max_rel=5.159e-03  ref_max=4.863e-01
+    cf   dbeta vs FLA        max_abs=2.509e-03  max_rel=5.159e-03  ref_max=4.863e-01
+    pc   dbeta vs cf         max_abs=1.590e-05  max_rel=3.270e-05  ref_max=4.862e-01
+    pci  dbeta vs cf         max_abs=1.633e-05  max_rel=3.359e-05  ref_max=4.862e-01
+    pc   dg vs FLA           max_abs=2.858e-04  max_rel=4.606e-03  ref_max=6.205e-02
+    pci  dg vs FLA           max_abs=2.868e-04  max_rel=4.622e-03  ref_max=6.205e-02
+    cf   dg vs FLA           max_abs=3.249e-04  max_rel=5.236e-03  ref_max=6.205e-02
+    pc   dg vs cf            max_abs=6.146e-05  max_rel=9.873e-04  ref_max=6.225e-02
+    pci  dg vs cf            max_abs=7.607e-05  max_rel=1.222e-03  ref_max=6.225e-02
+    pc   dh0 vs FLA          max_abs=2.849e-04  max_rel=5.187e-03  ref_max=5.493e-02
+    pci  dh0 vs FLA          max_abs=2.849e-04  max_rel=5.187e-03  ref_max=5.493e-02
+    cf   dh0 vs FLA          max_abs=2.849e-04  max_rel=5.187e-03  ref_max=5.493e-02
+
+# T=512 H=4 g=2  B=1 T=512 H=4 seed=3 g_scale=2.0
+    pc   dq vs FLA           max_abs=2.031e-03  max_rel=3.067e-03  ref_max=6.623e-01
+    pci  dq vs FLA           max_abs=2.027e-03  max_rel=3.060e-03  ref_max=6.623e-01
+    cf   dq vs FLA           max_abs=1.711e-03  max_rel=2.583e-03  ref_max=6.623e-01
+    pc   dq vs cf            max_abs=7.657e-04  max_rel=1.156e-03  ref_max=6.623e-01
+    pci  dq vs cf            max_abs=8.609e-04  max_rel=1.300e-03  ref_max=6.623e-01
+    pc   dk vs FLA           max_abs=2.203e-03  max_rel=3.415e-03  ref_max=6.452e-01
+    pci  dk vs FLA           max_abs=2.202e-03  max_rel=3.413e-03  ref_max=6.452e-01
+    cf   dk vs FLA           max_abs=2.130e-03  max_rel=3.301e-03  ref_max=6.452e-01
+    pc   dk vs cf            max_abs=6.588e-04  max_rel=1.022e-03  ref_max=6.448e-01
+    pci  dk vs cf            max_abs=7.437e-04  max_rel=1.153e-03  ref_max=6.448e-01
+    pc   dv vs FLA           max_abs=3.856e-04  max_rel=5.691e-03  ref_max=6.776e-02
+    pci  dv vs FLA           max_abs=3.856e-04  max_rel=5.691e-03  ref_max=6.776e-02
+    cf   dv vs FLA           max_abs=3.856e-04  max_rel=5.691e-03  ref_max=6.776e-02
+    pc   dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    pci  dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    pc   dbeta vs FLA        max_abs=3.072e-03  max_rel=6.006e-03  ref_max=5.115e-01
+    pci  dbeta vs FLA        max_abs=3.072e-03  max_rel=6.006e-03  ref_max=5.115e-01
+    cf   dbeta vs FLA        max_abs=3.072e-03  max_rel=6.005e-03  ref_max=5.115e-01
+    pc   dbeta vs cf         max_abs=4.254e-05  max_rel=8.352e-05  ref_max=5.094e-01
+    pci  dbeta vs cf         max_abs=3.485e-05  max_rel=6.842e-05  ref_max=5.094e-01
+    pc   dg vs FLA           max_abs=2.654e-04  max_rel=3.911e-03  ref_max=6.785e-02
+    pci  dg vs FLA           max_abs=2.660e-04  max_rel=3.921e-03  ref_max=6.785e-02
+    cf   dg vs FLA           max_abs=2.313e-04  max_rel=3.409e-03  ref_max=6.785e-02
+    pc   dg vs cf            max_abs=6.550e-05  max_rel=9.660e-04  ref_max=6.781e-02
+    pci  dg vs cf            max_abs=8.427e-05  max_rel=1.243e-03  ref_max=6.781e-02
+    pc   dh0 vs FLA          max_abs=4.717e-04  max_rel=6.708e-03  ref_max=7.031e-02
+    pci  dh0 vs FLA          max_abs=4.717e-04  max_rel=6.708e-03  ref_max=7.031e-02
+    cf   dh0 vs FLA          max_abs=4.717e-04  max_rel=6.708e-03  ref_max=7.031e-02
+
+# B2 T=513 H=2 (non-div)  B=2 T=513 H=2 seed=4 g_scale=1.0
+    pc   dq vs FLA           max_abs=1.847e-03  max_rel=3.066e-03  ref_max=6.022e-01
+    pci  dq vs FLA           max_abs=1.837e-03  max_rel=3.051e-03  ref_max=6.022e-01
+    cf   dq vs FLA           max_abs=1.779e-03  max_rel=2.954e-03  ref_max=6.022e-01
+    pc   dq vs cf            max_abs=8.584e-04  max_rel=1.426e-03  ref_max=6.018e-01
+    pci  dq vs cf            max_abs=1.024e-03  max_rel=1.701e-03  ref_max=6.018e-01
+    pc   dk vs FLA           max_abs=1.575e-03  max_rel=2.363e-03  ref_max=6.666e-01
+    pci  dk vs FLA           max_abs=1.587e-03  max_rel=2.381e-03  ref_max=6.666e-01
+    cf   dk vs FLA           max_abs=1.489e-03  max_rel=2.233e-03  ref_max=6.666e-01
+    pc   dk vs cf            max_abs=6.813e-04  max_rel=1.023e-03  ref_max=6.663e-01
+    pci  dk vs cf            max_abs=1.039e-03  max_rel=1.559e-03  ref_max=6.663e-01
+    pc   dv vs FLA           max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    pci  dv vs FLA           max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    cf   dv vs FLA           max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    pc   dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.473e-02
+    pci  dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.473e-02
+    pc   dbeta vs FLA        max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    pci  dbeta vs FLA        max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    cf   dbeta vs FLA        max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    pc   dbeta vs cf         max_abs=3.312e-05  max_rel=3.754e-05  ref_max=8.821e-01
+    pci  dbeta vs cf         max_abs=3.651e-05  max_rel=4.139e-05  ref_max=8.821e-01
+    pc   dg vs FLA           max_abs=3.239e-04  max_rel=7.864e-03  ref_max=4.118e-02
+    pci  dg vs FLA           max_abs=3.195e-04  max_rel=7.757e-03  ref_max=4.118e-02
+    cf   dg vs FLA           max_abs=2.905e-04  max_rel=7.054e-03  ref_max=4.118e-02
+    pc   dg vs cf            max_abs=6.395e-05  max_rel=1.553e-03  ref_max=4.118e-02
+    pci  dg vs cf            max_abs=8.070e-05  max_rel=1.960e-03  ref_max=4.118e-02
+    pc   dh0 vs FLA          max_abs=1.439e-04  max_rel=5.954e-03  ref_max=2.417e-02
+    pci  dh0 vs FLA          max_abs=1.439e-04  max_rel=5.954e-03  ref_max=2.417e-02
+    cf   dh0 vs FLA          max_abs=1.439e-04  max_rel=5.954e-03  ref_max=2.417e-02
+
+# T=192 H=2 g=0  B=1 T=192 H=2 seed=5 g_scale=0.0
+    pc   dq vs FLA           max_abs=3.464e-04  max_rel=6.491e-04  ref_max=5.337e-01
+    pci  dq vs FLA           max_abs=3.184e-04  max_rel=5.965e-04  ref_max=5.337e-01
+    cf   dq vs FLA           max_abs=4.187e-04  max_rel=7.844e-04  ref_max=5.337e-01
+    pc   dq vs cf            max_abs=4.640e-04  max_rel=8.693e-04  ref_max=5.337e-01
+    pci  dq vs cf            max_abs=5.267e-04  max_rel=9.868e-04  ref_max=5.337e-01
+    pc   dk vs FLA           max_abs=3.381e-04  max_rel=5.846e-04  ref_max=5.784e-01
+    pci  dk vs FLA           max_abs=3.843e-04  max_rel=6.644e-04  ref_max=5.784e-01
+    cf   dk vs FLA           max_abs=4.730e-04  max_rel=8.177e-04  ref_max=5.784e-01
+    pc   dk vs cf            max_abs=5.069e-04  max_rel=8.764e-04  ref_max=5.784e-01
+    pci  dk vs cf            max_abs=7.761e-04  max_rel=1.342e-03  ref_max=5.784e-01
+    pc   dv vs FLA           max_abs=3.565e-04  max_rel=5.438e-03  ref_max=6.556e-02
+    pci  dv vs FLA           max_abs=3.565e-04  max_rel=5.438e-03  ref_max=6.556e-02
+    cf   dv vs FLA           max_abs=3.565e-04  max_rel=5.438e-03  ref_max=6.556e-02
+    pc   dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    pci  dv vs cf            max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    pc   dbeta vs FLA        max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    pci  dbeta vs FLA        max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    cf   dbeta vs FLA        max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    pc   dbeta vs cf         max_abs=5.312e-06  max_rel=1.320e-05  ref_max=4.024e-01
+    pci  dbeta vs cf         max_abs=5.960e-06  max_rel=1.481e-05  ref_max=4.024e-01
+    pc   dg vs FLA           max_abs=2.213e-05  max_rel=3.643e-03  ref_max=6.074e-03
+    pci  dg vs FLA           max_abs=3.704e-05  max_rel=6.099e-03  ref_max=6.074e-03
+    cf   dg vs FLA           max_abs=3.709e-05  max_rel=6.106e-03  ref_max=6.074e-03
+    pc   dg vs cf            max_abs=3.693e-05  max_rel=6.081e-03  ref_max=6.073e-03
+    pci  dg vs cf            max_abs=5.924e-05  max_rel=9.755e-03  ref_max=6.073e-03
+    pc   dh0 vs FLA          max_abs=4.727e-05  max_rel=7.519e-03  ref_max=6.287e-03
+    pci  dh0 vs FLA          max_abs=4.727e-05  max_rel=7.519e-03  ref_max=6.287e-03
+    cf   dh0 vs FLA          max_abs=4.727e-05  max_rel=7.519e-03  ref_max=6.287e-03
+
+worst-case max_rel across cases:
+  fld      pc vs FLA  pci vs FLA   cf vs FLA    pc vs cf   pci vs cf
+  dq       3.067e-03   3.060e-03   3.417e-03   1.426e-03   1.701e-03
+  dk       3.415e-03   3.413e-03   3.301e-03   1.095e-03   1.559e-03
+  dv       6.795e-03   6.795e-03   6.795e-03   0.000e+00   0.000e+00
+  dbeta    6.012e-03   6.012e-03   6.012e-03   8.352e-05   6.842e-05
+  dg       7.864e-03   7.757e-03   7.054e-03   6.081e-03   9.755e-03
+  dh0      9.365e-03   9.365e-03   9.365e-03   0.000e+00   0.000e+00
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+
+============================================================================================================
+Part B: backward-only chain dev/wall (idle card): FLA vs cf vs pc (prod+intra) vs pci (fold)
+  wall = event-pair / reps (primary); dev = CUPTI over-attributes tiny launches.
+============================================================================================================
+  case               |  FLA dev |  cf dev  pc dev  pci dev |    cf w    pc w    pci w |  pc/FLA pci/FLA  pci/cf
+  T=512 H=4          |    203.4 |    74.6   116.3     94.9 |   292.3   459.1    340.2 |    0.57    0.47    1.27
+      kernels dev/call -- pci: B1   41.0 prod    27.5 | pc: prod    22.3 | cf:void b1_tma_kernel<16,=41  _fused_b2b3_kernel=14  _dav_kernel=4  void at::native::unrol=3  chunk_local_cumsum_vec=2
+  B2 T=1024 H=8      |    661.7 |   257.2   462.6    387.4 |   290.7   499.5    410.0 |    0.70    0.59    1.51
+      kernels dev/call -- pci: B1   78.3 prod   215.1 | pc: prod   170.5 | cf:_fused_b2b3_kernel=137  void b1_tma_kernel<16,=78  _dav_kernel=11  void at::native::unrol=8  chunk_local_cumsum_vec=7
+  B8 T=2048 H=8      |   4124.6 |  1404.4  2908.4   2422.8 |  1419.1  2946.3   2453.8 |    0.71    0.59    1.73
+      kernels dev/call -- pci: B1  182.7 prod  1606.9 | pc: prod  1265.8 | cf:_fused_b2b3_kernel=998  void b1_tma_kernel<16,=182  _dav_kernel=76  void at::native::unrol=53  chunk_local_cumsum_vec=44
+  T=250 H=3 nondiv   |    141.8 |    50.2    83.1     64.6 |   286.7   452.7    337.6 |    0.59    0.46    1.29
+      kernels dev/call -- pci: B1   22.6 prod    21.1 | pc: prod    17.5 | cf:void b1_tma_kernel<16,=23  _fused_b2b3_kernel=11  void at::native::unrol=3  _dav_kernel=2  void at::native::vecto=2
+
+DONE

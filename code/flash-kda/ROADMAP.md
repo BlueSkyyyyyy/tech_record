@@ -790,6 +790,23 @@
       变成每 CTA 关键路径尾部的**串行尾巴**。**Part D（ncu）**：DRAM 字节几乎不动、占用率/tensor% **完全不变**，
       代价＝bank conflict +55%、L2 +70 MB、global ld sector +6.6 M。**结论**：结构闭合兑现（单 kernel、`dA`
       不落盘），但**目标卡应保持 B2/B3 为两个 kernel**，仅小 batch/短序列（launch 受限）时折进净赢。见 `docs/07` §66。
+- [x] **P7-64** 把 K2 形状 CUDA B2 **生产核**（`-DB2M_PROD [-HDW] [-INTRA]`）**第一次落进完整反向链**
+       （P7-48…P7-63 的验证全在段间/合成操作数上，从未端到端）：新增 `harness/check_bwd_prod_e2e.py`
+       （`check_bwd_prod_e2e.out.txt`，空闲卡）+ `docs/07` §67。组装
+       `dAv(Triton)→CUDA-B1→CUDA-B2-prod[→Triton B3 intra]→反向 cumsum`，只吃 K1 workspace；两变体
+       `pc`（`prod_hdw` + 独立 Triton intra）、`pci`（`prod_hdw_intra` 单 launch）。**Part A（正确性）**：6 组
+       shape（含非整除 `T=250`/`B2 T=513`、`g=0`、`B=2`）六项梯度 vs FLA 落 bf16/tf32 底噪
+       （`dq 3.1e-3/dk 3.4e-3/dv 6.8e-3/dbeta 6.0e-3/dg 7.9e-3/dh0 9.4e-3`，与 `cf` 逐值同阶）；
+       `dv`/`dh0` 与 §45 最优链 `cf` **逐位相同（max_abs=0）**。**Part B（计时，关键/诚实）**：整核**不是净赢**
+       ——`pci/cf` **1.27–1.73×**（`B8T2048H8` `prod_intra` **1606.9µs** vs 融合 Triton `_fused_b2b3_kernel`
+       **998µs**；`prod_hdw` 无 intra = 1265.8µs，与 §63 的 1288 互证；`prod_intra` 与 §66 的 1636 互证）。
+       差**不是**输出体量（多落盘的诊断中间量 ~155MB≈65µs≈4%），而是**六段非 GEMM 成本在同一个
+       1 block/SM、tensor 3% 的核里累积**（§57 `dA` +33–61% + §60 门控 +30–38% 叠加），追不上 Triton
+       把 B2/B3 融进一张 `tl.dot` 图 + 寄存器常驻的形态。`pc/FLA` 0.46–0.71、`pci/FLA` 0.47–0.59。
+       **结论（更新 §66.6）**：目标卡最优反向仍是 §45 的 `dAv→B1→融合 Triton B2/B3→cumsum`（CUDA 只在
+       B1 净赢）；CUDA B2 生产核当前是**正确但更慢**的研究产物，下一杠杆＝把六段**重新融合回寄存器**
+       （同 CTA 交接、消 `dA`/门控中间量落盘），但收益上界已被端到端钉在 ~1.6×。**边界**：`B2M_TMA`
+       与 `B2M_INTRA` 未打通（TMA 分支未传 `dAqk_in`）；`pc` 的独立 Triton `intra` 计时含链外加法。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1191,12 +1208,28 @@
   `db`（折成 `Σ_w(dbrow+idbrow)`）只改 fp32 **结合序**，故与「两核相加」差 ulp（≤9.5e-7）而非逐位。
 - **核内复用 `dAkk` 时掩码别漏**（P7-63，§66.7）：`daB` 存的是 SAND 未掩码的 `X2`，intra 读它当 `dAkk`
   必须自带 `(a>j) & valid` 掩码，否则 `Mk/Sk` 把上三角也吃进去（指纹＝`dq` 对、`dk/dg` 错到 O(1)）。
+- **「单核化/结构闭合」不等于「端到端更快」——要用整链计时钉住**（P7-64，§67.3）：K2 形状 CUDA B2 的
+  每一段相对「GEMM 核心」都只贵一两成（§55–§60），但六段叠进同一个 1 block/SM、tensor 3%、发射受限的核
+  后，整核比 **Triton 融合 B2/B3 慢 ~1.6×**。段级「CUDA 赢 Triton」的结论**不能外推**到整核（Triton 会把
+  中间量留在寄存器/融进一张 `tl.dot` 图）。凡「把独立核合起来」的改动，必须以**整链 dev** 收口（同 §63/§66）。
+- **CUDA `<x>_probe.cu` 是 fp32/tf32 核**（P7-64）：落链时 B1 的 bf16 `dh`/`dv2` 需转 fp32 才能喂
+  `b2_mma_probe.cu`（无 bf16 入口）；且其 `-DB2M_TMA` 分支未传 `-DB2M_INTRA` 的 `dAqk_in`
+  （`b2_mma_probe.cu:1809-1820`），两宏不可同时用。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-63 补测**。
-  - P7-63（本轮）：**兑现 §65.6/P7-62 的「下一步」——把 B3 对角 intra 折进生产 launch**（`-DB2M_INTRA`，
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-64 补测**。
+  - P7-64（本轮）：**把 K2 形状 CUDA B2 生产核第一次落进完整反向链**（此前验证全在段间/合成操作数）。
+    新增 `harness/check_bwd_prod_e2e.py`（`check_bwd_prod_e2e.out.txt`，空闲卡）+ `docs/07` §67。组装
+    `dAv(Triton)→CUDA-B1→CUDA-B2-prod[→Triton B3 intra]→反向 cumsum`（只吃 K1 workspace），两变体
+    `pc`（`prod_hdw`+独立 intra）/`pci`（`prod_hdw_intra` 单 launch）。**Part A**：6 组 shape（含非整除
+    `T=250`/`B2 T=513`、`g=0`、`B=2`）六项 vs FLA 落 bf16/tf32 底噪（与 `cf` 逐值同阶），`dv`/`dh0` 与
+    §45 最优链 `cf` **逐位相同**。**Part B（关键）**：整核**不是净赢**——`pci/cf` **1.27–1.73×**
+    （`B8T2048H8` `prod_intra` 1606.9µs vs 融合 Triton 998µs），差来自六段非 GEMM 成本在同核累积。
+    **结论（更新 §66.6）**：目标卡最优反向仍是 §45 的 `dAv→B1→融合 Triton B2/B3→cumsum`；CUDA B2 生产核
+    是**正确但更慢**的研究产物，下一杠杆＝把六段重新融合回寄存器（收益上界已钉在 ~1.6×）。
+  - P7-63（上轮）：**兑现 §65.6/P7-62 的「下一步」——把 B3 对角 intra 折进生产 launch**（`-DB2M_INTRA`，
     需 `-DB2M_PROD`；新入口 `b2prod_intra_launch` 多 `dAqk` 入参）。用 SAND 的**核内** `daB`（掩码 `-X2`
     = `dAkk`，不落盘读回）+ `dAqk` + 合流 `q/k/g`，四个 `[BT,BT]@[BT,KD]` tf32 mma 产出 `idq/idk/idg`，
     寄存器 merge 进门控最终 `dq/dk/dg`（片元同构）、`db` 并进既有跨 warp 归约；DA+SAND 前移至 GATE/DB
