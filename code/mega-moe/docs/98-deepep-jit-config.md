@@ -128,7 +128,7 @@ static_assert(kNumAllocationAlignmentBytes % kNumRDMAAlignmentBytes == 0);
 
 三档是对称内存的**层层加严**：TMA 要 32B、RDMA 注册要 64B、VMM 分配（`ncclCommWindowRegister`
 或 CUDA VMM）要 2 MiB。两条 `static_assert` 保证「严的能被松的整除」，于是**一块 2 MiB 对齐的
-分配天然同时满足 32/64B**，不用在运行期再补对齐。`csrc/buffers/bucket.hpp:78` 就靠这条把
+分配天然同时满足 32/64B**，不用在运行期再补对齐。`csrc/buffers/bucket.hpp:77` 就靠这条把
 `num_storage_bytes % kNumAllocationAlignmentBytes == 0` 当契约。
 
 通信上限（`:73-82`）是「对称显存里信号/计数数组的静态上界」：`kNumMaxRanks = 1024`、

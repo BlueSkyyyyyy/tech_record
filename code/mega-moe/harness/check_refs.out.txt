@@ -1,0 +1,122 @@
+================================================================================================
+P97-1 · docs 引用行号 linter（check_refs.py）
+================================================================================================
+DeepGEMM=~/github/DeepGEMM  DeepEP=~/github/DeepEP
+索引源文件数（含 DeepJIT，vendored 拷贝按内容去重）: 2568
+排除的审计文档  : 106-deepgemm-source-index-audit.md, 107-refs-linter-audit2.md
+
+总引用条数            : 1699
+  · 占位省略（...）    : 6（非错误）
+  · 无法解析到文件     : 0
+  · 行号越界/文件缺失  : 0
+  · 被引行全为空       : 0
+  · 同名歧义未消解     : 0
+内容抽查（同行有标识符）: 741
+  · 严格命中           : 530 (71.52%)
+  · 宽松命中（符号在文件内）: 617 (83.27%)
+  · 轻微漂移（在文件、不在被引行）: 87
+覆盖的源文件数        : 236
+
+[轻微漂移 near_miss] 87 条（多为块/区间首行约定，人工复核）：
+  01-moe-ep-basics.md  116  dispatch.cuh:103  DeepEP/deep_ep/include/deep_ep/impls/ep/dispatch.cuh  ['deduplicate']
+  02-mega-moe-architecture.md  127  csrc/apis/mega_moe.hpp:35  DeepGEMM/csrc/apis/mega_moe.hpp  ['BLOCK_M']
+  05-mega-gate-mhc.md  648  mega_mhc.hpp:81-82  DeepGEMM/csrc/apis/mega_mhc.hpp  ['y_fp8']
+  07-deepep-dispatch-combine.md  37  symmetric.hpp:79  DeepEP/csrc/kernels/comm/symmetric.hpp  ['cuMemCreate']
+  07-deepep-dispatch-combine.md  83  token.cuh:84  DeepEP/deep_ep/include/deep_ep/layout/ep/token.cuh  ['BufferLayout']
+  07-deepep-dispatch-combine.md  168  combine_utils.cuh:55  DeepEP/deep_ep/include/deep_ep/impls/ep/combine_utils.cuh  ['combine_reduce']
+  07-deepep-dispatch-combine.md  169  combine_utils.cuh:67  DeepEP/deep_ep/include/deep_ep/impls/ep/combine_utils.cuh  ['enable_hadd_bypass']
+  07-deepep-dispatch-combine.md  170  combine_utils.cuh:8  DeepEP/deep_ep/include/deep_ep/impls/ep/combine_utils.cuh  ['use_rank_layout']
+  08-h100-environment.md  63  csrc/apis/gemm.hpp:369  DeepGEMM/csrc/apis/gemm.hpp  ['k_grouped_fp8_gemm_tn_contiguous']
+  10-mega-moe-mma-epilogue.md  117  mma/sm100.cuh:30  DeepGEMM/deep_gemm/include/deep_gemm/mma/sm100.cuh  ['make_smem_desc']
+  10-mega-moe-mma-epilogue.md  185  heuristics/mega_moe.hpp:80-82  DeepGEMM/csrc/jit_kernels/heuristics/mega_moe.hpp  ['block_k']
+  101-deepep-barrier-test-oracle.md  340  kernels/comm/barrier.hpp:25-41  DeepEP/csrc/kernels/comm/barrier.hpp  ['launch_barrier']
+  102-mega-gate-mhc-split-barrier.md  131  layout/mega_mhc.cuh:86  DeepGEMM/deep_gemm/include/deep_gemm/layout/mega_mhc.cuh  ['Workspace']
+  103-sm100-swap-ab-dgrad.md  11  sm100_bf16_gemm.cuh:43  DeepGEMM/deep_gemm/include/deep_gemm/impls/sm100_bf16_gemm.cuh  ['sm100_bf16_gemm']
+  103-sm100-swap-ab-dgrad.md  265  runtime.hpp:59-67  DeepGEMM/csrc/jit_kernels/heuristics/runtime.hpp  ['get_theoretical_mk_alignment_for_contiguous_layout']
+  103-sm100-swap-ab-dgrad.md  272  sm100_bf16_gemm.hpp:66  DeepGEMM/csrc/jit_kernels/impls/sm100_bf16_gemm.hpp  ['block_m']
+  105-fp4-mega-moe-weights.md  147  runtime_utils.hpp:63  DeepGEMM/csrc/jit_kernels/impls/runtime_utils.hpp  ['ALIGN16B']
+  12-moe-backward-wgrad.md  50  gemm.hpp:340-349  DeepGEMM/csrc/apis/gemm.hpp  ['k_grouped_fp8_gemm_tn_contiguous']
+  12-moe-backward-wgrad.md  181  gemm.hpp:388  DeepGEMM/csrc/apis/gemm.hpp  ['k_alignment']
+  13-moe-backward-dgrad.md  293  gemm.hpp:218  DeepGEMM/csrc/apis/gemm.hpp  ['grouped_layout']
+  14-moe-backward-kernels.md  47  gemm.hpp:69  DeepGEMM/csrc/apis/gemm.hpp  ['check_k_grouped_args']
+  14-moe-backward-kernels.md  63  gemm.hpp:194-233  DeepGEMM/csrc/apis/gemm.hpp  ['m_grouped_fp8_fp4_gemm_nt_contiguous']
+  14-moe-backward-kernels.md  135  gemm.hpp:320  DeepGEMM/csrc/apis/gemm.hpp  ['DG_HOST_UNREACHABLE']
+  15-moe-backward-profiling.md  79  csrc/apis/gemm.hpp:403  DeepGEMM/csrc/apis/gemm.hpp  ['k_grouped_fp8_gemm_nt_contiguous']
+  15-moe-backward-profiling.md  142  gemm.hpp:403  DeepGEMM/csrc/apis/gemm.hpp  ['k_grouped']
+  19-attention-mqa-logits.md  19  attention.hpp:380  DeepGEMM/csrc/apis/attention.hpp  ['fp8_fp4_sparse_mqa_logits']
+  19-attention-mqa-logits.md  263  attention.hpp:32  DeepGEMM/csrc/apis/attention.hpp  ['q_sf']
+  25-sf-layout-transform.md  99  layout.hpp:35  DeepGEMM/csrc/utils/layout.hpp  ['check_sf_layout']
+  27-cublaslt-fallback.md  52  jit_kernels/impls/epilogue_class.hpp:35  DeepGEMM/csrc/jit_kernels/impls/epilogue_class.hpp  ['EpilogueClass']
+  29-sm90-bf16-gemm.md  33  mma/sm90.cuh:89  DeepGEMM/deep_gemm/include/deep_gemm/mma/sm90.cuh  ['BLOCK_M']
+  29-sm90-bf16-gemm.md  267  gemm.hpp:707-710  DeepGEMM/csrc/apis/gemm.hpp  ['epilogue']
+  30-sm90-paged-mqa-logits-schedule.md  264  sm90_fp8_mqa_logits.hpp:192  DeepGEMM/csrc/jit_kernels/impls/sm90_fp8_mqa_logits.hpp  ['schedule_meta']
+  32-sm90-fp8-gemm.md  36  mma/sm90.cuh:42-59  DeepGEMM/deep_gemm/include/deep_gemm/mma/sm90.cuh  ['FP8MMASelector']
+  32-sm90-fp8-gemm.md  57  tests/generators.py:132-137  DeepGEMM/tests/generators.py  ['Kernel1D2D']
+  36-sm100-bf16-gemm-tc-util.md  54  csrc/jit_kernels/heuristics/config.hpp:22  DeepGEMM/csrc/jit_kernels/heuristics/config.hpp  ['GemmDesc']
+  37-deepgemm-reference-quantizer.md  147  math.py:109  DeepGEMM/deep_gemm/utils/math.py  ['per_token_cast_to_fp8']
+  38-deepgemm-ptx-primitives.md  31  scheduler/mega_moe.cuh:157  DeepGEMM/deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh  ['ld_acq_gpu']
+  45-muon-syrk-symm.md  31  smxx_cublaslt.hpp:223-234  DeepGEMM/csrc/jit_kernels/impls/smxx_cublaslt.hpp  ['cublaslt_bhd_bhr_hdr']
+  49-sm90-wgmma-descriptor.md  19  impls/sm90_bf16_gemm.cuh:219-220  DeepGEMM/deep_gemm/include/deep_gemm/impls/sm90_bf16_gemm.cuh  ['advance_gmma_desc_lo']
+  50-runtime-lifecycle.md  220  runtime.hpp:28  DeepGEMM/csrc/runtime/runtime.hpp  ['Runtime']
+  50-runtime-lifecycle.md  287  env.hpp:46-47  DeepGEMM/third-party/deep_jit/include/deep_jit/utils/env.hpp  ['from_chars']
+  52-kernel-launch-pdl.md  86  runtime/runtime.hpp:31  DeepGEMM/csrc/runtime/runtime.hpp  ['Runtime', 'default_launch_options']
+  52-kernel-launch-pdl.md  173  sm100_fp8_fp4_mega_moe.cuh:283-289  DeepGEMM/deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh  ['MegaMoEScheduler']
+  53-deepep-eplb-redundancy.md  64  ep.py:43  DeepEP/deep_ep/buffers/ep.py  ['num_sms']
+  57-mega-gate-test-oracle.md  9  csrc/apis/mega_gate.hpp:159  DeepGEMM/csrc/apis/mega_gate.hpp  ['sm100_bf16_mega_gate']
+  57-mega-gate-test-oracle.md  81  layout/mega_gate.cuh:45-51  DeepGEMM/deep_gemm/include/deep_gemm/layout/mega_gate.cuh  ['metadata_cache']
+  58-deepep-combine-reduce.md  136  ptx.cuh:594-597  DeepEP/deep_ep/include/deep_ep/common/ptx.cuh  ['accumulate']
+  58-deepep-combine-reduce.md  146  combine_reduce_epilogue.cuh:101  DeepEP/deep_ep/include/deep_ep/impls/ep/combine_reduce_epilogue.cuh  ['combined_x']
+  60-mqa-logits-test-oracle.md  238  attention.hpp:49  DeepGEMM/csrc/apis/attention.hpp  ['schedule_meta', 'get_mqa_logits_metadata']
+  62-deepep-deterministic-sort.md  84  layout/ep/token.cuh:63-77  DeepEP/deep_ep/include/deep_ep/layout/ep/token.cuh  ['TokenLayout']
+  64-deepep-bucket-collectives.md  93  driver.cpp:43-45  DeepEP/csrc/kernels/driver/driver.cpp  ['launch_batched_mem_ops']
+  64-deepep-bucket-collectives.md  106  csrc/kernels/bucket/all_gather.hpp:62-108  DeepEP/csrc/kernels/bucket/all_gather.hpp  ['launch_all_gather']
+  64-deepep-bucket-collectives.md  135  driver.cpp:76-77  DeepEP/csrc/kernels/driver/driver.cpp  ['increase_seq_idx']
+  64-deepep-bucket-collectives.md  186  reduce_scatter.cuh:12-17  DeepEP/deep_ep/include/deep_ep/layout/bucket/reduce_scatter.cuh  ['ReduceScatterSignals']
+  64-deepep-bucket-collectives.md  270  rdma.cuh:39-49  DeepEP/deep_ep/include/deep_ep/impls/bucket/reduce_scatter/rdma.cuh  ['global_warp_idx']
+  66-deepep-symmetric-memory-alloc.md  58  symmetric.hpp:72  DeepEP/csrc/kernels/comm/symmetric.hpp  ['cuMemMap']
+  67-mega-mhc-test-oracle.md  11  csrc/apis/mega_mhc.hpp:223  DeepGEMM/csrc/apis/mega_mhc.hpp  ['sm100_mega_mhc']
+  70-deepgemm-sanitizer.md  69  test_mega_gate.py:204  DeepGEMM/tests/test_mega_gate.py  ['test_mega_gate']
+  71-deepep-hybrid-dispatch-combine.md  151  common/math.cuh:45-68  DeepEP/deep_ep/include/deep_ep/common/math.cuh  ['int64']
+  72-bucket-allreduce-reduce-scatter.md  93  compiled.cuh:82  DeepEP/deep_ep/include/deep_ep/common/compiled.cuh  ['static_assert']
+  72-bucket-allreduce-reduce-scatter.md  247  epilogue/operators.cuh:35-48  DeepGEMM/deep_gemm/include/deep_gemm/epilogue/operators.cuh  ['StochasticRoundToBF16']
+  73-deepep-sm-qp-autotuning.md  22  deep_ep/buffers/ep.py:641-645  DeepEP/deep_ep/buffers/ep.py  ['dispatch', 'combine']
+  73-deepep-sm-qp-autotuning.md  215  ep.py:641-645  DeepEP/deep_ep/buffers/ep.py  ['dispatch']
+  73-deepep-sm-qp-autotuning.md  218  ep.py:780  DeepEP/deep_ep/buffers/ep.py  ['combine']
+  74-dense-gemm-test-oracle.md  194  test_fp8_fp4.py:79  DeepGEMM/tests/test_fp8_fp4.py  ['assert_bitwise_equal']
+  74-dense-gemm-test-oracle.md  285  test_bf16.py:49  DeepGEMM/tests/test_bf16.py  ['BF16StochasticRounding']
+  74-dense-gemm-test-oracle.md  285  test_fp8_fp4.py:60  DeepGEMM/tests/test_fp8_fp4.py  ['BF16StochasticRounding']
+  76-einsum-test-oracle.md  102  einsum.hpp:25-26  DeepGEMM/csrc/apis/einsum.hpp  ['bmk_bnk_mn']
+  78-sf-layout-test-oracle.md  311  generators.py:277  DeepGEMM/tests/generators.py  ['enumerate_sf_layout']
+  81-locality-domain-test-oracle.md  288  locality_domain.hpp:36  DeepGEMM/csrc/runtime/locality_domain.hpp  ['empty', 'RuntimeError']
+  82-legacy-test-oracle.md  268  m_grouped_gemm.py:37-40  DeepGEMM/deep_gemm/legacy/m_grouped_gemm.py  ['m_grouped', 'a_fused_m', 'a_fused_m']
+  84-deepgemm-python-api-surface.md  150  gemm.hpp:845  DeepGEMM/csrc/apis/gemm.hpp  ['alpha']
+  85-deepep-ep-test-oracle.md  215  deep_ep/__init__.py:55  DeepEP/deep_ep/__init__.py  ['deep_ep']
+  86-deepep-nccl-comm-binding.md  352  __init__.py:39  DeepEP/deep_ep/__init__.py  ['check_nccl_so', 'AssertionError']
+  86-deepep-nccl-comm-binding.md  363  __init__.py:39  DeepEP/deep_ep/__init__.py  ['check_nccl_so']
+  87-mega-moe-sync-primitives.md  4  comm/barrier.cuh:33-51  DeepGEMM/deep_gemm/include/deep_gemm/comm/barrier.cuh  ['nvlink_barrier']
+  87-mega-moe-sync-primitives.md  125  barrier.cuh:46-47  DeepGEMM/deep_gemm/include/deep_gemm/comm/barrier.cuh  ['print_timeout']
+  89-mega-moe-mhc-jit-wrappers.md  143  runtime_utils.hpp:130-131  DeepGEMM/csrc/jit_kernels/impls/runtime_utils.hpp  ['make_tma_2d_desc']
+  91-sf-contract-cross-api.md  37  csrc/apis/einsum.hpp:262-294  DeepGEMM/csrc/apis/einsum.hpp  ['fp8_einsum']
+  91-sf-contract-cross-api.md  199  smxx_layout.hpp:314  DeepGEMM/csrc/jit_kernels/impls/smxx_layout.hpp  ['ks_cpu']
+  93-deepep-bucket-session.md  216  event.py:73  DeepEP/deep_ep/utils/event.py  ['hook_after_wait']
+  94-deepep-bucket-mixed-test-oracle.md  22  csrc/buffers/bucket.hpp:151  DeepEP/csrc/buffers/bucket.hpp  ['get_physical_domain_size']
+  96-mega-moe-gate-jit-wrappers.md  43  csrc/apis/mega_moe.hpp:167  DeepGEMM/csrc/apis/mega_moe.hpp  ['fp8_fp4_mega_moe']
+  96-mega-moe-gate-jit-wrappers.md  280  sm100_bf16_mega_gate.cuh:42  DeepGEMM/deep_gemm/include/deep_gemm/impls/sm100_bf16_mega_gate.cuh  ['num_stages']
+  98-deepep-jit-config.md  23  deep_ep/__init__.py:8-16  DeepEP/deep_ep/__init__.py  ['init_jit', 'check_nccl_so']
+  98-deepep-jit-config.md  173  config.hpp:44  DeepGEMM/third-party/deep_jit/include/deep_jit/runtime/config.hpp  ['get_python_path']
+  98-deepep-jit-config.md  271  backend/cuda/options.hpp:136-138  DeepGEMM/third-party/deep_jit/include/deep_jit/backend/cuda/options.hpp  ['nvcc_flags']
+
+{
+  "total": 1699,
+  "elided": 6,
+  "unresolved": 0,
+  "oob": 0,
+  "empty": 0,
+  "ambiguous": 0,
+  "content_total": 741,
+  "strict": 530,
+  "weak": 617,
+  "near_miss": 87,
+  "files": 236,
+  "source_files": 2568
+}

@@ -44,7 +44,7 @@ static constexpr uint32_t kNumDeviceLocalityDomains = 2;
 - **CUDA 13.4 之前**：用 **MPS 的 MLOPart** 把一张物理卡切成 **2 个 device instance**，每个 instance
   暴露一半的 SM 和**一半的 HBM**（`nvidia-cuda-mps-control ... start_server -mlopart`）。
   代码里的注释明确写着这是「CUDA 13.4 之前的临时办法」
-  （`csrc/runtime/locality_domain.hpp:13`、`csrc/runtime/mlopart.hpp:13`）。
+  （`csrc/runtime/locality_domain.hpp:16`、`csrc/runtime/mlopart.hpp:13`）。
 - **CUDA 13.4 起**：改用正统的 `CU_MEM_LOCATION_TYPE_DEVICE_LOCALITY_DOMAIN`
   / `CU_DEVICE_ATTRIBUTE_LOCALITY_DOMAIN_COUNT`（`csrc/runtime/locality_domain.hpp:35, 52` 的 `TODO`），
   以及 `cuMemCreate` 直接按域分配。两个 `TODO` 就是这两处升级点。

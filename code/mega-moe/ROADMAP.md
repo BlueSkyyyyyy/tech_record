@@ -3024,6 +3024,30 @@
       另列 10 条同名歧义 + 92 条轻微漂移（off-by-one / 同行多引用串扰的启发式假阳性）供后续复核。
       配套博客 `content/posts/mega-moe-106-source-index-audit`（索引页新增第 106 篇）。
 
+### P97 增量（opt-in，引用体检第二遍：可复用 linter + 自指涉收口）
+
+- [x] **P97-1** **把第 106 篇的引用体检做成可复用 linter，并收口它的 defer 项**：
+      第 106 篇留下「10 条同名歧义 + 92 条轻微漂移」与「应统一写全相对路径」，但复现其脚本
+      （今日 `total 1933 / unresolved 9 / oob 3 / empty 24`）发现**脚本自身有三个会静默误判的方法学
+      问题**：① 索引扫进 vendored `third-party/cutlass`（与 `deep_gemm/include/cute|cutlass` 同份拷贝）
+      与两份 `third-party/deep_jit` → `runtime.hpp`/`python_api.cpp` 各 4 候选、消歧易落错份；② 消歧
+      排序键没利用「被引行是否为空」（作者核对过的引用极少指空行）；③ `impls/...cuh` 类占位被当错误。
+      **纯文件解析、架构无关，H100/任意机器可跑**。
+      → `docs/107-refs-linter-audit2.md`（真实数字）：新 linter `harness/check_refs.{py,sh,out.txt}`。
+      改进四点：候选**按内容哈希去重**（同份拷贝折叠，`dedup_by_content`）、排序键
+      `(被引行非空, 文档主仓库, 文档目录线索, 全语料引用偏好, 路径短)`（`repo_of`/`doc_repo_hist` 修掉
+      跨仓库错配，如 DeepEP 文档里的 `csrc/python_api.cpp` 被解析到 DeepGEMM 那份）、`...` 单列
+      `elided`、支持 fenced/`refcheck:ignore` 且给出 CI 退出码。**结果**：总 1699 条（排除 2 篇审计
+      文档）、**无法解析/行号越界/被引行全空/同名歧义未消解 四类硬错误全 0**、严格命中 530
+      （71.52%）、宽松 617（83.27%）、覆盖 236 个源文件（vendored 去重后；含 DeepJIT）。**闭环修掉
+      2 处真实 off-by-one**：`docs/34` 的 `csrc/runtime/locality_domain.hpp:13`（空行）→`:16`（CUDA 13.4
+      兼容层注释，与同句 `mlopart.hpp:13` 对应）；`docs/98` 的 `csrc/buffers/bucket.hpp:78`（空行）→`:77`
+      （`num_storage_bytes % kNumAllocationAlignmentBytes` 断言）。**并量化「审计文档自指涉」**：把
+      `docs/106` 纳入检查立刻多 `oob 3 + empty 2`，全来自它 §5 的修正名单（按设计引用坏引用）→ 体检
+      不幂等，故两篇审计文档入 `EXCLUDE_DOCS`。87 条轻微漂移不逐条改写（多为「引用块/区间首行」约定
+      与同行多引用串扰），保留在 `.out.txt`。配套博客 `content/posts/mega-moe-107-refs-linter-audit2`
+      （索引页新增第 107 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3049,8 +3073,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P96 各增量完成（P15-1…P41-1、P42-1…P96-1）。**
-  本轮 P96-1：新建 `docs/106-deepgemm-source-index-audit.md`
+- 当前进度：**P0~P14 全部完成；P15~P97 各增量完成（P15-1…P41-1、P42-1…P97-1）。**
+  本轮 P97-1：新建 `docs/107-refs-linter-audit2.md`
+  （+`harness/check_refs.{py,sh,out.txt}`）——第 106 篇（引用体检）的第二遍：把体检重写成**可复用
+  linter**，并收口 P96 的 defer 项。要点：P96 脚本自身有三个**会静默误判**的方法学问题——索引扫进
+  vendored `third-party/*` 致同名爆炸、消歧排序键没用「被引行是否为空」、占位 `...` 被当错误；
+  新 linter 用**内容哈希去重 + `(非空, 主仓库, 目录线索, 引用偏好, 路径短)` 排序键 + `elided` 单列**
+  修掉。**H100 实测四类硬错误全 0**（无法解析/越界/空行/歧义），总 1699、严格 530、宽松 617、覆盖
+  236 文件；**闭环修 2 处真实 off-by-one**（`docs/34 locality_domain.hpp:13→16`、
+  `docs/98 bucket.hpp:78→77`）；**量化「审计文档自指涉」**（`docs/106` 的修正名单会被下一轮当错误 →
+  入 `EXCLUDE_DOCS`）。索引页新增第 107 篇。
+  上一轮 P96-1：新建 `docs/106-deepgemm-source-index-audit.md`
   （+`harness/exp_deepgemm_source_audit.{py,sh,out.txt}`）——本专题第一篇**元层级**增量：给前 105 篇
   的 ~1900 处 `file:line` 引用做一次可复现的**引用体检**，并给全局算子/API 索引。要点：四层核对 +
   同名文件打分消歧；**1904 条引用里 1898（99.68%）可解析、行号越界 0、19 个 impl + 11 个 api 全部有
