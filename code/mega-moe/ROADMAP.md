@@ -4521,7 +4521,35 @@
       sha256 `5c74e749…`）：`[A]` 正确性 dq 8.1e-8 / dw 8.7e-8 / dkv_data 1.0e-7 / dkv_scale 9.5e-7 **ALL PASS**；
       `[B]` 吞吐 `T=1024,KV=2048,D=128` **8.48ms**（~1 GFLOP/s，瓶颈是 `dkv` 跨 token **scatter 归约**
       O(T·KV·H·D)——坐实「indexer 头数很小 / 只选 2048 KV」的工程动机）。与 MoE 反向对照表。配套博客
-      `content/posts/mega-moe-157-mqa-logits-indexer-backward`（索引页新增第 157 篇）。
+       `content/posts/mega-moe-157-mqa-logits-indexer-backward`（索引页新增第 157 篇）。
+
+### P148 增量（opt-in，把 P147-1 的连续反向推进到生产用的「分页 KV」）
+
+- [x] **P148-1** **分页 KV 的 MQA logits（lightning indexer）训练反向**（
+      `deep_gemm/include/deep_gemm/impls/sm90_fp8_paged_mqa_logits.cuh:30-38/39/138-140/191-198/204-211/255/294-329/326-328`；
+      `deep_gemm/include/deep_gemm/scheduler/sm90_paged_mqa_logits.cuh:11-123/141-197/190/223-243`；
+      `csrc/apis/attention.hpp:127/136-172/174-278/189/201-202/258-263/274-277`；
+      `tests/test_attention.py:29-36/225-253/270-282/299-439/397-408`）。
+      P147-1 拆了 indexer 的**连续版**反向；但生产推理 / long-context 训练用**分页 KV cache**
+      （物理页池 + block table 间接寻址 + 每行自己的 `context_lens`），分页前向只输出 logits、反向
+      一直没人讲。**主 kernel SM100/SM90 专属（本机只跑 SM90 分支做前向锚）、仅分析**；
+      **页表语义 / 别名累加 / KL 梯度架构无关，H100(sm90) 真机可跑**。
+      → `docs/158-indexer-paged-backward.md`（真实行号核对）。**要点**：① 分页前向 = 连续打分 +
+      **页表间接寻址**（`phys = block_table[i, s//BS]*BS + s%BS`，kernel `:191-198`）+ 每行
+      `context_lens` 掩码（ref `:247`）；② 反向 = 连续反向 + **`dkv` 沿页表逆映射
+      scatter-accumulate，并乘回 `scale`**（`khat=kv*scale`），`dq/dw` 与连续版同构；③ **别名累加是
+      正确性硬要求**——`next_n` 前缀重叠 + 跨序列共享页使一个物理槽被多行引用（实测 2816 逻辑引用→
+      2112 物理槽、704 个被多引用、最大共享度 2），「写」丢贡献（CUDA 对照 relerr 0.839），scatter-add
+      与 autograd 逐位一致（1.10e-16）；④ KL 蒸馏梯度 `dL/dI=(softmax_{s<cl}(I)-p)·mask` 逐式不变。
+      H100 实测 `harness/exp_mqa_logits_paged_backward.{py,sh,out.txt}` **14 PASS / 0 FAIL**：分页前向
+      vs 官方 ref 5.58e-08（**须显式关 TF32**，否则 ~1e-3 假误差）、解析反向 vs autograd 7.59e-17、
+      中心差分 1.57e-9，**真实 SM90 分页 kernel 前向 calc_diff 2.51e-9**，并坐实**分页 kernel 不保证
+      无效区 -inf**（实测 [-3.15, 967.0]，故官方测试比较前必须 `masked_fill`）。**CUDA 分页反向后端**
+      `src/mqa_indexer_backward_paged.cu`（grid=P、block=(32,H)、页表逆映射 + `atomicAdd`，sha256
+      `cbe4693d…`）：`[A]` dq 7.5e-8 / dw 7.9e-8 / dkv_phys 3.5e-8 **ALL PASS**（对照「写」0.839）；
+      `[B]` 吞吐 0.3–0.6 GFLOP/s、与连续版同量级——瓶颈仍是 `dkv` 的 scatter 归约 `O(Σ_r cl_r·H·D)`，
+      分页只把目标地址从连续下标换成页表逆映射。配套博客
+      `content/posts/mega-moe-158-indexer-paged-backward`（索引页新增第 158 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4555,8 +4583,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P147 各增量完成（P15-1…P41-1、P42-1…P147-1）。**
-  本轮 P147-1：新建 `docs/157-mqa-logits-indexer-backward.md`（+`src/mqa_indexer_backward.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P148 各增量完成（P15-1…P41-1、P42-1…P148-1）。**
+  本轮 P148-1：新建 `docs/158-indexer-paged-backward.md`（+`src/mqa_indexer_backward_paged.cu`、
+  `harness/exp_mqa_logits_paged_backward.{py,sh,out.txt}`）——承接 P147-1，把 indexer 反向从**连续版**
+  推进到生产用的**分页 KV**：物理页池 + block table 间接寻址 + 每行 `context_lens`。**核心**是反向
+  要沿**页表逆映射**把 `dkv` scatter-accumulate 回物理槽（并乘回 `scale`），且 `next_n` 前缀重叠 +
+  跨序列共享页使一个物理槽被多行引用——「写」丢 ~49% 贡献（CUDA 对照 0.839），scatter-add 与 autograd
+  逐位一致（1.10e-16）。H100(sm90) 真机 **14 PASS / 0 FAIL**：分页前向 vs 官方 ref 5.58e-08（须关 TF32）、
+  解析反向 vs autograd 7.59e-17、中心差分 1.57e-9、**真实 SM90 分页 kernel 前向 calc_diff 2.51e-9**、
+  并坐实**分页 kernel 不保证无效区 -inf**；CUDA 后端 `[A] ALL PASS`、吞吐 0.3–0.6 GFLOP/s（瓶颈仍是
+  `dkv` scatter 归约）。索引页新增第 158 篇。
+  上一轮 P147-1：新建 `docs/157-mqa-logits-indexer-backward.md`（+`src/mqa_indexer_backward.cu`、
   `harness/exp_mqa_logits_indexer_backward.{py,sh,out.txt}`）——补齐 MQA logits（lightning indexer）
   一直缺席的**训练反向**：第 19/60 篇只拆了**前向**，而 DeepGEMM 只有前向打分、indexer 却要训练。
   训练目标是对主注意力分布做 **KL 蒸馏**（arXiv:2512.02556 §2.1 式 (3)/(4)：目标 `p` = 各头分数求和后
@@ -6209,15 +6246,15 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P147 已完成（最新 **P147-1 补齐 MQA logits / lightning indexer 一直缺席的「训练反向」**
-  ——第 19/60 篇只拆前向，DeepGEMM 也只有前向打分，而 DeepSeek-V3.2 的 indexer 要训练。训练目标是对
-  主注意力分布做 **KL 蒸馏**（arXiv:2512.02556 §2.1 式 (3)/(4)，目标 `p` = 各头分数求和后 L1 归一化，
-  稀疏阶段只在 top-k 选中集 `S_t`、每 query 选 2048 KV，indexer 输入 detach）；梯度三段：`dL/dI = softmax(I)-p`、
-  打分算子四路反向、top-k 直通 + FP8 STE。H100(sm90) 真机 **23 PASS/0 FAIL** + CUDA 反向后端 `[A] ALL PASS`，
-  揭示瓶颈是 `dkv` 跨 token **scatter 归约**。索引页新增第 157 篇）。
+- **下一步**：P0~P148 已完成（最新 **P148-1 把 indexer 反向从连续版推进到生产用的「分页 KV」**
+  ——物理页池 + block table 间接寻址 + 每行 `context_lens`；反向须沿**页表逆映射**把 `dkv`
+  scatter-accumulate 回物理槽、`next_n` 前缀重叠 + 跨序列共享页使一个物理槽被多行引用（「写」丢 ~49%）。
+  H100(sm90) **14 PASS/0 FAIL** + CUDA 分页后端 `[A] ALL PASS`，真实 SM90 分页 kernel 前向 calc_diff 2.51e-9，
+  并坐实分页 kernel 不保证无效区 -inf。索引页新增第 158 篇）。
   可继续（均为增量、非承诺）：① 对 P96/P97/P123 的轻微漂移清单关键路径定点复核；② 把空出的 DeepEP
   端到端留给 NCCL≥2.32.3 环境（见「阻塞」）；③ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落 / indexer
-  的**分页 / 稀疏**反向变体做定点复核。详见上。
+  的**稀疏前向 kernel 反向**（sm100_sparse_mqa_logits，SM100 专属仅分析）/ 分页 KV 的 **varlen（SM100）**
+  变体做定点复核。详见上。
   上一轮 P146-1：把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」推到契约层——数值可行（真实
   `math.cuh` store 分支逐位复现，FP8 0/16777216、SF 0/524288），但契约是「单输出 + 无逐元素索引 + 无状态」，
   SwiGLU 反向要「逐元素读 gate/up + 两个输出 + 两个 SF」，只加一个 operator 结构体不够，须扩三处契约；

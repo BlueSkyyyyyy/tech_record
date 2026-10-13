@@ -1,0 +1,51 @@
+== 内核源码 ==
+cbe4693d1d94b8d3575e0d4b1d2aa0f9f86c69924059537d498dacb4db14e9b8  ~/proj/tech_record/code/mega-moe/src/mqa_indexer_backward_paged.cu
+
+== 编译（sm_90）==
+  built /tmp/mqa_indexer_backward_paged
+
+== 设备端自带报告（src/mqa_indexer_backward_paged.cu，单进程）==
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+== [A] 正确性：分页反向 CUDA vs host fp64 参考（含别名累加）==
+  dq        relerr = 7.480e-08
+  dw        relerr = 7.909e-08
+  dkv_phys  relerr = 3.451e-08
+  (对照) 若用「写」而非 scatter-accumulate，dkv_phys 与正确值 relerr = 8.389e-01
+  => [A] ALL PASS
+
+== [B] 吞吐（分页 gather + scatter 原子归约，受争用下界）==
+  S=64,N=1,H=32,BS=64,avg=8192     27.217 ms/call  ~0.3 GFLOP/s
+  S=64,N=4,H=32,BS=64,avg=8192     53.663 ms/call  ~0.6 GFLOP/s
+  S=256,N=1,H=32,BS=64,avg=8192    55.085 ms/call  ~0.6 GFLOP/s
+  注：dkv_phys 的 `atomicAdd` 沿页表逆映射散播，量 O(sum_r cl_r · H · D)；next_n>1 时
+      同一物理槽被多行引用（前缀重叠），别名累加是正确性硬要求而非优化。
+
+== 总判定：ALL PASS ==
+
+== Python：分页前向锚 + 解析反向 + 页别名 + KL 梯度 + 真实 kernel ==
+==============================================================================
+P148-1 分页 KV 的 MQA indexer 反向（H100 真机）
+==============================================================================
+Part A  分页前向的官方锚（可微分实现 vs DeepGEMM ref_paged_mqa_logits）
+  [PASS] 可微分前向(fp64) == ref_paged_mqa_logits(fp32, 关 TF32)（有效区）         relerr=5.583e-08
+  [PASS] 无效位置两者都是 -inf 语义（我们 -1e30）                                     ref 无效最小=-inf
+Part B  分页反向解析式 vs autograd fp64（+ 中心差分）
+  [PASS] dq  解析 vs autograd                                             relerr=0.000e+00
+  [PASS] dw  解析 vs autograd                                             relerr=0.000e+00
+  [PASS] dkv_phys 解析 vs autograd（含页别名累加）                                relerr=7.590e-17
+  [PASS] dkv_phys 中心差分（3 个物理槽条目）                                        最差 relerr=1.572e-09
+Part C  物理页别名：scatter-accumulate vs 「写」（last-writer-wins）
+    页映射：2816 个逻辑引用 -> 2112 个物理槽；被多引用的槽 704 个、最大共享度 2（next_n 前缀重叠 + 跨序列共享页）
+  [PASS] naive「写」在被引用槽上丢贡献（确有差异）                                        共享槽最大绝对差=3.880e+00
+  [PASS] naive「写」相对正确累加的全局 relerr 显著 >0                                 relerr=4.885e-01
+  [PASS] share 用例：dkv 解析 == autograd                                    relerr=1.099e-16
+Part D  分页 logits 的 KL 蒸馏梯度 dL/dI = softmax(I) - p（有效集内）
+  [PASS] dL/dI 解析(softmax-p) vs autograd                                relerr=1.696e-16
+  [PASS] 有效集内行和 = 0                                                     max=1.318e-16
+  [PASS] 无效位置（s>=cl）梯度恒 0                                               max=0.000e+00
+Part E  真实 DeepGEMM SM90 fp8_fp4_paged_mqa_logits 前向锚
+  [PASS] 真实 kernel vs 模拟参考（fp8 反量化）在容差内                                 calc_diff=2.511e-09 (tol 1e-3)
+  [PASS] kernel 不对无效区写 -inf（-inf 只由 ref 提供，kernel 侧比较须 masked）          无效区最小=-3.145e+00 最大=9.670e+02
+    真实分页 kernel 有效区样本：[0.4217153787612915, -0.3295143246650696, 2.327571392059326] vs ref [0.4217480719089508, -0.3296019434928894, 2.3275935649871826]
+------------------------------------------------------------------------------
+PASS=14  FAIL=0
