@@ -6247,3 +6247,97 @@ CUPTI `dev`（kernel-only，µs；`gate_nodg` = 同 build 跳过门控归约+落
 - 本轮只覆盖 `K=V=128`、`BT=16`、fp32；`B2M_GATE` **要求 `B2M_DKGB` 且不与 `B2M_OUT`/`B2M_SAND` 组合**
   （standalone，编译期 `#error` 拦截）。`q/k/g` 走**片元式 global 读**（未合流，见 §60.4）；`dqg`/`dkg`/`dg`
   落盘用标量 32-bit（`-DB2M_VECST` 未接）。这些都不影响本节结论（增量机制 = 门控标定 + warp 内列和 + 三次落盘）。
+
+## 61. 「K2 形状 CUDA B2」门控链的下一杠杆——把 `q/k/g` 合流载入 smem：**证伪**（P7-58）
+
+§60.5 把门控链这最贵的一刀（+30~38%）的成因归到 **raw `q/k/g` 的片元式 global 读**（§60.4：l1tex 全局读
+sector `2.10 M→19.40 M`，9.2×），并给出下一个杠杆：**把 `q/k/g` 像 `kg` 一样在 chunk 开头合流载入 smem**，
+把散读换成一次合流读（当时标「待验证」）。本轮把它直接测掉，答案是**负的**——合流载入 smem 不能收回那 +30%，
+反而**净亏**。
+
+证据：`harness/b2_mma_probe.cu`（新增 `-DB2M_QKG`，需 `-DB2M_GATE`；+ 诊断 `-DB2M_QKGP` 只把 staging 的行距
+从 `KD`(128 字) 加到 `KD+4`）+ `harness/check_bwd_b2_gate_qkg.py`（`harness/check_bwd_b2_gate_qkg.out.txt`，
+空闲卡）+ `harness/probe_b2_gate_qkg_ncu.sh`（`harness/probe_b2_gate_qkg_ncu.out.txt`）。
+
+### 61.1 设计：一次合流的 `[BT,KD]` staging，门控改读 smem
+
+- **staging**（`b2_mma_probe.cu:643-654`）：chunk 开头一次 `for idx in [0, BT*KD)` 循环，按 `row=idx/KD,
+  col=idx%KD` **合流**读 `q/k/g`（各一次）写进 `sh->sq/skb/sgb[BT][QKGP]`（pad rows zeroed，`tt<T` 守卫），
+  与 `kg`（`:604-618`）同构；随后 `__syncthreads()`（`:656-658`，本条把 `B2M_QKG` 加进该守卫）。
+- **门控读**（`:960-976`）：P7-57 的 `qv=qptr[off]; kv=kraw[off]; gv=graw[off]` 与 `gl=graw[gl_base+…]`
+  在 `B2M_QKG` 下换成 `sh->sq[rowrel][col]` / `sh->skb[…]` / `sh->sgb[…]`（`rowrel = i<2?g:g+8`）。
+  **算术一字未动**——只把操作数来源从「按 mma 片元地址散读 global」换成「先合流落 smem、再按片元读 smem」。
+- `-DB2M_QKGP`：staging 行距 `KD=128` 字（`128 % 32 == 0`）时，门控按固定 `col` 扫 `row=g/g+8`，8 个 row
+  全落**同一个 bank**；`QKGP=KD+4`（`(4*row+col) % 32` 在 `row=0..7` 上取遍 `{0,4,…,28}`）即消掉该冲突。
+
+### 61.2 Part A — 正确性：三种 stage 布局**逐位相同**（合流只是换取数）
+
+| 量（四组最坏 `max_rel`） | 值 |
+|---|---|
+| `dqg`/`dkg`/`dg` vs `gate_qkg`（P7-57 门控） | **0 / 0 / 0（逐位相同）** |
+| … vs `gate_qkgp`（pad 行距） | **0 / 0 / 0** |
+| … vs `gate_tma_qkg` / `gate_tma_qkgp`（TMA 原子布局） | **0 / 0 / 0** |
+| … vs `gate_tma64_qkg`（`BVK=64`） | **0 / 0 / 1.08e-7**（仅 `dg` 1 ulp，`BVK=64` 的 V-累加序） |
+| `dq`/`dk`/`dg` vs FLA | 1.05e-3 / 9.47e-4 / 1.01e-3（tf32 底噪） |
+
+即合流载入**逐位无损**：换源不改值，三布局（非 TMA / TMA@32 / TMA@64）一致（含非整除 `T=250`）。
+
+### 61.3 Part B — 计时：**全为净亏**（非 TMA 1.11–1.51×，TMA 1.08–1.19×），padding 改不了结论
+
+CUPTI `dev`（kernel-only，µs；`qkg`=合流，`qkgp`=合流+pad 行距）：
+
+| shape | `gate` | `gate_qkg` | `gate_qkgp` | `gate_tma` | `tma_qkg` | `tma_qkgp` | 全 Triton B2 | `qkg/gate` | `qkgp/gate` | `tqkg/tma` | `tqkgp/tma` |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | 676.0 | 1021.6 | 1004.0 | 655.1 | 715.2 | 706.3 | 896.8 | **1.51×** | 1.49× | **1.09×** | 1.08× |
+| `B2 T1024 H8` | 95.0 | 135.2 | 132.7 | 94.0 | 106.2 | 104.2 | 121.9 | 1.42× | 1.40× | 1.13× | 1.11× |
+| `T512 H4` | 12.0 | 13.8 | 13.8 | 11.7 | 13.8 | 13.8 | 15.1 | 1.15× | 1.15× | 1.19× | 1.19× |
+| `T250 H3`（非整除） | 11.1 | 12.4 | 12.1 | 10.9 | 12.8 | 12.4 | 14.1 | 1.12× | 1.09× | 1.18× | 1.14× |
+
+- **合流 `q/k/g` 一律更慢**，大 shape 最明显（非 TMA `B8` 1.51×）；pad 行距只把 1.51→1.49、1.09→1.08，
+  **不改变符号**。即「散读 global 换合流 smem」这条路在任何布局下都不回本。
+
+### 61.4 `ncu` — 两个独立机制，但**都不指向 global 读合流**是那 +30% 的成因
+
+`B8 T2048 H8`（`probe_b2_gate_qkg_ncu.out.txt`）：
+
+| 变体 | dyn smem | occ 限(block) | warps_active | global ld sectors | bank conflict | shared wavefronts | DRAM 读 | L2 bytes | Duration |
+|---|---|---|---|---|---|---|---|---|---|
+| `gate` | 92.67 KB | 2 | 24.16% | 66.58 M | 9.87 M | 40.0 M | 1.56 GB | 3.79 GB | 672 µs |
+| `gate_qkg` | 117.25 KB | **1** | **12.44%** | 60.03 M | 19.94 M | 51.9 M | 1.55 GB | 3.77 GB | 1020 µs |
+| `gate_qkgp` | 118.02 KB | **1** | 12.45% | 60.03 M | **10.51 M** | — | 1.55 GB | 3.78 GB | 1000 µs |
+| `gate_tma` | 82.56 KB | 2 | 24.21% | 19.40 M | 9.67 M | 39.8 M | 1.56 GB | 3.07 GB | 652 µs |
+| `gate_tma_qkg` | 107.14 KB | 2 | 24.56% | **12.85 M** | 20.81 M | 52.8 M | 1.55 GB | 3.12 GB | 719 µs |
+| `gate_tma_qkgp` | 107.90 KB | 2 | 24.57% | **12.85 M** | **11.46 M** | — | 1.55 GB | 3.15 GB | 709 µs |
+
+- **机制 1（非 TMA 独有）= 占用率**：三张常驻 `[BT,KD]` tile（+24 KB）把 dynamic smem 从 92.7 KB 顶到
+  117.3 KB，占用率上限从 **2 掉到 1 block/SM**（`warps_active` 24.2%→12.4%）。这就是非 TMA 那 1.5× 的主因
+  ——pad 行距把 bank conflict 从 19.94 M 打到 10.51 M（≈基线），`Duration` 仍 1000 µs（1.49×），占用率没回来。
+- **机制 2（两版共有）= 合流本身的代价**：TMA 版 smem 107 KB 仍保住 2 blocks/SM（`warps_active` 24.6%），
+  global ld sector 从 **19.40 M→12.85 M（−34%）**——**预期收益确实兑现**（且 `gate_tma_qkgp` 的 bank conflict
+  11.46 M 已回到基线）——可 `Duration` 反升 **652→709 µs（+8.7%）**、DRAM 读一字未动（1.56→1.55 GB）。
+  **原因**：本核是 **DRAM/L2 双 bound**（DRAM SOL ~86%、L2 SOL ~88%），那 1.3 GB 的 l1tex 散读**大头被 L2
+  吸收**（DRAM 读不变），删掉它并不动瓶颈；而 staging 多出一遍 smem 写 + 一个 block 同步 + 额外指令，
+  净负。
+- **XU 完全不变**（`sm__inst_executed_pipe_xu` 恒 1.507 M）：合流不改 `exp2` 发射，故 `exp2f` 那部分成本
+  与取数无关。SASS 里 `LDG 62→49/48→35`、`LDS 164→190 / 98→124` 也印证「global 读换成 smem 读」，
+  值没变、只是搬家。
+
+### 61.5 结论 / 修正 §60.4 的归因
+
+- **§60.5 的「合流 `q/k/g` 收回门控 +30%」证伪**：合流载入 smem **是净亏**（非 TMA 1.11–1.51×、TMA 1.08–1.19×，
+  逐位无损但更慢）；pad 行距只把大 shape 的 1.51→1.49、1.09→1.08，**不改符号**。
+- **修正 §60.4 的归因**：门控那 9.2× 的 global-load sector **是真的、但不在关键路径上**（被 L2 吸收，
+  DRAM 读不变）；门控 +30% 的成本是 **三份 `[B,T,H,K]` 输出写（199 MB，交付物本身）+ `exp2f` XU 发射 +
+  本核本就 DRAM/L2 bound**，**不是** raw `q/k/g` 取数的合流度。§60.4 那句「大头是散读」应改为
+  「散读真实存在于 L1 计数，但被 L2 吸收、不构成端到端成本」。
+- **对目标卡的设计输入（更新）**：门控链**不必**为 `q/k/g` 单设 smem staging（徒增占用/同步，见机制 1/2）；
+  生产 B2 里 `k`/`g` 已为 `kg`/`db`/`dA` 载入，`q` 的少量散读**保持直读 global 更划算**。若一定要合流，
+  必须**不新增常驻 smem 峰值**（复用既有缓冲、或让 staging 随 TMA 阶段滚动）且**验证不掉占用率**——
+  但本轮已证即便做到（TMA+pad，占用率不掉、冲突回基线）仍 +8.7%，故**不作为优化项**。
+
+### 61.6 边界（诚实）
+
+- 只覆盖 `K=V=128`、`BT=16`、fp32；`B2M_QKG` 需 `B2M_GATE`。`sq/skb/sgb` 为常驻 `[BT,QKGP]`（`QKGP∈{128,132}`），
+  `-DB2M_QKGP` 仅用于受控归因（消 bank conflict），非部署项。
+- 「DRAM/L2 双 bound → 删 L1 散读不兑现」这一归因由 `gate_tma`（一对换算子只改取数来源、occupancy 不变）
+  作受控对照，故非小 shape 噪声；小 shape（`T512/T250`）合流更慢还叠加了 staging 的固定延迟。

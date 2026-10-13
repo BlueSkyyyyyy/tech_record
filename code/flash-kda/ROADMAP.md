@@ -698,7 +698,29 @@
       至此 §5.2 的 **B2 六项 `dq/dk/dv2/db/dg/dA` 第一次全部存在于 K2 形状 CUDA 核**。**坑**：`m_last` 项按
       lane 条件（`g+8==lastrow`）写会让 `g=7` 的行 7/15 都被加——指纹「`dq/dk` 逐位对、`dg` 只在 行%16∈{7,15}
       错」；改逐行坐标即归零。**边界**：`B2M_GATE` 要求 `B2M_DKGB` 且 standalone（不与 OUT/SAND 组合）、
-      `q/k/g` 片元式 global 读未合流、标量落盘。**下一步＝六项全搬完后收尾/维护**；有需求时再合流 `q/k/g`。
+       `q/k/g` 片元式 global 读未合流、标量落盘。**下一步＝六项全搬完后收尾/维护**；有需求时再合流 `q/k/g`。
+
+- [x] **P7-58** 兑现 §60.5「门控链的下一杠杆＝把 `q/k/g` 合流载入 smem 收回 +30%」（当时标**待验证**），
+      结论＝**证伪（净亏）**（`docs/07` §61）。给 `b2_mma_probe.cu` 加 **`-DB2M_QKG`**（需 `B2M_GATE`；
+      诊断 **`-DB2M_QKGP`** 只把 staging 行距 `KD`(128 字) 加到 `KD+4` 消固定列 row-aliasing 冲突）：
+      chunk 开头一次合流 `[BT,KD]` staging 读 `q/k/g`（`b2_mma_probe.cu:643-654`，与 `kg` 同构），门控改读
+      `sh->sq/skb/sgb[rowrel][col]`（`:960-976`，**算术一字未动**）。新增 `harness/check_bwd_b2_gate_qkg.py`
+      （`check_bwd_b2_gate_qkg.out.txt`，空闲卡）+ `harness/probe_b2_gate_qkg_ncu.sh`
+      （`probe_b2_gate_qkg_ncu.out.txt`）。**Part A**：`dqg/dkg/dg` vs P7-57 `gate`/`gate_qkgp`/`gate_tma_qkg`/
+      `gate_tma_qkgp` **全逐位相同（max_abs=0）**、`gate_tma64_qkg` 仅 `dg` 1 ulp（含非整除 T=250）——合流逐位无损。
+      **Part B（关键）**：合流**一律更慢**——非 TMA `qkg/gate` **1.11–1.51×**、TMA `tqkg/tma` **1.08–1.19×**；
+      pad 行距只把大 shape 1.51→1.49、1.09→1.08，**不改符号**。**ncu**：两独立机制——(1) 非 TMA 加 24 KB
+      常驻 tile 把 dyn smem 92.7→117.3 KB、占用率上限 **2→1 block/SM**（`warps_active` 24.2→12.4%，pad 后
+      bank conflict 19.9M→10.5M 回基线仍 1.49×）；(2) TMA 版占用率不掉（2 blocks），global ld sector 确从
+      **19.40M→12.85M（−34%，预期收益兑现）**、pad 后 bank conflict 回基线 11.46M，但 `Duration +8.7%`、
+      DRAM 读不变（1.56→1.55 GB）——本核 **DRAM/L2 双 bound（~86/88% SOL）**，删 L1 散读（被 L2 吸收）
+      **不动瓶颈**，staging 多一遍 smem 写+同步反成净负。**结论**：**修正 §60.4**——门控 +30% 的成本是
+      **三份 `[B,T,H,K]` 输出写（199 MB，交付物）+ `exp2f` XU + 本核本就 DRAM/L2 bound**，**不是** raw
+      `q/k/g` 的散读合流度（散读真实存在于 L1 计数但被 L2 吸收、不进端到端）。**设计输入（更新）**：门控链
+      **不必**为 `q/k/g` 单设 smem staging；`q` 保持直读 global 更划算；若合流须不增 smem 峰值且不掉占用率
+      ——但本轮已证即便做到仍 +8.7%，故**不作为优化项**。**方法学**：把「ncu 计数里的散读」当成本前，须用
+      「换算子只改取数来源、occupancy 不变」的受控对拍验证它是否在关键路径上。
+
 
 - [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
       验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
@@ -1056,11 +1078,39 @@
   **同一张量**——流水/落盘覆写致 `dkgb` 大面积错（`max_rel≈2`）、`db` 随之错，且**只对照 dkgb 专用 build 才定位**
   （对自身 torch 参考比是「循环自洽」、查不出）。改独立 `dw_out` 缓冲后与 §56 专用 build **逐位相同**。凡原型里
   有「中间量走 global round-trip」的两趟契约，对拍必须用**独立缓冲**，且**与能独立核验的上一刀交叉比**。
+- **ncu 里的「散读 sector 放大」不一定是端到端头寸**（P7-58，§61.4；更正 §60.4 的归因）：门控链的
+  `q/k/g` 片元式散读在 l1tex 全局读 sector 上是 **9.2×**，但把它换成合流 smem staging（`-DB2M_QKG`，
+  global sector **−34%**）后端到端**反慢 +8.7%**（大 shape）——因为本核 **DRAM/L2 双 bound**，那 1.3 GB
+  L1 散读**被 L2 吸收**（DRAM 读不变），删它不动瓶颈；staging 多一遍 smem 写+同步是净负。**判据**：把
+  ncu 计数当成本前，须用「换算子**只改取数来源**、occupancy 不变」的受控对拍确认它在关键路径上。另本核
+  加常驻 `[BT,KD]` tile 直接把 dyn smem 顶过 occupancy 阈值（非 TMA 92.7→117.3 KB，**2→1 block/SM**）
+  ——小核「往 smem 搬东西」的第一代价是**峰值 smem 顶掉占用率**，先算 `smem/block × blocks ≤ 227KB`。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-57 补测**。
-  - P7-57（本轮）：**兑现 §55.6/§56.6/§57.6/§58.6/§59.6「补非 GEMM 段」第六刀——门控链（最终
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-58 补测**。
+  - P7-58（本轮）：**兑现 §60.5「门控链的下一杠杆＝把 `q/k/g` 合流载入 smem 收回 +30%」（待验证），
+    结论＝证伪（净亏）**（`docs/07` §61）。给 `b2_mma_probe.cu` 加 `-DB2M_QKG`（需 `B2M_GATE`；诊断
+    `-DB2M_QKGP` 把 staging 行距 `KD`→`KD+4` 消固定列 row-aliasing 冲突）：chunk 开头一次合流 `[BT,KD]`
+    staging 读 `q/k/g`（`:643-654`，与 `kg` 同构），门控改读 `sh->sq/skb/sgb[rowrel][col]`（`:960-976`，
+    算术一字未动）。新增 `harness/check_bwd_b2_gate_qkg.py`（`check_bwd_b2_gate_qkg.out.txt`，空闲卡）+
+    `harness/probe_b2_gate_qkg_ncu.sh`（`probe_b2_gate_qkg_ncu.out.txt`）。**Part A**：`dqg/dkg/dg` vs
+    P7-57 `gate`/`gate_qkgp`/`gate_tma_qkg`/`gate_tma_qkgp` **全逐位相同（max_abs=0）**、`gate_tma64_qkg`
+    仅 `dg` 1 ulp（含非整除 T=250）——**合流逐位无损**。**Part B（关键）**：合流**一律更慢**——非 TMA
+    `qkg/gate` **1.11–1.51×**、TMA `tqkg/tma` **1.08–1.19×**；pad 行距只把大 shape 1.51→1.49、1.09→1.08，
+    **不改符号**。**ncu**：两独立机制——(1) 非 TMA 三张常驻 `[BT,KD]` tile（+24KB）把 dyn smem 92.7→117.3KB、
+    **占用率上限 2→1 block/SM**（`warps_active` 24.2→12.4%），pad 后 bank conflict 19.9M→10.5M 回基线仍
+    1.49×；(2) TMA 版占用率不掉（2 blocks），global ld sector 确从 **19.40M→12.85M（−34%，预期收益兑现）**、
+    pad 后 bank conflict 回基线 11.46M，但 `Duration +8.7%`、DRAM 读不变（1.56→1.55GB）——本核 **DRAM/L2
+    双 bound（~86/88% SOL）**，删 L1 散读（被 L2 吸收）**不动瓶颈**，staging 多一遍 smem 写+同步反成净负。
+    **结论**：**修正 §60.4**——门控 +30% 的成本是 **三份 `[B,T,H,K]` 输出写（199MB，交付物）+ `exp2f` XU +
+    本核本就 DRAM/L2 bound**，**不是** raw `q/k/g` 的散读合流度（散读真实存在于 L1 计数但被 L2 吸收、
+    不进端到端）。**设计输入（更新）**：门控链**不必**为 `q/k/g` 单设 smem staging；`q` 保持直读 global
+    更划算；若合流须不增 smem 峰值且不掉占用率——但本轮已证即便做到仍 +8.7%，故**不作为优化项**。
+    **方法学（新）**：把「ncu 计数里的散读」当成本前，须用「换算子只改取数来源、occupancy 不变」的受控
+    对拍验证它是否在关键路径上；否则会把一个被 L2 吸收的分项误判为端到端头寸。**至此 §60.5 的两条
+    「下一步」（收尾/维护 + 合流 `q/k/g`）全部关闭**：六项已全进 CUDA、合流被证伪，专题进入维护态。
+  - P7-57（上轮）：**兑现 §55.6/§56.6/§57.6/§58.6/§59.6「补非 GEMM 段」第六刀——门控链（最终
     `dq/dk/dg`）落进 K2 形状 CUDA B2**（`docs/07` §60）。给 `b2_mma_probe.cu` 加 `-DB2M_GATE`（需
     `-DB2M_DKGB`；诊断 `-DB2M_NODG`；新符号 `b2gate_launch`）。门控标定全在寄存器（warp 拥有 k-列切片，
     各 mma 片元独立）；唯一归约 `Σ_t kdk` 是 **warp 内 `shfl_xor` over groupID**（mma 16 行 = 8 lane×2 行），

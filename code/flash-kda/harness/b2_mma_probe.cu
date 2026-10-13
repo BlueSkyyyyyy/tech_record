@@ -216,6 +216,26 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 #if B2M_GATE && (B2M_OUT || B2M_SAND)
 #error "B2M_GATE is standalone (B2M_DKGB only; no B2M_OUT / B2M_SAND)"
 #endif
+// P7-58: coalesce the gate's raw operands `q`/`k`/`g` into smem once per chunk (like `kg`),
+// instead of the fragment-address global reads of P7-57 (§60.4: 9.2x global-load sectors).
+// The gate then reads `q`/`k`/`g` from the shared buffers (fully coalesced staging load, one
+// scalar smem read per fragment position).  Requires `B2M_GATE`.
+#ifndef B2M_QKG
+#define B2M_QKG 0
+#endif
+#if B2M_QKG && !B2M_GATE
+#error "B2M_QKG requires B2M_GATE"
+#endif
+//   B2M_QKGP : pad the staged `q`/`k`/`g` row stride from `KD` (128 words = 0 mod 32 banks)
+//              to `KD+4`, so the gate's per-fragment shared reads (`row = g/g+8`, fixed col)
+//              spread over distinct banks instead of aliasing 8 rows onto one bank.
+#ifndef B2M_QKGP
+#define B2M_QKGP 0
+#endif
+#if B2M_QKGP && !B2M_QKG
+#error "B2M_QKGP requires B2M_QKG"
+#endif
+constexpr int QKGP = KD + (B2M_QKGP ? 4 : 0);   // staged q/k/g row stride (words)
 // raw `v` staging (`Stage::vv`) and the `kg` buffer are needed by `B2M_DA` (base dA) and/or `B2M_DB`.
 #define B2M_VV_KG_ON (B2M_DA || B2M_DB)
 constexpr int BVK = B2M_BVK;   // V-tile (contraction) depth staged per pipeline stage
@@ -294,6 +314,13 @@ struct alignas(128) Shared {
     // P7-57: per-chunk `dgk_tot[k] = dgk_raw[k]*exp2(g_last[k]) + sum_t kdk[t,k]`, written by
     // the `g==0` lanes of each warp (its own k-column slice) and read back for the `m_last` row.
     float sdgkt[KD];
+#endif
+#if B2M_QKG
+    // P7-58: coalesced per-chunk `q`/`k`/`g` [BT, QKGP] (padded rows; the gate's operand reads
+    // become shared loads instead of the P7-57 fragment-address global reads).
+    float sq[BT][QKGP];
+    float skb[BT][QKGP];
+    float sgb[BT][QKGP];
 #endif
 };
 
@@ -613,7 +640,20 @@ b2mma_kernel(
         sh->sbeta[r] = (i_t * BT + r < T) ? beta[((int64_t)(n * T + i_t * BT + r) * H + hh)] : 0.f;
     }
 #endif
-#if B2M_DA || B2M_VV_KG_ON || B2M_SAND
+#if B2M_QKG
+    // P7-58: coalesced per-chunk `q`/`k`/`g` (rows t<T; pad rows zeroed).  One pass per chunk;
+    // the gate reads these from smem instead of the fragment-address global reads (P7-57 §60.4).
+    for (int idx = threadIdx.x; idx < BT * KD; idx += NW * 32) {
+        const int row = idx / KD, col = idx % KD, tt = i_t * BT + row;
+        float qv = 0.f, kv = 0.f, gv = 0.f;
+        if (tt < T) {
+            const int64_t off = ((int64_t)(n * T + tt) * H + hh) * KD + col;
+            qv = qptr[off]; kv = kraw[off]; gv = graw[off];
+        }
+        sh->sq[row][col] = qv; sh->skb[row][col] = kv; sh->sgb[row][col] = gv;
+    }
+#endif
+#if B2M_DA || B2M_VV_KG_ON || B2M_SAND || B2M_QKG
     __syncthreads();
 #endif
 #if B2M_OUT || B2M_DKGB
@@ -909,13 +949,19 @@ b2mma_kernel(
         const int last = ((i_t + 1) * BT < T ? (i_t + 1) * BT : T) - 1;
         const int lastrow = last - t0;                    // relative row of the last valid token
         const int64_t dgk_base = ((int64_t)(n * NT + i_t) * H + hh) * KD;
+#if !B2M_QKG
         const int64_t gl_base = ((int64_t)(n * T + last) * H + hh) * KD;
+#endif
         float dgv[2][4];
         #pragma unroll
         for (int nt = 0; nt < 2; ++nt) {
             const int cl = nt * 8 + 2 * t;                // column within the warp's owned 16
             const int c0 = warp * BW + cl, c1 = c0 + 1;
+#if B2M_QKG
+            const float gl0 = sh->sgb[lastrow][c0], gl1 = sh->sgb[lastrow][c1];
+#else
             const float gl0 = graw[gl_base + c0], gl1 = graw[gl_base + c1];   // g at (last, col)
+#endif
             const float f0 = exp2f(gl0), f1 = exp2f(gl1); // exp2(g_last) for dgk_raw
             const int tr0 = t0 + g, tr1 = t0 + g + 8;
             float pk0 = 0.f, pk1 = 0.f;
@@ -925,8 +971,13 @@ b2mma_kernel(
                 const int col = (i & 1) ? c1 : c0;
                 float qv = 0.f, kv = 0.f, gv = 0.f, bt = 0.f;
                 if (row < T) {
+#if B2M_QKG
+                    const int rowrel = (i < 2) ? g : g + 8;
+                    qv = sh->sq[rowrel][col]; kv = sh->skb[rowrel][col]; gv = sh->sgb[rowrel][col];
+#else
                     const int64_t off = ((int64_t)(n * T + row) * H + hh) * KD + col;
                     qv = qptr[off]; kv = kraw[off]; gv = graw[off];
+#endif
                     bt = beta[((int64_t)(n * T + row) * H + hh)];
                 }
                 const float gk = exp2f(gv);
