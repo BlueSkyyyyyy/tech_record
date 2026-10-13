@@ -3048,3 +3048,133 @@ fill + 3 个加法 + cumsum 前的中间物化）。`ip dev / FLA dev` 落到 **
   下一步才是 §27.7 说的「对角平铺 `dAqk/dAkk` 每 `i_k` 重读、k/g 每 `i_k` 重读」的 L1 局部性优化。
 - **产物**：`harness/check_bwd_b3_accum.py`（`harness/check_bwd_b3_accum.out.txt`，Part A 语义 +
   Part B 落链正确性 + Part C 计时与 per-kernel 归因）。
+
+## 32. B3 `intra` 的 L1 局部性：重复读是**空**、真正的杠杆是把 k 循环**软件流水**（P7-29）
+
+§27.7/§31.3 把 B3 的下一杠杆定为「减少对角平铺的重复读（`dAqk/dAkk` 每 `i_k` 重读、`k/g` 每
+`i_k` 重读）、提升 L1 局部性」。回读 P7-24 的 MMA kernel（`check_bwd_b3_mma.py:64-212`）后，这个
+假设里其实藏着**两处具体的冗余读**，本轮把它们逐一做成受控实验 —— 结论是**两处都不是杠杆**，而
+真正的杠杆是第三件当时没写进列表的事：**把 `k` 分块从 grid 轴改回 program 内的循环并软件流水**。
+
+**(R1) `k`/`g` 被同一 program 读了两次。** Part B/D 读「对角 key 行」`j = i_ti + o_i`
+（`check_bwd_b3_mma.py:142-143` 的 `p_kd`/`p_gd`），但 `o_c = i_ti + o_i`，所以 `p_kd`/`p_gd`
+与前面 `:98-99` 的 `p_k`/`p_g` 是**逐字节相同的地址**，mask 也相同（`m_jk == m_ck`，因为
+`m_jd == m_c`）。原 kernel 把这两块又 load 了一遍。
+
+**(R2) 对角 `dAqk`/`dAkk` 每 `k` 分块重读一份。** grid 是 `(NK*NC, NT, B*H)` 且
+`BK=min(32,K)`（`check_bwd_b3_mma.py:219`），所以 `K=128` 时 `NK=4` 个 program 各自把同一份只依赖
+`(chunk, head)` 的 `[BC,BC]` 对角块读一遍（`:135-138`）。取 `BK=K`（`NK=1`）即读一次。
+
+本轮新增 `harness/check_bwd_b3_l1.py`：四个变体——
+`reuse`（R1：`b_kd=b_k`,`b_gd=b_g`，算术不动）、`noreuse`（R1 的对照，照旧重读）、
+`bkK`（R2：`BK=K`）、`loop`（新增 kernel，见下）；另有 `harness/ncu_b3_l1_driver.py` /
+`harness/probe_b3_l1_ncu.sh`。
+
+### 32.1 Part A：正确性——`reuse`/`bkK` 与 P7-24 **逐位相同**，`loop` 只差 fp32 加法序
+
+`harness/check_bwd_b3_l1_correctness.out.txt`，8 组 case（含非整除 `T=250/513/1023`、`g=0`、
+`BT=16/64`、`BC=16`）：
+
+| 变体 | `dq` | `dk` | `db` | `dg` | vs FLA（最坏） |
+|---|---|---|---|---|---|
+| `reuse` vs P7-24 | **0** | **0** | 1.3e-7 | **0** | `dq 1.14e-3 / dk 9.8e-4 / db 1.0e-3 / dg 1.04e-3` |
+| `noreuse` vs P7-24 | **0** | **0** | 1.6e-7 | **0** | — |
+| `bkK` vs P7-24 | **0** | **0** | 1.5e-7 | **0** | `dq 1.14e-3 / dk 9.8e-4 / db 1.0e-3 / dg 1.04e-3` |
+| `loop_ns2` vs P7-24 | **0** | 1.1e-7 | 1.3e-7 | 8.5e-8 | — |
+
+`reuse`/`bkK` **逐位相同**（`db` 的 ~1e-7 只是 `atomic_add` 顺序），因为它们是纯重排/常量折叠，
+结果数学上同一串运算。`loop` 把 `b_eg` 提前复用（`b_QG=b_q*b_eg`），只差一个乘法的结合序，落
+~1e-7。全部 vs FLA 仍在 tf32 底噪 ~1e-3。
+
+### 32.2 Part B：R1/R2 在部署粒度**测不出**——`reuse` 恒 1.00×、`BK` 只值 ~5%
+
+`harness/check_bwd_b3_l1_timing.out.txt`（孤立 kernel，CUPTI `dev`）。
+
+- **R1 是空的**：`reuse` 与 `noreuse` 在**所有** shape/nw 上 `dev` 比值恒为 **1.00×**——编译器
+  （Triton/CSE）早已把 `p_kd/p_gd` 那两条与 `p_k/p_g` 相同的 load 消掉，手工「复用」不产生任何
+  差别。故 §27.7 说的「k/g 每 i_k 重读」在生成代码里根本不存在。
+- **R2 只在非部署粒度帮忙**：`BK=64` 在部署 `BT=16` 的大 shape 稳定 **0.95–0.96×**
+  （`B2 T=2048 H=8` 94.6→90.0、`B8 T=2048 H=8` 365.0→346.0），小 shape 打平或略慢；
+  `BK=128`（`NK=1`，理论上彻底消 R2）在 `BT=16` 反而**中性**（94.6/365.0 不变），只在非部署的
+  `BT=64` 有 `0.74–0.81×`。即 R2 的重复读被 L2 吸收了（见 §32.4 的 DRAM 字节）。
+
+### 32.3 真正杠杆：把 `k` 分块改成 program 内 `tl.range` 循环并**软件流水**
+
+`BT=BC=16/NC=1` 时 B3 每个 program 只做「一个 chunk × 一个 k 块」的少量工作，**所有 q/k/g 的
+global load 都在 kernel 开头发出，随后长等**——这正是 P7-24 报的 `long_scoreboard 16.71`、
+`L1 hit 20%`、而 `tensor` 只有 2.61% 的成因。修法是**换并行结构**：新增 `_intra_kernel_loop`
+（`check_bwd_b3_l1.py`），grid 由 `(NK*NC,NT,B*H)` 改成 `(NT,B*H)`，program 内 `for i_k in
+tl.range(0,NK,num_stages=NS)`；对角 `dAqk/dAkk`（R2）与 beta 循环不变、提前到循环外只读一次。
+算术与 P7-24 **逐行同构**（`NC=1` 时 Parts A/C 不执行，只剩对角公式）。
+
+`harness/check_bwd_b3_l1_timing.out.txt`（`reuse`/`noreuse` 已并入，此处列 `loop`）：
+
+| case（部署 `BT=16`） | P7-24 mma | `BK=64` | `loop nw4 bk64 ns1` | `loop nw4 bk64 ns2` | `loop nw4 bk64 ns3` |
+|---|---|---|---|---|---|
+| `B1 T=512 H=4` | 9.4 | 9.5 | 12.0 (1.27×) | 10.1 | **9.6** |
+| `B2 T=2048 H=8` | 94.6 | 89.9 | 100.8 (1.07×) | **76.6 (0.81×)** | 77.5 |
+| `B8 T=2048 H=8` | 365.0 | 346.0 | 370.9 (1.02×) | 289.4 (0.79×) | **288.3 (0.79×)** |
+
+**关键指纹**：`NS=1` 的循环版**比 P7-24 的 grid 版还慢**（1.02–1.27×，少了许多 program 的并行
+度），只有 `NS≥2` 才反超——证明收益**全部来自 `tl.range` 的软件流水**（把下一 k 块的 load 提前到
+当前 k 块的计算里），而不是「循环」本身。大 shape 上 `B2/B8` 各降 **~20%**；小 shape（`T=512`）
+因归约太短、流水填不满而打平/略负。
+
+### 32.4 Part C：落进真实组装链——梯度**逐值不变**、链 `dev` 0.97×
+
+`harness/check_bwd_b3_l1_chain.out.txt`。**正确性**（六组，含非整除 `T=250/513`、`g=0`、`B=2`）：
+`loop` 链 vs FLA autograd 六项最坏 `dq 3.42e-3 / dk 3.02e-3 / dv 6.80e-3 / dbeta 6.01e-3 /
+dg 7.05e-3 / dh0 8.27e-3`——与 §25.2/§26.3/§27/§31.2 **同一组数**；`loop` 链 vs P7-24 链自身增量
+`dq/dv` **逐位 0**、`dk ≤9.2e-8`、`dbeta ≤3.7e-8`、`dg ≤2.4e-6`（加法序）。
+
+**计时**（`NS=3` pipe B1 + acc B3，CUPTI `dev`）：
+
+| case | FLA `dev` | P7-24 `dev` | `loop` `dev` | loop/ref |
+|---|---|---|---|---|
+| `T=512 H=4` | 201.9 | 87.9 | 88.8 | 1.01× |
+| `B2 T=1024 H=8` | 661.5 | 294.7 | **284.5** | **0.97×** |
+| `B8 T=2048 H=8` | 4139.1 | 1940.1 | **1874.5** | **0.97×** |
+| `T=250 H=3`（非整除） | 141.6 | 61.1 | 63.7 | 1.04× |
+
+链级只 **0.97×**，因为 B3 在整链里占比已不大（B3 孤立省 ~77 µs @`B8T2048H8`，链省 ~66 µs，占比
+吻合）；非部署小 shape 仍打平。
+
+### 32.5 Part D：`ncu` 复核——DRAM 字节**逐位不变**，`long_scoreboard` 16.7→4.0
+
+`harness/probe_b3_l1_ncu.out.txt`（`B8 T=2048 H=8`，`BT=16`；ncu 锁频故绝对 `Duration` 与 CUPTI
+不同源，只看比值/机制）：
+
+| 配置 | `long_sb` | `short_sb` | `wait` | `tensor` | DRAM% | L2% | occ | `Duration` |
+|---|---|---|---|---|---|---|---|---|
+| P7-24 mma | **16.74** | 1.36 | 1.29 | 2.61 | 57.3 | 73.8 | 48.6% | 257.4 |
+| loop `ns=1` bk64 | 9.59 | 0.89 | 1.04 | 2.34 | 51.7 | 61.8 | 18.4% | 285.1 |
+| loop `ns=2` bk64 | **5.72** | 0.91 | 0.81 | 3.41 | 74.3 | 82.5 | 18.3% | 198.1 |
+| loop `ns=3` bk32 | **3.98** | 1.44 | 1.13 | 3.47 | 75.3 | 88.3 | 30.4% | 195.5 |
+
+三个机制确认：
+
+1. **DRAM 字节四档逐位相同**（读 **311.2 MB**、写 **182.2–182.9 MB**）——R1/R2 的「重复读」**根本
+   不进 DRAM**（L2 全吸收）。这是 §32.2「R1 空、R2 只有 ~5%」的硬件解释：所谓重复读是 L2 命中，
+   不是带宽。
+2. **流水把 `long_scoreboard` 从 16.74 压到 3.98**（`ns` 越大越低），`Duration 257→195`（0.76×），
+   与 CUPTI 的 0.79× 同向——**这就是收益来源**（隐藏 load 延迟）。
+3. **占用率反降**（48.6%→18–30%）却更快：再证 B3 不是占用率受限；流水后 `L2 82–88%`、
+   `DRAM 74–75%` 成为最高 pipe——B3 现在是**（更彻底的）L2/DRAM 带宽 bound**。
+
+`reuse`/`bkK` 与 `mma` 的 DRAM 字节与 `long_sb` 基本相同（表中未列），印证「消重复读」无论从
+指令还是字节角度都不成立。
+
+### 32.6 结论与下一步
+
+- **§27.7 的「减少对角平铺重复读 / 提升 L1 局部性」是空命题**：R1（k/g 双读）被编译器 CSE
+  （`reuse` 恒 1.00×）；R2（`dAqk/dAkk` 每 `i_k` 重读）被 L2 吸收（DRAM 字节逐位不变，
+  `BK=64` 只值 ~5%、`BK=128` 在部署粒度中性）。**B3 的重复读不是瓶颈**。
+- **真正杠杆＝把 k 分块从 grid 轴搬进 program 内并 `tl.range` 软件流水**（`_intra_kernel_loop`）：
+  孤立 kernel 大 shape **0.79–0.81×**、`long_scoreboard 16.7→4.0`、DRAM 字节不变；落链 `dev`
+  **0.97×**（`B8T2048H8` 1940→1875），六项梯度逐值不变。**部署配置**：`nw=4`、`BK=64`、
+  `num_stages=2`（大 shape）或 `3`（`BK=32`）；小 shape 打平，可回退 grid 版。
+- **定位**：B3 kernel 级优化**到此收敛**——它已彻底是 L2/DRAM 带宽 bound，而流量大头是 P7-28 引入的
+  `dq/dk/dg` **fp32 累加器读改写** + q/k/g 读。再往下只能靠**结构**（B2/B3 融合把累加器留寄存器，
+  §31.3/§30 已列为下一步）而非 B3 内的 tiling/局部性。
+- **产物**：`harness/check_bwd_b3_l1.py`（`..._correctness/…_timing/…_chain.out.txt`）+
+  `harness/ncu_b3_l1_driver.py` / `harness/probe_b3_l1_ncu.sh`（`probe_b3_l1_ncu.out.txt`）。

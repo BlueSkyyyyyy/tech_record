@@ -447,6 +447,24 @@
       elementwise 归因 **316→49 µs**、每次少 **8 个** elementwise/memset kernel；`ip dev/FLA` 0.36–0.41×。
       **结论**：先消掉这块「链外 elementwise 税」（B3 链时间的 ~16%），下一步才是 §27.7 的 kernel 内
       对角平铺 L1 局部性优化。**约束**：B3 契约改为消费 B2 缓冲（其后 B2 输出不可再用；若 B2/B3 融合须重审）。
+- [x] **P7-29** 检验 §27.7/§31.3 遗留的「减少对角平铺重复读 / L1 局部性」并给出**空结论**，同时找到
+      真正的杠杆。回读 P7-24 MMA kernel 定位两处具体冗余读：**(R1)** 对角 key 行 `j=i_ti+o_i` 即
+      `o_c`，故 `p_kd/p_gd`（`check_bwd_b3_mma.py:142-143`）与 `p_k/p_g`（`:98-99`）地址逐字节相同、
+      mask 相同，kernel 却重读一遍；**(R2)** grid `(NK*NC,NT,B*H)`、`BK=32` 使 `NK=4` 个 program 各自
+      重读同一份只依赖 `(chunk,head)` 的 `[BC,BC]` 对角 `dAqk/dAkk`（`:135-138`）。新增
+      `harness/check_bwd_b3_l1.py`（`..._correctness/…_timing/…_chain.out.txt`）+ `harness/ncu_b3_l1_driver.py`
+      / `harness/probe_b3_l1_ncu.sh`（`probe_b3_l1_ncu.out.txt`）+ `docs/07` §32。**Part A**：`reuse`（R1
+      消重读）/`bkK`（R2，`BK=K`）与 P7-24 **逐位相同**（`dq/dk/dg max_abs=0`，`db` ~1e-7 atomic 序）、
+      `loop` 仅差 fp32 加法序（≤2.4e-6）；vs FLA 均 tf32 底噪。**Part B（空结论）**：`reuse` 恒 **1.00×**
+      ——R1 被 Triton CSE 掉、根本不生成重复 load；`BK=64` 部署 `BT=16` 大 shape 只 **0.95×**、
+      `BK=128` 中性（R2 被 L2 吸收）。**Part B（真杠杆）**：新增 `_intra_kernel_loop`（grid `(NT,B*H)`、
+      program 内 `tl.range(0,NK,num_stages=NS)`），大 shape **0.79–0.81×**，且 `NS=1` 反比 grid 版
+      **慢 1.02–1.27×**——收益**全部**来自软件流水而非循环本身。**Part C**：落链六项梯度 vs FLA
+      `dq 3.42e-3…dh0 8.27e-3` **逐值同 §25/§26/§27**、自身增量 `dq/dv` 逐位 0，链 `dev` **0.97×**
+      （`B8T2048H8` 1940→1875）。**Part D（ncu）**：四档 **DRAM 字节逐位相同**（读 311 MB/写 182 MB）
+      ——重复读不进 DRAM；`long_scoreboard 16.74→5.72→3.98`（`ns` 越大越低）、`Duration 257→195`、
+      占用率反降（48.6→18–30%）、`L2 82–88%` 成最高 pipe。**结论**：B3 kernel 级优化收敛（已彻底
+      L2/DRAM bound），再往下只能靠 B2/B3 **融合**把 `dq/dk/dg` 累加器留寄存器，而非 B3 内 tiling。
 
 ### P8 小结 / 一页纸
 
@@ -478,8 +496,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-28 补测**。
-  - P7-28（本轮）：兑现 §27.7「B3 下一杠杆」里**与 kernel 无关**的那块税——组装链让 B3 在**全新置零**的
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-29 补测**。
+  - P7-29（本轮）：检验 §27.7/§31.3 遗留的「减少对角平铺重复读 / L1 局部性」并给**空结论**、同时
+    找到真杠杆。回读 P7-24 kernel 定位两处具体冗余读——**(R1)** 对角 key 行 `j=i_ti+o_i` 即 `o_c`，
+    `p_kd/p_gd`（`check_bwd_b3_mma.py:142-143`）与 `p_k/p_g`（`:98-99`）地址/mask 逐字节相同却被重读；
+    **(R2)** grid `(NK*NC,NT,B*H)`、`BK=32` 令 `NK=4` 个 program 各自重读只依赖 `(chunk,head)` 的
+    `[BC,BC]` 对角 `dAqk/dAkk`（`:135-138`）。新增 `harness/check_bwd_b3_l1.py`
+    （`..._correctness/…_timing/…_chain.out.txt`）+ `harness/ncu_b3_l1_driver.py` / `harness/probe_b3_l1_ncu.sh`
+    （`probe_b3_l1_ncu.out.txt`）+ `docs/07` §32。**Part A**：`reuse`/`bkK` 与 P7-24 **逐位相同**
+    （`dq/dk/dg max_abs=0`）、`loop` 仅差 fp32 加法序。**Part B**：`reuse` 恒 **1.00×**（R1 被 CSE）、
+    `BK=64` 部署大 shape 只 **0.95×**（R2 被 L2 吸收）——两处冗余读都不是杠杆；而新增
+    `_intra_kernel_loop`（grid `(NT,B*H)` + `tl.range(0,NK,num_stages)`）大 shape **0.79–0.81×**，
+    且 `NS=1` 反比 grid 版慢——收益全部来自**软件流水**。**Part C**：落链六项梯度 vs FLA 逐值同
+    §25–27、自身增量 `dq/dv` 逐位 0，链 `dev` **0.97×**。**Part D（ncu）**：四档 **DRAM 字节逐位
+    相同**、`long_scoreboard 16.74→3.98`、`Duration 257→195`、占用率反降、`L2 82–88%` 成最高 pipe。
+    **结论**：B3 kernel 级优化收敛（已彻底 L2/DRAM bound），下一步只能靠 B2/B3 **融合**（§30/§31.3）。
+  - P7-28（上轮）：兑现 §27.7「B3 下一杠杆」里**与 kernel 无关**的那块税——组装链让 B3 在**全新置零**的
     `dq/dk/dg` 上跑、再在 kernel 外物化三个整张 `[B,T,H,K]` 求和（`check_bwd_b1_pipe_e2e.py:162-166`）。
     这不是 FLA 契约：FLA `chunk_kda_bwd_intra` 把传入 `dq/dk/dg` 当**累加器**写到独立缓冲
     （`chunk_intra.py:554-560/657-667`）。改为 B3 **就地累积进 B2 缓冲**（grid 划分每个 `(token,k)`、
