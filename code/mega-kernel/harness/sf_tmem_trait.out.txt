@@ -1,0 +1,53 @@
+$ CUDA_VISIBLE_DEVICES=3 /tmp/sf_tmem_trait
+CUTLASS SM100 UMMA TMEM fragment layout probe (host-side, no SM100 needed)
+
+=== (A) tmem_sf_frg<float,32,1,SFA> M=128 VS=32 nK=4 -> (dp,col) map ===
+layout = ((((_32,_4),_4),(_32,_1)),_1,_4):((((_65536,_4),_2097152),(_0,_1)),_0,_1)
+  logical M-row r -> (dp,col) at k=0 (expect dp = r mod 32, col = 4 * (r div 32)):
+    r=  0 : addr=      0  dp=  0  col= 0
+    r=  1 : addr=  65536  dp=  1  col= 0
+    r= 31 : addr=2031616  dp= 31  col= 0
+    r= 32 : addr=      4  dp=  0  col= 4
+    r= 33 : addr=  65540  dp=  1  col= 4
+    r= 63 : addr=2031620  dp= 31  col= 4
+    r= 64 : addr=      8  dp=  0  col= 8
+    r= 96 : addr=     12  dp=  0  col=12
+    r=127 : addr=2031628  dp= 31  col=12
+  K sub-block sweep at r=0 (expect col advances by 1 per k): k0->col0 k1->col1 k2->col2 k3->col3 
+  REP sweep at r=0 (expect dp += 32 per rep, i.e. across subpartitions): rep0->dp0 rep1->dp32 rep2->dp64 rep3->dp96 
+  MMA_VS sweep at r=0 (expect identical addr, stride 0): vs0->0 vs1->0 vs31->0 
+
+=== (B) scale-factor SFB variants (SFA always 4by1) ===
+[SFB float VS=32 1SM 4by1]
+  shape : ((_128,(_32,_1)),_1,_4)
+  layout: ((((_32,_4),_4),(_32,_1)),_1,_4):((((_65536,_4),_2097152),(_0,_1)),_0,_1)
+[SFA float VS=64 (sparse K64)]
+  shape : ((_128,(_64,_1)),_1,_2)
+  layout: ((((_32,_4),_4),(_64,_1)),_1,_2):((((_65536,_4),_2097152),(_0,_1)),_0,_1)
+[SFB float VS=32 2SM 2by2]
+  shape : ((_128,(_32,_1)),_1,_4)
+  layout: ((((_32,_2),_2,_2),(_32,_1)),_1,_4):((((_65536,_4),_4194304,_2097152),(_0,_1)),_0,_1)
+
+=== (C) accumulator tmem_frg (c_type=float in uint32 storage) ===
+[acc M=128 N=128]
+  shape : ((_128,_128),_1,_1)
+  layout: ((_128,_128),_1,_1):((_65536,_1),_0,_0)
+[acc M=64 N=128 I]
+  shape : ((_64,_128),_1,_1)
+  layout: (((_16,_4),_128),_1,_1):(((_65536,_2097152),_1),_0,_0)
+[acc M=64 N=128 NI]
+  shape : ((_64,_128),_1,_1)
+  layout: (((_16,_4),_128),_1,_1):(((_65536,_2097152),_1),_0,_0)
+
+=== (D) get_num_aligned_tmem_cols rounding (round up to 2-power, [32,512]) ===
+  cols= 20 -> round= 32
+  cols= 32 -> round= 32
+  cols= 33 -> round= 64
+  cols= 64 -> round= 64
+  cols= 65 -> round=128
+  cols=128 -> round=128
+  cols=129 -> round=256
+  cols=200 -> round=256
+  cols=256 -> round=256
+  cols=257 -> round=512
+  cols=512 -> round=512

@@ -4131,6 +4131,37 @@
   计时是隔离微基准、`1d2d` 未 round 列数 CUTLASS 是否容忍未核、未走 `mma_traits_sm100.hpp` 的
   block-scaled scale TMEM 布局 trait）。**本轮新增增量。**
 
+### P146 SM100 scale-factor 的 TMEM 布局 trait 走读（`docs/60-mpk-scale-sf-tmem-trait.md`）
+
+- [x] **P146-1** 补上 `docs/59` §8 **点名的最直接下一步**（CUTLASS `mma_traits_sm100.hpp` 里
+  block-scaled scale-factor 的 TMEM 布局 trait），把 MPK 手工路径与 CUTLASS 高层路径在「scale 落进
+  TMEM 的哪个槽、指令怎么找到它」上并置。见 `docs/60-mpk-scale-sf-tmem-trait.md`（MPK `f9eb70c` +
+  CUTLASS `deps/cutlass` `f3fde583`；纯源码走读 + 1 个 host 侧微实验）。三条 headline：
+  **(A)（headline）用真实 CUTLASS 头文件在 host 上把 `tmem_sf_frg` 的 CuTe Layout 求出来了**——
+  `tmem_sf_frg`/`tmem_frg` 是 `CUTE_HOST_DEVICE`，故整套布局代数可在 host 实例化/求值（无需 SM100）；
+  对 `float,VS=32,1SM,SFA`、M=128、K 分 4 子块，实测映射 **逻辑 M 行 `r` → (dp=`r mod 32`,
+  col=`4*(r div 32)`)**、每 K 子块列 **+1**、`MMA_VS`（一个 scale 覆盖 32 个值）stride **0**、
+  `REP=_4` 复制到 **4 个子分区**（`dp+=32*rep`）；并钉死 `TmemAllocMode` 五模式（SF 专用的
+  `ScaleFactorDuplicated4by1/2by2`，`mma_traits_sm100.hpp:426-455`；SFA 恒 4by1、仅 SFB 可 2by2）、
+  累加器 `tmem_frg`（M=128 每 N 元素一列、M=64 半子分区 `16x4` 交织、I/NI 单 tile 时打印相同）。
+  新 `src/sf_tmem_trait.cu` + `harness/sf_tmem_trait.sh` + `harness/sf_tmem_trait.out.txt`（device 3）。
+  **(B)（headline）`sf_id` 是本次布局在指令描述符里的「地址高位」**——CUTLASS
+  `make_runtime_instr_desc_block_scaled`（`mma_sm100_desc.hpp:588-621`/`:623-649`）直接
+  `(tmem_sf_addr & 0xC0000000)>>30` 取 `a_sf_id_`/`b_sf_id_`（`InstrDescriptorBlockScaled` 位域
+  `[29,31)`/`[4,6)`，`:441-468`）；而 **MPK 手工路径把纯列偏移当地址、用
+  `make_runtime_instr_desc_with_sf_id` 显式按 K 子块号填**（`sfa_id=k`、
+  `tmem_sfa=kTmemStartColOfSFA+w*4`，`linear_fp8_sm100.cuh:494-522`）——同两位域、来源相反。
+  **(C)（headline）`docs/59` §8 点名的「CuTe tie 层」其实是 60 行、全仓零调用点的宏工具**
+  `linear_fp8_sm100_cute_tie.cuh`（`docs/59` §8 误写成 `linear_fp8_1d2d_sm100_cute_tie.cuh`，快照无此名），
+  提供 `cute::ignore`/`CUTE_TIE` 解构宏却被 `linear_fp8_sm100_utils.cuh:8` 传递 include 后一次不用
+  （全仓 `CUTE_TIE(` 只 1 处=定义）；另记「三份 SM100 MMA 封装 + 两份
+  `make_runtime_instr_desc_with_sf_id`」（`sm100_utils.cuh` vs `linear_fp8_sm100_sm100_utils.cuh`）与一处
+  **只记不判**的对照（CUTLASS M 轴组间列 stride=4 vs MPK UTCCP 4 列块组间 stride=1，谁合硬件契约须在
+  SM100 上核验，本机不可执行）。判据只贡献 **C3**。配套博客 post
+  `mega-kernel-61-mpk-scale-sf-tmem-trait`（weight 62）并更新 `mega-kernel-00-index` 第 61 项。
+  P146-1 新留尾巴见文档 §9（SM100 指令本体未执行、未跑 MPK FP8 线性 task、只走 `linear_fp8_sm100.cuh`
+  一支、只走 `f3fde583` 一个 CUTLASS 快照）。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4506,10 +4537,52 @@
   **功能中性**置换（读集/写集不变，注释自称「identical to DeepGEMM」但 DeepGEMM 自身用无 XOR 版），
   `linear_fp8_1d2d_sm100.cuh:50-65` 无 XOR。**别按「注释说 identical」推断代码序列相同**（又一处
   「按注释/名字推断会错」）；三份在目标卡 H100 实测输出逐位相同（本文 §5）。
-  
+- **`sf_id` 在「地址高位」与「显式入参」两种约定下填的是同一个位域**（P146-1/`docs/60` §4/§5）：
+  CUTLASS `make_runtime_instr_desc_block_scaled`（`deps/cutlass@f3fde583` 的
+  `cute/arch/mma_sm100_desc.hpp:588-621`）从 **TMEM 地址高 2 位**取 `a_sf_id_`/`b_sf_id_`
+  （`& 0xC0000000)>>30`，位域在 `a_sf_id_ [29,31)`/`b_sf_id_ [4,6)`；`:441-468`）；而 MPK 手工路径
+  （`linear_fp8_sm100.cuh:494-522`）把**纯列偏移**当 `tmem_sfa`/`tmem_sfb` 操作数、用
+  `make_runtime_instr_desc_with_sf_id` 按 **K 子块号 `k`** 显式填 id——**两条路径填同两位域、来源相反**。
+  读 MPK 的 `sf_id` 时别以为它跟 CUTLASS 一样从地址高位派生。
+- **CUTLASS `tmem_sf_frg` 与 MPK UTCCP 对 scale 的 M 轴列分配不同（只记不判）**（P146-1/`docs/60` §7）：
+  host 实测 `tmem_sf_frg<float,32,1,SFA>` M=128 时 `col = 4*(r div 32)`（组间列 stride **4**，占列
+  0/4/8/12）、K 子块列 stride **1**；而 MPK UTCCP 路径按 `docs/59` §3 的 `out[l*4+k]=in[k*32+l]` 得到
+  `col = r div 32`（组间列 stride **1**），K 交给 `sf_id`。二者「4 列足迹」的组间 stride 与 K 的落点
+  都不同，**谁合 `tcgen05.mma...block_scale` 的硬件 TMEM SF 寻址契约，本机 H100/sm90 不可执行 SM100、
+  无法核验**，故只记不判（要收敛须在 SM100 上做 CUTLASS 路径 vs MPK 路径逐位比对）。
+
 ## 当前进度 / 下一步
 
-- 当前进度：**P145-1 完成（1/1）**。补掉 `docs/57` §3 只给摘要的「scale 先 stage 到 SMEM、再经 UTCCP
+- 当前进度：**P146-1 完成（1/1）**。补掉 `docs/59` §8 **点名的最直接下一步**（CUTLASS
+  `mma_traits_sm100.hpp` 里 block-scaled scale-factor 的 TMEM 布局 trait），把 MPK 手工路径与 CUTLASS
+  高层路径在「scale 落进 TMEM 的哪个槽、指令怎么找到它」上并置。见
+  `docs/60-mpk-scale-sf-tmem-trait.md`（MPK `f9eb70c` + CUTLASS `deps/cutlass` `f3fde583`；纯源码走读 +
+  1 个 host 侧微实验）。三条 headline：**(A)（headline）用真实 CUTLASS 头文件在 host 上把
+  `tmem_sf_frg` 的 CuTe Layout 求出来了**（`CUTE_HOST_DEVICE`，无需 SM100）：对 `float,VS=32,1SM,SFA`、
+  M=128、K 分 4 子块，实测 **逻辑 M 行 `r` → (dp=`r mod 32`, col=`4*(r div 32)`)**、每 K 子块列 **+1**、
+  `MMA_VS` stride **0**、`REP=_4` 复制到 **4 个子分区**（`dp+=32*rep`）；并钉死 `TmemAllocMode` 五模式
+  （SF 专用 `ScaleFactorDuplicated4by1/2by2`；SFA 恒 4by1、仅 SFB 可 2by2）与累加器 `tmem_frg`
+  （M=128 每 N 元素一列、M=64 半子分区 `16x4` 交织、I/NI 单 tile 相同）。新 `src/sf_tmem_trait.cu` +
+  `harness/sf_tmem_trait.{sh,out.txt}`（device 3）。**(B)（headline）`sf_id` = 布局在指令描述符里的
+  「地址高位」**——CUTLASS `make_runtime_instr_desc_block_scaled`（`mma_sm100_desc.hpp:588-621`）直接
+  `(tmem_sf_addr & 0xC0000000)>>30` 填 `a_sf_id_`/`b_sf_id_`（位域 `[29,31)`/`[4,6)`），而 **MPK 手工路径
+  把纯列偏移当地址、按 K 子块号显式填 id**（`sfa_id=k`、`tmem_sfa=kTmemStartColOfSFA+w*4`，
+  `linear_fp8_sm100.cuh:494-522`）——同两位域、来源相反。**(C)（headline）`docs/59` §8 点名的「CuTe tie
+  层」其实是 60 行、全仓零调用点的宏工具** `linear_fp8_sm100_cute_tie.cuh`（`docs/59` §8 误写成
+  `linear_fp8_1d2d_sm100_cute_tie.cuh`，快照无此名）；另记「三份 SM100 MMA 封装 + 两份
+  `make_runtime_instr_desc_with_sf_id`」与一处**只记不判**的对照（CUTLASS M 轴组间列 stride=4 vs MPK
+  UTCCP 4 列块组间 stride=1，谁合硬件契约须在 SM100 上核验）。判据只贡献 **C3**。配套博客 post
+  `mega-kernel-61-mpk-scale-sf-tmem-trait`（weight 62）并更新 `mega-kernel-00-index` 第 61 项。
+  P146-1 新留尾巴见文档 §9。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计
+  （注：该 kernel 名 `eagle3_draft_chain_step_attn` 快照里 `grep` 零命中，**可能不可走**，须先核 demo
+  引用是否指向别处）；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或 SM100 专属布局的其余面
+  （`mma_traits_sm100.hpp` 的 `tmem_e_frg`/`tmem_frg_ws` 稀疏元数据与 WS 布局、
+  `linear_fp8_1d2d_sm100_cute_tie` 想表达的 CuTe 解构路径、`fp8_group_gemm_sm100.cuh` 的 SF 段逐行）
+  逐行。**CUTLASS scale-factor TMEM trait 已由 P146-1/`docs/60` 补掉**；TMEM 列布局 / UTCCP 重排已由
+  P145-1/`docs/59` 补掉；TMA 版 SMEM 布局已由 P144-1/`docs/58` 补掉；SM100 共享原语层已由
+  P143-1/`docs/57` 补掉。
+- 此前：**P145-1 完成（1/1）**。补掉 `docs/57` §3 只给摘要的「scale 先 stage 到 SMEM、再经 UTCCP
   拷进 TMEM scale 列」，并把本专题存储层级布局契约补齐第三段（`docs/51` SMEM 软件、`docs/58` SMEM TMA
   之外的 **TMEM**）。见 `docs/59-mpk-tmem-utccp-layout.md`（MPK `f9eb70c`；纯源码走读 + 1 个 H100 微实验）。
   三条 headline：**(A)（headline）TMEM 是第三种「布局即 ABI」，且比 SMEM 更贵**——per-SM 显式资源、须
@@ -4527,12 +4600,6 @@
   cycles/转置。判据贡献 **C3**（device body 内 SMEM→TMEM 的布局/数据流契约）。配套博客 post
   `mega-kernel-60-mpk-tmem-utccp-layout`（weight 61）并更新 `mega-kernel-00-index` 第 60 项。
   P145-1 新留尾巴见文档 §8。
-- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计
-  （注：该 kernel 名 `eagle3_draft_chain_step_attn` 快照里 `grep` 零命中，**可能不可走**，须先核 demo
-  引用是否指向别处）；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或 SM100 专属布局的其余面
-  （`mma_traits_sm100.hpp` 的 block-scaled scale TMEM 布局 trait、`linear_fp8_1d2d_sm100_cute_tie.cuh`
-  的 CuTe UTCCP 路径）逐行。**TMEM 列布局 / UTCCP 重排已由 P145-1/`docs/59` 补掉**；TMA 版 SMEM 布局
-  已由 P144-1/`docs/58` 补掉；SM100 共享原语层已由 P143-1/`docs/57` 补掉。
 - 此前：**P144-1 完成（1/1）**。补掉 `docs/51-mpk-smem-layout.md` §6 明留的尾巴——把
   `tasks/hopper/smem_layout_tma.cuh`（`smem_tma`，129 行，被 10 个 Hopper/Blackwell 身体共用）逐行打开，
   并**在目标卡 H100/sm90a 上用真实 TMA 实测**它与硬件 128 B swizzle 的一致性与其**1024 B 基址对齐契约**。
