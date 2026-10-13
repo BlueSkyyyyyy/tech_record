@@ -10690,3 +10690,126 @@ prodvec (K=V=128,V=256):   2 × STG.E + 38 × STG.E.64
   因为判据只数 **store** 扇区，而实测 $S_{L1}$ 与 $U$ 的比值精确到 0.5%，说明该集合完整）。
 - 「跨 `ncu` 重放 ~19 MB」只观察到 `prod V=256` 一例（其余 ~0.2–2 MB），成因（replay 顺序/L2 残留）未定，
   标**待验证**；不影响 Part A/B/C 的 $S_{L1}$ 逐位结论。
+
+## 102. 关闭 §101.7 的两条边界——`INTRA`/`DAMMA` 交叉补 `V=128`、再叠 `TMA`/`BF16MMA` 三向（P7-99）
+
+§101 把 §100.6 的 `INTRA`/`DAMMA`/`K≠V` 交叉关掉，但 §101.7 留了两条明确边界：**（1）**
+`INTRA`/`DAMMA` 只在 `V=256` 量过（未做 `V=128`）；**（2）** 这两个旋钮**从未与 `TMA` / `BF16MMA`
+交叉**（三向）。本轮把它们放回同一条写侧三段分解（L1 store 扇区 $S_{L1}$ → L2 write 扇区 + hit/miss
+→ `dram__bytes_write`），判据全部成立，并顺手量到一条新的部署事实（`INTRA` 折叠会把 `BF16MMA` 的
+`2 blocks/SM` 占用优势打回 `1`）。原始输出 `harness/probe_b2_write_cross2_ncu.out.txt`、解析
+`harness/check_bwd_b2_write_cross2.out.txt`。`b2_mma_probe.cu` **一行未改**。
+
+### 102.1 方法
+
+全部 `-DB2M_PROD -DB2M_HDW`、`B8T2048H8`、`BT=16`、`K=V=128`（`U=424.1` MB @ `V=128`、`U=558.4` MB
+@ `V=256`）；`ncu` 外预编译（`nvcc` 在 ncu 下会挂，P7-16），每配置只落一次 `b2mma_kernel`、
+`--launch-skip=3`。三组：
+
+- **Part A2（`INTRA`/`DAMMA` 交叉，`V=128`）**：`prod` / `damma`(`-DB2M_DAMMA`) / `intra`(`-DB2M_INTRA`) /
+  `intra_damma`。
+- **Part D（三向，`V=256`）**：`tma`(`-DB2M_TMA`) / `damma_tma` / `intra_tma` / `bf16mma`
+  (`-DB2M_BF16 -DB2M_BF16MMA`) / `bf16mma_damma` / `bf16mma_intra` / `bf16mma_intra_tma`。
+  注意 **bf16 的 TMA 张量图要求 `BVK∈{64,128}`**（`b2_mma_probe.cu:474` 的 `static_assert`，§79.1），
+  默认 `BVK=32` 非法，故 `bf16mma_intra_tma` 额外带 `-DB2M_BVK=64`——这同时给 §100「`BVK` 不改变
+  `S_L1`」补了一列。
+- **Part E（store 向量化 × `INTRA`/`TMA`）**：`intra` / `intra_vecst`(`-DB2M_VECST`) / `intra_tma` /
+  `intra_tma_vecst`。
+
+### 102.2 Part A2：`INTRA`/`DAMMA` 在 `V=128` 上同样不改变写指令流
+
+| tag | occ s/r | regs | dur(ms) | **$S_{L1}$** | $S_{L1}$ req | $l2\_wr$ | $S_{L1}\cdot32/U$ |
+|---|---|---|---|---|---|---|---|
+| prod | 1/2 | 112 | 1.27 | **26 476 544** | 3 350 528 | 26.68 M | 1.998 |
+| damma | 1/2 | 99 | 1.20 | **26 476 544** | 3 350 528 | 28.11 M | 1.998 |
+| intra | 1/2 | 128 | 1.61 | **26 476 544** | 3 350 528 | 30.54 M | 1.998 |
+| intra_damma | 1/2 | 128 | 1.55 | **26 476 544** | 3 350 528 | 29.31 M | 1.998 |
+
+四点 `S_L1`（= $26\,476\,544$）与 store 请求（= $3\,350\,528$）**逐位相同**，$S_{L1}\cdot32/U=1.998$。
+即 §101 Part A 的结论（`INTRA`/`DAMMA` 只改 `dqg/dkg`/`dApre` 的**值**，不新增/不减少 global store）
+**在 `V=128` 上照旧**。`dur` 的符号也与 §101 一致：`damma` 1.20 < `prod` 1.27（§69 段内 2–3× 的边际）、
+`intra` 1.61 > `prod` 1.27（折叠是每 CTA 尾部串行尾巴，§66/§93）。$l2\_wr$ 随旋钮变（26.68→30.54 M）
+但 $S_{L1}$ 不动——见 §102.5。
+
+### 102.3 Part D：三向 `INTRA`/`DAMMA` × `TMA`/`BF16MMA` 的 $S_{L1}$ 仍逐位相同
+
+| tag | occ s/r | regs | dur(ms) | **$S_{L1}$** | $S_{L1}$ req | $l2\_wr$ | $S_{L1}\cdot32/U$ |
+|---|---|---|---|---|---|---|---|
+| tma | 1/1 | 156 | 2.20 | **34 865 152** | 4 399 104 | 42.95 M | 1.998 |
+| damma_tma | 1/2 | 123 | 1.87 | **34 865 152** | 4 399 104 | 41.46 M | 1.998 |
+| intra_tma | 1/2 | 128 | 2.71 | **34 865 152** | 4 399 104 | 43.82 M | 1.998 |
+| bf16mma | 2/2 | 128 | 1.29 | **34 865 152** | 4 399 104 | 38.39 M | 1.998 |
+| bf16mma_damma | 2/2 | 125 | 1.21 | **34 865 152** | 4 399 104 | 41.10 M | 1.998 |
+| bf16mma_intra | 1/1 | 152 | 2.23 | **34 865 152** | 4 399 104 | 45.70 M | 1.998 |
+| bf16mma_intra_tma (`BVK=64`) | 1/2 | 128 | 2.61 | **34 865 152** | 4 399 104 | 43.54 M | 1.998 |
+
+七点 $S_{L1}=34\,865\,152$、请求 $=4\,399\,104$ 全**逐位相同**，$S_{L1}\cdot32/U=1.998$。三点：
+
+1. **判据穿越三向**：TMA 的独立引擎只在**读侧**（§52），输出仍是 generic `st.global`（§100.4）；
+   `BF16MMA` 只换 mma ISA（操作数 staging 仍是 bf16）；`INTRA`/`DAMMA` 只改值。故把三者任意叠加，
+   写侧指令流都不动——`S_L1`/解析输出 $U$ 仍是「比写量」的唯一合法口径。
+2. **`BVK` 不变的又一条证据**：`bf16mma_intra_tma` 走 `BVK=64`（bf16 TMA 的硬约束），其余走
+   `BVK=32`，$S_L1$ 依旧 $34\,865\,152$——把 §100 Part A「`BVK` 不改变写侧」在**新的 bf16-TMA 布局**上
+   再证一遍（对照 §101.7 曾把它列在 `K≠V` 之外）。
+3. **一条新的部署事实**：`bf16mma` 的诱人之处是占用率翻倍（`launch__occupancy_limit_shared_mem=2`，
+   `warps% 24.70`，`dur 1.29ms`，比 fp32 `prod` ~2.04ms 快）；但**叠上 `INTRA` 就掉回 1 block/SM**
+   （`occ s/r` 2/2 → 1/1，regs 128→152，`dur 1.29→2.23ms`）。这正是 §95.3/§98.3 的 smem 账单：
+   `intra` 的三块 `siq/sik/sig[BT][KD]` **无条件 fp32**（`b2_mma_probe.cu:630-632`，不随 bf16 build 降位），
+   `K=128` 多加 `3·16·128·4=24.6 KB` + 寄存器先被推到 152——过了 2→1 的分块台阶。**故「bf16 入口」的
+   占用率红利与「intra 折叠」在本核互斥**：要两者同时要，须先降 `intra` staging（复用已在 smem 的 `skg`
+   或降 dtype，§96.3 的结论）。`bf16mma_intra_tma` 的 `occ 1/2`（reg 侧仍 2）说明此时是 smem 而非寄存器
+   限的块数——TMA 省下的输入 staging 恰好把 smem 拉回能容 2 块。
+   *（`damma_tma` 的 `occ 1/2` vs `tma` 的 `1/1` 同理：DAMMA 把标量 DA 换成 mma 后 regs 156→123，
+   越过寄存器台阶——与 §69 一致。）*
+
+### 102.4 Part E：`-DB2M_VECST` 的 $S_{L1}$ 减半在 `INTRA`/`TMA` 上照旧
+
+| 对照 | $S_{L1}$ | $S_{L1}\cdot32/U$ | 比值 |
+|---|---|---|---|
+| `intra` | 34 865 152 | 1.998 | — |
+| `intra_vecst` | 17 563 648 | **1.007** | **0.504** |
+| `intra_tma` | 34 865 152 | 1.998 | — |
+| `intra_tma_vecst` | 17 563 648 | **1.007** | **0.504** |
+
+两对都精确 **0.504**、$S_{L1}\cdot32/U\to1.00$。SASS 侧同印（`cuobjdump -sass` 数 `STG.E`）：
+
+```
+intra             STG.E(32b)=78  STG.E.64=0   LDGSTS=12  UBLKCP=0
+intra_vecst       STG.E(32b)=2   STG.E.64=38  LDGSTS=12  UBLKCP=0
+intra_tma         STG.E(32b)=78  STG.E.64=0   LDGSTS=0   UBLKCP=0
+intra_tma_vecst   STG.E(32b)=2   STG.E.64=38  LDGSTS=0   UBLKCP=0
+```
+
+即 §101.4 的「默认 `2×U` 是 32-bit 跨步 store 的半 sector、`vecst` 恢复到 `1.0×U`」**与 `INTRA`
+折叠、`TMA` 输入都正交**（`intra_tma` 的 `LDGSTS=0`、`UBLKCP=0` 是因为 TMA 走独立指令、
+`cuobjdump` 的 `sed /b2mma_kernel/,/^$/p` 段没框到 `UBLKCP`——不影响 store 计数，`S_L1` 已逐位佐证）。
+这印证 §101.6 的口径：$S_L1$ 是 **store 指令流**，只随 store 的**向量化形态**跳变，与 dtype / `BVK` /
+staging / mma ISA / `INTRA` / `DAMMA` 全无关。
+
+### 102.5 副产物：$S_{L1}$ 逐位，而 $l2\_wr$ 与 `dram__bytes_write` 抖动
+
+§102.2/§102.3 的表里，同一 `(K,V)` 下 $S_{L1}$ 与请求逐位相同，但 $lts\_\ldots op\_write$ 在
+$26.68\text{–}30.54$ M（`V=128`）/ $38.39\text{–}45.70$ M（`V=256`）间摆动、`dram__bytes_write` 在
+$419\text{–}424$ MB（`V=128`）/ $550\text{–}583$ MB（`V=256`）间摆动。这正是 §99.5/§100.4/§101.5 的
+三层口径再次现身：**同一批输出字节**，L1 store 指令流不变（$S_{L1}$），L2 收到的写扇区（含重触）与
+最终挤出到 DRAM 的份额随核的**时长与读写交错**变。故本轮的 $S_{L1}$ 结论不依赖那两个抖动口径。
+（`intra` @`V=256` 本轮 `DRAM_wr=556.10` 与 P7-98 §101 的 `556.13` 在 0.03 MB 内复现，给 §101.5 的
+「同配置跨进程可差 ~19 MB」补了一个**小差异**的样本——该口径的抖动是间歇性的，仍标**待验证**。）
+
+### 102.6 结论与设计输入（更新 §101.6 / §101.7）
+
+- **§101.7 的两条边界关闭**：写侧判据（$S_{L1}$ 或解析 $U$）对 `INTRA`/`DAMMA` 在 **`V=128`**、
+  以及对 **`INTRA`/`DAMMA` × `TMA`/`BF16MMA` 三向**（含 `BVK=64` 的 bf16-TMA）**全部成立**；
+  Part E 再次标定 $S_{L1}\cdot32=2U$（默认）/ $=U$（`vecst`）。
+- **新增部署事实**：`bf16` 入口的 `2 blocks/SM` 占用红利与 `INTRA` 折叠**互斥**（折叠的 fp32
+  `[BT,KD]` staging 把 `K=128` 顶过 smem 门槛、register 也升至 152）——两者不能同时默认开，
+  要并开须先降 `intra` staging（同 §96.3/§98.3）。
+- **部署无后果**：`INTRA`/`DAMMA`/`K≠V`/`TMA`/`BF16MMA` 的读侧/时长结论与默认部署（§45 的 `cf`）不变。
+
+### 102.7 边界（诚实）
+
+- 单 shape（`B8T2048H8`）、`BT=16`、fp32 输出；`K=V=128`（三向里唯一例外是 `bf16mma_intra_tma`
+  的 `BVK=64`）。`K≠V` 与 `INTRA`/`DAMMA` 的**同时**交叉未做（§101 Part B 只做 fp32 `prod`）；
+  `V=64` 未做。
+- `bf16mma_intra`/`bf16mma_intra_tma` 的正确性沿用 P7-95/P7-98 的逐位结论（本轮只量写侧计数，
+  未重跑数值对拍）；`-DB2M_VECST` 的正确性沿用 P7-71（逐位无损）。

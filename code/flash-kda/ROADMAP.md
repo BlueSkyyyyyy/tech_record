@@ -1382,6 +1382,25 @@
         `ncu` 重放差 **~19 MB**（577.13 vs 558.30，远超 §100 的 ≤3 MB），**`dram__bytes_write` 全面禁用**。
         见 `docs/07` §101。**边界**：单 shape/`BT=16`；`K≠V` 只 fp32 `prod`；`INTRA`/`DAMMA` 只 `V=256`
         未叠 TMA/BF16MMA；`bf16` 跨 ncu 抖动的成因标待验证。
+- [x] **P7-99** 关闭 §101.7（P7-98）明确留下的两条边界——把 `-DB2M_INTRA`/`-DB2M_DAMMA` 交叉补 **`V=128`**、
+        再叠 **`TMA`/`BF16MMA` 三向**（§100.6 遗留的最后格子）。新增 `harness/probe_b2_write_cross2_ncu.sh`
+        （`harness/probe_b2_write_cross2_ncu.out.txt`，空闲卡）+ `harness/check_bwd_b2_write_cross2.py`
+        （`..._cross2.out.txt`）；**`b2_mma_probe.cu` 一行未改**。**Part A2（`INTRA`/`DAMMA`，`K=V=128`、
+        `V=128`）**：四形态 `prod/damma/intra/intra_damma` **$S_{L1}=26\,476\,544$、请求 $=3\,350\,528$
+        全逐位相同**、$S_{L1}\cdot32/U=1.998$——判据在 `V=128` 照旧。**Part D（三向，`K=V=128`、`V=256`）**：
+        七形态 `tma/damma_tma/intra_tma/bf16mma/bf16mma_damma/bf16mma_intra/bf16mma_intra_tma` 的
+        **$S_{L1}=34\,865\,152$、请求 $=4\,399\,104$ 全逐位相同**（TMA 独立引擎只在读侧、输出仍 generic
+        `st.global`；BF16MMA 只换 mma ISA；INTRA/DAMMA 只改值）；其中 `bf16mma_intra_tma` 因 bf16 TMA 的
+        `static_assert`（`b2_mma_probe.cu:474`）取 **`BVK=64`**，$S_{L1}$ 仍逐位——把 §100「`BVK` 不改变
+        写侧」在新 bf16-TMA 布局上再证一遍。**新部署事实**：`bf16mma` 的 `2 blocks/SM` 占用红利与 `INTRA`
+        折叠**互斥**（折叠的 fp32 `[BT,KD]` staging 把 `K=128` 顶过 smem 门槛、regs 128→152，
+        `occ 2/2→1/1`、`dur 1.29→2.23ms`）；`damma_tma` 越过寄存器台阶 `occ 1/1→1/2`（regs 156→123，
+        与 §69 一致）。**Part E（`vecst`×`INTRA`/`TMA`）**：`intra→intra_vecst`、`intra_tma→intra_tma_vecst`
+        均 **0.504**、$S_{L1}\cdot32/U\to1.007$（SASS `78×STG.E → 2×STG.E+38×STG.E.64`）——§101.4 的 2× 半
+        sector 与 `INTRA`/`TMA` 正交。**副产物**：同 `(K,V)` 下 $S_{L1}$ 逐位而 `l2_wr`/`dram__bytes_write`
+        抖动（`intra`@`V=256` 本轮 556.10 vs P7-98 556.13，仅 0.03 MB）——三层口径再证，抖动仍待验证。
+        见 `docs/07` §102。**边界**：单 shape/`BT=16`/fp32 输出；`K≠V`×`INTRA`/`DAMMA` 同时交叉、`V=64` 未做；
+        数值对拍沿用 P7-95/P7-98（本轮只量写侧计数）。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1937,8 +1956,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-98 补测 + P8-3/P8-4**。
-  - P7-98（本轮）：**关闭 §100.6（P7-97）明确留下的三处从未复测的交叉——`-DB2M_INTRA` / `-DB2M_DAMMA` /
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-99 补测 + P8-3/P8-4**。
+  - P7-99（本轮）：**关闭 §101.7（P7-98）明确留下的两条边界——`-DB2M_INTRA`/`-DB2M_DAMMA` 交叉补
+    `V=128`、再叠 `TMA`/`BF16MMA` 三向（§100.6 的最后格子）**。新增
+    `harness/probe_b2_write_cross2_ncu.sh`（`probe_b2_write_cross2_ncu.out.txt`）+ `harness/check_bwd_b2_write_cross2.py`
+    （`check_bwd_b2_write_cross2.out.txt`）；**`b2_mma_probe.cu` 一行未改**。**Part A2**（`K=V=128`、`V=128`）：
+    四形态 $S_{L1}=26\,476\,544$、请求 $=3\,350\,528$ 全逐位。**Part D**（`V=256`）：七形态（含
+    `tma`/`damma_tma`/`intra_tma`/`bf16mma*`）$S_{L1}=34\,865\,152$、请求 $=4\,399\,104$ 全逐位；
+    `bf16mma_intra_tma` 取 `BVK=64`（bf16-TMA 硬约束）仍逐位 ⟹ §100「`BVK` 不改写侧」再证。**新事实**：
+    `bf16mma` 的 `2 blocks/SM` 与 `INTRA` 折叠互斥（`occ 2/2→1/1`、`dur 1.29→2.23ms`）；`damma_tma`
+    `occ 1/1→1/2`（regs 156→123）。**Part E**：`intra`/`intra_tma` 叠 `-DB2M_VECST` 均 0.504、
+    $S_{L1}\cdot32/U\to1.007$。副产物 $S_{L1}$ 逐位而 `l2_wr`/`dram__bytes_write` 抖动（`intra`@`V=256`
+    556.10 vs P7-98 556.13）。见 `docs/07` §102。**下一步（可选）**：专题维持维护态；若继续，可做
+    `K≠V`×`INTRA`/`DAMMA` 同时交叉、`V=64`，或扩展 `docs/08-summary.md` 到 P7-95…P7-99（§98–§102）。
+  - P7-98（上轮）：**关闭 §100.6（P7-97）明确留下的三处从未复测的交叉——`-DB2M_INTRA` / `-DB2M_DAMMA` /
     `K≠V`**，放回 §99/§100 的写侧三段分解，并把 `S_L1` 首次标定到解析输出。新增
     `harness/probe_b2_write_cross_ncu.sh`（`probe_b2_write_cross_ncu.out.txt`）+ `harness/check_bwd_b2_write_cross.py`
     （`check_bwd_b2_write_cross.out.txt`）+ `probe_b2_write_cross_sass.out.txt`；**`b2_mma_probe.cu` 一行未改**。
@@ -3381,13 +3412,20 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-98 补测（+ P8-2…P8-4 一页纸补全）**，进入收尾/维护。
-  **P7-98（本轮）**：关闭 §100.6（P7-97）留下的三处交叉——`-DB2M_INTRA`/`-DB2M_DAMMA`/`K≠V` 的写侧三段分解。
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-99 补测（+ P8-2…P8-4 一页纸补全）**，进入收尾/维护。
+  **P7-99（本轮）**：关闭 §101.7（P7-98）的两条边界——`-DB2M_INTRA`/`-DB2M_DAMMA` 交叉补 `V=128`、
+  再叠 `TMA`/`BF16MMA` 三向。`V=128` 四形态 $S_{L1}=26\,476\,544$、`V=256` 七形态 $S_{L1}=34\,865\,152$
+  全逐位（含 `BVK=64` 的 `bf16mma_intra_tma`）；`vecst`×`INTRA`/`TMA` 仍 0.504。新事实：`bf16mma` 的
+  `2 blocks/SM` 与 `INTRA` 折叠互斥（`occ 2/2→1/1`、`dur 1.29→2.23ms`）。新增
+  `harness/probe_b2_write_cross2_ncu.sh` + `harness/check_bwd_b2_write_cross2.py`（`b2_mma_probe.cu` 一行未改）。
+  见 `docs/07` §102。**下一步（可选）**：专题维持维护态；`K≠V`×`INTRA`/`DAMMA` 同时交叉、`V=64`，
+  或把 `docs/08-summary.md` 扩到 P7-95…P7-99。
+  **P7-98（上轮）**：关闭 §100.6（P7-97）留下的三处交叉——`-DB2M_INTRA`/`-DB2M_DAMMA`/`K≠V` 的写侧三段分解。
   七形态（`K=V=128`/`V=256`）**L1 store 扇区 `34 865 152`、请求 `4 399 104` 全逐位相同**；`K≠V` 五档
   **$S_{L1}\cdot32/U=1.99–2.00$**；默认 `-DB2M_VECST` 关闭时 **$S_{L1}\cdot32=2U$（半 sector）**、开启后
   减半到 **$U$**；`prod V=256` 跨 ncu 重放差 ~19 MB ⟹ `dram__bytes_write` 全面禁用。新增
   `harness/probe_b2_write_cross_ncu.sh` + `harness/check_bwd_b2_write_cross.py`（`b2_mma_probe.cu` 一行未改）。
-  见 `docs/07` §101。**下一步（可选）**：`INTRA`/`DAMMA` 补 `V=128` 与 TMA/BF16MMA 三向；或专题维持维护态。
+  见 `docs/07` §101。
   **P7-93（上轮）**：关闭 §95.6/§94.7 空白 (2) 的另一半——**`intra` 折叠 × `K≠128` 的 `ncu` pipe 归因**。
   同核 `prod` vs `prod_intra`（`K=V∈{64,128}`、`b8t2048h8`），`b2_mma_probe.cu` 一行未改；新增
   `harness/ncu_b2_k128_intra_driver.py` + `harness/probe_b2_k128_intra_ncu.sh`
