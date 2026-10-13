@@ -4751,6 +4751,34 @@
       `harness/exp_pipeline_overlap.{sh,out.txt}`。配套博客
       `content/posts/mega-moe-165-pipeline-overlap`（索引页新增第 165 篇）。
 
+### P156 增量（opt-in，把第 142 篇「偏斜代价在通信」半句量到 hot-rank straggler）
+
+- [x] **P156-1** **路由偏斜对 EP 通信与显存的真实代价**（DeepEP `deep_ep/utils/gate.py:32-113`、
+      `deep_ep/utils/refs.py:10-120`、`deep_ep/layout/ep/token.cuh:33-40`、
+      `deep_ep/include/deep_ep/common/compiled.cuh:67-68`、
+      `csrc/kernels/ep/{dispatch.hpp:26-28,combine.hpp:19-21}`、`deep_ep/buffers/ep.py:431`、
+      `deep_ep/utils/envs.py:197/204`；对照第 94/104/139/142/152/155/162 篇）。
+      第 142 篇（P142-1）把路由负载均衡放回**计算侧**量，结论是 grouped GEMM **对偏斜免疫**、
+      代价在**显存与通信**，但明确留了口子「未把 dispatch/combine 的通信不均纳入」。本篇补上：
+      **偏斜几乎不改变 EP 通信总字节，而是把字节集中到 hot rank**（straggler）。
+      **路由夹具**用 DeepEP 真实 `gate.generate_rank_count`（第 116 篇拆过）——把「每 token 触及的
+      不同 rank 数」`a` 夹到 `int((R-1)/ratio)+1`（`:54/:57`）来制造「特殊 rank 0 拿 `ratio` 倍流量」，
+      **这也解释极端偏斜为何减少总行数**（`ratio=8,R=8` → `a≡1`，两 top-k 专家同 rank，dispatch 去重
+      后每 token 1 行）。**行/字节模型**：dispatch 按 `(token,dst)` 去重（`refs.py:60-69` 的
+      `.any(dim=1)`）、combine 在 expanded 空间搬；per-token 字节用真实 `TokenLayout::get_num_bytes`
+      （`token.cuh:33-40`）复刻——`H=7168,topk=2` → dispatch **8128 B**（含 mbarrier 8160）/ combine
+      **14432 B**，与第 162 篇 C++ 真机数**逐字节对上**。**H100 实测**
+      `harness/exp_routing_skew_comm.{sh,py,out.txt}`（真实源码 sha256 `c5f551b4…`/`5372e456…`/
+      `ed0dfb4b…`）：`T_local=2048,E=64,R=8,topk=2`、`ratio=1/2/4/8` 下 dispatch 收端
+      **max/mean=1.00/1.78/2.91/4.25×**、combine 发端同量级，而**总行数 `ratio≤4` 完全相同**（30952）；
+      真实 8×H100 ragged a2a（221.7MB/rank）：straggler 2.9× 只让墙钟 **+7.9%**（5203→5616us），
+      因固定成本 **~4.7ms** 主导、边际带宽 **~400 GB/s**（同第 155/162 篇：本机 NCCL a2a 未跑满带宽，
+      straggler 被掩盖，但方向稳定）；真实 `refs.dispatch`（含 5 条真实 a2a）与独立去重模型 per-src
+      **逐元素一致**（`ratio=1/4` 的 `[121,…]`/`[349,…]`）。**正解是 EPLB 冗余专家**（第 53 篇）；
+      均衡机制收益要从 hot rank 的**通信+显存**算（第 139/152 篇）。融合 kernel 本体 SM100 专属、仅分析。
+      → `docs/166-routing-skew-ep-comm.md`。配套博客
+      `content/posts/mega-moe-166-routing-skew-ep-comm`（索引页新增第 166 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4783,8 +4811,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P155 各增量完成（P15-1…P41-1、P42-1…P155-1）。**
-  本轮 P155-1：新建 `docs/165-ep-pipeline-overlap.md` + `harness/exp_pipeline_overlap.{sh,py,out.txt}` +
+- 当前进度：**P0~P14 全部完成；P15~P156 各增量完成（P15-1…P41-1、P42-1…P156-1）。**
+  本轮 P156-1：新建 `docs/166-routing-skew-ep-comm.md` + `harness/exp_routing_skew_comm.{py,sh,out.txt}`
+  ——把第 152 篇（P142-1）留下的「偏斜代价在显存与通信」半句补上**通信半边**：用 DeepEP 真实
+  `gate.generate_rank_count` 造「特殊 rank 0 拿 ratio 倍流量」的可控不均衡，量出**偏斜几乎不改总字节、
+  而是把字节集中到 hot rank（straggler）**。`T_local=2048,E=64,R=8,topk=2`、`ratio=1/2/4/8` 下 dispatch
+  收端 **max/mean=1.00/1.78/2.91/4.25×**、combine 发端同量级，**总行数 `ratio≤4` 完全相同**（30952）；
+  per-token 字节用真实 `TokenLayout` 复刻（dispatch 8128/8160、combine 14432）与第 162 篇 C++ 真机数
+  **逐字节对上**。真实 8×H100 ragged a2a（221.7MB/rank）：straggler 2.9× 只让墙钟 **+7.9%**
+  （5203→5616us）——固定成本 **~4.7ms** 主导、边际带宽 ~400 GB/s（坐实本机 NCCL a2a 未跑满带宽、
+  straggler 被掩盖，方向稳定）。真实 `refs.dispatch`（含 5 条真实 a2a）与独立去重模型 **逐元素一致**。
+  正解是 EPLB 冗余专家（第 53 篇）；均衡收益要从 hot rank 的通信+显存算（第 139/152 篇）。索引页新增第 166 篇。
+  上一轮 P155-1：新建 `docs/165-ep-pipeline-overlap.md` + `harness/exp_pipeline_overlap.{sh,py,out.txt}` +
   `src/pipeline_overlap_nvlink.cu`——把第 144 篇（P134-1）「同一 micro-batch 侧流 NCCL 不重叠」推进到
   **生产训练真正用的 micro-batch 流水线**（`dispatch_{i+1} ∥ compute_i`）。**H100 真机两面对照**：
   **负结果（NCCL）**——8×H100 真实 `m_grouped_fp8_gemm_nt_contiguous`（L1+L2，每 micro-batch

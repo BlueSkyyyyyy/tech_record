@@ -1,0 +1,53 @@
+真实 DeepEP 源码 sha256: refs.py c5f551b49e55…  gate.py 5372e45604c5…  math.py ed0dfb4bf989…
+字节公式自检: dispatch FP8=8128 B（含 mbarrier 8160 B）、combine BF16=14432 B （对齐第 162 篇 14432）
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+
+====================================================================================================
+rank 0/8: T_local=2048 H=7168 E=64 topk=2
+====================================================================================================
+[Part A] 路由偏斜 → 每 rank 收到的 dispatch 行数（token 去重口径）
+   ratio |                              per-rank 行数（去重） | max/mean  min/mean  gini
+     1.0 | [3872, 3872, 3872, 3864, 3864, 3872, 3864, 3872] |   1.00    1.00  0.000
+     1.5 | [5464, 3640, 3640, 3640, 3640, 3640, 3640, 3648] |   1.41    0.94  0.052
+     2.0 | [6872, 3440, 3440, 3440, 3440, 3440, 3440, 3440] |   1.78    0.89  0.097
+     4.0 | [11240, 2816, 2816, 2816, 2816, 2816, 2816, 2816] |   2.91    0.73  0.238
+     8.0 | [8712, 1096, 1096, 1096, 1096, 1096, 1096, 1096] |   4.25    0.54  0.407
+  （ratio=1.0 为均衡基线；>1 时 rank 0 被系统性偏好，即 DeepEP `generate_rank_count` 的特殊 rank）
+
+[Part B] 字节模型（per-token dispatch FP8=8128B / 含 mbarrier=8160B、combine BF16=14432B）
+   ratio |    dispatch max/mean (straggler) |    combine send max/mean | 总字节 MB
+     1.0 |                            1.001 |                    1.039 |    724.5
+     1.5 |                            1.412 |                    1.465 |    724.5
+     2.0 |                            1.776 |                    1.846 |    724.5
+     4.0 |                            2.905 |                    3.031 |    724.5
+     8.0 |                            4.254 |                    4.254 |    606.1
+
+[Part C] 真实 ragged all-to-all（dispatch 主数据段 fp8 [rows,H]）—— C1 小消息（延迟域，T_local=2048）
+   ratio |   t_a2a us |  t/t_base |  straggler/mean |   本rank MB |    有效 GB/s
+     1.0 |     4719.4 |     1.000 |           1.001 |       27.7 |        5.9
+     1.5 |     4727.0 |     1.002 |           1.412 |       27.7 |        5.9
+     2.0 |     4734.1 |     1.003 |           1.776 |       27.7 |        5.9
+     4.0 |     4764.8 |     1.010 |           2.905 |       27.7 |        5.8
+     8.0 |     4731.4 |     1.003 |           4.254 |       14.7 |        3.1
+  （straggler/mean = 最大单 rank 收 vs 全局均值；t 是单次 a2a 墙钟）
+
+[Part C] 真实 ragged all-to-all（dispatch 主数据段 fp8 [rows,H]）—— C2 大消息（字节域，T_local=16384）
+   ratio |   t_a2a us |  t/t_base |  straggler/mean |   本rank MB |    有效 GB/s
+     1.0 |     5203.6 |     1.000 |           1.000 |      221.7 |       42.6
+     1.5 |     5277.6 |     1.014 |           1.412 |      221.7 |       42.0
+     2.0 |     5369.0 |     1.032 |           1.778 |      221.7 |       41.3
+     4.0 |     5616.3 |     1.079 |           2.909 |      221.7 |       39.5
+     8.0 |     5572.0 |     1.071 |           4.266 |      117.4 |       21.1
+  （straggler/mean = 最大单 rank 收 vs 全局均值；t 是单次 a2a 墙钟）
+
+[Part D] 真实 deep_ep.utils.refs.dispatch 交叉验证 per-rank recv 行数
+  ratio=1.0  refs num_recv_tokens_per_rank(rank0) = [121, 121, 127, 121, 130, 108, 117, 139] sum=984
+           独立模型 per-src 命中 = [121, 121, 127, 121, 130, 108, 117, 139]  match=True  （全局 per-dst=[984, 986, 972, 969, 949, 984, 944, 971]）  T_small=512
+  ratio=4.0  refs num_recv_tokens_per_rank(rank0) = [349, 353, 353, 353, 353, 349, 353, 353] sum=2816
+           独立模型 per-src 命中 = [349, 353, 353, 353, 353, 349, 353, 353]  match=True  （全局 per-dst=[2816, 707, 707, 705, 707, 706, 706, 705]）  T_small=512
+
+[Part E] 显存/缓冲区（与偏斜无关）：
+  dispatch 缓冲按 worst-case `num_max_tokens_per_rank*num_ranks` 分配 → 偏斜不改变分配、只改变实际 NVLink 流量分布
+  单 token dispatch 记录 = 8128 B（含 mbarrier 8160 B），combine 记录 = 14432 B
+  EPLB 冗余专家（第 53 篇）把「被系统性偏好」的专家复制到 peer 冗余槽，把 straggler 拉平——这是偏斜通信代价的正解
