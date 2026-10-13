@@ -4728,6 +4728,29 @@
       总判定 **ALL PASS**。SM100 的 UMMA TS 变体仅分析。配套博客
       `content/posts/mega-moe-164-sm90-tf32-rs-wgmma`（索引页新增第 164 篇）。
 
+### P155 增量（opt-in，把第 144 篇的「侧流不重叠」推进到 micro-batch 流水线维度）
+
+- [x] **P155-1** **跨 micro-batch 流水线能不能藏 EP 通信**（`harness/exp_pipeline_overlap.py`
+      / `src/pipeline_overlap_nvlink.cu`；`deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh`、
+      `impls/sm100_fp8_fp4_mega_moe.cuh`、`deep_ep/buffers/ep.py`）。第 144 篇（P134-1）量的是
+      **同一 micro-batch** 的侧流 NCCL ∥ grouped GEMM；但生产训练用 **micro-batch 流水线**
+      （`dispatch_{i+1} ∥ compute_i`）——这条路从没量过。**H100 真机两面对照**。
+      → `docs/165-ep-pipeline-overlap.md`（真实行号核对）：**负结果（NCCL）**——8×H100 真实
+      `m_grouped_fp8_gemm_nt_contiguous`（L1+L2）× NCCL `all_to_all_single`（每 micro-batch
+      `T_m=512,topk=2,H=7168` = d 7.34MB + c 14.68MB）；三调度 `serial_micro`/`serial_grouped`
+      （无重叠最优）/`pipeline`（先排 `D_0..D_{M-1}`，`K_i` 等 `D_i`、`C_i` 等 `K_i`）——
+      `ovf_vs_grouped` 最多 **1.214×（reps=1）**/**1.093×（reps=3）** vs 理想 1.388/1.858
+      （`M=1` ovf≈1、`bitsame=True`）；**通信腿在上下文里膨胀 1.9×**（M=8 grouped 通信分量
+      6013us vs 孤立 3180us）。**正对照（SM 预算）** `src/pipeline_overlap_nvlink.cu`：单进程 8 卡
+      同一条 `D_i→K_i→C_i` 链、通信换成限块 NVLink scatter（176MB/rank），扫 `B`/`M`——
+      **每个 B 下 `t_pipe≈max(t_comm,t_comp)`**、`B=64/96` 达理想 **~99%**、`t_grouped≈t_comm+t_comp`
+      （不膨胀）。结论：流水线本身可行，NCCL 无法被塞进小 SM 预算——正是 Mega MoE 单 kernel +
+      warp/寄存器级 SM 预算（`sm100_fp8_fp4_mega_moe.cuh:329/331/332-334/344`、
+      `scheduler/mega_moe.cuh:345-370`）的动机；DeepEP 侧对应 `deep_ep/buffers/ep.py:431`
+      `get_theoretical_num_sms`。SM100 融合 kernel 本体仅分析。H100 实测
+      `harness/exp_pipeline_overlap.{sh,out.txt}`。配套博客
+      `content/posts/mega-moe-165-pipeline-overlap`（索引页新增第 165 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4760,8 +4783,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P154 各增量完成（P15-1…P41-1、P42-1…P154-1）。**
-  本轮 P154-1：新建 `docs/164-sm90-tf32-rs-wgmma.md` + `harness/exp_tf32_rs_wgmma.{sh,out.txt}` +
+- 当前进度：**P0~P14 全部完成；P15~P155 各增量完成（P15-1…P41-1、P42-1…P155-1）。**
+  本轮 P155-1：新建 `docs/165-ep-pipeline-overlap.md` + `harness/exp_pipeline_overlap.{sh,py,out.txt}` +
+  `src/pipeline_overlap_nvlink.cu`——把第 144 篇（P134-1）「同一 micro-batch 侧流 NCCL 不重叠」推进到
+  **生产训练真正用的 micro-batch 流水线**（`dispatch_{i+1} ∥ compute_i`）。**H100 真机两面对照**：
+  **负结果（NCCL）**——8×H100 真实 `m_grouped_fp8_gemm_nt_contiguous`（L1+L2，每 micro-batch
+  `T_m=512,topk=2,H=7168`）× NCCL a2a，三调度（`serial_micro`/`serial_grouped` 无重叠最优/`pipeline`），
+  `ovf_vs_grouped` 最多 **1.214×（reps=1）**/**1.093×（reps=3）** vs 理想 **1.388/1.858**（M=1 作自洽检查
+  ovf≈1.00、`bitsame=True`）；**通信腿在上下文里膨胀 1.9×**（M=8 grouped 通信分量 6013us vs 孤立 3180us）
+  =NCCL a2a 与 GEMM 互抢 SM/互毁 L2。**正对照（SM 预算）** `src/pipeline_overlap_nvlink.cu`：单进程 8 卡
+  同一条 `D_i→K_i→C_i` 依赖链、通信换成**限块** NVLink scatter（176MB/rank）扫 `B`/`M`——**每个 B 下
+  `t_pipe≈max(t_comm,t_comp)`**、`B=64/96` 达理想重叠 **~99%**、`t_grouped≈t_comm+t_comp`（不膨胀）。
+  结论：流水线本身可行，NCCL 无法被塞进小 SM 预算——正是 Mega MoE 用单 kernel + warp/寄存器级 SM 预算
+  （`sm100_fp8_fp4_mega_moe.cuh:329/331/332-334/344`、`scheduler/mega_moe.cuh:345-370`）的动机；DeepEP
+  对应 `deep_ep/buffers/ep.py:431 get_theoretical_num_sms`。SM100 融合 kernel 本体仅分析。索引页新增第 165 篇。
+  上一轮 P154-1：新建 `docs/164-sm90-tf32-rs-wgmma.md` + `harness/exp_tf32_rs_wgmma.{sh,out.txt}` +
   `src/tf32_rs_wgmma.cu`——补齐第 49 篇（P39-1）§10 明确留下的「`TF32MMASelector` 的 RS 路径数值」。
   **TF32 是 DeepGEMM 里唯一走 RS 的选择器**（`mma/sm90.cuh:168-190`，`kUseRS=false` 直接 static_assert
   `:187`），唯一消费者是 HC prenorm GEMM（`sm90_tf32_hc_prenorm_gemm.cuh:157`）。A 寄存器布局
@@ -6490,20 +6526,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P153 已完成（最新 **P153-1 补上官方验收测试 baseline 里从没单独读过的 TileLang
-  SwiGLU 算子**——`third-party/tilelang_ops/swiglu_apply_weight_to_fp8.py`，是 fused mega-kernel
-  L1 epilogue（`sm100_fp8_fp4_mega_moe.cuh:1066-1205`）的官方逐位对照物。host `get_sf_shape`/
-  `get_sf_and_inv` = UE8M0 打包 + ceil-to-power2；设备 kernel persistent + `T.pdl_sync` +
-  `silu(gate)*up*weight` + per-`g` amax + UE8M0。H100(sm90) 真机：真实 tilelang kernel vs 独立
-  torch oracle **FP8 0/1048576、SF 0/32768**（四组配置，量化 relerr 2.25e-2=E4M3 噪声）、BF16
-  分支 3/1048576 个 1-ulp；用真实 `common/math.cuh` 复刻的 mega L1 epilogue 算术（`fast=1`/`fast=0`）
-  与 tilelang **逐位相等（FP8 0/524288、SF 0/16384）**⇒ baseline 与 fused kernel L1 段
-  **bit-compatible**；吞吐 122.2us/686 GB/s。索引页新增第 163 篇）。
+- **下一步**：P0~P155 已完成（最新 **P155-1 把第 144 篇「同一 micro-batch 侧流 NCCL 不重叠」推进到
+  micro-batch 流水线维度**：8×H100 真实 grouped GEMM × NCCL a2a 的 `dispatch_{i+1} ∥ compute_i` 只藏
+  `ovf 1.21×/1.09×`（理想 1.39/1.86）、通信腿上下文膨胀 1.9×；正对照限块 NVLink 流水线在每个 SM 预算下
+  都到理想 **~99%**。结论：流水线没错、NCCL 没法给小 SM 预算——正是 Mega MoE 单 kernel warp/寄存器级
+  分区的动机。详见 `docs/165`。索引页新增第 165 篇）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
-  （需 NCCL≥2.32.3，见「阻塞」）；② 在**独占卡安静环境**下量「EP 图跨 micro-batch 流水线重叠」
-  （dispatch_{i+1} ∥ compute_i），坐实/证伪第 144 篇侧流 NCCL 不重叠的结论（第 161/162 篇已给字节口径）；
-  ③ 把 indexer 反向（连续/分页/稀疏/分页稀疏）**端到端接进真实前向 kernel**（需目标卡 SM100，仅分析）
-  + indexer 的 **varlen（SM100）**变体定点复核；④ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。详见上。
+  （需 NCCL≥2.32.3，见「阻塞」）；② 把 indexer 反向（连续/分页/稀疏/分页稀疏）**端到端接进真实前向 kernel**
+  （需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体定点复核；③ 用 §5 正对照的「限块通信
+  kernel」思想，在 8×H100 上做一个**单进程**的「Mega-MoE-like 单 kernel」原型（通信 warp + 计算 warp
+  同一 grid、寄存器预算分区）量它与「NCCL 侧流」的重叠差；④ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落
+  做定点复核。详见上。
   上一轮 P151-1：把多卡 EP MoE 图接上真实 SM90 FP8 grouped kernel
   上一轮 P146-1：把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」推到契约层——数值可行（真实
   `math.cuh` store 分支逐位复现，FP8 0/16777216、SF 0/524288），但契约是「单输出 + 无逐元素索引 + 无状态」，

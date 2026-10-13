@@ -1,0 +1,60 @@
+跨 micro-batch 流水线能否藏 EP 通信（NCCL a2a × 真实 SM90 grouped GEMM）—— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 nccl (2, 29, 7)
+
+===== A) 负结果：NCCL a2a 的 micro-batch 流水线（8×H100，多进程） =====
+# P155 pipeline overlap  world=8 T_m=512 H=7168 I=2048 E=8 ktop=2
+[rank4] dispatch+combine = 22.02 MB/micro-batch (d=7.34 c=14.68)
+[rank1] dispatch+combine = 22.02 MB/micro-batch (d=7.34 c=14.68)
+[rank6] dispatch+combine = 22.02 MB/micro-batch (d=7.34 c=14.68)
+[rank3] dispatch+combine = 22.02 MB/micro-batch (d=7.34 c=14.68)
+[rank5] dispatch+combine = 22.02 MB/micro-batch (d=7.34 c=14.68)
+[rank2] dispatch+combine = 22.02 MB/micro-batch (d=7.34 c=14.68)
+[rank7] dispatch+combine = 22.02 MB/micro-batch (d=7.34 c=14.68)
+[rank0] dispatch+combine = 22.02 MB/micro-batch (d=7.34 c=14.68)
+RESULT M=1 reps=1 t_comm=568.3us t_comp=155.3us serial_micro=1197.5us serial_grouped=1199.4us pipeline=1200.1us ovf_vs_micro=0.998 ovf_vs_grouped=0.999 ideal_ovf=1.273 hidden_frac=-0.017 comm_bw=38.7GB/s bitsame=True
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+RESULT M=2 reps=1 t_comm=1143.9us t_comp=309.6us serial_micro=1944.6us serial_grouped=1931.1us pipeline=1902.6us ovf_vs_micro=1.022 ovf_vs_grouped=1.015 ideal_ovf=1.271 hidden_frac=0.136 comm_bw=38.5GB/s bitsame=True
+RESULT M=4 reps=1 t_comm=1825.6us t_comp=617.3us serial_micro=3902.7us serial_grouped=3858.8us pipeline=3257.9us ovf_vs_micro=1.198 ovf_vs_grouped=1.184 ideal_ovf=1.338 hidden_frac=1.045 comm_bw=48.2GB/s bitsame=True
+RESULT M=8 reps=1 t_comm=3180.4us t_comp=1235.4us serial_micro=7338.7us serial_grouped=7248.6us pipeline=5968.7us ovf_vs_micro=1.230 ovf_vs_grouped=1.214 ideal_ovf=1.388 hidden_frac=1.109 comm_bw=55.4GB/s bitsame=True
+RESULT M=1 reps=3 t_comm=568.2us t_comp=464.2us serial_micro=1981.4us serial_grouped=1989.3us pipeline=1990.4us ovf_vs_micro=0.995 ovf_vs_grouped=0.999 ideal_ovf=1.817 hidden_frac=-0.019 comm_bw=38.8GB/s bitsame=True
+RESULT M=2 reps=3 t_comm=1143.3us t_comp=927.0us serial_micro=3990.0us serial_grouped=3986.8us pipeline=3944.9us ovf_vs_micro=1.011 ovf_vs_grouped=1.011 ideal_ovf=1.811 hidden_frac=0.049 comm_bw=38.5GB/s bitsame=True
+RESULT M=4 reps=3 t_comm=1824.1us t_comp=1857.1us serial_micro=8028.0us serial_grouped=7960.3us pipeline=7347.2us ovf_vs_micro=1.093 ovf_vs_grouped=1.083 ideal_ovf=1.982 hidden_frac=0.373 comm_bw=48.3GB/s bitsame=True
+RESULT M=8 reps=3 t_comm=3186.7us t_comp=3715.7us serial_micro=15566.3us serial_grouped=15465.2us pipeline=14154.2us ovf_vs_micro=1.100 ovf_vs_grouped=1.093 ideal_ovf=1.858 hidden_frac=0.443 comm_bw=55.3GB/s bitsame=True
+NCCL version 2.29.7+cuda13.2
+
+===== B) 正对照：SM 预算下的 NVLink 流水线（单进程 8 卡，扫 B / M） =====
+visible GPUs = 8
+SM count = 132, comm bytes/rank = 176.0 MB (22.0 MB/peer)
+
+# NVLink 流水线正对照：固定总计算量、限通信块数 B（comm 176MB/rank）
+M    B_comm  t_comm_us  t_comp_us   t_grouped      t_pipe   ovf_grp  ovf_idel comm_GB/s
+1    8          6663.4      331.1      7023.2      7024.2     1.000     1.050      24.2
+1    16         3463.0      349.8      3786.4      3771.4     1.004     1.101      46.6
+1    32         2118.5      424.5      2498.7      2445.5     1.022     1.200      76.2
+1    48         1766.1      404.9      2101.3      2071.4     1.014     1.229      91.4
+1    64         1651.1      478.2      2079.3      2069.9     1.005     1.290      97.8
+1    96         1793.5      612.7      2186.0      2210.9     0.989     1.342      90.0
+1    120        1699.5     1413.8      2826.9      2790.2     1.013     1.832      95.0
+2    8          6673.1      334.1      7038.3      6740.0     1.044     1.050      24.2
+2    16         3446.1      352.4      3779.6      3449.8     1.096     1.102      46.9
+2    32         2057.4      426.3      2426.7      2104.9     1.153     1.207      78.5
+2    48         1738.1      407.9      2042.2      1734.4     1.177     1.235      92.9
+2    64         1658.5      480.7      2047.9      1572.2     1.303     1.290      97.4
+2    96         1664.0      620.8      2175.3      1656.5     1.313     1.373      97.0
+2    120        1653.0     1415.8      2832.3      2173.8     1.303     1.856      97.7
+4    8          6696.3      339.0      7069.8      6716.2     1.053     1.051      24.1
+4    16         3426.3      357.7      3830.3      3446.4     1.111     1.104      47.1
+4    32         2043.8      431.5      2429.4      2046.5     1.187     1.211      79.0
+4    48         1764.2      413.3      2064.9      1752.1     1.179     1.234      91.5
+4    64         1499.5      486.5      2070.0      1526.2     1.356     1.324     107.7
+4    96         1600.8      620.6      2159.8      1600.6     1.349     1.388     100.9
+4    120        1655.8     1421.4      2854.3      1938.6     1.472     1.858      97.5
+8    8          6738.6      348.1      7079.1      6745.6     1.049     1.052      24.0
+8    16         3426.7      366.8      3817.8      3434.9     1.111     1.107      47.1
+8    32         2072.1      441.7      2440.4      2086.8     1.169     1.213      77.9
+8    48         1761.7      421.9      2104.2      1775.8     1.185     1.240      91.7
+8    64         1515.4      495.9      2034.6      1544.8     1.317     1.327     106.6
+8    96         1521.7      628.7      2144.6      1525.8     1.406     1.413     106.1
+8    120        1539.6     1431.0      2903.1      1821.4     1.594     1.929     104.9
