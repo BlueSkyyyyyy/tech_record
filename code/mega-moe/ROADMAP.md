@@ -2791,6 +2791,40 @@
       ④ 吞吐 L1/L2 **312/303 TFLOPS**（843/434us）；⑤ 记吞吐陷阱（每调用 empty+sync 把 312 误测
       成 54）。配套博客 `content/posts/mega-moe-99-mega-moe-forward-emulation`（索引页新增第 99 篇）。
 
+### P90 增量（opt-in，补齐 EPLB 两个原语一直缺席的「验收测试即正确性规范」）
+
+- [x] **P90-1** **DeepEP EPLB 冗余权重的验收测试即正确性规范**
+      （`tests/ep/test_prefetch_weights.py` 250 行；`tests/ep/test_reduce_grads.py` 256 行；
+      `deep_ep/buffers/ep.py:846-905`；`deep_ep/utils/envs.py:193-234`；
+      `deep_ep/include/deep_ep/common/compiled.cuh:67-71`；消费方第 53 篇 P43-1）。
+      第 53 篇（P43-1）把两个 EPLB 原语（前向 `lb_prefetch_weights` / 反向 `lb_reduce_grads`）
+      从 host 编排到负载均衡切块讲透了，但只在 §5/§6 引用过上游两份验收测试来佐证 reduce-add 的
+      顺序无关性，从没把这两份「什么叫对」的唯一规范单独拆过——它们正是第 53 篇所有判据的出处。
+      **设备路径走 NCCL 设备 API（`ncclDevComm`/`ncclGin`），本机 NCCL 2.29.7 无该 API
+      （同「阻塞」），端到端仅分析**；但判据几乎全在纯 Python/纯张量里，H100(sm90) 可跑真机。
+      → `docs/100-deepep-eplb-test-oracle.md`（真实行号核对）：**前向 blob** 是**唯一 key 的
+      确定性 ramp**（`make_blob:45-53`，`key=e*NUM_PAYLOADS+p`、`(arange+key)%255`、纯算术非 RNG
+      以保跨 GPU 逐位相同）→ 错专家/错载荷/错偏移**每个字节**都暴露；`SENTINEL=0xa5`（`:16`）让
+      未分配槽被写=strayed writes（`check:95-108` 两条分支 `torch.equal` 逐字节）；`PAYLOAD_SWEEP`
+      （`:27-38`）10 组只打 chunk 边界（12 KiB 容量整数倍/两侧短尾/少于 warp 数）。**映射表**
+      `make_redundancy_mapping`（prefetch `:56-92` / reduce `:54-95`）保证**一个 rank 绝不为本地
+      专家持有冗余副本**（own-expert 排除 `:93-94`）——前向定义「往哪推」、反向变成「绝不从自己
+      那行 pull」→ seed 不被重复计（`expected_expert_grads:98-114` 的 `:107` continue + `:111` owner
+      判定）；`ring`（`:75-80`，r 只借 r+1）是基准 pattern，分离「流量形态」与「kernel」。**反向
+      blob** 是**小整数精确 fp32**（`make_pattern:23-40`，period 4095、值 `(0..4094)-2047`）——因
+      `cp.reduce.async.bulk` 是元素级原子加、落地顺序不固定，小整数使期望值**顺序无关**、判据用
+      `torch.equal` 免容差；两族 key（expert≥0 `:46` / redundant<0 `:51`）永不碰撞。**判据维度**：
+      哨兵分支、`with_sf=False` 未请求载荷槽必须保哨兵（host 契约 `ep.py:866-874`）、反向源池
+      一个元素都不许被改（`:198-204`，TMA 源/目的弄反的落点）。H100 实测
+      `harness/exp_deepep_eplb_test_oracle.{py,sh,out.txt}`（ast 抽取真实函数原样运行 + 独立复刻
+      逐位对拍）**37 PASS / 0 FAIL**：`make_blob`/`make_pattern` 逐字复刻、错专家/错载荷失配=n、
+      映射表 own-expert/ratio/ring/seed 确定性、`check` 三负样本被断言抓到、5 pattern 三种加序
+      `torch.equal`、期望值与独立复刻逐位相等；全量仿真 10 载荷 × 2 轮 × 8 rank push **920 槽
+      0 不符**、11 hidden × 2 轮 × 8 rank pull **176 组 0 不符**；带宽关键路径 prefetch 与 reduce
+      **完全一致**（本机 NVLink 上限 430.3 GB/s、`random` `[2,5,6,8,9,10,4,3]` → critical path
+      671 MB、下限 ~1560 us）。`tests/*.py` sha256 已认证。配套博客
+      `content/posts/mega-moe-100-deepep-eplb-test-oracle`（索引页新增第 100 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -2816,8 +2850,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P89 各增量完成（P15-1…P41-1、P42-1…P89-1）。**
-  本轮 P89-1：新建 `docs/99-mega-moe-forward-emulation.md`
+- 当前进度：**P0~P14 全部完成；P15~P90 各增量完成（P15-1…P41-1、P42-1…P90-1）。**
+  本轮 P90-1：新建 `docs/100-deepep-eplb-test-oracle.md`
+  （+`harness/exp_deepep_eplb_test_oracle.{py,sh,out.txt}`）——补齐 EPLB 两个原语一直缺席的
+  **验收测试即正确性规范**。前向 blob=唯一 key 的确定性 ramp（`make_blob`，错专家/错载荷每字节暴露）、
+  `SENTINEL=0xa5` 哨兵、映射表 **own-expert 排除**；反向 blob=小整数精确 fp32（`make_pattern`，
+  period 4095）使原子加**顺序无关**、判据 `torch.equal` 免容差。**设备路径 NCCL GIN 端到端仅分析**；
+  **H100 真机 37/37 ALL PASS**：三负样本被断言抓到、10 载荷 × 2 轮 × 8 rank push 920 槽 0 不符、
+  11 hidden × 2 轮 × 8 rank pull 176 组 0 不符、prefetch/reduce 关键路径一致（NVLink 430.3 GB/s、
+  critical path 671 MB、下限 ~1560 us）。索引页新增第 100 篇。
+  上一轮 P89-1：新建 `docs/99-mega-moe-forward-emulation.md`
   （+`harness/exp_mega_moe_forward_emul.{py,sh,out.txt}`）——补齐**前向**一直缺席的
   **端到端数值复刻与误差分解**。主 kernel SM100 专属、仅分析；用 SM90
   `m_grouped_fp8_gemm_nt_contiguous`（1D2D）+ `m_grouped_bf16_gemm_nt_contiguous` 逐段复刻
@@ -3846,7 +3888,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P89 已完成（最新 **P89-1 Mega MoE 前向流水线在 H100 上的数值复刻与误差分解**：
+- **下一步**：P0~P90 已完成（最新 **P90-1 DeepEP EPLB 冗余权重的验收测试即正确性规范**：
+  `tests/ep/test_prefetch_weights.py` + `test_reduce_grads.py`——前向 blob 唯一 key ramp + 哨兵、
+  映射表 own-expert 排除；反向小整数精确 fp32 使原子加顺序无关、`torch.equal` 免容差；设备路径
+  NCCL GIN 仅分析，H100 真机 37/37 ALL PASS（push 920 槽 / pull 176 组 0 不符、关键路径 671 MB /
+  NVLink 430.3 GB/s / 下限 ~1560 us）；详见上）。
+  上一轮 P89-1：P0~P89 已完成（最新 **P89-1 Mega MoE 前向流水线在 H100 上的数值复刻与误差分解**：
   用 SM90 `m_grouped_fp8_gemm_nt_contiguous`（1D2D）+ bf16 grouped kernel 逐段复刻
   dispatch→L1→SwiGLU→L2→combine；把 top-k 权重在 L1 输出/L2 量化前乘、combine 只求和；端到端
   fp8-kernel vs fp64 rel 6.28–6.34e-2（bf16 5.0e-3 / fp32 5.1e-4）、分层 3.2e-4、消融仅激活 5.70e-2
