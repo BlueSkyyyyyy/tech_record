@@ -2598,6 +2598,42 @@
       `_C.BucketBuffer` kernel 侧**仅分析**。配套博客
       `content/posts/mega-moe-93-deepep-bucket-session`（索引页新增第 93 篇）。
 
+### P84 增量（opt-in，补齐 DeepEP bucket 一直缺席的「验收测试即正确性规范」）
+
+- [x] **P84-1** **DeepEP bucket 混合集合算子的验收测试即正确性规范**
+      （`tests/bucket/test_mixed.py` 373 行；`tests/bucket/test_perf.py` 273 行；
+      消费方 `deep_ep/buffers/bucket.py`、`deep_ep/comm/handle.py:80`、`csrc/buffers/bucket.hpp:151/219/284`）。
+      第 54 篇（P54-1）拆了 bucket 三类算子 × 三物理域与 copy-engine、第 62 篇（P62-1）拆了
+      `all_reduce`/`reduce_scatter` 三后端与信用环、第 83 篇（P83-1）拆了 `BucketSession`，但它们
+      组织成**一套可执行规范**的两份旗舰测试一直只被顺带引用。**端到端 BucketBuffer 依赖 NCCL GIN /
+      对称窗口 → 仅分析**；**测试侧纯 Python/张量，H100(sm90) 真机实测**。
+      → `docs/94-deepep-bucket-mixed-test-oracle.md`（真实行号核对）：`test_mixed.py` 在**多轮**里随机
+      编排**混合**算子（`OPS=all_reduce/reduce_scatter/all_gather/rs_ag`，`:24`；`rs_ag` 是
+      `reduce_scatter`+`all_gather` 的组合，`:244-265`），轮换正交维度（`:164-214`：销毁模式 /
+      会话每 3 轮 / 三条**各自独立**计算流 producer·launch·consumer / exact=bf16·all_gather·每 7 步 /
+      scale∈{1,0,0.25,-0.5,2} / SM（all_gather 必须 0）/ bucket 数 / packed / dtype / 外部输入）。
+      五个规范组件：① **能力门控** `supported:69-79`（单 rank 只有 all_gather `rdma*nvl==1`；bf16 只在
+      纯 RDMA `rdma>1 and nvl==1`），perf `get_skip_reason:101-106` 是原因串版；② **尺寸量化**
+      `make_sizes:82-88`（`quantum=lcm(group_size·32)`）；③ **用例枚举** `make_schedule:91-102`
+      （`all_reduce` 恒 fp32）；④ **拓扑** `make_groups:44-66`（world + half/nvl 等分段 + 纯 RDMA rail）；
+      ⑤ **NCCL 参考** `nccl_reference:126-141`（`rs_ag` 参考直接走 `all_reduce`，因
+      `all_gather(reduce_scatter(x))==all_reduce(x)`）+ `make_inputs:105-123`（`GUARD_BYTES=128`、
+      会话时新分配 / 非会话返回 guard 视图）+ 判据 `verify:144-154`（exact 时 `rtol=atol=0` 逐位 +
+      guard 恒等）。`run_round:157-314` 三条隐蔽契约：三流 event 串 order（`:228-236`）、原地指针契约
+      （`:277-282` 结果 `data_ptr`==arena payload 地址）、慢快照（`:283-284`「deferred CPU checks
+      cannot hide missing dependencies」）+ 销毁后弱引用断言（`:304-311`）。`test_perf.py`：NCCL profile
+      矩阵 `:36-48`（auto/cta/ring/tree/nvls…，`run_profiles:218-249` 总先跑 auto、profile 必须在
+      import torch 前设）、`nccl_collective:76-84` coalescing、ragged `make_sizes:91-98`、
+      `measure:51-73`（先 `all_reduce(MAX)` 取每样本**最慢 rank** 时长再中位）。H100 实测
+      `harness/exp_deepep_bucket_test_oracle.{sh,py,out.txt}`（按路径 exec 两个真实测试模块、stub
+      `deep_ep` 绕过 `check_nccl_so`）：**33 PASS / 0 FAIL**——`supported` 64/64 组、`make_sizes`
+      3/3（全为 `quantum` 倍数）、真机 `dist.new_group` 拓扑 3/3（nvl=8/4/2）、`nccl_reference`
+      4op×scale vs 独立求和 10/10 + `rs_ag` 不变量、`make_inputs`/`verify` 8/8（guard 抓错、exact
+      1-ulp、容差放行）、perf 规范 6/6、真实 `measure` 1/1。**环境发现**：DeepEP@93eb6eb 用的
+      `reduce_scatter_single`/`all_gather_single` 在本机 torch 2.12.0a0 不存在，用 `*_tensor` 兼容别名
+      驱动（继第 86 篇 NCCL 版本后又一条「测试所需环境」）。配套博客
+      `content/posts/mega-moe-94-deepep-bucket-mixed-test-oracle`（索引页新增第 94 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -2623,8 +2659,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P83 各增量完成（P15-1…P41-1、P42-1…P83-1）。**
-  本轮 P83-1：新建 `docs/93-deepep-bucket-session.md`（+`harness/exp_deepep_bucket_session.{sh,py,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P84 各增量完成（P15-1…P41-1、P42-1…P84-1）。**
+  本轮 P84-1：新建 `docs/94-deepep-bucket-mixed-test-oracle.md`
+  （+`harness/exp_deepep_bucket_test_oracle.{sh,py,out.txt}`）——补齐 DeepEP bucket 一直缺席的
+  **「验收测试即正确性规范」**：`tests/bucket/test_mixed.py`（373 行，**混合**算子的**多轮**随机编排）
+  与 `tests/bucket/test_perf.py`（273 行，NCCL profile 基准）。五个规范组件——**能力门控**
+  `supported:69-79`（单 rank 仅 all_gather、bf16 仅纯 RDMA）、**尺寸量化** `make_sizes:82-88`
+  （`quantum=lcm(group_size·32)`）、**用例枚举** `make_schedule:91-102`、**拓扑** `make_groups:44-66`
+  （world + half/nvl + RDMA rail）、**NCCL 参考** `nccl_reference:126-141`（`rs_ag` 参考走
+  `all_reduce`，因 `all_gather(reduce_scatter(x))==all_reduce(x)`）+ guard/逐位判据
+  `verify:144-154`。另拆 `run_round:157-314` 三条隐蔽契约（三流 event 串 order / 原地指针契约 /
+  慢快照）与 perf 的 `measure:51-73`（慢 rank 中位数）。**端到端 BucketBuffer 依赖 NCCL GIN → 仅分析**；
+  **测试侧纯 Python/张量，H100(sm90) 真机 33 PASS / 0 FAIL**（`supported` 64/64、真机 `dist.new_group`
+  拓扑 3/3、`nccl_reference`+`rs_ag` 不变量 11/11、`make_inputs`/`verify` 8/8、perf 规范 6/6、真实
+  `measure` 1/1）；**环境发现**：DeepEP@93eb6eb 用的 `*_single` 通信 API 在本机 torch 2.12.0a0 不存在
+  （用 `*_tensor` 兼容别名驱动）。索引页新增第 94 篇。
+  上一轮 P83-1：新建 `docs/93-deepep-bucket-session.md`（+`harness/exp_deepep_bucket_session.{sh,py,out.txt}`）
   ——补齐 DeepEP bucket 一直当作细节略过的 **`BucketSession`（会话式临时张量注册 + 生命周期守卫）**。
   常规集合算子要求张量注册在对称 buffer 里（`bucket.hpp:150/213` 裸断言），`BucketSession` 用
   「**实例属性遮蔽类方法**（`:29-43`，嵌套检测即检测副作用）+ **64B 对齐 bump 分配器**（`:55-62`）+
@@ -3577,7 +3627,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P83 已完成（最新 **P83-1 DeepEP BucketBuffer 的会话机制（`BucketSession`）**：
+- **下一步**：P0~P84 已完成（最新 **P84-1 DeepEP bucket 混合集合算子的验收测试即正确性规范**：
+  `tests/bucket/test_mixed.py`（373 行）+ `tests/bucket/test_perf.py`（273 行）——混合算子的多轮随机
+  编排（三流 / scale / exact / session / 外部输入）+ 五个规范组件（`supported` 门控、`make_sizes`
+  `quantum=lcm(g·32)`、`make_schedule`、`make_groups` 拓扑、`nccl_reference`）与逐位判据 `verify`；
+  perf 的 NCCL profile 矩阵与慢 rank 中位数 `measure`；端到端依赖 NCCL GIN 仅分析，测试侧纯 Python/
+  张量 H100 真机 **33 PASS / 0 FAIL**；详见上）。
+  上一轮 P83-1：P0~P83 已完成（最新 **P83-1 DeepEP BucketBuffer 的会话机制（`BucketSession`）**：
   `deep_ep/buffers/bucket.py:19-181` + `csrc/buffers/bucket.hpp:48-56/150/213/279/314`——常规集合算子
   要求张量注册在对称 buffer 里，`BucketSession` 用「实例属性遮蔽类方法 + 64B bump 分配器 + 越界 src
   仅纯 NVLink all-gather 透传 + 结果回拷 + `record_stream` 生命周期守卫」把约束藏起来；纯 host Python，
