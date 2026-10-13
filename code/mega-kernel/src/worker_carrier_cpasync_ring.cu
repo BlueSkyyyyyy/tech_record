@@ -505,6 +505,11 @@ static void launch(int grid, int T, size_t req, int PS, int G, int NB, int DW, i
   TRYF(4, 256, 8, 1, 3); TRYF(4, 256, 8, 1, 4); TRYF(4, 256, 8, 1, 5);
   TRYF(4, 256, 8, 1, 6); TRYF(4, 256, 8, 2, 6); TRYF(4, 256, 8, 4, 6); TRYF(4, 256, 8, 8, 6);
   TRYF(4, 256, 8, 1, 7); TRYF(4, 256, 8, 2, 7); TRYF(4, 256, 8, 4, 7); TRYF(4, 256, 8, 8, 7);
+  // P79-1：MINB（每 SM 最小 block 数）= 寄存器预算旋钮。MINB=8 -> 32 regs/线程（= §66 配置）；
+  //   MINB=6 -> 42；MINB=4 -> 64。用于检验 §66.9 的「plain/TMA 8 B 局部溢出」是否来自
+  //   `__launch_bounds__(256,8)` 的 32-reg 上限，而非「运行期分支选择载体」。
+  TRYF(4, 256, 6, 1, 0); TRYF(4, 256, 6, 1, 1); TRYF(4, 256, 6, 1, 4); TRYF(4, 256, 6, 2, 6);
+  TRYF(4, 256, 4, 1, 0); TRYF(4, 256, 4, 1, 1); TRYF(4, 256, 4, 1, 4); TRYF(4, 256, 4, 2, 6);
 #undef TRYF
   LAUNCH_FOR(4, 256, 8, 1, 0);  // 兜底：未列出的组合退化为 plain（正常 bench 不会命中）
 #undef LAUNCH_FOR
@@ -591,6 +596,67 @@ static void run_line(int PS, int G, int NB, int DW, int K, int D, int WMODE, lon
          "%-6s ms=%.4f descGB/s=%-7.1f taskGB/s=%-7.1f\n",
          (tag ? tag : ""), wmode_name(WMODE), PS, G, chunk, NB, D, g_DCA, MD, g_U, verdict,
          r.ms, desc_gbs, task_gbs);
+}
+
+// ============================================================================
+// P79-1：codegen 偏移归因（载体 × MINB 的寄存器/局部栈预算）
+// ============================================================================
+template <typename F>
+static void dump_attr(const char* name, F kern) {
+  cudaFuncAttributes at;
+  CK(cudaFuncGetAttributes(&at, kern));
+  printf("  %-14s numRegs=%-3d localB=%-3zu\n", name, at.numRegs, at.localSizeBytes);
+}
+
+static void bench_reg() {
+  const int DW = g_DW, K = g_K, D = 2, PS = 8, NB = 2048;
+  const long long MD = 65536;
+  printf("\n########################################################################\n");
+  printf("# P79-1：§66.9 跨二进制 codegen 偏移归因——载体 × MINB 的寄存器/局部栈预算\n");
+  printf("# 目标卡 H100/sm90a，DW=%d(352B)，K=%d，T=%d，U=%d，NB=%d，MD=%lld\n", DW, K,
+         g_TB, g_U, NB, MD);
+  printf("########################################################################\n");
+
+  printf("\n===== §A 函数属性：numRegs / localB（载体 × MINB）=====\n");
+  dump_attr("plain MINB=8", (wcr_kernel<4, 256, 8, 1, 0>));
+  dump_attr("plain MINB=6", (wcr_kernel<4, 256, 6, 1, 0>));
+  dump_attr("plain MINB=4", (wcr_kernel<4, 256, 4, 1, 0>));
+  dump_attr("tma   MINB=8", (wcr_kernel<4, 256, 8, 1, 1>));
+  dump_attr("tma   MINB=6", (wcr_kernel<4, 256, 6, 1, 1>));
+  dump_attr("tma   MINB=4", (wcr_kernel<4, 256, 4, 1, 1>));
+  dump_attr("ca1   MINB=8", (wcr_kernel<4, 256, 8, 1, 4>));
+  dump_attr("ca1   MINB=6", (wcr_kernel<4, 256, 6, 1, 4>));
+  dump_attr("ca1   MINB=4", (wcr_kernel<4, 256, 4, 1, 4>));
+  dump_attr("caR   MINB=8", (wcr_kernel<4, 256, 8, 2, 6>));
+  dump_attr("caR   MINB=6", (wcr_kernel<4, 256, 6, 2, 6>));
+  dump_attr("caR   MINB=4", (wcr_kernel<4, 256, 4, 2, 6>));
+
+  printf("\n===== §B 运行时：MINB=8/6/4 扫 G（NB=%d，MD=%lld，U=%d）=====\n", NB, MD, g_U);
+  unsigned long long dref = prepare_data(NB, MD);
+  unsigned long long refd = host_ref_desc(NB, K, DW);
+  unsigned long long ref = refd + dref;
+  int Gs[] = {100, 132, 264, 528, 1040};
+  int minbs[] = {8, 6, 4};
+  for (int mi = 0; mi < 3; ++mi) {
+    int mb = minbs[mi];
+    g_MINB = mb; g_TB = 256; g_U = 4; g_DCA = 2;
+    printf("\n--- MINB=%d（寄存器上限 %d/线程，%d blk/SM @T=256）---\n", mb, 65536 / (mb * 256), mb);
+    for (int i = 0; i < 5; ++i) {
+      int G = Gs[i];
+      char t1[32], t2[32], t3[32], t4[32];
+      snprintf(t1, 32, "mb%d-plain", mb);
+      run_line(PS, G, NB, DW, K, D, 0, MD, 3, ref, t1);
+      snprintf(t2, 32, "mb%d-ca1", mb);
+      run_line(PS, G, NB, DW, K, D, 4, MD, 3, ref, t2);
+      snprintf(t3, 32, "mb%d-caR2", mb);
+      run_line(PS, G, NB, DW, K, D, 6, MD, 3, ref, t3);
+      snprintf(t4, 32, "mb%d-tma", mb);
+      run_line(PS, G, NB, DW, K, D, 2, MD, 3, ref, t4);
+    }
+  }
+  prepare_data(NB, MD);
+  g_MINB = 8;
+  printf("\n########## P79-1 regs 完成 ##########\n");
 }
 
 // ============================================================================
@@ -779,6 +845,7 @@ static void bench() {
 
 int main(int argc, char** argv) {
   if (argc >= 2 && !strcmp(argv[1], "bench")) { bench(); return 0; }
+  if (argc >= 2 && !strcmp(argv[1], "regs")) { bench_reg(); return 0; }
   if (argc >= 2 && !strcmp(argv[1], "run")) {
     if (argc < 10) {
       printf("usage: run PS G NB DW K D reps WMODE [MD] [U] [T] [MINB] [DCA]\n");

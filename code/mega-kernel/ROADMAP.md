@@ -2008,6 +2008,36 @@
         （本版 plain `localB=8` 有 8 B 溢出、`G≤132` 慢 ~1.6×，故只采信同族内相对排序）、小 `G`
         受同机争用抖动、合成描述符/数据面、未与 DeepGEMM SM100 对跑。
 
+### P79 实验扩展 28：§66 的「跨二进制 codegen 偏移」归因（`docs/04-experiments.md` §67）
+
+- [x] **P79-1** 补掉 P78-1（§66）**§66.9 明留的第一条尾巴**「**跨二进制 codegen 偏移**：本版内核
+      plain 路径 `numRegs=32/localB=8` 有 8 B 局部栈溢出，`G≤132` 比 §65 慢 ~1.6×，故只采信同族相对
+      排序」——把它从**诚实标注**推进到**归因**：8 B 溢出从哪来？它是不是 §66 plain 慢的原因？抬掉它
+      能否收回？见 `docs/04-experiments.md` **§67**，源码沿用 `src/worker_carrier_cpasync_ring.cu`
+      （只新增 `MINB=6/4` 实例化与 `regs` 子命令）、脚本 `harness/carrier_reg_budget.sh`、原始输出
+      `harness/carrier_reg_budget.out.txt`（目标卡 H100/sm90a、**自动选最闲 device**、nvcc 13.2、
+      `DW=88`=352 B/task、`K=32`、`PS=8`、`T=256`、`U=4`、`NB=2048`、`MD=65536`=1 MiB/batch、
+      min-of-3；把 `__launch_bounds__(256,MINB)` 的 `MINB∈{8,6,4}` 当**寄存器预算旋钮**，`MINB=8→32` /
+      `6→42` / `4→64` regs/线程）。核心结论：
+      - **§A 溢出归因**：`MINB=8` 下 plain / TMA 各 `localB=8`（溢出），`cp.async` 单缓冲与深环
+        `localB=0`；放宽 `MINB` 后 plain 到 **`MINB=4`（52 regs）**、TMA 到 **`MINB=6`（40 regs）** 才
+        干净 ⇒ **8 B 溢出是 32-reg 上限打的，不是「运行期分支选择载体」**（源码本就是 `if constexpr` +
+        编译期 template）。**载体寄存器耐压序**：`cp.async` 单缓冲/深环（≤32）> TMA（~40）> plain
+        直接读（~52）——**直接寄存器读最耗、SMEM 载体最省**，给 MPK 用 16 B `cp.async` 单缓冲取 task
+        （`persistent_kernel.cuh:1063-1078`）再添一个**寄存器侧**理由。
+      - **§B 修正因果（headline）**：溢出**不是** §66 plain 慢的原因——`MINB: 8→6→4` 把 plain 在
+        `G=100/132` 提速 **1.64×/2.43×、1.59×/2.14×**（收回 §66.9 的 ~1.6×），但**一直 `localB=0`
+        的 `ca1` 与 plain 逐点重合（<1%）且同步变化** ⇒ 主导量是**寄存器预算 → 数据面 ILP**，不是那
+        8 B；与 §60/§61/§72「数据面认每 SM 总线程/ILP，ILP 与占用率是替代品」一致（**降占用率 8→4
+        blk/SM 反把 1 MiB/batch 数据面从 931 抬到 2263 GB/s**）。
+      - **TMA 反向 + 排序稳定**：`tma` 在 `G=100/132` 随 `MINB` 下降**变慢**（1149→927→926），在
+        `G=528/1040` **变快**（1791→2391→2420）——§66.9「TMA/深环在大 `chunk`/大 `MD` 反超 plain」是
+        **配置/占用率耦合**的产物。而**任一固定 `MINB` 内** `ca1 ≈ plain`、`caR` 一致更差——**§66「单缓冲
+        `cp.async ≡ plain`、深环无收益」在三个 `MINB` 下都成立**（尾巴补掉）。
+      - 判据 **C1–C4**、仍差 C5（与 §66 同档）。**已据此修正 ROADMAP「已知坑」**（那条把溢出归到
+        「运行期 `if(wmode==…)` 分支」的说明是**错的**）。**本轮新增实验。**
+
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2035,10 +2065,32 @@
   分支会把寄存器压力顶上去 → **局部溢出（`localB>0`）→ 整核降速**（P78-1/§66.9：plain 路径
   `numRegs=32/localB=8`、`G≤132` 比 §65 同配置慢 ~1.6×）。`if constexpr` + 模板参数可消除；但
   比较深环等同一内核内变体时应只采信**同族相对排序**。
+  **（P79-1/§67 修正）**：上面对溢出来源的猜测（「运行期 `if (wmode==…)` 分支」）是**错的**——源码
+  本就是 `if constexpr` + 编译期 template，`ptxas -v` 只对各实例独立报溢出。真实来源是
+  **`__launch_bounds__(256,8)` 的 32-reg 上限**（`MINB=8`）；放宽 `MINB` 即消除（plain 需 `MINB=4`
+  52 regs、TMA 需 `MINB=6` 40 regs、`cp.async` 单缓冲/深环一直 0 溢出）。且该 8 B 溢出**不是** plain
+  慢的原因（`localB=0` 的 `cp.async` 单缓冲与 plain 逐点重合、同步变快）——主导量是**寄存器预算 →
+  数据面 ILP**。载体寄存器耐压序 `cp.async` > TMA > plain 直接读。比较同一内核内载体变体时，除固定
+  `MINB` 采信同族相对排序外，还须知**排序可能随占用率/配置翻转**（TMA 在大 `G` 反超）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P78-1 完成（1/1）**。补掉 P77-1（§65）**§65.9 明留的尾巴**「**cp.async 是单缓冲**
+- 当前进度：**P79-1 完成（1/1）**。补掉 P78-1（§66）**§66.9 明留的第一条尾巴**「跨二进制 codegen
+  偏移」（plain `numRegs=32/localB=8`、`G≤132` 慢 ~1.6×）：把 `__launch_bounds__(256,MINB)` 的
+  `MINB∈{8,6,4}` 当**寄存器预算旋钮**（32/42/64 regs/线程），对 plain / TMA / `cp.async` 单缓冲 /
+  深环逐一对跑。见 `docs/04-experiments.md` **§67**，源码沿用 `src/worker_carrier_cpasync_ring.cu`
+  （只加 `MINB=6/4` 实例化与 `regs` 子命令）、脚本 `harness/carrier_reg_budget.sh`、原始输出
+  `harness/carrier_reg_budget.out.txt`（目标卡 H100/sm90a、自动选最闲 device、nvcc 13.2、`T=256`、
+  `U=4`、`NB=2048`、`MD=65536`、min-of-3）。核心结论：**(1) 8 B 溢出 = 32-reg 上限（不是运行期
+  分支）**——`MINB=8` 下 plain/TMA 溢出、`cp.async` 不溢出；放宽后 plain 需 `MINB=4`（52 regs）、
+  TMA 需 `MINB=6`（40）；**(2) 载体寄存器耐压序 `cp.async` 单缓冲/深环 > TMA > plain 直接读**
+  （直接读最耗、SMEM 载体最省）；**(3) 溢出不是慢因**——`localB=0` 的 `ca1` 与 plain 逐点重合、
+  同步随 `MINB` 变快（`G=100/132` 提速 1.64×/2.43×、1.59×/2.14×），主导量是**寄存器预算 → 数据面
+  ILP**（降占用率 8→4 blk/SM 反把数据面从 931 抬到 2263 GB/s）；**(4) 排序随配置翻转**——TMA 在
+  大 `G` 反超，但任一固定 `MINB` 内 §66 结论（`ca1 ≡ plain`、深环更差）都成立。**已修正 ROADMAP
+  「已知坑」**（原把溢出归到「运行期 `if(wmode==…)` 分支」的说明是错的）。判据 C1–C4、仍差 C5。
+  **本专题此前 P0–P78 全完成，本轮为其新增的实验增量。**
+- 此前：**P78-1 完成（1/1）**。补掉 P77-1（§65）**§65.9 明留的尾巴**「**cp.async 是单缓冲**
   （快照形态），**未做 `D` 深环预取**（§42 已量『预取增益全在 D=1→2』）」：把 cp.async 从单缓冲升级成
   **`DCA` 槽软件流水深环**（`cp.async.wait_group (DCA-1)`、尾批 `wait_group 0`、逐槽复用
   `__syncthreads()`），接进 §64/§65 的端到端 worker 阶梯。见 `docs/04-experiments.md` **§66**，源码
