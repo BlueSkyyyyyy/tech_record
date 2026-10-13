@@ -13523,3 +13523,135 @@ mbarrier，SMEM 比 `push`/`ring1` 的 `2·sb` 更小 ⇒ **低 `U` 占用率更
   两枚 mbarrier，未测 `expect_tx`（TMA 事务计数）形态；搬运的是合成 `float`、非真实 task tile；
   计时取 min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；本轮未做 ncu 归因
   （结论二的「两次往返」是**时序推断**，未用 `gpu__time_duration` 拆分单次 mbarrier 往返）。
+
+## 90. cluster 跨 SM 交换：把 `mbar` 的 arrive 粒度从「每线程」降到「每 block 一次」——省 arrive 可行，但被每 round 的 `__syncthreads` 吃掉（P165-1）
+
+本节补掉 §89.7 明留的第一条尾巴——`mbar`（§89 的「环形槽 + 每槽 cluster 作用域 `mbarrier` 的
+release/done，零 `cluster.sync`」）是**每线程**每槽 arrive（`count=TH`，每 round 每 block 最多
+`2·TH` 次跨 SM arrive），**未测「每 block 一次 arrive（`count=1`）+ `__syncthreads` 包裹」的省
+arrive 形态**。本节问：**把每 round 的 512 次远端 arrive 压到 2 次，值不值得？** 语义、拓扑、
+数据量与 §89 `mbar` 逐字相同，**唯一设计变量 = arrive/等待的粒度**：数据由全 block 协作写、
+`__syncthreads()` 后由 `tid0` 单点远端 arrive；消费端 `tid0` 单点 `try_wait`、`__syncthreads()`
+后全 block 读。代价是每 round 多出 3–4 个 `__syncthreads()`。
+
+源码复用 `src/cluster_concurrency.cu`（**新增两条载体 `mbarb`（缺席 arrive + CUTLASS 同款
+suspend-hint）与 `mbarb0`（同 mbarb，但单线程等待用 `try_wait` hint=0）**，不改
+`pull`/`push`/`pulls`/`ring`/`ring1`/`mbar` 语义），脚本 `harness/cluster_mbar_bulk.sh`，原始输出
+`harness/cluster_mbar_bulk.out.txt`（目标卡 H100 / sm90a、**固定空闲 device 6**、nvcc 13.2、
+每配置独立进程以规避 sticky context；计时项 min-of-20 且报 `ok/20`、探针报 `ok/N`）。
+
+被测量载体（每 block 有 `snd`/`rcv` 两块 SMEM；每 block 每 round 移动 `SEG = TH·U = 256·U` 个
+`float` 的**远端字节**，数据量/结果与 §87 `push`/§88 `ring`/§89 `mbar` 逐字相同）：
+- `mbarb`（**新**，环形槽 + 每槽 `mbarrier`、`count=1`，每 block 每 round 只有 `tid0` 各做一次
+  `ready`/`ack` 远端 arrive；写/读由全 block 协作，`__syncthreads()` 包裹；循环内零 `cluster.sync`，
+  末尾一个 teardown `cluster.sync`）。
+- `mbarb0`（**新**，与 `mbarb` 逐字相同，唯一区别 = `tid0` 的 `try_wait` 用 hint=0 持续轮询，
+  而非 §89 `mbar` 的 CUTLASS 同款 10 ms suspend-hint）。加它的动机见 §90.4。
+- 对照载体 `mbar`（§89：每线程 arrive，`count=TH`）、`ring1`（§88：环形槽 + 单次 `cluster.sync`/
+  round）、`push`（§87：双 `cluster.sync`/round）。
+
+### 90.1 §A 资源表：`mbarb`/`mbarb0` 与 `mbar` 逐项相同（SMEM/寄存器同档）
+
+`sb=32KB, T=256`（完整表见 `.out.txt` §A）：
+
+```
+  载体    U=1            U=2            U=4            U=8            U=16
+  mbar   regs=18 occ=6  regs=18 occ=5  regs=18 occ=4  regs=26 occ=3  regs=32 occ=3
+  mbarb  regs=18 occ=6  regs=18 occ=5  regs=20 occ=4  regs=25 occ=3  regs=32 occ=3
+  mbarb0 regs=18 occ=6  regs=18 occ=5  regs=20 occ=4  regs=25 occ=3  regs=32 occ=3
+  ring1  regs=31 occ=3  regs=32 occ=3  regs=32 occ=3  regs=32 occ=3  regs=32 occ=3
+```
+
+`mbarb`/`mbarb0` 与 `mbar` 是**资源同档**对照（`U=1` 都 18 regs/occ=6、`U=8` 25 vs 26 regs/occ=3），
+且三者都因 `rcv` 只留 `S` 个槽 + mbarrier 标志区而比 `ring1`/`push` 的 `2·sb` SMEM 更小、低 `U`
+占用率更高。故 `mbarb` vs `mbar` 的吞吐差**只能归因 arrive 粒度 + `__syncthreads`**。
+
+### 90.2 §B（Q1）`mbarb`/`mbarb0` 稳定到 `grid=1056`（与 §89 `mbar`/§88 `ring1` 同档）
+
+`C=2, U=8, rounds=64`，单发/重复探针扫 `grid`：`mbarb0`（`X`）与 `mbarb`（`Y`）在
+`grid=2/16/32/64/132/264/528/792/1056` **全部 `1/1 ok`**、重复 3 发 `3/3 ok`，与 §89 `mbar`、
+§88 `ring1` **逐点同档**（对照组见 `.out.txt` §B）。
+
+⇒ **「每 block 一次 arrive」的省 arrive 形态同样可行且稳定**，没有引入 §88 `ring`（纯 `volatile`
+握手）那类 `unspecified launch failure`。
+
+### 90.3 §C（Q2 headline）但省 arrive 是五种载体里**最慢的一个**：`__syncthreads` 吃掉收益
+
+`grid=264`，min-of-20，五载体对跑（完整见 `.out.txt` §C，下表取 `C=2`，单位 GB/s 远端）：
+
+```
+  C=2      U=1     U=2     U=4     U=8     U=16
+  mbarb    112.8   221.5   438.2   829.4   1418.4
+  mbarb0   112.9   222.4   429.6   826.2   1415.8
+  mbar     166.9   326.0   603.9  1093.6   1876.5
+  push     216.7   424.6   746.8  1367.5   2195.6
+  ring1    328.7   524.7   967.2  1621.8   2456.9
+```
+
+（`C=8` 同序，见 `.out.txt` §C；大 grid 528/1056 同形，见 §90.4。）
+
+- `mbarb ≈ mbarb0`（每 `U` 差 ≤2%，同族内噪声），故**hint 与否在干净机器上不影响吞吐**（见 §90.4）。
+- **`mbarb` 在每个 `U` 上都最慢**：`U=1` 113（vs `mbar` 167、`push` 217、`ring1` 329）、`U=8` 829
+  （vs 1094/1368/1622，`ring1/mbarb` = **1.96×**）、`U=16` 1418（vs 1877/2196/2457）。即 **`mbar` >
+  `mbarb` 在每个 `U` 成立**：把每 round 的 `2·TH=512` 次远端 arrive 压到 2 次，**被多出的 3–4 个
+  `__syncthreads()` 完全吃掉还倒亏 25–50%**。
+- 机制：`mbar` 的每线程 arrive 与数据写是**同一线程的程序序**，`arrive.release` 直接发布该线程的
+  写、无需块内会合；`mbarb` 却必须在「写完」与「单点 arrive」之间、以及「单点等」与「全块读」
+  之间各插一道 `__syncthreads()`（每 round 3 道，`m==0` 时少一道），把 `256` 线程反复拉齐。
+  **在这是「延迟受限的跨 SM ping-pong」（§89.3 已证每 round 串两次依赖往返），`__syncthreads`
+  的会合延迟比远端 arrive 的条数更值钱**。
+
+### 90.4 §D/§F hint 敏感性：干净机器上 `Q≈Z`，但开发期一个受扰窗口里 `mbarb`（带 hint）出现 ~15× 塌陷
+
+- **干净对照（`.out.txt` §F）**：`C=2 grid=264 U=8` 连跑 6 次，`mbarb`（`Q`，带 hint）与 `mbarb0`
+  （`Z`，hint=0）**都稳定在 ~2605 ns/lap（~828 GB/s）**、逐点重合。
+- **开发期观察（不在本次提交的 `.out.txt` 里、仅记录）**：同一台机器另一次会话里，`mbarb`（带
+  CUTLASS 同款 10 ms suspend-hint）在**完全相同的配置**下出现**性能双模态**——多数进程
+  `~39750 ns/lap`（≈15× 慢，数值与 `ok=20/20` 全正确）、偶发 `~2620 ns/lap`；同一窗口里
+  `mbarb0`（hint=0）与 `mbar` 都保持稳定快。当时把 `tid0` 的 `try_wait` 从 hint 改成 0 后
+  立即恢复稳定。
+- **结论（只作 caveat、不作 headline）**：`mbar` 每槽有 `256` 个线程在等，SM 一直在轮询、对
+  「单线程等待 + 长 suspend-hint」的调度不敏感；`mbarb` 只有 `tid0` 一个等待线程，**若沿用为
+  每线程形态调的 10 ms hint，在外部占用波动下该线程可能长时间不被唤醒**。该效应**在本次
+  干净会话复现不出来**（`Q≈Z`），故记为**「suspend-hint 与等待粒度耦合」的工程警示**，并保留
+  `mbarb0`（hint=0）作为稳健默认，而非宣称一个可复现的固有 15× 代价。
+
+### 90.5 §E 环深 `S` 不是一阶旋钮（与 §89.5 同结论）
+
+`mbarb0`，`C=2, grid=264, rounds=64`，扫 `S∈{1,2,4,8}`：
+
+```
+   U=1   S=1 111.3 | S=2 112.9 | S=4 112.8 | S=8 112.6  GB/s
+   U=8   S=1 817.5 | S=2 825.8 | S=4 827.0 | S=8 826.2  GB/s
+```
+
+吞吐几乎不动（`U=1` 极差 1.4%、`U=8` 1.2%）——每 round 的固定代价是「单点等 + 会合」的往返，
+背压 `ack` 等待很少绑定，`S` 摊薄不了它。
+
+### 90.6 §G 结论、判据与局限
+
+- **结论一（headline）**：`mbar` 的「省 arrive」形态（每 block 一次 arrive，`count=1` +
+  `__syncthreads` 包裹，`mbarb`/`mbarb0`）**可行、稳定、逐位正确**（`grid≤1056`、`U≤16` 全稳），
+  但**是五种载体里最慢的一个**——把每 round 的 512 次远端 arrive 压到 2 次，**被每 round 3–4 个
+  `__syncthreads()` 完全抵消并倒亏 25–50%**（`U=8`：`mbarb` 828 vs `mbar` 1094 vs `ring1` 1622）。
+  ⇒ **「更少的 arrive」不等于「更快」**：在延迟受限的跨 SM ping-pong 里，**块内会合（`__syncthreads`）
+  比远端 arrive 的条数更贵**。
+- **结论二（工程警示）**：**`mbarrier` 的 suspend-hint 必须与等待粒度匹配**。为「每线程都等」调的
+  10 ms hint 用在「只有 `tid0` 等」的形态上，本机在受扰窗口出现过 ~15× 的性能塌陷（数值仍正确）；
+  干净会话复现不出（`Q≈Z`），故只作 caveat。稳健写法是**单线程等待用 `try_wait` hint=0 持续轮询**
+  （`mbarb0`）。
+- **结论三**：环深 `S` **不是**一阶旋钮（与 §89.5 同）。
+- **对 MPK / 生产案例的印证**：MPK 的 ring barrier / event queue（`docs/12` §4–§7）与 DeepGEMM
+  symmetric memory 的 ring barrier（`docs/17` §3）用的是「**每步/每格一个硬件同步点 + 环形槽降频 +
+  批量搬运**」，而**不是**「每槽每线程一对 mbarrier」、也不是「每 block 一次 arrive 全块会合」——
+  本节从硬件原语层补上理由：前者（`ring1` 的单次 `cluster.sync`/round）在延迟受限区间**比两种
+  mbarrier 细粒度形态都快**（`ring1/mbarb` 1.96×、`ring1/mbar` 1.48× @U=8）；细粒度 mbarrier 通道
+  虽能「零 `cluster.sync`」（§89），但其每 round 的两笔依赖往返 + 会合开销把收益吃回。
+- **判据（C1–C5，`docs/00` §3）**：五载体均单常驻 kernel、设备侧推进、`cluster.sync`/`mbarrier`
+  细化 **C4**；**仍不是 C5**（无固定角色 worker/scheduler 动态派发，与 §18–§23/§86–§89 同档）。
+- **局限（诚实标注）**：只测 H100/sm90a（DSM 的真正家是 SM100 2SM，本机不可执行）；`mbarb` 的
+  「每 block 一次 arrive」用 `__syncthreads` 会合，未测「每 warp 一次 arrive」或「只用一个 warp
+  arrive」的中间形态；§90.4 的双模态**未在受控条件下重复**（依赖当时同一张卡上的外部负载），
+  只作 caveat；搬运的是合成 `float`、非真实 task tile；计时取 min-of-20，绝对值受同机 HBM/调度
+  噪声影响，**只采信同族内相对排序**；未做 ncu 归因（§90.3 的「`__syncthreads` 主导」是
+  「资源同档 + 单变量改变」的对照推断）。
