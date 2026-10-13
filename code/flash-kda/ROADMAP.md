@@ -681,6 +681,23 @@
       选项 (a) **关闭为空结论**——手写 mbarrier 已到该结构上限；选项 (b)「直接接受 Triton 版」是正确路线；
       CUTLASS 的价值在**稳健/可维护**（天然确定、代码更短），不在性能。目标卡剩余投入应去**链级 B2/B3**。
 
+- [x] **P7-42** 把两条**分别收敛**的反向优化**合成一条链**（此前从未同时出现）：CUDA B1 只在 §42 落
+      过链（那条链用**未融合** B2/B3），B2/B3 融合只在 §33 落过链（那条链用 **Triton** pipe B1）。新增
+      `harness/check_bwd_cudab1_fused_e2e.py`（`harness/check_bwd_cudab1_fused_e2e.out.txt`，空闲卡）+
+      `docs/07` §45。拼成 `dAv -> CUDA B1(dht,NSTAGE) -> fused B2+B3 -> reverse cumsum`（三变体
+      `cu`=CUDA+未融合、`fu`=Triton+融合、`cf`=CUDA+融合）。**Part A**：`cf` vs FLA 六项 worst-case
+      `dq 3.417e-3/dk 3.301e-3/dv 6.795e-3/dbeta 6.012e-3/dg 7.054e-3/dh0 9.365e-3` = 与 §25/§26/§42
+      **逐值一致**（tf32/bf16 底噪）；位级签名证实归因——`cf` vs `fu` 的 `dq`/`dh0`、`cf` vs `cu` 的
+      `dv`/`dh0` **逐位相同（max_abs=0）**（`dv/dh0` 由 B1 定、`dq/dk/dg/dbeta` 由 B2/B3 形式定）。
+      **Part B（关键）**：(1) **两条优化可加**——`cf` 在**所有** shape 优于 `cu`（`cf/cu` **0.67–0.71×**，
+      融合在 CUDA B1 之上再砍 ~30%，非零和）；(2) **但最优 B1 随 shape 交叉**——`cf/fu` 只在大 shape
+      取胜（`B8T2048H8` **0.91×**，dev 1537→1402），小 shape **1.05–1.16× 略慢**，根因＝B1 单核头对头
+      （CUDA B1@BT=16 小 grid 40.8/77.9/22.8 vs Triton 34.9/61.7/19.0，大 shape 才 184.2 vs 317.9=1.73×）；
+      (3) `NSTAGE≥3` 最优（`cf1` 明显最慢）。两条路线 `dev/FLA` 都只 **0.31–0.37×**（整链反向比 FLA 反向
+      dev 快 ~2.7–3.2×，且不含其前向重算）。**结论**：目标卡 CUDA 反向最终形态＝`dAv→B1→融合 B2/B3→
+      反向 cumsum`，**B1 按 grid 切换实现、B2/B3 一律融合**；合成实验（本轮新增方法学）证明可加、并暴露
+      单链看不到的「B1 随 shape 切换」部署约束；剩余大头＝把融合 B2/B3 从 Triton 搬成 K2 形状 CUDA。
+
 ### P8 小结 / 一页纸
 
 - [x] **P8-1** `docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总
@@ -738,8 +755,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-41 补测**。
-  - P6-9（本轮）：**关闭 §5.3 最后一条精度待验证（$P$/`Akk` 的存储精度）**——受控消融「反向 B2 读到的
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-42 补测**。
+  - P7-42（本轮）：**把两条分别收敛的反向优化合成一条链**——CUDA B1（§15–§41）此前只在 §42 落过链
+    （那条链用**未融合** B2/B3），B2/B3 融合（§31–§33）此前只在 §33 落过链（那条链用 **Triton** pipe B1），
+    **两条最新收获从未同时出现**。新增 `harness/check_bwd_cudab1_fused_e2e.py`
+    （`harness/check_bwd_cudab1_fused_e2e.out.txt`，空闲卡）+ `docs/07` §45；拼成
+    `dAv -> CUDA B1(dht,NSTAGE) -> fused B2+B3 -> reverse cumsum`（三变体 `cu`=CUDA+未融合、
+    `fu`=Triton+融合、`cf`=CUDA+融合）。**Part A**：`cf` vs FLA 六项 worst-case `dq 3.417e-3/dk 3.301e-3/
+    dv 6.795e-3/dbeta 6.012e-3/dg 7.054e-3/dh0 9.365e-3` 与 §25/§26/§42 **逐值一致**；位级签名
+    （`cf` vs `fu` 的 `dq`/`dh0`、`cf` vs `cu` 的 `dv`/`dh0` **逐位 0**）证实「`dv/dh0` 由 B1 定、
+    `dq/dk/dg/dbeta` 由 B2/B3 形式定」。**Part B**：(1) **两条优化可加**——`cf/cu` **0.67–0.71×**（全 shape，
+    融合在 CUDA B1 之上再砍 ~30%）；(2) **最优 B1 随 shape 交叉**——`cf/fu` 只在大 shape 胜（`B8T2048H8`
+    **0.91×**），小 shape **1.05–1.16× 略慢**（CUDA B1@BT=16 小 grid 慢、大 shape 184.2 vs 317.9=1.73×）；
+    (3) `NSTAGE≥3` 最优。两条路线 `dev/FLA` 均 **0.31–0.37×**（比 FLA 反向 dev 快 ~2.7–3.2×）。**结论**：
+    目标卡 CUDA 反向最终形态＝`dAv→B1→融合 B2/B3→反向 cumsum`，**B1 按 grid 切换、B2/B3 一律融合**；
+    剩余大头＝把融合 B2/B3 从 Triton 搬成 K2 形状 CUDA。**方法学（新）**：多条分别收敛的优化必须做合成实验。
+  - P6-9（上轮）：**关闭 §5.3 最后一条精度待验证（$P$/`Akk` 的存储精度）**——受控消融「反向 B2 读到的
     $P$ 存 fp32 vs bf16」。新增 `harness/check_bwd_p_dtype.py`（`harness/check_bwd_p_dtype.out.txt`）+ `docs/06` §6.11。
     **Part A**（dtype 审计）：FLA 前向 `Akk` 开成 `k.dtype`（`chunk_intra.py:817-819`），fp32 入→fp32、bf16 入→bf16，
     **生产时 $P$ 本就是 bf16**（与目标卡 K1 的 bf16 `kINV` 一致）；并更正 `docs/06` §3.3 把 `302-303` 的
@@ -1309,7 +1340,15 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-41 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-42 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-42（`docs/07` §45）把两条分别收敛的反向优化合成一条链**：CUDA B1 与 B2/B3 融合此前从未同时在
+    一条链里（§42 链用未融合 B2/B3、§33 链用 Triton B1）。拼成 `dAv -> CUDA B1 -> fused B2+B3 -> 反向
+    cumsum`（`harness/check_bwd_cudab1_fused_e2e.py`）。**Part A**：`cf` vs FLA 六项 worst-case 与
+    §25/§26/§42 **逐值一致**、位级签名（`dq/dh0` vs `fu`、`dv/dh0` vs `cu` 逐位 0）。**Part B**：两条
+    优化**可加**（`cf/cu` **0.67–0.71×**），但**最优 B1 随 shape 交叉**（`cf/fu` 大 shape 0.91×、小 shape
+    1.05–1.16×），`NSTAGE≥3` 最优；两条路线 `dev/FLA` 均 **0.31–0.37×**。**结论**：最终形态＝`dAv→B1→
+    融合 B2/B3→反向 cumsum`，B1 按 grid 切换、B2/B3 一律融合；剩余大头＝把融合 B2/B3 搬成 K2 形状 CUDA。
+    **新增方法学**：多条分别收敛的优化必须做**合成实验**（本轮既证明可加，又暴露单链看不到的部署约束）。
   - **P7-41（`docs/07` §44）关闭 §24.5/§36 的「换 CUTLASS `PipelineTmaAsync`」——空杠杆**：`-DB1T_CUTLASS`
     只换 pipeline 管理，`cut`≡`base`/`cut2`≡`hnd` **逐位相同**、`cut2/hnd` **0.985–1.003**（零性能）、
     `ncu` 逐指标重合（`wait` 1.42→1.38 纹丝不动）。**手写 mbarrier 已到该结构上限**；§24.5 选项 (b)「直接
