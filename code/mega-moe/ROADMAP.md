@@ -2510,7 +2510,32 @@
        内存地基）、libdw 8/8 + trace 带真实行号、`LazyInit` 工厂只跑一次、`get_shape/get_data_ptr`
        四条全过、版本真实值 2.12/13020；**负样本**伪造 `CUDA_VERSION=11000` 被 `compatibility.hpp:11`
        `static_assert` 拦下。**30 PASS / 0 FAIL + 1 编译期负样本**。配套博客
-       `content/posts/mega-moe-90-lazy-driver-compat`（索引页新增第 90 篇）。
+        `content/posts/mega-moe-90-lazy-driver-compat`（索引页新增第 90 篇）。
+
+### P81 增量（opt-in，以官方 SF 契约为准核验 host 契约代码）
+
+- [x] **P81-1** **DeepGEMM 官方 SF 契约（`docs/scaling-factor-format.md`）的代码对照与 H100 一致性核验**。
+      第 25 篇讲「SF 怎么被变换」、第 26 篇讲「K-grouped SF 怎么打包」、第 78 篇讲「test_layout.py 的逐位
+      oracle」，但都以实现侧出发；官方 spec 文件是 SF 张量契约的 source of truth，却从没被这样对读。
+      本篇补 spec §1.1 / §2 / §3 / §5.2 / §6.2 这些**契约校验本身**（§4 分派表归第 25 篇、§6.1 MQA 耦合
+      归第 19 篇、§1.2/§7.1 打包位运算归第 25 篇，均不重复）。
+      → `docs/91-sf-contract-cross-api.md`（真实行号核对）：**两条路径**（`csrc/apis/layout.hpp:38-55`，
+      路径 B = 只调一次 `check_sf_layout(..., true, false, torch::kInt)`）、**§1.1 形状公式**
+      （`csrc/utils/layout.hpp:112-119`，`:119` 的三元 `? 1 : 4` 同时表达 fp32/int32 末维）、
+      **§3 预变换 stride 契约**（`utils/layout.hpp:122-130`：group 维紧 packed `:124`、MN-major `:126`、
+      `get_tma_aligned_size`=`align(mn,4)` `:127-128`、`%4==0` `:129`；对照 `math.hpp:23-27` 的
+      `ALIGN_MN=16/4`）、**§5.2 K-grouped 预打包**（`smxx_layout.hpp:286-317`：`gran_k==32` `:293`、
+      `stride(0)>=mn` `:299`、下界 `:312`）、**§6.2 einsum 换回**（`einsum.hpp:268-269` permute SF，
+      naive reshape 破坏 MN-major 撞 `layout.hpp:124`）、**§6.3 Mega MoE 额外要求**
+      （`mega_moe.hpp:177` recipe 钉死 / `:201-204` kInt / `:367` arch 门控；`deep_gemm/mega/__init__.py:112-149`
+      权重变换）。**关键观察**：`check_sf_layout` / `check_k_grouped_packed_ue8m0_tensor` **不含 arch 门控**，
+      故 int32 packed UE8M0 虽是 SM100 专属，其 host 校验层可在 H100 直接跑真实代码。
+      H100 实测 `src/sf_contract_conformance.cu` + `harness/exp_sf_contract_conformance.{sh,out.txt}`：
+      `nvcc -arch=sm_90a` 直接 include 真实头文件，A 组 6 + B 组 5 + C 组 6 + D 组 2 = **19 PASS / 0 FAIL**，
+      每条负用例打印真实 `DGException` 的 `file:line`（`:110/115/117/119/124/126/128/129`、
+      `smxx_layout.hpp:293/299/312/314`），并坐实 C5「预分配更大 buffer 通过」/ D2「naive reshape 后
+      post-permute stride `(1,4,20)` 被拒」。配套博客 `content/posts/mega-moe-91-sf-contract-cross-api`
+      （索引页新增第 91 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2537,8 +2562,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P80 各增量完成（P15-1…P41-1、P42-1…P80-1）。**
-  本轮 P80-1：新建 `docs/90-lazy-driver-compat.md`
+- 当前进度：**P0~P14 全部完成；P15~P81 各增量完成（P15-1…P41-1、P42-1…P81-1）。**
+  本轮 P81-1：新建 `docs/91-sf-contract-cross-api.md`（+`src/sf_contract_conformance.cu`、
+  `harness/exp_sf_contract_conformance.{sh,out.txt}`）——以 DeepGEMM 官方 SF 契约
+  `docs/scaling-factor-format.md` 为准，核验 host 契约代码：两条路径（自动变换 vs 预变换只校验）、
+  §3 预变换 int32 stride 契约（MN-major + TMA 对齐）、§5.2 K-grouped 预打包（仅 gran_k=32、下界 `>=`）、
+  §6.2 einsum「按 post-permute 坐标变换再换回」（naive reshape 撞 `layout.hpp:124`）、§6.3 Mega MoE
+  四条更硬要求。**关键点**：`check_sf_layout` / `check_k_grouped_packed_ue8m0_tensor` 不含 arch 门控，
+  int32 packed UE8M0 虽是 SM100 专属，host 校验层可在 H100 直接跑真实代码；**19 PASS / 0 FAIL**。
+  索引页新增第 91 篇。
+  上一轮 P80-1：新建 `docs/90-lazy-driver-compat.md`
   （+`src/lazy_driver_compat.cu`、`harness/exp_lazy_driver_compat.{sh,out.txt}`）——补齐两库的
   **「启动前地基」**：DeepEP `csrc/utils/lazy_driver.hpp`（dlopen libcuda + `DECL_LAZY_CUDA_DRIVER_FUNCTION`
   宏 + `EP_CUDA_STRINGIFY` 别名展开）与 `csrc/utils/tensor.hpp`（`get_shape`/`get_data_ptr`）；DeepGEMM
@@ -3462,7 +3495,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P80 已完成（最新 **P80-1 两库的「启动前地基」：驱动符号懒加载 / 版本闸门 / 张量视图 helper**：
+- **下一步**：P0~P81 已完成（最新 **P81-1 官方 SF 契约的代码对照与 H100 一致性核验**：
+  以 `docs/scaling-factor-format.md` 为准核验 host 契约代码——两条路径（自动变换 vs 预变换只校验）、
+  §3 int32 预变换 stride 契约、§5.2 K-grouped 预打包（仅 gran_k=32、下界 `>=`）、§6.2 einsum
+  「按 post-permute 坐标变换再换回」、§6.3 Mega MoE 四条更硬要求；`check_sf_layout` /
+  `check_k_grouped_packed_ue8m0_tensor` 无 arch 门控，H100 直接 include 真实头文件跑真实契约函数，
+  **19 PASS / 0 FAIL**（负用例打印真实 `file:line`）；详见上）。
+  上一轮 P80-1：P0~P80 已完成（最新 **P80-1 两库的「启动前地基」：驱动符号懒加载 / 版本闸门 / 张量视图 helper**：
   DeepEP `csrc/utils/lazy_driver.hpp` + `tensor.hpp`；DeepGEMM `csrc/utils/compatibility.hpp` + deep_jit
   `utils/lazy.hpp` / `backend/cuda/driver.hpp` / `utils/exception.hpp`；以及最后一个未覆盖文件
   `sm100_locality_domain.hpp`。两库两套 dlopen/dlsym 宏对照、`EP_CUDA_STRINGIFY` 别名展开、`LazyInit<T>`

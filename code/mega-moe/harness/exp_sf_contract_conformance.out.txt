@@ -1,0 +1,46 @@
+== 环境坐标 ==
+057ca59 Public release 26/09/30 (#462)
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+Build cuda_13.2.r13.2/compiler.37668154_0
+layout.hpp
+smxx_layout.hpp
+
+== 编译（nvcc 直接 include 真实头文件 + torch）==
+build OK
+
+== P81-1 SF 契约一致性核验（H100/sm90，真实 host 头文件）==
+  csrc/utils/layout.hpp / csrc/jit_kernels/impls/smxx_layout.hpp
+
+== Part A: spec §1.1 形状公式（fp32 未变换 SF）==
+  [PASS] A1 fp32 [1000,4] 通过（size(-1)=ceil_div(512,128)=4）
+  [PASS] A2 fp32 末维=5 被拒（layout.hpp:119 ceil_div(k,gran_k)） — Assertion error (~/github/DeepGEMM/csrc/utils/layout.hpp:119): sf.size(-1) == ceil_div(k, gran_k * (sf_dtype == torch::kFloat ? 1 : 4))
+  [PASS] A3 gran_mn=128 → size(-2)=ceil_div(1000,128)=8 通过
+  [PASS] A4 num_groups=3 且 dim=3 通过（layout.hpp:115/117）
+  [PASS] A5 size(-3)=2 != num_groups=3 被拒（layout.hpp:117） — Assertion error (~/github/DeepGEMM/csrc/utils/layout.hpp:117): sf.size(-3) == num_groups.value()
+  [PASS] A6 dim=2 != num_groups+2 被拒（layout.hpp:115） — Assertion error (~/github/DeepGEMM/csrc/utils/layout.hpp:115): sf.dim() == static_cast<int>(num_groups.has_value()) + 2
+
+== Part B: spec §3 预变换 int32 契约（MN-major + TMA 对齐）==
+  (mn=6, k=128, gran_k=32 → packed_sf_k=1, align(mn,4)=8)
+    strides = (1, 8)
+  [PASS] B1 int32 MN-major [6,1] stride(1,8) 通过（:122-129）
+  [PASS] B2 type_check=kInt 拒绝 fp32（layout.hpp:110；MegaMoE 用同一断言） — Assertion error (~/github/DeepGEMM/csrc/utils/layout.hpp:110): sf.scalar_type() == type_check.value()
+  [PASS] B3 stride(-2)!=1（K-major 的 [mn,4] 连续）被拒（:126） — Assertion error (~/github/DeepGEMM/csrc/utils/layout.hpp:126): sf.stride(-2) == 1 or mn == 1
+  [PASS] B4 stride(-1)=6 < align(6,4)=8 被拒（:128） — Assertion error (~/github/DeepGEMM/csrc/utils/layout.hpp:128): sf.stride(-1) >= compact_stride
+  [PASS] B5 stride(-1)=10 % 4 != 0 被拒（:129） — Assertion error (~/github/DeepGEMM/csrc/utils/layout.hpp:129): sf.stride(-1) % 4 == 0
+
+== Part C: spec §5.2 K-grouped 预打包 int32（gran_k 必须=32）==
+  ks={2048,4096,1024}, gran_k=32 → required packed_sf_k=sum ceil_div(k,128)=56
+  [PASS] C1 int32 [56,8] 连续 通过（:299 stride(0)>=mn, :300 %4==0）
+  [PASS] C2 gran_k=128 被拒（:293；gran_k=128 必须走 float32） — Assertion error (~/github/DeepGEMM/csrc/jit_kernels/impls/smxx_layout.hpp:293): gran_k == 32
+  [PASS] C3 stride(0)=mn-4 < mn 被拒（:299） — Assertion error (~/github/DeepGEMM/csrc/jit_kernels/impls/smxx_layout.hpp:299): sf.stride(0) >= mn and sf.stride(1) == 1
+  [PASS] C4 packed_sf_k=55 < required=56 被拒（:312） — Assertion error (~/github/DeepGEMM/csrc/jit_kernels/impls/smxx_layout.hpp:312): packed_sf_k >= required_packed_sf_k
+  [PASS] C5 packed_sf_k=60 > required（预分配更大 buffer）通过（:312 是 >=）
+  [PASS] C6 ks_cpu 空且 use_psum=false 被拒（:314） — Assertion error (~/github/DeepGEMM/csrc/jit_kernels/impls/smxx_layout.hpp:314): use_psum_layout
+
+== Part D: spec §6.2 einsum 预变换 SFA 的「换回」契约 ==
+  b=5 h=4 r=512 → packed_sf_k=4, align(b,4)=8
+  [PASS] D1 换回后的 [h,b,packed] 满足 stride(-3)==stride(-1)*size(-1)（:124）
+    naive reshape 后 post-permute strides = (1, 4, 20)
+  [PASS] D2 2D transform + reshape 破坏 MN-major，被拒（:124/:126） — Assertion error (~/github/DeepGEMM/csrc/utils/layout.hpp:124): sf.stride(-3) == sf.stride(-1) * sf.size(-1)
+
+== 汇总：19 PASS / 0 FAIL ==
