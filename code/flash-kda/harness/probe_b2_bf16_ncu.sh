@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+# P7-73: ncu attribution of the bf16-native operand entry for the K2-shaped mma CUDA B2
+# GEMM core (b2_mma_probe.cu `-DB2M_BF16`).  Question: does staging the five streamed
+# operands (do/vn/dv/h/dh) as bf16 halve the DRAM read and move the kernel off its DRAM
+# bound, and is the timing win (Part B: 0.73x at B8) explained by bytes (not occupancy)?
+#
+# NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
+#
+# Usage (inside kernel_lab):
+#   bash .../probe_b2_bf16_ncu.sh > .../probe_b2_bf16_ncu.out.txt 2>&1
+
+set -uo pipefail
+
+DIR=~/proj/tech_record/code/flash-kda
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2}
+cd "$DIR"
+
+echo "== prebuild (outside ncu) =="
+nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared \
+    "$DIR/harness/b2_mma_probe.cu" -o /tmp/b2_bf16_base.so || exit 1
+nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_BF16 \
+    "$DIR/harness/b2_mma_probe.cu" -o /tmp/b2_bf16_native.so || exit 1
+
+SECTIONS="--section SpeedOfLight --section Occupancy --section SchedulerStats \
+--section WarpStateStats --section LaunchStats --section MemoryWorkloadAnalysis"
+
+METRICS="sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active,\
+launch__registers_per_thread,launch__occupancy_limit_registers,\
+launch__occupancy_limit_shared_mem,\
+sm__warps_active.avg.pct_of_peak_sustained_active,\
+smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,\
+smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,\
+smsp__average_warps_issue_stalled_wait_per_issue_active.ratio,\
+l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum,\
+l1tex__data_pipe_lsu_wavefronts_mem_shared.sum,\
+lts__throughput.avg.pct_of_peak_sustained_elapsed,\
+dram__throughput.avg.pct_of_peak_sustained_elapsed,\
+dram__bytes_read.sum,dram__bytes_write.sum,lts__t_bytes.sum,\
+sm__throughput.avg.pct_of_peak_sustained_elapsed"
+
+tag() { sed -e '/^==PROF==/d' -e '/^==WARNING==/d'; }
+
+echo "GPU: $(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)"
+echo "ncu: $(ncu --version 2>/dev/null | grep -i 'version' | head -1)"
+echo "torch: $(python -c 'import torch; print(torch.__version__)' 2>/dev/null)"
+
+for MODE in base bf16; do
+  echo ""
+  echo "################################################################################"
+  echo "# K2-shaped mma CUDA B2 GEMM core  b8t2048h8  -- mode=$MODE"
+  echo "################################################################################"
+  ncu -k "regex:b2mma_kernel" -c 1 --launch-skip 1 $SECTIONS --metrics "$METRICS" \
+      python "$DIR/harness/ncu_b2_bf16_driver.py" --mode "$MODE" --shape b8t2048h8 --reps 3 2>&1 \
+      | tag
+done
+
+echo ""
+echo "# K2-shaped mma CUDA B2 GEMM core  t512h4  -- mode=base/bf16"
+for MODE in base bf16; do
+  echo "----------------------------------------------------------------- t512h4 $MODE"
+  ncu -k "regex:b2mma_kernel" -c 1 --launch-skip 1 $SECTIONS --metrics "$METRICS" \
+      python "$DIR/harness/ncu_b2_bf16_driver.py" --mode "$MODE" --shape t512h4 --reps 3 2>&1 \
+      | tag
+done
+
+echo ""
+echo "DONE"

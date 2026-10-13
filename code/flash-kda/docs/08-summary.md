@@ -176,7 +176,7 @@ B3（`intra`，`docs/06` §6.7 P6-5）**均已做成最小可运行 Triton kerne
 FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支路全覆盖；且 P6-8（`06` §6.10）
 已把整条链**架在 FlashKDA 自己的 K1 workspace 上端到端跑通**（六项梯度对 autograd 最坏 6.4e-3）。
 剩余的是把最小 kernel 工程化为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、
-`CHUNK=16`）；**该工程化已由 P7-13…P7-71 完成并收口**——B1 做成 K2 形状手写 CUDA（TMA 输入 + TMA store +
+`CHUNK=16`）；**该工程化已由 P7-13…P7-73 完成并收口**——B1 做成 K2 形状手写 CUDA（TMA 输入 + TMA store +
 `fence.proxy.async`），B2/B3 做成 K2 形状 CUDA 六段生产核（逐位无损、但整核非净赢），最终部署取
 `cf`（`dAv→CUDA-B1→融合 Triton B2/B3→反向 cumsum`），见文末「K2 形状 CUDA B2 反向终局」段。**B1 的 CHUNK=16 粒度损失**已由 P7-10 通过
 「从 16-chunk workspace 免重算恢复 64-chunk 操作数」消掉（B1@64 快 2.1–2.3×，但 torch 原型恢复 ~ms 是
@@ -404,3 +404,10 @@ P7-44 把「放弃 `tl.dot` 手写 SIMT」读法**证伪**（慢同 op Triton �
 **CUDA B2 生产核**（六段单 launch）**正确、逐位可核验，但在部署链上不是净赢（~1.6–1.7×），不作为默认**——
 它每一段都「CUDA 赢 Triton」，六段叠进同一个 1 block/SM、tensor 3%、发射受限的核后，反被 Triton「中间量留寄存器
 \+ 融进一张 `tl.dot` 图」打败。**核心判据**：段级赢**不能外推**到整核，凡「把独立核合起来」必须以**整链 `dev`** 收口。
+
+**P7-72 / P7-73（`docs/07` §75/§76）——研究形态收尾与「bf16 原生入口」**：§75（P7-72）关闭 `BVK=128`（数值逐位
+但无收益：NS 被迫=1 + 无 V-tile 并行）与 `atom64` 的 L2 +0.04 GB 归因（**NAT×NS 相关的 atom 边界 L2 重触**，
+srcunit/DRAM/全局读三者恒定）。§76（P7-73）兑现「**bf16 原生入口**」：B2 GEMM 核的五个 streamed 操作数改
+bf16 staging（mma 保持 `m16n8k8.tf32`，因 **bf16 ⊂ tf32** 故与真 bf16 mma 逐位），与 fp32 核在 `bf16.float()`
+上**逐位相同**（`.float()` 往返是 drop-in）、大 shape kernel **0.73×**、**DRAM 读精确减半**（1.28 GB→637 MB）。
+即 §67.4「`.float()` 往返是部署税」里 **B2 侧那部分可用 bf16 入口消掉**。（仅覆盖非 TMA 基础 GEMM 核，未落链。）

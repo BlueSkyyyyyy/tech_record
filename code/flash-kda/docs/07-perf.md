@@ -7799,3 +7799,101 @@ CUPTI `dev`（kernel-only，µs）：
   否则会把纯 L2 内部重触误当成访存瓶颈（同 §51.6「省字节要落最紧 pipe」的镜像）。
 - **边界**：只测 `BT=16`、`K=V=128`、fp32、`B8T2048H8`（ncu）；`BVK=128` 的 `NSTAGE>1` 因 smem 超限
   不可编译（已由 launcher `rc=-3` 证实，非静默）；`atom128` 的 `dgk` 仍标量列归约。
+
+## 76. B2 K2-mma GEMM 核的 **bf16 原生入口**：五个 streamed 操作数改 bf16 staging——与 fp32 核**逐位相同**、大 shape **0.73×**、DRAM 读**精确减半**（P7-73）
+
+P7-64（§67.4）在把 CUDA B2 生产核落进完整反向链时留了一条明确的部署边界：**`b2_mma_probe.cu` 是
+fp32/tf32 核，落链时 B1 的 bf16 `dh`/`dv2` 必须先 `.float()` 才能喂进来**（一次 elementwise 往返）。
+§67/§72 的默认部署（`cf`）里 Triton B2/B3 直接吃 fp32，也一直走这条转换。ROADMAP 把「**bf16 原生入口**」
+列为触发下一轮的真需求之一。本节给 K2 形状的 **B2 GEMM 核**加上 bf16-native 操作数入口（`-DB2M_BF16`），
+把这条边界第一次量化。
+
+新增 `harness/check_bwd_b2_bf16.py`（`harness/check_bwd_b2_bf16.out.txt`）+ `harness/ncu_b2_bf16_driver.py`
+/ `harness/probe_b2_bf16_ncu.sh`（`harness/probe_b2_bf16_ncu.out.txt`，空闲卡 `CUDA_VISIBLE_DEVICES=2`）。
+
+### 76.1 设计：只在 **staging** 换 bf16，mma 保持 `m16n8k8.tf32`——因为 bf16 ⊂ tf32
+
+`-DB2M_BF16` 只改一处概念：五个 streamed 操作数 `do/vn/dv/h/dh` 在 smem 里按 **bf16** 暂存（`Stage` 的
+数组类型 `float → __nv_bfloat16`、行距 `BVP=BVK+4 → OPS=BVK+8`，一次 `cp.async` 搬 8 个 bf16=16 B），
+`rd()` 从 smem 读 bf16 后 `__bfloat162float` 扩到 fp32，再照旧 `to_tf32` 喂 `mma.sync.m16n8k8.tf32`。
+**关键恒等式**：bf16 的 8 位尾数 ⊂ tf32 的 10 位尾数，故 bf16 值在 tf32 里**精确可表示**——`cvt.rna.tf32`
+对已扩宽的 bf16 是恒等，乘积与「真正 bf16 mma」（`m16n8k16.bf16`）逐位相同，唯一差别是 fp32 累加序。
+因此**不必重写 mma 指令/fragment 布局**（tf32 是 `m16n8k8`、bf16 是 `m16n8k16`、A/B 片段布局不同），
+staging 换成 bf16 即可拿到「减半字节」的全部好处。本轮范围限定为**非 TMA 的 `cp.async` staging + 基础
+GEMM 核**（TMA 需 bf16 张量图与更窄 swizzle；非 GEMM 六段按 fp32 寻址读 staged 操作数，均列为边界）。
+
+### 76.2 Part A：bf16 核在 bf16 操作数上与 fp32 核在 `bf16.float()` 上 **逐位相同**（`max_abs=0`）
+
+四组 shape（`BT=16`，含非整除 `T=250`，torch 参考关 tf32 走真 fp32）：
+
+| 量 | fp32核 vs torch | **bf16核 vs torch(bf16)** | **bf16核 vs fp32核**（吃 `bf16.float()`） |
+|---|---|---|---|
+| `dq` | 3.583e-4 | 5.154e-7 | **0** |
+| `dk` | 3.281e-4 | 4.416e-7 | **0** |
+| `dw` | 3.408e-4 | 6.371e-7 | **0** |
+| `dgk` | 1.628e-7 | 1.334e-7 | **0** |
+
+（最坏 `max_rel`；四组 shape 全部如此。）三点被钉死：
+
+- **`bf16核 vs fp32核` 全 0**：把 B1 的 bf16 出口直接喂 bf16 核（不做 `.float()`）与「`.float()` 后喂
+  fp32 核」**逐位相同**——因为 fp32 核会把 `bf16.float()` 再 `cvt.rna.tf32` 截回同一个 bf16 值，两侧操作数、
+  mma、累加序完全一致。故 **bf16 入口是 drop-in 替换**，不引入任何数值差。
+- **`bf16核 vs torch(bf16)`（~5e-7）比 `fp32核 vs torch`（~3e-4）还紧**：fp32 核那 3e-4 来自把 **fp32
+  输入截到 tf32** 的截断误差；bf16 核的输入本就 ⊂ tf32，**无截断**，只剩 fp32 累加序——bf16 入口反而更贴真 fp32。
+- 含非整除 `T=250`（尾块 pad 行走 `OP_ZERO`）。
+
+### 76.3 Part B：kernel-only `dev`——大 shape **0.73×**，shape 越大越受益
+
+CUPTI `dev`/`wall`（µs，kernel-only）：
+
+| shape | fp32 dev | fp32 wall | bf16 dev | bf16 wall | **bf16/fp32 dev** |
+|---|---|---|---|---|---|
+| `B8 T2048 H8` | 517.5 | 519.9 | **377.4** | 379.2 | **0.729×** |
+| `B2 T1024 H8` | 71.0 | 73.1 | **52.3** | 54.5 | **0.736×** |
+| `T512 H4` | 9.2 | 29.9 | 8.0 | 29.9 | 0.863× |
+| `T250 H3`（非整除） | 8.5 | 30.1 | 7.8 | 30.0 | 0.907× |
+
+收益随 shape 增大（大 shape 是本核的 DRAM-bound regime），小 shape（`wall` 由 host/launch 主导）收益被冲淡。
+
+### 76.4 Part C：静态资源——smem **85.5→47.5 KB（−44%）**、blocks/SM 2→4、零 spill
+
+| | smem | theo blocks/SM | regs | spill |
+|---|---|---|---|---|
+| fp32 | 87552 B（85.5 KB） | 2 | 70 | 0 |
+| **bf16** | **48640 B（47.5 KB）** | **4** | 65 | 0 |
+
+staged 操作数占本核 smem 的绝大部分（`NS=2` stage × 5 操作数），bf16 直接把它们减半。
+
+### 76.5 `ncu`：DRAM 读**精确减半**、不再是 bound；占用率与 tensor 密度随之抬升
+
+`B8 T2048 H8`（同一批操作数，`probe_b2_bf16_ncu.out.txt`）：
+
+| 指标 | base（fp32） | **bf16** | 变化 |
+|---|---|---|---|
+| `dram__bytes_read` | 1.28 GB | **637.57 MB** | **−50.2%（精确减半）** |
+| `dram__bytes_write` | 199.83 MB | 196.02 MB | 基本不变（输出仍是 fp32） |
+| `lts__t_bytes`（L2） | 3.03 GB | **1.56 GB** | −48.5% |
+| DRAM SOL | 84.72% | **65.96%** | 不再是最紧 pipe |
+| L2 SOL | 88.51% | 79.63% | — |
+| tensor 密度 | 7.84% | **10.83%** | ↑ |
+| achieved 占用率 | 24.62% | **36.84%** | smem 87.5→48.6 KB 放开 block limit |
+| `long_scoreboard` | 3.14 | **1.71** | 等 DRAM 的停滞减半 |
+| Duration | 519.39 µs | **377.02 µs** | 0.726×（与 Part B 0.729× 一致） |
+
+**归因干净**：五操作数的理论读取 = `(3·B·T·H·V + 2·B·NT·H·K·V)·4 B` = `(201+1073) MB = 1.27 GB`（fp32），
+bf16 精确减半到 **637 MB**——`ncu` 实测 1.28 GB→637.57 MB **逐值吻合**，故收益**就是这五个操作数的 DRAM 读**
+（以及被它连带减半的 L2 流量），**不是**占用率（占用率是 smem 减半的副产物：DRAM SOL 已降到 66%）。
+`t512h4` 同向：DRAM 读 19.94→9.98 MB、L2 48.08→24.23 MB、Duration 12.51→10.30 µs（DRAM 49.1%→28.9%）。
+
+### 76.6 结论与设计输入
+
+- **「bf16 原生入口」在 B2 GEMM 核上兑现，且是免费的**：与 fp32 核在 `bf16.float()` 上**逐位相同**
+  （drop-in），大 shape kernel **0.73×**，机制是**五操作数 DRAM 读/L2 精确减半**（不是占用率，占用率是 smem
+  减半的副产物）。故 §67.4「`.float()` 往返是部署税」里 **B2 侧那部分可以用 bf16 入口整个消掉**（B1 侧
+  `.float()` 是否也删取决于 B1 的 bf16 出口是否直接接 B2——§31/§39 已证 B1 原生即吐 bf16）。
+- **设计输入**：目标卡 CUDA B2 的操作数路径在部署 dtype 为 bf16 时应走 **bf16-native staging**；它天然与
+  §51/§59/§70 的向量化 store 正交（输出仍 fp32）。
+- **边界（诚实）**：本轮只覆盖**非 TMA 的 `cp.async` staging**与**基础 GEMM 核**；TMA（需 bf16 张量图/更窄
+  swizzle，或 `SWIZZLE_NONE` 的 128 B 行）、非 GEMM 六段（`-DB2M_OUT/DKGB/DA/DB/GATE/SAND/INTRA` 按 fp32
+  寻址读 staged 操作数）**未做**，`-DB2M_BF16` 与它们通过 `#error` 互斥；也**未落进完整反向链**（生产核里
+  `bf16 in → 门控/输出仍 fp32 out` 的组合待测）。本核是研究形态，不改变 §45 的 `cf` 默认部署。

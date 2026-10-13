@@ -948,8 +948,28 @@
       NAT 1/2/4 = **2.35/2.36/2.42**、NAT=2 下 NS 1/2 = **2.36/2.39**，而 **srcunit 读恒 39.85M、DRAM 读
       恒 1.28 GB、l1tex 全局读恒 0** ⟹ §54.5 的 +0.04 GB 确认是 **「atom 边界 L2 重触」**（随 `NAT×NS`
       增大、**不是**线性「每 atom 对 +0.02」），**非 DRAM、非 SM 侧读**。**结论**：目标卡不需要 `BVK=128`，
-      `BVK=64`（NAT=2）仍是原子拆分最优点；新增判据——L2 总字节含重触，须与 DRAM 字节、srcunit 读扇区
-      **分开读**。见 `docs/07` §75。
+       `BVK=64`（NAT=2）仍是原子拆分最优点；新增判据——L2 总字节含重触，须与 DRAM 字节、srcunit 读扇区
+       **分开读**。见 `docs/07` §75。
+- [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
+       （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
+       （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
+       `rd()` 读 bf16 后 `__bfloat162float` 扩到 fp32 再照旧 `to_tf32` 喂 **`mma.sync.m16n8k8.tf32` 不变**。
+       关键恒等式：**bf16(8 位尾数) ⊂ tf32(10 位)**，故 bf16 值在 tf32 里精确可表示、`cvt.rna` 是恒等，
+       与真 bf16 mma 逐位相同（只差 fp32 累加序）——**不必重写 mma 指令/fragment 布局**。范围限**非 TMA 的
+       `cp.async` staging + 基础 GEMM 核**（`#error` 与 TMA/六段互斥）。新增 `harness/check_bwd_b2_bf16.py`
+       （`check_bwd_b2_bf16.out.txt`，空闲卡）+ `harness/ncu_b2_bf16_driver.py` / `harness/probe_b2_bf16_ncu.sh`
+       （`probe_b2_bf16_ncu.out.txt`）+ `docs/07` §76。**Part A**：`bf16核`（吃 bf16 操作数）vs `fp32核`
+       （吃 `bf16.float()`）**四位全逐位相同（`max_abs=0`）**——`.float()` 往返是 drop-in、数值无损；
+       `bf16核 vs torch(bf16)` ~5e-7 **比 `fp32核 vs torch` 的 3e-4 还紧**（fp32 核的 3e-4 是截到 tf32 的
+       误差，bf16⊂tf32 无截断）；含非整除 T=250。**Part B**：kernel-only `dev` 大 shape **0.729×**
+       （`B8T2048H8` 517.5→377.4）、`B2T1024H8` 0.736×、`T512H4` 0.863×、`T250H3` 0.907×。**Part C**：
+       smem **85.5→47.5 KB（−44%）**、theo blocks/SM 2→4、regs 70→65 零 spill。**`ncu`（关键）**：DRAM 读
+       **1.28 GB→637.57 MB（精确减半，与五操作数理论读 201+1073 MB 逐值吻合）**、L2 3.03→1.56 GB、
+       DRAM SOL **84.7→66.0%**（不再是 bound）、tensor 7.84→10.83%、占用率 24.6→36.8%、`long_sb` 3.14→1.71、
+       Duration 519.4→377.0µs——**收益就是五操作数的 DRAM 读/L2，占用率是 smem 减半的副产物**。**结论**：
+       §67.4「`.float()` 往返是部署税」里 **B2 侧那部分可用 bf16 入口整个消掉**；目标卡 CUDA B2 操作数路径
+       在部署 dtype 为 bf16 时应走 bf16-native staging（与向量化 store 正交）。**边界**：TMA/非 GEMM 六段/
+       落整链（`bf16 in → fp32 out` 生产组合）未做；不改变 §45 的 `cf` 默认部署。见 `docs/07` §76。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1390,8 +1410,29 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-72 补测**。
-  - P7-72（本轮）：**关闭 §54.5（P7-51）的两条遗留——`BVK=128`（NAT=4）未测、`atom64` 的 L2 +0.04 GB
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-73 补测**。
+  - P7-73（本轮）：**兑现 ROADMAP 列出的「bf16 原生入口」真需求——给 K2 形状 B2 GEMM 核加 `-DB2M_BF16`**。
+    五个 streamed 操作数（`do/vn/dv/h/dh`）改 **bf16 staging**（`Stage` 数组 `float→__nv_bfloat16`、行距
+    `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16），`rd()` 读 bf16 扩到 fp32 再照旧 `to_tf32` 喂
+    **`mma.sync.m16n8k8.tf32` 不变**（关键：**bf16 ⊂ tf32**，`cvt.rna.tf32` 对已扩宽的 bf16 是恒等，与真
+    bf16 mma 逐位相同、只差 fp32 累加序——**不必重写 mma/fragment 布局**）。范围限**非 TMA 的 cp.async
+    staging + 基础 GEMM 核**（`#error` 与 TMA/六段互斥）。新增 `harness/check_bwd_b2_bf16.py`
+    （`check_bwd_b2_bf16.out.txt`，空闲卡）+ `harness/ncu_b2_bf16_driver.py` / `harness/probe_b2_bf16_ncu.sh`
+    （`probe_b2_bf16_ncu.out.txt`）+ `docs/07` §76。**Part A**：`bf16核`（吃 bf16）vs `fp32核`（吃
+    `bf16.float()`）**四位全逐位（max_abs=0）**（drop-in、无损）；`bf16核 vs torch(bf16)` ~5e-7 比 `fp32核
+    vs torch` 的 3e-4 还紧（fp32 核的 3e-4 是截 tf32 的误差，bf16⊂tf32 无截断）；含非整除 T=250。
+    **Part B**：kernel-only `dev` 大 shape **0.729×**（`B8T2048H8` 517.5→377.4）、`B2T1024H8` 0.736×、
+    `T512H4` 0.863×、`T250H3` 0.907×。**Part C**：smem **85.5→47.5 KB（−44%）**、theo blocks/SM 2→4、
+    regs 70→65 零 spill。**`ncu`（关键）**：DRAM 读 **1.28 GB→637.57 MB（精确减半，与五操作数理论读
+    201+1073 MB 逐值吻合）**、L2 3.03→1.56 GB、DRAM SOL **84.7→66.0%**（不再是 bound）、tensor
+    7.84→10.83%、占用率 24.6→36.8%、`long_sb` 3.14→1.71、Duration 519.4→377.0µs——**收益就是五操作数的
+    DRAM 读/L2，占用率是 smem 减半的副产物**。**结论**：§67.4「`.float()` 往返是部署税」里 **B2 侧那部分
+    可用 bf16 入口整个消掉**；目标卡 CUDA B2 操作数路径在部署 dtype 为 bf16 时走 bf16-native staging（与
+    向量化 store 正交）。**边界**：TMA/非 GEMM 六段/落整链（`bf16 in → fp32 out` 生产组合）未做；不改变
+    §45 的 `cf` 默认部署。**下一步**：专题维持维护态——若有「bf16 入口叠 TMA」「bf16 in 的生产核落链」
+    「bf16 原生 **mma**（`m16n8k16` + `ldmatrix`）」等新需求再动（后者可顺带消 §47 的 tf32 无 16-bit
+    `ldmatrix` 限制）。
+  - P7-72（上轮）：**关闭 §54.5（P7-51）的两条遗留——`BVK=128`（NAT=4）未测、`atom64` 的 L2 +0.04 GB
     未归因**。`b2_mma_probe.cu` 只放宽一处 `static_assert`（`BVK ∈ {32,64,128}`；atom-major 布局本就
     `NAT=BVK/32` 泛化，算术一字未动）。新增 `harness/check_bwd_b2_tma_atom128.py`
     （`check_bwd_b2_tma_atom128.out.txt`，空闲卡）+ `harness/probe_b2_tma_atom128_ncu.sh`

@@ -41,6 +41,7 @@
 #include <cuda.h>
 #include <cstdint>
 #include <cstdio>
+#include <cuda_bf16.h>
 
 #define DEV __device__ __forceinline__
 
@@ -126,6 +127,17 @@ DEV void st2(float* p, float a, float b) {
 #define B2M_TMA_ON 1
 #else
 #define B2M_TMA_ON 0
+#endif
+// P7-73: `-DB2M_BF16` gives the base B2 K2-mma GEMM core a **bf16-native operand entry**:
+// the five streamed operands `do/vn/dv/h/dh` are staged into smem as bf16 (halving both the
+// global DRAM read and the smem footprint); the mma stays `m16n8k8.tf32`.  bf16 is a strict
+// subset of tf32, so widening bf16->fp32 (exact) before the `cvt.rna.tf32` truncation
+// reproduces bf16 (`m16n8k16.bf16`) products exactly -- only the fp32 accumulation order
+// differs.  This closes the deployment boundary pinned in P7-64 (§67.4): the CUDA B2 core was
+// fp32/tf32-only, so the assembled chain had to `.float()` B1's bf16 `dh`/`dv2` before feeding
+// it.  This round covers only the non-TMA `cp.async` staging path and the base GEMM core.
+#ifndef B2M_BF16
+#define B2M_BF16 0
 #endif
 // P7-60: `-DB2M_PROD` compiles the *production* combination of all six non-GEMM segments in a
 // single kernel/launch (see the note further down for the rationale).  It forces the six
@@ -370,6 +382,23 @@ static_assert(BVK == 32 || BVK == 64 || BVK == 128,
 // P7-54 regardless of the stage layout.
 constexpr int BVP = BVK + 4;   // padded row stride (16B keeps 4-float cp.async aligned)
 
+// P7-73: bf16-native operand entry (see the macro block at the top).  Only the base non-TMA
+// GEMM core is supported this round (the non-GEMM segments read the staged operands with
+// fp32-only addressing; TMA staging needs a bf16 tensor map / narrower swizzle).
+#if B2M_BF16 && (B2M_TMA_ON || B2M_OUT || B2M_DKGB || B2M_DA || B2M_DB || B2M_GATE || \
+                 B2M_SAND || B2M_INTRA || B2M_HDW || B2M_VV_KG_ON)
+#error "B2M_BF16 (P7-73) covers only the base non-TMA GEMM core"
+#endif
+#if B2M_BF16
+using op_t = __nv_bfloat16;
+constexpr int OPS = BVK + 8;   // padded bf16 row stride (16 B alignment = 8 bf16)
+#define OP_ZERO __float2bfloat16(0.0f)
+#else
+using op_t = float;
+constexpr int OPS = BVP;
+#define OP_ZERO 0.0f
+#endif
+
 static_assert(VD % BVK == 0, "BVK must divide V=128");
 
 struct alignas(128) Stage {
@@ -386,11 +415,12 @@ struct alignas(128) Stage {
     float dwm[NAT][BT][32];   // dw [t, k]  (P7-53: B-operand of `A @ -dw`, k-tiled)
 #endif
 #else
-    float do_[BT][BVP];   // do  [t, v]
-    float vn [BT][BVP];   // v_new[t, v]
-    float dv [BT][BVP];   // dv  [t, v]
-    float h  [KD][BVP];   // h  [k, v]  (rows = output N index, cols = contraction v)
-    float dh [KD][BVP];   // dh [k, v]
+    // P7-73: op_t/OPS are `float`/BVP by default, `__nv_bfloat16`/BVK+8 under -DB2M_BF16.
+    op_t do_[BT][OPS];   // do  [t, v]
+    op_t vn [BT][OPS];   // v_new[t, v]
+    op_t dv [BT][OPS];   // dv  [t, v]
+    op_t h  [KD][OPS];   // h  [k, v]  (rows = output N index, cols = contraction v)
+    op_t dh [KD][OPS];   // dh [k, v]
 #if B2M_VV_KG_ON
     float vv [BT][BVP];   // raw v [t, v]
 #endif
@@ -462,7 +492,7 @@ struct alignas(128) Shared {
 // decode (Swizzle<3,4,3>: byte bits [4:6] ^= bits [7:9]) *within that atom*.  Since the
 // atom stride (`rows*128` bytes) is a multiple of 8 rows, the decode reduces to the same
 // `row & 7` XOR as the single-atom BVK==32 case.
-DEV float rd(const float* buf, int row, int col, int rows) {
+DEV float rd(const void* buf, int row, int col, int rows) {
 #if B2M_TMA_ON
     const int atom = col >> 5, cc = col & 31;
     int b = ((atom * rows + row) * 32 + cc) * 4;
@@ -470,7 +500,11 @@ DEV float rd(const float* buf, int row, int col, int rows) {
     return *(const float*)((const char*)buf + b);
 #else
     (void)rows;
-    return buf[row * BVP + col];
+#if B2M_BF16
+    return __bfloat162float(((const __nv_bfloat16*)buf)[row * OPS + col]);
+#else
+    return ((const float*)buf)[row * BVP + col];
+#endif
 #endif
 }
 
@@ -539,57 +573,69 @@ DEV void prefetch(Stage* st, const float* __restrict__ v, const float* __restric
                   int n, int hh, int T, int H, int NT, int c, int v0) {
     const int tid = threadIdx.x, nthr = blockDim.x;
     const int t0 = c * BT;
+#if B2M_BF16
+    constexpr int U = 8;   // bf16 per 16-byte cp.async
+    const __nv_bfloat16* gdo = (const __nv_bfloat16*)do_;
+    const __nv_bfloat16* gvn = (const __nv_bfloat16*)vn;
+    const __nv_bfloat16* gdv = (const __nv_bfloat16*)dv;
+    const __nv_bfloat16* gh  = (const __nv_bfloat16*)h;
+    const __nv_bfloat16* gdh = (const __nv_bfloat16*)dh;
+#else
+    constexpr int U = 4;   // fp32 per 16-byte cp.async
+    const float* gdo = do_; const float* gvn = vn; const float* gdv = dv;
+    const float* gh = h; const float* gdh = dh;
+#endif
     // do/vn/dv [BT, BVK]  (token rows; zero the pad rows for a non-divisible tail)
-    for (int idx = tid; idx < BT * (BVK / 4); idx += nthr) {
-        int row = idx / (BVK / 4), cg = idx % (BVK / 4), t = t0 + row;
-        float* pd = &st->do_[row][cg * 4];
-        float* pv = &st->vn [row][cg * 4];
-        float* pw = &st->dv [row][cg * 4];
+    for (int idx = tid; idx < BT * (BVK / U); idx += nthr) {
+        int row = idx / (BVK / U), cg = idx % (BVK / U), t = t0 + row;
+        op_t* pd = &st->do_[row][cg * U];
+        op_t* pv = &st->vn [row][cg * U];
+        op_t* pw = &st->dv [row][cg * U];
 #if B2M_VV_KG_ON
-        float* pvv = &st->vv[row][cg * 4];
+        float* pvv = &st->vv[row][cg * U];
 #endif
 #if B2M_NODOV
-        for (int j = 0; j < 4; ++j) { pd[j] = 0.f; pv[j] = 0.f; pw[j] = 0.f; }
+        for (int j = 0; j < U; ++j) { pd[j] = OP_ZERO; pv[j] = OP_ZERO; pw[j] = OP_ZERO; }
   #if B2M_VV_KG_ON
-        for (int j = 0; j < 4; ++j) pvv[j] = 0.f;
+        for (int j = 0; j < U; ++j) pvv[j] = 0.f;
   #endif
 #else
         if (t < T) {
-            const int64_t off = ((int64_t)(n * T + t) * H + hh) * VD + v0 + cg * 4;
-            cp16(pd, do_ + off);
-            cp16(pv, vn  + off);
-            cp16(pw, dv  + off);
+            const int64_t off = ((int64_t)(n * T + t) * H + hh) * VD + v0 + cg * U;
+            cp16(pd, gdo + off);
+            cp16(pv, gvn + off);
+            cp16(pw, gdv + off);
   #if B2M_VV_KG_ON
             cp16(pvv, v + off);
   #endif
         } else {
-            for (int j = 0; j < 4; ++j) { pd[j] = 0.f; pv[j] = 0.f; pw[j] = 0.f; }
+            for (int j = 0; j < U; ++j) { pd[j] = OP_ZERO; pv[j] = OP_ZERO; pw[j] = OP_ZERO; }
   #if B2M_VV_KG_ON
-            for (int j = 0; j < 4; ++j) pvv[j] = 0.f;
+            for (int j = 0; j < U; ++j) pvv[j] = 0.f;
   #endif
         }
 #endif
 #if B2M_DKGB && !B2M_HDW
         // dw [BT, BVK] (token rows; k-tiled).  Same [B,T,H,K] layout as do/vn/dv, KD==VD.
-        float* pn = &st->dwm[row][cg * 4];
+        float* pn = &st->dwm[row][cg * U];
         if (t < T) {
-            const int64_t off = ((int64_t)(n * T + t) * H + hh) * KD + v0 + cg * 4;
+            const int64_t off = ((int64_t)(n * T + t) * H + hh) * KD + v0 + cg * U;
             cp16(pn, dw + off);
         } else {
-            for (int j = 0; j < 4; ++j) pn[j] = 0.f;
+            for (int j = 0; j < U; ++j) pn[j] = 0.f;
         }
 #endif
     }
     // h/dh [KD, BVK]  (chunk-granular, always full)
     const int64_t hbase = ((int64_t)(n * NT + c) * H + hh) * KD * VD;
-    for (int idx = tid; idx < KD * (BVK / 4); idx += nthr) {
-        int row = idx / (BVK / 4), cg = idx % (BVK / 4);
-        const int64_t off = hbase + (int64_t)row * VD + v0 + cg * 4;
+    for (int idx = tid; idx < KD * (BVK / U); idx += nthr) {
+        int row = idx / (BVK / U), cg = idx % (BVK / U);
+        const int64_t off = hbase + (int64_t)row * VD + v0 + cg * U;
 #if B2M_NOHDH
-        for (int j = 0; j < 4; ++j) { st->h[row][cg * 4 + j] = 0.f; st->dh[row][cg * 4 + j] = 0.f; }
+        for (int j = 0; j < U; ++j) { st->h[row][cg * U + j] = OP_ZERO; st->dh[row][cg * U + j] = OP_ZERO; }
 #else
-        cp16(&st->h [row][cg * 4], h  + off);
-        cp16(&st->dh[row][cg * 4], dh + off);
+        cp16(&st->h [row][cg * U], gh  + off);
+        cp16(&st->dh[row][cg * U], gdh + off);
 #endif
     }
 }
