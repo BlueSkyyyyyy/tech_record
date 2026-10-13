@@ -5667,3 +5667,115 @@ CUPTI `dev`（kernel-only，µs；`out` = `-DB2M_OUT` 非 TMA、`core_tma` = 只
   「同 CTA 交接」目标）；本轮只证「能算对、加得便宜」。
 - 只覆盖 `K=V=128`、`BT=16`、fp32/tf32；`out` store 用标量 32-bit（`-DB2M_VECST` 未接到本段）；`beta` 未做
   bf16。这些都不影响本节结论（增量机制＝写字节），但生产形态应接向量化 store。
+
+## 56. 「K2 形状 CUDA B2」补非 GEMM 段第二刀：**`dkgb = A @ (-dw)`** 落进 CUDA，数值落 tf32 底噪、只 +10%（P7-53）
+
+§55.6（P7-52）把 B2 非 GEMM 段的剩余工作列成「`dA`/`db` 的后处理项（`dw@kg^T`、`A^T diag A^T`、`dkgb`）
+与**门控链**（`dg`、`dk` 的 `exp2(g)` 标定）」。§55 只落了 `i_k==0` 输出支路 `dvb=A@dv`。本轮落**第二刀**：
+同一个 `i_k==0` 分支里紧邻的 **chunk-行收缩**段
+
+    dkgb[o_A, k] = sum_{o_t} A[o_A, o_t] · (-dw[o_t, k])        (== A @ (-dw))
+
+它对应 FLA / torch 的 `chunk_bwd.py:305-307`（`b_dw = -b_dw` 后 `b_dkgb = einsum("bhtu,bhuk->bhtk", b_A, b_dw)`，
+`check_bwd_dqkg_kernel.py:180-182`）。`dkgb` 是**中间量**（下游喂 `db`、`dg`、`dk`、`dA`），故与 §55 暴露 `dvb`
+一样，这里把它单独落盘以**独立核对这段 GEMM**。答案是：**逐位对得上自己的 GEMM 核心、落 tf32 底噪，且只给核心
+加 10–13%**，与 §55 的输出支路同阶。
+
+证据：`harness/b2_mma_probe.cu`（新增 `-DB2M_DKGB` + 符号 `b2dkgb_launch`）+ `harness/check_bwd_b2_dkgb.py`
+（`harness/check_bwd_b2_dkgb.out.txt`，空闲卡）+ `harness/ncu_b2_dkgb_driver.py` / `harness/probe_b2_dkgb_ncu.sh`
+（`harness/probe_b2_dkgb_ncu.out.txt`）。
+
+### 56.1 设计：与 §55 输出支路**同构**，只换 B 操作数并取负
+
+§55.1 已讲清为什么「收缩维落在 chunk 行 `o_t`、输出行也是 chunk 行 `o_A`」的段最便宜：`Akk`（`[B,T,H,BT]`，
+`o_A` 连续）喂 mma 的 **A 操作数只需索引重映射、无 smem 转置**。`A @ (-dw)` 的收缩维同样是 `o_t`、输出行同样是
+`o_A`，所以**与输出支路共用同一套 A-fragment 读法**（`b2_mma_probe.cu:516-519` vs `:546-549`，逐字相同）；唯一
+差别是：
+
+- **B 操作数换成 `dw`**：三条主 GEMM 里 `dw = dv @ h`（收缩维是 V）是**输出**，这里把它当成 `A @ (-dw)` 的
+  B 操作数（收缩维 `o_t`、自由维 `k`）。为独立可证，本段把 `dw` 作为**新操作数**经同一条流水 stage 搬进 smem
+  （新增 `Stage::dwm`，`[BT, BVK]`，k-tiled；TMA 复用 `make_map_dov`，内维 `KD==VD==128`）。
+- **取负在 B-fragment**：`b_dw = -b_dw`（`check_bwd_dqkg_kernel.py:180`），故读 B-fragment 时取反
+  （`b2_mma_probe.cu:555-556` 的 `-rd(...)`），A-fragment 不动。
+- **warp 列归属不变**：warp `w` 仍拥有输出列 `[w·16, w·16+16)`（这里输出列是 `k`），只在包含自己列的 stage 上做
+  那 4 条 mma（`local0 = warp*BW - it*BVK` 守卫，同 `:510`/`:540`）。
+- **`dw` 是 k-tiled、V-tile 也 k-tiled**：`VD==KD==128`，故 stage 粒度与三条主 GEMM 完全一致。
+
+> 注：**同 CTA 交接尚未做**——本段仍把 `dw` 从 global 读进来、`dkgb` 落盘再返回；生产形态应让 GEMM 段
+> 把 `dw` 的累加器写 smem（或直接在寄存器里做 C→B 片段的 shuffle/转置），省掉这一读一写。本轮只证「能算对、
+> 加得便宜」。这与 §55.6 的「同 CTA 交接未做」是同一条边界。
+
+### 56.2 Part A — 正确性：`dkgb` 落 tf32 底噪，且三种 stage 布局**逐位相同**
+
+同操作数四组 shape（`BT=16`，含非整除 `T=250`；`dw` 操作数由 **CUDA GEMM 核心**产出，故两侧吃的都是同一份
+tf32 `dw`；torch 参考关 tf32 走真 fp32）：
+
+| 量 | `dkgb` vs torch | `dkgb_tma` vs torch | `dkgb_tma64` vs torch | `dkgb` vs `dkgb_tma` | `dkgb` vs `dkgb_tma64` |
+|---|---|---|---|---|---|
+| `dkgb` | 3.64e-4 | 3.64e-4 | 3.64e-4 | **0** | **0** |
+
+（表内为四组 shape 的最坏 `max_rel`；`ref_max≈2.6–3.0`，`max_abs` 最坏 1.01e-3。）
+
+两件事被钉死：(1) **CUDA `dkgb` 代数无误**——落 tf32 底噪（`~3.6e-4`，与 §55 输出支路的 `dvb` 4.40e-4、
+§49/§52/§54 的四条 op 同量级）；torch 参考严格照 `check_bwd_dqkg_kernel.py:149-150`（`b_A[o_A,o_t]=A4[o_t,o_A]`）
+与 `:180-182`（取负 + `A@dw`）写。(2) **`dkgb`≡`dkgb_tma`≡`dkgb_tma64` 逐位相同（`max_abs=0`）**——非 TMA / TMA@32 /
+TMA@64（atom 拆分）三种 stage 布局对这段**零影响**，等于把 §54 的布局解码正确性在**第三段新算术**上再证一遍
+（§55 已在输出支路证过一次）。
+
+### 56.3 Part B — 计时：`dkgb` 段只给 GEMM 核心加 10–13%，且仍 DRAM-bound
+
+CUPTI `dev`（kernel-only，µs；`dkgb` = `-DB2M_DKGB` 非 TMA、`core_tma` = 只有 GEMM 的 TMA 基座）：
+
+| shape | `core` | `core_tma` | `dkgb` | `dkgb_tma` | `dkgb_tma64` | 全 Triton B2 | `dkgb/core` | `dkgb_tma/core_tma` |
+|---|---|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | 517.4 | 492.7 | 569.7 | 544.1 | 610.4 | 903.7 | 1.10× | 1.10× |
+| `B2 T1024 H8` | 71.2 | 68.6 | 77.8 | 75.4 | 86.5 | 121.6 | 1.09× | 1.10× |
+| `T512 H4` | 9.4 | 9.0 | 10.7 | 9.8 | 9.7 | 16.1 | 1.13× | 1.09× |
+| `T250 H3`（非整除） | 8.6 | 8.4 | 9.7 | 9.3 | 8.7 | 14.1 | 1.13× | 1.10× |
+
+- **第二刀同样便宜**：加进 GEMM 核心只 **+9–13%**（比 §55 输出支路的 +12–25% 还略低，因本段只有 2 条 mma、
+  无 `beta` 乘法）。加完本段的 CUDA 核**已到全 Triton B2 的 0.63–0.70×**（`B8` 544 vs 904 µs）。
+- `dkgb_tma` 比非 TMA `dkgb` 略快（§52 的 TMA 读侧收益仍在）；`dkgb_tma64` 在大 shape 反而回退
+  （`B8` 610 µs）——与 §55.3「输出支路偏好小 `BVK`」同因：`BVK=64` 时每个 warp 只在一个 stage 上有活，
+  4 条 mma 摊不平；小 shape 因固定开销占比高、三者接近。
+
+### 56.4 `ncu` — 增量是 **+67 MB DRAM 读（`dw`）+ 65 MB DRAM 写（`dkgb`）**，仍贴 DRAM 地板；不引入新瓶颈
+
+`B8 T2048 H8`，同一批 fp32 操作数（`probe_b2_dkgb_ncu.out.txt`）：
+
+| 变体 | DRAM 读 | DRAM 写 | DRAM SOL | L2 bytes | Duration | tensor% | occ | bank conflicts | l1tex 全局读 |
+|---|---|---|---|---|---|---|---|---|---|
+| `core_tma`（只有 GEMM） | 1.28 GB | 199.19 MB | 88.93% | 2.35 GB | 494.5 µs | 8.08% | 24.62% | 8.72 M | **0** |
+| `dkgb_tma`（+ `dkgb` 段） | **1.35 GB** | **264.61 MB** | 88.72% | 2.62 GB | 543.2 µs | 7.68% | 24.51% | 9.18 M | 2.10 M |
+
+- **时间增量 ≈ 写字节 + 读字节增量**：DRAM 读 `+0.07 GB`（=`dw` 一个 `[B,T,H,K]` fp32 = 67 MB）、DRAM 写
+  `+65.4 MB`（=`dkgb` 一个 `[B,T,H,K]` fp32），`Duration +48.6 µs`，`(0.07+0.065) GB / 48.6 µs ≈ 2.78 TB/s`
+  ——新增段**仍在冲 HBM 带宽**：`dkgb_tma` DRAM SOL 仍 **88.7%**、L2 **88.0%**、占用率/tensor 密度**几乎不动**
+  （24.51% / 7.68%），**没有把核从带宽受限打成延迟受限**。
+- 新增 global 读＝**A 的 2.10 M sectors（1 个 sector/元素，A 按标量读）≈67 MB**（`core_tma` 为 0）；`dw` 经
+  TMA 读（`lts__srcunit` 39.85M→42.24M）；bank conflict `8.72→9.18 M`（+0.46 M，来自 `A@dw` 的两条
+  B-fragment 读），相对 §50 的 8.39 M `dgk` 冲突是小头、非新瓶颈。
+- SASS：`dkgb_tma` `LDS` 88→96、`STG` 25→**33**（+8 = `dkgb` 的标量 store）、`LDGSTS/UBLKCP` 10→**12**
+  （+2 = `dw` 的 TMA）。`dkgb` 的 store 与 §55 的输出支路一样是 32-bit 标量，接 §51 的 `-DB2M_VECST` 可
+  向量化（本轮未接，留给生产形态）。
+
+### 56.5 结论 / 对目标卡的设计输入
+
+- **§55.6 的「补非 GEMM 段」第二刀成立**：B2 的 `dkgb = A @ (-dw)` 进 CUDA 后**独立可证**（落 tf32 底噪
+  `3.6e-4`）、**与三条主 GEMM 共用同一份 stage 与 A-fragment 索引重映射**（`dw` 经同一条流水搬入、取负在
+  B-fragment），成本仅 **+10–13%**、仍 DRAM-bound、不引入新瓶颈。
+- **设计输入（更新 §55.5）**：目标卡 CUDA B2 里，凡「收缩维落在 chunk 行（`BT`）」的段（`A@dv`、`A@dw`、
+  以及最终的 `A^T diag(beta) A^T`）都走**同一套「原地读 `Akk` + staged 操作数」**；`dw` 这类**中间量**在
+  生产形态应在 GEMM 段**就地（smem/寄存器）交接**，而非落盘再读（本轮为独立可证而落盘，多读 67 MB、
+  多写 67 MB）。
+- **剩余头寸仍是门控链**：本段只补 `dkgb`；`dA` 的 `dw@kg^T` 与 `A^T diag A^T`、`db`（`sum_k dkgb·kg`，
+  需跨 warp 归约）与**门控链**（`dg`、`dk` 的 `exp2(g)` 标定）**仍未进 CUDA**（§49.7/§55.6 未关闭）。
+- **方法学**：「段进 CUDA」先按**完整/中间量**对齐 torch（用**同一份**上游操作数，避免上游 dtype 混入），
+  再证三种 stage 布局**逐位相同**——把「算术错」与「布局解码错」分开（同 §53.5/§54.5/§55.5）。
+
+### 56.6 边界 / 下一步（诚实）
+
+- 本轮**只**落 `dkgb`（`dw` 作为 global 输入、`dkgb` 落盘），**同 CTA 交接未做**；`dA` 的后处理项
+  （`dw@kg^T`、`A^T diag A^T`）、`db` 的 `sum_k dkgb·kg`（跨 warp 归约）与门控链未进 CUDA。
+- 只覆盖 `K=V=128`、`BT=16`、fp32/tf32；`dkgb` store 用标量 32-bit（`-DB2M_VECST` 未接到本段）；`dw` 未做
+  bf16。这些都不影响本节结论（增量机制＝读/写字节），但生产形态应接向量化 store 并就地交接 `dw`。
