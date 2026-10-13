@@ -2910,6 +2910,48 @@
       `Workspace` host 算术 7/7；**`arrive` 在 `sm_90a` 编不过、`sm_100a` 编得过**（S 组硬证据）。
       配套博客 `content/posts/mega-moe-102-mega-gate-mhc-split-barrier`（索引页新增第 102 篇）。
 
+### P93 增量（opt-in，补齐第 36 篇只在一条 bullet 里带过的 SM100 `kSwapAB`（dgrad）分支）
+
+- [x] **P93-1** **SM100 BF16 GEMM 的 `kSwapAB`（dgrad）分支：A/B 角色互换、转置写回与选核启发式**
+      （`csrc/jit_kernels/heuristics/sm100.hpp:30-46/81-132/165-215/254-270`、
+      `csrc/jit_kernels/heuristics/sm90.hpp:125`、`csrc/jit_kernels/heuristics/{runtime,common,config}.hpp`、
+      `csrc/jit_kernels/impls/sm100_bf16_gemm.hpp:22-66/126-...`、
+      `deep_gemm/include/deep_gemm/impls/sm100_bf16_gemm.cuh:66-88/177/237-240/286/310-315/382-412`、
+      `deep_gemm/include/deep_gemm/epilogue/sm100_store_cd_swap_ab.cuh`（259 行）、
+      `deep_gemm/include/deep_gemm/scheduler/gemm.cuh:177-184`）。
+      第 19 篇拆了 SM90 BF16 主 kernel、第 36 篇（P36-1）拆了 SM100 BF16 主 kernel 骨架，但第 36 篇
+      只在一条 bullet 里写「dgrad 的 m-grouped 强制 `swap_ab=true`」，从未讲清**它改了什么、为什么改、
+      host 怎么选、转置写回怎么落地**；而它恰是 SM100 上 MoE **dgrad**（及所有 m-grouped 稠密 GEMM）
+      唯一能走的形态。**为什么需要它**：SM100 UMMA 的 M 维（layout A/D 行数）被钉死在 64/128/256
+      （`sm100_bf16_gemm.cuh:252-254`），而 m-grouped 的 M 是「逐组不等、按 16 对齐」的短维、N（hidden）
+      才是固定大维；swap 把 A、B 操作数在 MMA 里**换轴**，让 `UMMA_N=BLOCK_M`（`:68`，且可逐块
+      `update_instr_desc_with_umma_n` `:286`）去承接可变短 M、`UMMA_M=128`（`:67`）留给大 N。
+      → `docs/103-sm100-swap-ab-dgrad.md`（真实行号核对）：**host 启发式**——m-grouped（含
+      `MGroupedMasked`/`MGroupedContiguousWithPsumLayout`）走 `heuristics/sm100.hpp:34-46` 返回**唯一
+      候选** `swap_ab=1, block_n=128, cluster_m=1`，`block_m=mk_alignment_for_contiguous_layout()`
+      （默认 128、SM100 理论值 256，`runtime.hpp:11/59-67`）、`cluster_n=ceil_div(n,128)%2==0 and
+      num_sms%2==0 ? 2 : 1`（`:42`）；对照非 m-grouped 完整枚举 `swap_ab∈{0,1}` 并施加
+      `block_n==128`（`:121-123`）、`cluster_m==1`（`:81`）、TMEM 列预算（`:130-132`）过滤。
+      **编译期常量**：`STORE_BLOCK_M=16`（`UMMA_STEP_N` 原子 `:85`）、`STORE_BLOCK_N=BLOCK_N=128`
+      （`:86`，epilogue 用整 128 行 TMEM，须一个 warpgroup、`:87` `kNumUMMAStoreThreads=128`）、
+      `smem_cd=16*128*sizeof(cd)*num_tma_store_stages`（`:214-215`）。**设备端**：TMA `load_block_m`
+      逐块取 `get_aligned_effective_m_in_block / kNumMulticast`（`:177`）、`instr_desc` 的 major 顺序对调
+      （`:237-240`）、MMA 发成 `fma(b_desc, a_desc, …)`（`:310-312`）。**转置写回**
+      `epilogue/sm100_store_cd_swap_ab.cuh`：按 16 行 M 一块块搬（`:60`）、一次读 8 行 TMEM（`:69`）、
+      转置 STSM（FP8 用 `SM100_U8x8_STSM_T` `:156-165`、BF16 用 `SM90_U32x4_STSM_T` `:233-238`）、
+      TMA store 坐标是 `(n_idx,m_idx)`（`:249-256`）；swap 下 FP8 输出必须正好 `16×128` + 一个 warpgroup
+      （`:42-48`），随机舍入在「间隔 4 条 lane」间用 `__shfl_xor_sync` 逐级归约哈希（`:206-224`）。
+      **主 kernel 是 SM100 专属、仅分析**；但 host 半边是纯 C++，H100(sm90) 直接 include 真实头文件真机
+      `harness/exp_sm100_swap_ab_dgrad.{sh,out.txt}` + `src/sm100_swap_ab_dgrad.cu` **56 PASS / 0 FAIL**：
+      m-grouped 唯一 swap layout（3 形状，含 `n=7168`→cluster_n=2 / `n=7296`→1）；`block_m` 随
+      `mk_alignment`(128/256) 变（`num_stages` **9→6**、`smem_size` **230204→205628**）；storage/
+      pipeline/launch 逐字段对回公式（`swizzle a/b/cd=128`、`load_block_m=block_m/cluster_n`、
+      `store_block_m=16`、`smem_extra=9020`、`num_threads=256`、`num_epilogue_threads=128`）；稠密 BF16
+      枚举 **50 候选**、最优落回 `swap_ab=0`；`(A@B^T)^T==B@A^T` **逐位**（逐组 fp32 9.5e-06）；
+      SM90 候选全 `swap_ab==0`（48 个）且源码 `sm90.hpp:125` 硬断言。另点明一个会咬人的数字：
+      `mk_alignment` 直接进 JIT 模板实参（`sm100_bf16_gemm.hpp` 附近），配置改动会**静默改变 kernel 形态**。
+      配套博客 `content/posts/mega-moe-103-sm100-swap-ab-dgrad`（索引页新增第 103 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -2935,8 +2977,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P92 各增量完成（P15-1…P41-1、P42-1…P92-1）。**
-  本轮 P92-1：新建 `docs/102-mega-gate-mhc-split-barrier.md`
+- 当前进度：**P0~P14 全部完成；P15~P93 各增量完成（P15-1…P41-1、P42-1…P93-1）。**
+  本轮 P93-1：新建 `docs/103-sm100-swap-ab-dgrad.md`
+  （+`src/sm100_swap_ab_dgrad.cu`、`harness/exp_sm100_swap_ab_dgrad.{sh,out.txt}`）——补齐第 36 篇
+  只在一条 bullet 里带过的 **SM100 BF16 GEMM `kSwapAB`（dgrad）分支**。要点：UMMA 的 M 维被钉死在
+  64/128/256，而 m-grouped 的 M 是短且逐组变的维、N（hidden）才固定大；swap 在 MMA 里把 A/B 换轴，
+  让 `UMMA_N=BLOCK_M`（可逐块动态）承接短 M、`UMMA_M=128` 留给大 N。host 启发式对 m-grouped（含
+  mask/psum）返回**唯一** `swap_ab=1/block_n=128/cluster_m=1`、`block_m=mk_alignment`(128 或 256)，
+  对照稠密会枚举 `swap_ab∈{0,1}`；常量 `STORE_BLOCK_M=16`、`STORE_BLOCK_N=128`、epilogue 128 线程；
+  设备端 major 对调 + `fma(b,a)`；转置写回 `sm100_store_cd_swap_ab`（转置 STSM + `(n,m)` TMA 坐标）。
+  **主 kernel SM100 专属、仅分析**；**H100(sm90) host 半边真机 56 PASS / 0 FAIL**（含 `mk_alignment`
+  128→256 使 `num_stages` 9→6、`(A@B^T)^T==B@A^T` 逐位、SM90 全 `swap_ab==0`）。索引页新增第 103 篇。
+  上一轮 P92-1：新建 `docs/102-mega-gate-mhc-split-barrier.md`
   （+`src/mega_gate_mhc_split_barrier.cu`、`harness/exp_mega_gate_mhc_split_barrier.{sh,out.txt}`）——
   补齐 Mega Gate / Mega mHC **从没被单独读过的两个分段屏障调度器** `scheduler/mega_gate.cuh`
   （`ScoreBarrier`）与 `scheduler/mega_mhc.cuh`（`SplitBarrier`/`Norm`/`Mix`）及其 `Workspace` 布局。
@@ -3994,7 +4046,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P92 已完成（最新 **P92-1 Mega Gate / Mega mHC 的跨 CTA 分段屏障调度器与工作区布局**：
+- **下一步**：P0~P93 已完成（最新 **P93-1 SM100 BF16 GEMM 的 `kSwapAB`（dgrad）分支**：
+  host 启发式对 m-grouped 返回唯一 `swap_ab=1/block_n=128`、`block_m=mk_alignment`(128/256)，
+  设备端 A/B 换轴 + 逐块动态 `UMMA_N`，转置写回 `sm100_store_cd_swap_ab`（16×128 store + 转置 STSM）；
+  主 kernel SM100 专属仅分析，H100 host 半边真机 56 PASS / 0 FAIL；详见上）。
+  上一轮 P92-1：P0~P92 已完成（**P92-1 Mega Gate / Mega mHC 的跨 CTA 分段屏障调度器与工作区布局**：
   `scheduler/mega_gate.cuh` 的 `ScoreBarrier` + `scheduler/mega_mhc.cuh` 的 `SplitBarrier`/`Norm`/`Mix`
   ——状态编码 `(grid 标签)*stride + 到达数`、`%gridid` 免复位、`wait_init` 无符号距离、`arrive` 的
   `red.async` SM100 专属、进位隔离、128B line、两个 `Workspace` 几何、四个角色调用链与 deterministic
