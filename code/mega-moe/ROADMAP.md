@@ -1780,6 +1780,34 @@
       **host 契约 9 条逐条命中 `mega_mhc.hpp` 真实行号**（含「合法调用撞 `:223` arch 闸门」）。
       配套博客 `content/posts/mega-moe-67-mega-mhc-test-oracle`（索引页新增第 67 篇）。
 
+### P58 增量（opt-in，补齐 DeepEP 与 EP all-to-all / bucket 并列的第三类通信原语：流水线并行 send/recv）
+
+- [x] **P58-1** **DeepEP 的流水线并行 send/recv 原语 `pp_send_recv`**（
+      `csrc/kernels/pp/pp_send_recv.hpp`、`csrc/buffers/pp.hpp`、`deep_ep/include/deep_ep/impls/pp/pp_send_recv.cuh`、
+      `deep_ep/include/deep_ep/layout/pp/workspace.cuh`、`deep_ep/buffers/pp.py`、`tests/pp/test_pp.py`）。
+      第 7/58/61 篇拆了 **EP all-to-all**、第 64 篇拆了 **bucket 集合通信**，本篇补上 DeepEP 通信设施里
+      第三类：**环形流水相邻 rank、带背压、可重叠的 send/recv**。它没有计数/前缀和/算法选型，关键是
+      **几何与协议**。三块：① **host 契约**（`pp.py:12-67` / `pp.hpp`）——`num_max_tensor_bytes` 按
+      `kNumRDMAAlignmentBytes=64` 对齐、`num_storage_bytes=align(4·T·F, 2MiB)`、send/recv 断言「相邻 rank +
+      32B 对齐 + 字节数 32 倍数」（`pp.hpp:83-88/:100-105`）、`get_num_qps=min(2,allocated)`、
+      cooperative launch、单 warp（`pp_send_recv.hpp:20-23/32/50-53`）；② **数据面 `pp_tma_copy`**
+      （`cuh:27-102`）——**可复用的多 SM TMA 1D 两级流水**：跨 SM 分连续 32B 块区间、smem 切 stage+mbarrier、
+      `tma_load_1d`+`mbarrier::complete_tx` 填流水、稳态「等 load→`tma_store_1d`→commit→`tma_store_wait`→
+      发下一 load」、收尾排空；③ **寻址面 + 协议**——`get_pp_buffer_offset`（`cuh:20-25`）编码方向，
+      4 段对称缓冲（0/1=收 prev/next，2/3=发 prev/next）与 `send_count/recv_count/arrival[2][2]/release`
+      索引（表见 docs）；两跳协议 `pp_send_impl`（`cuh:106-171`：背压等 `release>=count-F+1` → TMA 到本地
+      staging → `grid sync` → 按 QP `NCCLGin::put` + `StrongVASignalAdd` arrival）与 `pp_recv_impl`
+      （`cuh:175-234`：等 arrival → TMA 拷出 → `grid sync` → 回 release）。**H100(sm90) 真机**：逐行抽取
+      `get_pp_buffer_offset`/`pp_tma_copy`（sha256 `c3a3b0d1817b3bcb`/`ef702e38dd6caa81`）跑真实设备代码
+      ——`N=2..8` 全部 **168 个有序对**的 12 个导出字段逐字段 **0 不符**、每 rank 4 段缓冲恰好各占一次、
+      TMA 搬运 5 种 `num_sms`×8 种字节数 **40/40 byte-exact**（含跨 stage/SM 边界；真机坑：96KB 动态
+      smem 必须 `cudaFuncSetAttribute` 否则 launch 静默失败）；`PPSignals` sizeof 192/alignof 64；
+      Python oracle 逐行跑 `test_pp.py:19-50` 的 `generate_stress_ops`（sha256 `56d5e37722ddc497`）
+      验证「第 i 个 send 严格晚于第 i-F 个 recv」+ 计数 + 全序。**设备 PASS=4 / Python PASS=6 / FAIL=0**。
+      GIN 第二跳（`put`/`signal`）与真实多 rank 端到端为 NCCL 设备 API 专属，仅分析。
+      → `docs/68-deepep-pp-send-recv.md`。配套博客 `content/posts/mega-moe-68-deepep-pp-send-recv`
+      （索引页新增第 68 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1804,8 +1832,42 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P57 各增量完成（P15-1…P41-1、P42-1…P57-1）。**
-  本轮 P57-1：新建 `docs/67-mega-mhc-test-oracle.md`（+`src/mhc_sf_row_idx.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P58 各增量完成（P15-1…P41-1、P42-1…P58-1）。**
+  本轮 P58-1：新建 `docs/68-deepep-pp-send-recv.md`（+`src/deepep_pp_send_recv.cu`、
+  `harness/exp_deepep_pp.{sh,py,out.txt}`）——补上 DeepEP 通信设施里**第三类原语**：
+  **流水线并行的相邻 rank send/recv**（前两类是第 7/58/61 篇的 EP all-to-all、第 64 篇的
+  bucket 集合通信）。它服务「把一层激活/梯度在流水线相邻 stage 间前后传」这一步，没有计数/前缀和/
+  算法选型，关键是**几何与协议**。三块：① **host 契约**（`deep_ep/buffers/pp.py:12-67`、
+  `csrc/buffers/pp.hpp`）——`num_max_tensor_bytes` 按 `kNumRDMAAlignmentBytes=64` 对齐、
+  `num_storage_bytes=align(4·T·F, 2MiB)`（4 段来自「收/发 × 前/后邻居」）、send/recv 断言
+  「相邻 rank + 32B 对齐 + 字节数 32 倍数」（`pp.hpp:83-88/:100-105`）、`get_num_qps=min(2,allocated)`
+  （`pp_send_recv.hpp:20-23`）、**cooperative launch + 单 warp**（`:32-53`，因 kernel 要
+  `this_grid().sync()`）；② **数据面 `pp_tma_copy`**（`pp_send_recv.cuh:27-102`）——可复用的
+  **多 SM TMA 1D 两级流水**：把 `num_bytes` 切成 32B 块、每 SM 分连续一段（`:50-55`），smem 切
+  stage+mbarrier（`:37-41`），填流水 `tma_load_1d`+`mbarrier::complete_tx`（`:65-73`），稳态
+  「等本 stage load→`tma_store_1d`→commit→`tma_store_wait`→发下一 load」（`:75-98`）、收尾排空
+  （`:101`）；③ **寻址面 + 协议**——`get_pp_buffer_offset`（`:20-25`）用 `next=(src+1)%N` 编码方向，
+  返回 `(local_idx, peer_idx)`；**4 段对称缓冲**（0/1=收 prev/next，2/3=发 prev/next）与
+  `send_count[2]/recv_count[2]/arrival[2][2]/release[2]`（`layout/pp/workspace.cuh`）索引由
+  `peer_idx+2`/`local_idx` 给出（表见 docs）；**两跳协议** `pp_send_impl`（`:106-171`：
+  背压等 `release[peer]>=count-F+1`（`:133-141`）→ TMA 到本地 staging（`:142`）→ `grid sync`
+  （`:144`）→ 按 QP `NCCLGin::put` + `ncclGin_StrongVASignalAdd` arrival（`:146-170`））与
+  `pp_recv_impl`（`:175-234`：等 arrival（`:203-216`）→ TMA 拷出（`:218-220`）→ `grid sync`
+  （`:221`）→ 回 release（`:224-233`））。**H100(sm90) 真机**：逐行抽取 `get_pp_buffer_offset`
+  与 `pp_tma_copy`（片段 sha256 `c3a3b0d1817b3bcb`/`ef702e38dd6caa81`，与 `DeepEP@93eb6eb` 一致）
+  直接 include 真实头文件跑真实设备代码——`N=2..8` **168 个有序对**的 12 个导出字段**逐字段 0 不符**、
+  每 rank 4 段缓冲 `{0,1,2,3}` 被 recv×2/send×2 恰好各占一次、`put` 对称目标 == 接收方 recv block、
+  TMA 搬运 5 种 `num_sms`×8 种字节数 **40/40 byte-exact**（真机坑：96KB 动态 smem 必须先
+  `cudaFuncSetAttribute(MaxDynamicSharedMemorySize)` 否则 launch 静默失败——初版 40 组
+  `mismatch` 全是 dst 保持初值）；`PPSignals` `sizeof=192/alignof=64`（偏移
+  `barrier=0/send_count=64/recv_count=80/arrival=96/release=128`）；`BarrierSignals=64B`；
+  Python oracle 逐行跑 `tests/pp/test_pp.py:19-50` 的 `generate_stress_ops`
+  （sha256 `56d5e37722ddc497`）6 组 `(R,S,F)`×4 种子，验证「第 i 个 send 严格晚于第 i-F 个 recv」
+  + `sends==recvs` + ops 全序；缓冲几何 `4096×7168×2 bf16`：`F=4`→896 MiB、`F=16`→3584 MiB。
+  **设备 PASS=4 / Python PASS=6 / FAIL=0**。GIN 第二跳（`put`/`signal`，`comm/handle.cuh:171-217`）
+  与真实多 rank 端到端为 NCCL 设备 API 专属，仅分析。配套博客
+  `content/posts/mega-moe-68-deepep-pp-send-recv`（索引页新增第 68 篇）。
+  上一轮 P57-1：新建 `docs/67-mega-mhc-test-oracle.md`（+`src/mhc_sf_row_idx.cu`、
   `harness/exp_mega_mhc_test.{py,sh,out.txt}`）——补上 Mega mHC 一直缺席的**端到端验收测试**
   `tests/test_mega_mhc.py`（第 5 篇拆了实现、第 51/57 篇拆了 Mega MoE / Mega Gate 的测试）。
   三个核心事实：① **SF 页布局是 Mega MoE 共享专家的 4×32 交错页**——测试 `extra_sf_rows:96-104`
@@ -2573,9 +2635,11 @@
     已由 P52-1 补齐**（`EPHandle.deterministic_sort`，纯 host/Python，H100 抽取真实源码 7 PASS）；
     **多 rank 屏障与 symmetric-memory 句柄层已由 P53-1 补齐**（`comm/{barrier,handle}.cuh`，NVLink 腿
     逐行抽取 + 对称指针桩 H100 真机 19 PASS）；**「对称内存」的物理分配/映射/跨进程 shard 地基已由
-    P56-1 补齐**（`comm/symmetric.hpp` + `allocator.py`，H100 真机 55+23 PASS）。DeepEP
-    侧余下的运行期空档（bucket 集合通信 `all_gather/all_reduce/reduce_scatter`、`pp_send_recv`、`engram`）
-    都要 NCCL 设备 API，待环境。
+     P56-1 补齐**（`comm/symmetric.hpp` + `allocator.py`，H100 真机 55+23 PASS）；**bucket 集合通信
+     已由 P54-1 补齐**（`all_gather` copy-engine 真机跨 NVLink peer 逐字节一致）；**流水线并行
+     send/recv 已由 P58-1 补齐**（`pp_send_recv`，数据面 TMA 流水 + 寻址面索引 H100 真机 40/40
+     byte-exact + 168 有序对 0 不符）。DeepEP 侧余下的运行期空档（bucket 的 `all_reduce/reduce_scatter`
+     内核、`engram` fetch）都要 NCCL GIN 设备 API，待环境。
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
     shared expert 分支的更深精读；端到端需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。
