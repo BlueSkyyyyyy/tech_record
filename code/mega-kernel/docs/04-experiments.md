@@ -4461,3 +4461,131 @@ ncu 双窗口读数（carveout=16 MB）：仅 stA 窗口 → K2a 6.77 / K2b 8.40
 - **H100 参数**：L2=50 MB、`maxPersistingL2CacheSize`=31 MB；不同代 GPU（A100 40 MB L2、B200 更大）
   数值会移，但结论的**形状**（carveout 大小是零和开关、`f<1` 只救小 carveout、多窗口不叠加）应保持。
 - device 3（固定空闲）；每配置独立进程跑 ncu，避免 persisting 状态串扰。
+
+## 31. 有界 ready 池 + warmup wave 的防死锁与容量下界（P42-1）
+
+> 本节把 checklist（`docs/05` §2.3「防死锁：交错调度下上游可能饿死下游——DeepGEMM 用 warmup wave +
+> ring 容量上界闭式推导」）里**只作资料转引**的一条做成实测：megakernel 的 in-kernel scheduler 把待跑 task
+> 放进一个**有界** ready 池（ring block / SMEM 页 / pool block）时，「**准入顺序**」与「**池容量**」如何
+> 共同决定**死锁**与**吞吐**。源码 `src/ring_deadlock.cu`，脚本 `harness/ring_deadlock.sh`，原始输出
+> `harness/ring_deadlock.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、`work_iters=20000`）。
+
+### 31.1 背景：DeepGEMM Mega MoE scheduler 的两件防死锁机制
+
+一手核对 `~/github/DeepGEMM`（commit `057ca59`）的 `deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh`：
+
+- **`get_num_l1_warmup_waves()`（`:15-45`）**——注释原文 *"Get minimal L1 warmup waves to ensure no
+  L1 -> L2 deadlock"*。它在交错调度 L1（专家 GEMM 第一部分）/ L2（第二部分）task 前，**先把前若干个
+  m-block 的 L1 task 全部发出去**（warmup wave）；否则 L2 task 会先把 ring/pool 的槽位占住、却在等
+  **发不出来的 L1 前置**，形成死锁（`:23` 注释 *"The first L2 wave may touch multiple M blocks; all their
+  L1 N tasks must be issued first"*、`:30-35` 讲交错调度每 M-block 遗留的 pending L1 task 如何累积）。
+- **`get_num_max_live_pool_blocks()`（`:47-80`）**——注释 *"Host-side ring capacity helper for the MegaMoE
+  schedule"*。它给出 ring 容量的**闭式上界**：`num_live_blocks_after_warmup + frontier_growth + wave_margin`
+  （`:67-79`）。容量必须装得下「warmup 之后的活跃 block 数 + frontier 增长 + 一个 wave margin」；并且
+  `l2_full_mask` 的奇偶 **generation 复用**也依赖 ring 容量（`:140-141` 注释 *"the mask parity per ring
+  generation relies on the ring capacity, see `get_num_max_live_pool_blocks`"*，`:153-164`）。
+- **运行期就是动态执行这条不变式**：`get_next_task()`（`:372-407`）在返回一个 L2 task 前，会
+  **等所有需要的 L1 task 都已被各调度队列取走**（`:398-403` *"Wait until all required L1 tasks are fetched
+  from all scheduling queues"*）；`fetch_expert_recv_count()`（`:302-306`）把 `num_sched_l1_waves` 取成
+  `min(min_l1_warmup_waves, num_total_l1_waves)`。即：**「任何 L2 task 不得先于其 L1 前置被发」**是
+  warmup 的本质不变式，`get_num_l1_warmup_waves` 只是它的**最小**宽度闭式。
+
+MPK 侧对应的是 event 驱动的去中心化调度（`docs/01` §4、快照行 1175–1231 / 1232–1308）：task 完成→触发
+event→event 激活→入 scheduler 队列→派发下游 task。它同样需要保证「上游先发」，只是用 event 依赖而非
+固定 warmup 宽度。本节用一个**单常驻 kernel**（scheduler/worker 角色分离，对应 MPK §5.1）把这条不变式
+的**死锁边界**与**容量下界**量出来。
+
+### 31.2 实验设计
+
+单 kernel，`G+1` 个 block：**block 0 = scheduler**（唯一准入者），其余 `G` 个 = **worker**（消费者）：
+
+- **任务图**：`M` 个 m-block，每块 `Kp` 个 **producer**（L1，可立即跑）与 `Kc` 个 **consumer**（L2，
+  **必须等本块全部 `Kp` 个 producer 完成**，fan-in 依赖）。`N = M*(Kp+Kc)`。
+- **有界 ready 池**：scheduler 按 `order[]` 把 task **准入**池；池内「已准入未完成」数 **≤ `CAP`**
+  （占用语义 = task 在整个生命周期占一个池槽，对应 ring block / SMEM 页）。worker 从池 pop task；
+  遇到 consumer 且前置未齐就**自旋等待（占着 worker + 池槽）**。
+- **两种准入顺序**：
+  - `naive`：每块 **consumer 先于 producer**（对抗性交错，模拟「L2 先于 L1 被发」的坏顺序）；
+  - `warmup(W)`：先把前 `W` 个 m-block 的 producer 全发出（warmup wave），其余同 naive。
+- **安全**：设备侧**无进度守门狗**——scheduler 用 `clock64()` 检测 `completed` 长时间不增即置
+  `deadlock_flag`，所有 worker 在依赖自旋里检查该 flag 退出。故**死锁 case 也让 kernel 正常返回并打印**，
+  host 不会挂（§A/§B/§E 里 `ms≈505` 的行就是守门狗判死锁的耗时，~1e9 cycle ≈ 0.5 s）。
+- **正确性**：`warmup, CAP=N+1` 全跑完时 `sum` 相对解析参考 `rel=-1.84e-10`（float 累加，量级正确）。
+
+### 31.3 Section A/B：死锁边界与 warmup 宽度
+
+**§A（`M=32,Kp=8,Kc=4,N=384`，扫 `CAP`）**：`naive` 在 **`CAP ≤ Kc=4`** 时死锁、`CAP≥5` 即 ok；
+`warmup(W=M=32)` 在 `CAP=1..12` **全部 ok**。原因：naive 顺序下前 `CAP` 个准入的全是 m0 的 4 个 consumer，
+它们等 m0 的 producer（排在位置 4..11、因池满无法准入）→ 池被「等前置的 consumer」堵死；`CAP≥5` 时
+至少挤进一个 producer → 脱困。**死锁阈值恰 = 首个 m-block 的 consumer 数 `Kc`**。
+
+**§B（`CAP=4=Kc`，扫 warmup 宽度 `W`）**：`done` 精确 = `12·W`（每救一个 block 就完整跑完它的
+`Kp+Kc=12` 个 task），`W<M=32` 都死锁、`W=M=32` 才全解：
+
+```
+   W  | deadlock | done
+    0 |        1 | 0/384      <- 退化为 naive
+    1 |        1 | 12/384
+    8 |        1 | 96/384
+   16 |        1 | 192/384
+   32 |        0 | 384/384    <- W=M，全解
+```
+
+**§E（依赖宽度敏感性，`M=16,Kp=8`，`run` naive）**：死锁边界随 `Kc` 平移——`Kc=2` 时
+`CAP≤2` 死锁（`CAP=4` ok）；`Kc=4` 时 `CAP≤4` 死锁（`CAP=8` ok）；`Kc=8` 时 `CAP≤8` 死锁
+（`CAP=9` ok）。同 `Kc` 下 `warmup(W=M=16)` 在 `CAP=2/4/8` **全部脱困**。
+
+**结论**：有界池 + 坏顺序会**真死锁**，边界 = 「先被准入的、等前置的 task 数」；warmup（把前置抢发在前）
+是**充分**的解除手段，且**必须够宽**（本模型里要覆盖到每个 consumer 的 producer 都在其前被发）。
+真实 DeepGEMM 的 `get_num_l1_warmup_waves` 是这条不变式的**最小**宽度的闭式（靠 wave/block 几何算），
+比「全部 producer」小得多，但机理同源。
+
+### 31.4 Section C/D：容量下界与 worker 标度
+
+**§C（`warmup W=M`，扫 `CAP`，`G=64` workers）**：即便**不死锁**，池容量对吞吐是**硬约束**——
+`CAP<G` 时同时在飞的 task 不足 G，worker 饿着：
+
+```
+   CAP |    ms    | us/task | vs CAP=G
+     2 |    9.169 |   23.88 |   27.6×
+     8 |    2.300 |    5.99 |    6.9×
+    16 |    1.164 |    3.03 |    3.5×
+    32 |    0.594 |    1.55 |    1.8×
+    64 |    0.334 |    0.87 |   1.01×   <- CAP=G，饱和
+   128 |    0.326 |    0.85 |   0.98×
+```
+
+`CAP≥G` 后吞吐饱和（0.334→0.326 ms）。即 **ring 容量的「吞吐下界」≈ 同时在飞 task 数 / worker 数**，
+正对应 `get_num_max_live_pool_blocks` 里的 "max live"（`:67` `num_live_blocks_after_warmup`）——容量
+必须 ≥ 活跃 block 数才能不饿着。
+
+**§D（`CAP=128` 富余，扫 worker 数 `G`）**：`G=1→18.151 ms`、`G=128→0.207 ms`（相对 `G=16`
+**5.58×**）；`G≤32` 接近线性（`G=16→32` 1.93×），`G>32` 转次线性（`G=64→128` 只再 1.57×），
+因任务总数 `N` 与调度协调成为瓶颈。
+
+### 31.5 与 DeepGEMM / MPK、判据的关系
+
+- **给 `docs/05` §2.3「防死锁」一个量化锚点**：坏顺序 + `CAP≤Kc` 必死；`warmup` 任意 `CAP` 可解但**宽度要够**；
+  即使不死锁，`CAP<` 活跃数也会**掉吞吐**（§C `CAP=2` 慢 **27.6×**）。这解释了为什么真实 megakernel
+  的 ring 容量要按 `get_num_max_live_pool_blocks` 的**闭式上界**取，而不是随手取小。
+- **与 `docs/05` §2.3「跨 launch 复位不靠 host」互补**：`l2_full_mask` 的奇偶 generation 复用依赖 ring
+  容量（`mega_moe.cuh:140-141,153-164`）——ring 容量不仅决定「装得下」，还决定「能否用奇偶位掩码免复位」。
+- **与 MPK 的关系**：MPK 用 event 依赖**隐式**保证「上游先发」（下游 task 只有在其 triggering event
+  激活后才入 scheduler 队列），DeepGEMM 用**显式 warmup wave + 闭式容量**；本节把后者的两条不变式在
+  单常驻 kernel 上复现。两者都不改「调度权在 device、粒度到 SM/task」（C4/C5）。
+- **判据（C1–C5）**：`warmup`/`naive` 都是 **C1–C4** 的单常驻 kernel（block 0 是固定 scheduler 角色、
+  设备侧原子/池推进），但 worker 无固定 task 角色、由池动态取——**仍差 C5 一步**（与 P15-1/P22-1 同档）。
+  本节重点是**成本/正确性侧**（死锁与容量），与 P14-1/P16-1/P17-1 的资源足迹互补。
+
+### 31.6 局限与踩到的坑
+
+- **合成依赖模型**：consumer 依赖「本块全部 producer」（fan-in），顺序是「每块 consumer 先于 producer」；
+  真实 DeepGEMM 的依赖与 wave 几何更细，故本节的**最小 warmup 宽度 = 全部 producer**，而真实闭式远小于此
+  （靠 m-block × L1-N cluster 的 wave 结构）。结论的**形状**（坏顺序死锁、warmup 必要且要够宽、容量
+  ≥ 活跃数才满吞吐）应保持，绝对宽度不可直接套用。
+- **守门狗是近似**：用「`completed` 长时间不增」判死锁；若某 task 真跑得极慢可能误判。本节 `work_iters=20000`
+  的 task 仅 ~0.1 ms，阈值 ~0.5 s，余量充足。死锁 case 的 `ms` 是**守门狗耗时**，非真实计算耗时。
+- **单 GPU、`N≤384`、`Kp=8`**：未扫更大 `N`/更深依赖/多级扇入扇出（P22-1 覆盖了扇入/扇出策略但未覆盖
+  「有界池容量」这一维）；未与真实 DeepGEMM SM100 路径对跑（SM100 专属）。
+- 正确性只查 `sum`（float 量级），未逐 task 比对；`warmup`/`naive` 收敛 case 的 `done` 均 = `N`。
+- 目标卡 H100/sm90、device 3（固定空闲）；每 case 独立进程，避免残留状态串扰。

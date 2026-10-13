@@ -944,6 +944,38 @@
     侧受保护、但自然计时两个 K2 都加速、`oneB` 单 stream 又证明 stB 完全能保护），故**多窗口 split 归因
     以自然计时为准、ncu 逐 kernel 拆分只作参考**。判据不变（kernel-per-operator，谈落点）。**本轮新增实验。**
 
+### P42 实验扩展 24：有界 ready 池 + warmup wave 的防死锁与容量下界（`docs/04-experiments.md` §31）
+
+- [x] **P42-1** 把 checklist（`docs/05` §2.3「防死锁：交错调度下上游可能饿死下游——DeepGEMM 用 warmup
+  wave + ring 容量上界闭式推导」）里**只作资料转引**的一条做成实测：megakernel 的 in-kernel scheduler
+  用**有界** ready 池时，「**准入顺序**」与「**池容量**」如何共同决定**死锁**与**吞吐**。
+  见 `docs/04-experiments.md` §31，源码 `src/ring_deadlock.cu`，脚本 `harness/ring_deadlock.sh`，
+  原始输出 `harness/ring_deadlock.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
+  `work_iters=20000`）。一手核对 `~/github/DeepGEMM`（`057ca59`）`scheduler/mega_moe.cuh`：
+  `get_num_l1_warmup_waves()`（`:15-45`，注释 *"ensure no L1 -> L2 deadlock"*）、
+  `get_num_max_live_pool_blocks()`（`:47-80`，"Host-side ring capacity helper"，闭式上界）、
+  `l2_full_mask` 奇偶 generation 复用依赖 ring 容量（`:140-141,153-164`）、运行期 `get_next_task()`
+  在返回 L2 task 前**等所有需要的 L1 task 已被取走**（`:398-403`）、`fetch_expert_recv_count()`
+  取 `num_sched_l1_waves=min(min_l1_warmup_waves,num_total_l1_waves)`（`:302-306`）。模型：单常驻 kernel
+  （block 0 = scheduler，其余 G = worker），`M` 个 m-block × `Kp` producer（L1）+ `Kc` consumer（L2，
+  等本块全部 producer），有界池 `CAP` + 顺序 `naive`（每块 consumer 先）/`warmup(W)`（先发前 W 块 producer）。
+  设备侧 `clock64` 无进度守门狗使死锁 case 也正常返回。核心结论：
+  - **§A 死锁边界 = 首个 m-block 的 consumer 数 `Kc`**：`M=32,Kp=8,Kc=4` 时 naive 在 **`CAP≤4`** 死锁、
+    `CAP≥5` 即 ok（池被「等前置的 consumer」堵死；挤进一个 producer 即脱困）；`warmup(W=M=32)` 任意
+    `CAP=1..12` 全 ok。
+  - **§B warmup 必须够宽**：`CAP=4=Kc` 下 `done=12·W`，`W<M=32` 都死锁、`W=M` 才全解（每救一个 block
+    完整跑完它的 12 个 task）。
+  - **§E 边界随 `Kc` 平移**：`M=16,Kp=8`，naive 死锁阈值 `Kc=2→CAP≤2`、`Kc=4→≤4`、`Kc=8→≤8`；
+    同 `Kc` 下 `warmup(W=M=16)` 在 `CAP=2/4/8` 全脱困。
+  - **§C 容量是吞吐硬下界**：即便不死锁，`CAP<G` 时 worker 饿着——`G=64` 扫 `CAP`，`CAP=2` 慢
+    **27.6×**、`CAP=8` 6.9×、`CAP≥G=64` 饱和（0.334→0.326 ms）——正对应 `get_num_max_live_pool_blocks`
+    的 "max live"。
+  - **§D worker 标度**：`G=1→18.15 ms`、`G=128→0.207 ms`（相对 `G=16` 5.58×），`G≤32` 近线性、
+    `G>32` 转次线性（任务数/协调成瓶颈）。
+  判据：`warmup`/`naive` 均 **C1–C4**、worker 无固定角色，**仍差 C5**（与 P15-1/P22-1 同档）；是
+  megakernel 的**正确性/容量成本侧**，与 P14-1/P16-1/P17-1 资源足迹互补。正确性 `rel=-1.84e-10`。
+  **本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -966,7 +998,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P41-1 完成（1/1）**。补齐 `docs/04` §29.6（P40-1）明确留的「只测单窗口、单 stream、
+- 当前进度：**P42-1 完成（1/1）**。把 `docs/05` §2.3「防死锁」checklist 里**只作资料转引**的一条
+  做成实测：megakernel 的 in-kernel scheduler 用**有界 ready 池**时，「**准入顺序**」与「**池容量**」
+  如何共同决定**死锁**与**吞吐**。`docs/04-experiments.md` 新增 **§31**，源码 `src/ring_deadlock.cu`、
+  脚本 `harness/ring_deadlock.sh`、原始输出 `harness/ring_deadlock.out.txt`（目标卡 H100/sm90、
+  **固定空闲 device 3**、nvcc 13.2、`work_iters=20000`）。一手核对 DeepGEMM(`057ca59`)
+  `scheduler/mega_moe.cuh`：`get_num_l1_warmup_waves()`（`:15-45`）、`get_num_max_live_pool_blocks()`
+  （`:47-80`）、`l2_full_mask` 奇偶 generation 依赖 ring 容量（`:140-141,153-164`）、运行期
+  `get_next_task()` 返回 L2 前等 L1 取走（`:398-403`）。模型：单常驻 kernel（block 0 = scheduler、
+  其余 = worker），`M` m-block × `Kp` producer + `Kc` consumer（fan-in），有界池 `CAP` + 顺序
+  `naive`（consumer 先）/`warmup(W)`（先发前 W 块 producer）。核心结论：
+  - **死锁边界 = 首个 m-block 的 consumer 数 `Kc`**：`M=32,Kp=8,Kc=4` naive 在 `CAP≤4` 死锁、
+    `CAP≥5` ok；`warmup(W=M)` 任意 `CAP` 全 ok（§A）。
+  - **warmup 必须够宽**：`CAP=4` 下 `done=12·W`，`W<M=32` 全死锁、`W=M` 才全解（§B）。
+  - **边界随 `Kc` 平移**：naive 死锁阈值 `Kc=2→≤2`、`Kc=4→≤4`、`Kc=8→≤8`（§E）。
+  - **容量是吞吐硬下界**：即便不死锁，`CAP<G` 时 worker 饿着——`G=64` 时 `CAP=2` 慢 **27.6×**、
+    `CAP≥G` 饱和（§C），正对应 `get_num_max_live_pool_blocks` 的 "max live"。
+  - **worker 标度**：`G=1→18.15 ms`、`G=128→0.207 ms`（5.58× vs G=16），`G>32` 转次线性（§D）。
+  判据：`warmup`/`naive` 均 C1–C4、worker 无固定角色，**仍差 C5**（与 P15-1/P22-1 同档）；是
+  megakernel 的**正确性/容量成本侧**，与 P14-1/P16-1/P17-1 资源足迹互补。正确性 `rel=-1.84e-10`。
+  设备侧 `clock64` 无进度守门狗使死锁 case 也正常返回（`ms≈505` 的行即守门狗耗时）。**本轮新增实验。**
+- 此前：**P41-1 完成（1/1）**。补齐 `docs/04` §29.6（P40-1）明确留的「只测单窗口、单 stream、
   单一 persisting 段，**未测多窗口、多 stream 各自窗口、`hitRatio<1` 的概率化分区**」尾巴，把「L2 常驻」
   从「能不能用」推进到「**怎么配才不亏**」，直接对应 megakernel「整图很多中间量同时活着、争同一个
   carveout」的处境。`docs/04-experiments.md` 新增 **§30**，源码 `src/l2_persist_tuning.cu`、脚本
@@ -1365,7 +1417,12 @@
      `cudaGridDependencySynchronize` 仍等完成、capture ≡ 显式构图、节点级 PDL 属性被驱动拒绝）。
      **至此「下一步」剩余可选方向全部完成**；随后 **P36-1/P37-1/P38-1/P39-1** 又各自补掉了
      `docs/04` 明留的尾巴（条件节点 `cwhile`、device graph launch、Green Contexts 分区、MPS 跨进程
-     隔离），**全专题无遗留必做项**。
+     隔离），**全专题无遗留必做项**。此后 **P40-1/P41-1/P42-1** 又依次补掉：L2 常驻（中间量第三档
+     落点）、L2 persisting 调参/多窗口、**有界 ready 池 + warmup wave 的防死锁/容量下界**（`docs/04`
+     §29/§30/§31）。
+     **P42-1 新留尾巴**（见 `docs/04` §31.6）：只测单 GPU / `N≤384` / `Kp=8`、依赖是「每块 fan-in」，
+     故最小 warmup 宽度 = 全部 producer（真实 DeepGEMM 闭式远小于此，靠更细 wave 几何）；未测多级
+     扇入扇出 + 有界池的组合、未与真实 SM100 路径对跑。
 - **本轮（P40-1）**：`docs/04-experiments.md` 新增 **§29**「L2 常驻：损失三的第三档中间量落点」——
   兑现 §17.7（P24-1）的假设，把「中间量的内存落点」补上 **L2** 这一档（寄存器/SMEM+DSM/HBM 之外）。
   源码 `src/l2_residency.cu`、脚本 `harness/l2_residency.sh`、原始输出 `harness/l2_residency.out.txt`
