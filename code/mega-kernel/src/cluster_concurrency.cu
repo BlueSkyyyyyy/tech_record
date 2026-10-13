@@ -87,6 +87,24 @@ __host__ __device__ __forceinline__ float fval(int i, int owner) {
   return (float)(((long long)i * 7 + (long long)owner * 13) % 1000);
 }
 
+// ---------- cluster 作用域的 release/acquire 标志访存（sm90+） ----------
+// 用于「环形缓冲 + 每槽 release/done」：生产者写数据后 release-store 一个 per-thread
+// 就绪标志，消费者 acquire-load 它再读数据；反向的 done 标志对称。二者都作用在
+// `.shared::cluster` 状态空间、`.cluster` 作用域上，跨 SM 的 DSM 访问走同一 memory model。
+// 用 volatile 访存 + cluster 作用域 fence 表达 release/acquire：写数据 → fence → 写标志；
+// 读标志 → fence → 读数据。避免直接在 `.shared::cluster` 上用 st.release/ld.acquire
+// （本机实测在 256 线程 × 远端共享地址下会间歇报 `unspecified launch failure`，见 §88.6）。
+__device__ __forceinline__ unsigned ld_acq_cs(const unsigned* p) {
+  return *(volatile const unsigned*)p;
+}
+__device__ __forceinline__ void st_rel_cs(unsigned* p, unsigned v) {
+  asm volatile("fence.acq_rel.cluster;" ::: "memory");
+  *(volatile unsigned*)p = v;
+}
+__device__ __forceinline__ void fence_cluster() {
+  asm volatile("fence.acq_rel.cluster;" ::: "memory");
+}
+
 // ---------- 远端读：每线程 U 路在飞 `ld.shared::cluster` ----------
 #define DEF_PULL(U)                                                                     \
   __global__ void pull_##U(float* __restrict__ out, int rounds, int sb) {               \
@@ -180,6 +198,90 @@ DEF_PULLS(1) DEF_PULLS(2) DEF_PULLS(4) DEF_PULLS(8) DEF_PULLS(16)
 DEF_PUSH(1) DEF_PUSH(2) DEF_PUSH(4) DEF_PUSH(8) DEF_PUSH(16)
 #undef DEF_PUSH
 
+// ---------- 环形缓冲 + 每槽 release/done：去掉每 round 的两次 `cluster.sync` ----------
+// 与 push 同数据量/同远端字节数，但把「每 round 两次全 cluster 同步」换成「每线程每槽
+// 一对 release/done 标志」（per-thread 通道）：
+//   本 block 把 snd 的一段推给 (rank+1)%C 的 rcv 的第 j=r%S 个槽；
+//   - 生产者（每个线程独立）写数据后 `st.release` 它的就绪标志 ready[j*TH+tid]=r+1；
+//   - 消费者（同一线程）`ld.acquire` 本地 ready[j*TH+tid] 到 r+1 后读该槽；
+//   - 读完 `st.release` 一个 done 标志 ack[j*TH+tid]=r+1 回生产者；
+//   - 生产者复用槽 j 前 `ld.acquire` 本地 ack 到 r-S+1（环形深度 S 的背压）。
+// 全程无 `__syncthreads`、无 `cluster.sync`（初始化后）——每线程是独立的 SPSC 通道。
+// S = min(4, tiles)，S 越大流水越深、同步越摊薄。
+#define DEF_RING(U)                                                                     \
+  __global__ void ring_##U(float* __restrict__ out, int rounds, int sb) {               \
+    extern __shared__ float sm[];                                                       \
+    int SEG = TH * U;                                                                   \
+    int tiles = sb / SEG;                                                               \
+    int S = tiles < 4 ? tiles : 4;                                                      \
+    float* snd = sm;                                                                    \
+    float* rcv = sm + sb;                                                               \
+    unsigned* ready = (unsigned*)(rcv + (size_t)S * SEG);                               \
+    unsigned* ack = ready + (size_t)S * TH;                                             \
+    cg::cluster_group cl = cg::this_cluster();                                          \
+    int C = cl.num_blocks();                                                            \
+    int rank = cl.block_rank();                                                         \
+    for (int i = threadIdx.x; i < sb; i += blockDim.x) snd[i] = fval(i, rank);          \
+    for (int i = threadIdx.x; i < S * TH; i += blockDim.x) { ready[i] = 0; ack[i] = 0; }\
+    cl.sync();                                                                          \
+    int dstRank = (rank + 1) % C, srcRank = (rank - 1 + C) % C;                         \
+    float* dst = (float*)cl.map_shared_rank(rcv, dstRank);                              \
+    unsigned* dstReady = (unsigned*)cl.map_shared_rank(ready, dstRank);                 \
+    unsigned* ackTo = (unsigned*)cl.map_shared_rank(ack, srcRank);                      \
+    unsigned* myReady = ready;   /* 本地标志：用本地指针 => 普通 ld.shared，避开 */      \
+    unsigned* myAck = ack;       /* `ld.shared::cluster` 的脆弱路径（§86/§87） */       \
+    int tid = threadIdx.x;                                                              \
+    long long acc = 0;                                                                  \
+    for (int r = 0; r < rounds; r++) {                                                  \
+      int j = r % S;                                                                    \
+      int off = (r % tiles) * SEG;                                                      \
+      if (r >= S) { while (ld_acq_cs(&myAck[j * TH + tid]) < (unsigned)(r - S + 1)) {} fence_cluster(); } \
+      _Pragma("unroll") for (int u = 0; u < U; u++) dst[j * SEG + u * TH + tid] = snd[off + u * TH + tid]; \
+      st_rel_cs(&dstReady[j * TH + tid], (unsigned)(r + 1));                            \
+      while (ld_acq_cs(&myReady[j * TH + tid]) < (unsigned)(r + 1)) {} fence_cluster(); \
+      _Pragma("unroll") for (int u = 0; u < U; u++) acc += (long long)rcv[j * SEG + u * TH + tid]; \
+      st_rel_cs(&ackTo[j * TH + tid], (unsigned)(r + 1));                               \
+    }                                                                                   \
+    if (tid == 0) out[blockIdx.x] = (float)acc;                                         \
+  }
+DEF_RING(1) DEF_RING(2) DEF_RING(4) DEF_RING(8) DEF_RING(16)
+#undef DEF_RING
+
+// ---------- 环形缓冲 + 单次 cluster.sync：去掉 push 每 round 的第二次同步 ----------
+// push 每 round 两次 `cluster.sync`：一次「写完让邻居读到」，一次「读完防下轮覆写」。
+// 但 push 的 `off=(r%tiles)*SEG` 本就把数据摊在 `tiles` 个槽上、循环复用；只要
+// **槽位数 S>=2**，邻居下一 round 写的是**另一个槽**、要到 r+S 才回写本槽——而每 round
+// 一次 `cluster.sync` 已把两块压在同一步，邻居不可能领先 S 轮。故**第二次同步是多余的**。
+// ring1 = push - 第二次同步（SMEM/占用率/数据量/结果与 push 逐字相同，唯一变量=同步次数）。
+#define DEF_RING1(U)                                                                    \
+  __global__ void ring1_##U(float* __restrict__ out, int rounds, int sb) {              \
+    extern __shared__ float sm[];                                                       \
+    int SEG = TH * U;                                                                   \
+    int tiles = sb / SEG;                                                               \
+    int S = tiles < 4 ? tiles : 4;                                                      \
+    float* snd = sm;                                                                    \
+    float* rcv = sm + sb;                                                               \
+    cg::cluster_group cl = cg::this_cluster();                                          \
+    int C = cl.num_blocks();                                                            \
+    int rank = cl.block_rank();                                                         \
+    for (int i = threadIdx.x; i < sb; i += blockDim.x) snd[i] = fval(i, rank);          \
+    rcv[threadIdx.x] = 0.f;                                                             \
+    cl.sync();                                                                          \
+    float* dst = (float*)cl.map_shared_rank(rcv, (rank + 1) % C);                       \
+    int tid = threadIdx.x;                                                              \
+    long long acc = 0;                                                                  \
+    for (int r = 0; r < rounds; r++) {                                                  \
+      int j = r % S;                                                                    \
+      int off = (r % tiles) * SEG;                                                      \
+      _Pragma("unroll") for (int u = 0; u < U; u++) dst[j * SEG + u * TH + tid] = snd[off + u * TH + tid]; \
+      cl.sync();                                                                        \
+      _Pragma("unroll") for (int u = 0; u < U; u++) acc += (long long)rcv[j * SEG + u * TH + tid]; \
+    }                                                                                   \
+    if (tid == 0) out[blockIdx.x] = (float)acc;                                         \
+  }
+DEF_RING1(1) DEF_RING1(2) DEF_RING1(4) DEF_RING1(8) DEF_RING1(16)
+#undef DEF_RING1
+
 // ============================ host dispatch ============================
 static void* pick_pull(int U) {
 #define P(UU) if (U == UU) return (void*)pull_##UU;
@@ -195,6 +297,18 @@ static void* pick_push(int U) {
 }
 static void* pick_pulls(int U) {
 #define P(UU) if (U == UU) return (void*)pulls_##UU;
+  P(1) P(2) P(4) P(8) P(16)
+#undef P
+  return nullptr;
+}
+static void* pick_ring(int U) {
+#define P(UU) if (U == UU) return (void*)ring_##UU;
+  P(1) P(2) P(4) P(8) P(16)
+#undef P
+  return nullptr;
+}
+static void* pick_ring1(int U) {
+#define P(UU) if (U == UU) return (void*)ring1_##UU;
   P(1) P(2) P(4) P(8) P(16)
 #undef P
   return nullptr;
@@ -236,9 +350,13 @@ static int run(const char* tag, int C, int grid, int sbKB, int rounds, int U, in
   int sb = sbKB * 1024 / 4;
   int SEG = TH * U;
   if (SEG > sb) { printf("%s C=%d grid=%d sb=%dKB U=%d | SKIP(SEG>sb)\n", tag, C, grid, sbKB, U); return 3; }
-  size_t smem = (size_t)2 * sb * 4;   // snd + rcv
-  int is_push = (path == 1);
-  void* fn = path == 1 ? pick_push(U) : (path == 2 ? pick_pulls(U) : pick_pull(U));
+  int tiles = sb / SEG, S = tiles < 4 ? tiles : 4;
+  size_t smem = path == 3
+      ? (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * TH * 4   // snd + S*rcv + ready/ack
+      : (size_t)2 * sb * 4;                                            // snd + rcv
+  int is_push = (path == 1 || path == 3 || path == 4);
+  void* fn = path == 1 ? pick_push(U) : (path == 2 ? pick_pulls(U)
+             : (path == 3 ? pick_ring(U) : (path == 4 ? pick_ring1(U) : pick_pull(U))));
   float* out; CK(cudaMalloc(&out, (size_t)grid * sizeof(float)));
   cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   cudaFuncAttributes a; CK(cudaFuncGetAttributes(&a, fn));
@@ -249,7 +367,8 @@ static int run(const char* tag, int C, int grid, int sbKB, int rounds, int U, in
   cudaEvent_t e0, e1; cudaEventCreate(&e0); cudaEventCreate(&e1);
   double best = 0; int ok = 0; cudaError_t last = cudaSuccess;
   // 正式计时：每次 launch 一个 event 对，取 min-of-N、统计成功次数。
-#define FN(UU) (path == 1 ? (void*)push_##UU : (path == 2 ? (void*)pulls_##UU : (void*)pull_##UU))
+#define FN(UU) (path == 1 ? (void*)push_##UU : (path == 2 ? (void*)pulls_##UU \
+              : (path == 3 ? (void*)ring_##UU : (path == 4 ? (void*)ring1_##UU : (void*)pull_##UU))))
 #define TIME(UU) if (U == UU) {                                                        \
     for (int i = 0; i < N; i++) {                                                      \
       cudaEventRecord(e0);                                                             \
@@ -285,13 +404,17 @@ static int run(const char* tag, int C, int grid, int sbKB, int rounds, int U, in
 // 可行性探针：每配置独立进程各 launch reps 次，报成功次数（规避 sticky 与并发 context）
 static int probe(int C, int grid, int sbKB, int U, int reps, int path, int rounds) {
   int sb = sbKB * 1024 / 4;
-  size_t smem = (size_t)2 * sb * 4;
+  int SEG = TH * U, tiles = sb / SEG, S = tiles < 4 ? tiles : 4;
+  size_t smem = path == 3
+      ? (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * TH * 4
+      : (size_t)2 * sb * 4;
   float* out; CK(cudaMalloc(&out, (size_t)grid * sizeof(float)));
   int ok = 0;
   for (int i = 0; i < reps; i++) {
     cudaError_t e;
 #define GO(UU) if (U == UU) e = launch_cluster(C, dim3(grid), dim3(TH), smem, \
-    path == 1 ? (void*)push_##UU : (path == 2 ? (void*)pulls_##UU : (void*)pull_##UU), \
+    path == 1 ? (void*)push_##UU : (path == 2 ? (void*)pulls_##UU \
+    : (path == 3 ? (void*)ring_##UU : (path == 4 ? (void*)ring1_##UU : (void*)pull_##UU))), \
     out, rounds, sb);
     GO(1) GO(2) GO(4) GO(8) GO(16)
 #undef GO
@@ -299,42 +422,53 @@ static int probe(int C, int grid, int sbKB, int U, int reps, int path, int round
     else cudaGetLastError();
   }
   printf("%s C=%d grid=%4d U=%2d rounds=%3d | %d/%d ok\n",
-         path == 1 ? "W" : (path == 2 ? "S" : "R"), C, grid, U, rounds, ok, reps);
+         path == 1 ? "W" : (path == 2 ? "S" : (path == 3 ? "N" : (path == 4 ? "M" : "R"))),
+         C, grid, U, rounds, ok, reps);
   cudaFree(out);
   return reps - ok;
 }
 
 int main(int argc, char** argv) {
-  if (argc < 2) { printf("usage: cluster_concurrency <A|R|W|S|F|G|K> ...\n"); return 1; }
+  if (argc < 2) { printf("usage: cluster_concurrency <A|R|W|S|N|M|F|G|K|O|L> ...\n"); return 1; }
   const char* cmd = argv[1];
-  // path 取值：0=pull（远端读），1=push（远端写+本地读），2=pulls（远端读、外层串行）
+  // path：0=pull（远端读），1=push（远端写+本地读），2=pulls（远端读串行），
+  //       3=ring（无 cluster.sync 的每槽 release/done），4=ring1（环形槽 + 单次 cluster.sync/round）
   int path = !strcmp(cmd, "W") ? 1 : (!strcmp(cmd, "S") ? 2 : (!strcmp(cmd, "G") ? 1
-             : (!strcmp(cmd, "K") ? 2 : 0)));
-  const char* tag = path == 1 ? "W" : (path == 2 ? "S" : "R");
+             : (!strcmp(cmd, "K") ? 2 : (!strcmp(cmd, "N") ? 3 : (!strcmp(cmd, "O") ? 3
+             : (!strcmp(cmd, "M") ? 4 : (!strcmp(cmd, "L") ? 4 : 0)))))));
+  const char* tag = path == 1 ? "W" : (path == 2 ? "S" : (path == 3 ? "N" : (path == 4 ? "M" : "R")));
 
   if (!strcmp(cmd, "A")) {
-    printf("# §87 §A 资源表（T=%d，SMEM=2*sb*4=64KB）\n", TH);
-    size_t smem = 2 * (8192) * 4;
+    printf("# §87 §A / §88 §A 资源表（T=%d，sb=32KB；pull/push/pulls SMEM=64KB，ring 见下）\n", TH);
+    int sb = 8192;
     for (int Ui = 0; Ui < 5; Ui++) {
       int U = (int[]){1, 2, 4, 8, 16}[Ui];
-      for (int P = 0; P < 3; P++) {
-        void* fn = P == 0 ? pick_pull(U) : (P == 1 ? pick_push(U) : pick_pulls(U));
+      int SEG = TH * U, tiles = sb / SEG, S = tiles < 4 ? tiles : 4;
+      size_t smem_r = (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * TH * 4;
+      for (int P = 0; P < 5; P++) {
+        size_t smem = P == 3 ? smem_r : (size_t)2 * sb * 4;
+        void* fn = P == 0 ? pick_pull(U) : (P == 1 ? pick_push(U)
+                 : (P == 2 ? pick_pulls(U) : (P == 3 ? pick_ring(U) : pick_ring1(U))));
         cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
         cudaFuncAttributes a; CK(cudaFuncGetAttributes(&a, fn));
         int occ = 0; CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, fn, TH, smem));
-        printf("  %-5s U=%2d regs=%d localB=%zu occ=%d blk/SM\n",
-               P == 0 ? "pull" : (P == 1 ? "push" : "pulls"), U,
-               a.numRegs, (size_t)a.localSizeBytes, occ);
+        printf("  %-5s U=%2d regs=%d localB=%zu occ=%d blk/SM%s\n",
+               P == 0 ? "pull" : (P == 1 ? "push" : (P == 2 ? "pulls"
+               : (P == 3 ? "ring" : "ring1"))), U,
+               a.numRegs, (size_t)a.localSizeBytes, occ,
+               P == 3 ? " (S=min(4,tiles))" : "");
       }
     }
     return 0;
   }
-  if (!strcmp(cmd, "R") || !strcmp(cmd, "W") || !strcmp(cmd, "S")) {
+  if (!strcmp(cmd, "R") || !strcmp(cmd, "W") || !strcmp(cmd, "S") || !strcmp(cmd, "N")
+      || !strcmp(cmd, "M")) {
     int C = atoi(argv[2]), grid = atoi(argv[3]), sbKB = atoi(argv[4]);
     int rounds = atoi(argv[5]), U = atoi(argv[6]);
     return run(tag, C, grid, sbKB, rounds, U, path);
   }
-  if (!strcmp(cmd, "F") || !strcmp(cmd, "G") || !strcmp(cmd, "K")) {
+  if (!strcmp(cmd, "F") || !strcmp(cmd, "G") || !strcmp(cmd, "K") || !strcmp(cmd, "O")
+      || !strcmp(cmd, "L")) {
     int C = atoi(argv[2]), grid = atoi(argv[3]), sbKB = atoi(argv[4]);
     int U = atoi(argv[5]), reps = atoi(argv[6]);
     int rounds = argc > 7 ? atoi(argv[7]) : 4;

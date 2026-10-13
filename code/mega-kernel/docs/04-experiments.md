@@ -13194,3 +13194,163 @@ cluster 一变大（`C=4`），远端读的失稳区**向左扩到 `grid=132`（
   （该 S2S bulk 在 sm90 上编译可过但运行时 `illegal instruction`，本快照不可用——记入「已知坑」）；
   搬运的 `float` 是合成数据、非真实 task tile；`pulls` 只作对照、未扫更多 codegen 形态；计时取
   min-of-20、绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**。
+
+## 88. cluster 跨 SM 交换：把 `push` 每 round 的**双 `cluster.sync`** 减到**单次**（环形槽），以及「完全无 sync 的每槽 release/done」为何不可用（P163-1）
+
+本节补掉 §87.7 明留的下一步——「`push` 每 round 两次 `cluster.sync()` 使其低 `U` 吞吐偏低，
+真实实现用**环形缓冲 + 每槽 release/done**（而非每 round 全 cluster 同步）进一步摊薄」。§87 只把
+「远端读换成远端写」测到「稳」，但把稳定性**押在全 cluster 同步**上；本节问：**这第二次同步到底
+能不能去掉？去掉后换来的低-`U` 吞吐有多少？** 以及，若**连 `cluster.sync` 都不要**、改用教科书式的
+「生产者 release 每槽就绪标志 / 消费者 acquire 后 done」纯握手，在这台目标卡（H100/sm90a）的 DSM 上
+**跑不跑得起来**？
+
+源码复用 `src/cluster_concurrency.cu`（**新增两条载体，不改 `pull`/`push`/`pulls` 语义**），
+脚本 `harness/cluster_ring.sh`，原始输出 `harness/cluster_ring.out.txt`（目标卡 H100 / sm90a、
+**固定空闲 device 1**、nvcc 13.2、每配置独立进程以规避 sticky context；计时项 min-of-20 且报
+`ok/20`、单发探针报 `ok/1`）。
+
+三条被测量载体（每 block 有 `snd`/`rcv` 两块 32 KB SMEM；每 block 每 round 移动
+`SEG = TH·U = 256·U` 个 `float` 的**远端字节**，数据量/结果与 §87 `push` 逐字相同）：
+- `push`（§87 原样，**双** `cluster.sync`/round）：写完 sync 一次（让邻居读到）、读完再 sync 一次
+  （防下轮覆写）——**每 round 两次全 cluster 同步**；
+- `ring1`（**新**，单次 `cluster.sync`/round）：数据本已摊在 `tiles = sb/SEG` 个槽上、按
+  `off=(r%tiles)*SEG` 循环复用；只要**槽位数 `S=min(4,tiles) ≥ 2`**，邻居下一 round 写的是
+  **另一个槽**、要到第 `r+S` 轮才回写本槽，而每 round 一次同步已把两块压在同一步，邻居不可能领先
+  `S` 轮——故**第二次同步是多余的**，直接删掉（SMEM/占用率/数据量/结果与 `push` 逐字相同，
+  **唯一变量 = 同步次数**）；
+- `ring`（**新**，**无任何 `cluster.sync`**）：纯「每槽 release/done」握手——本 block 的第 `tid`
+  个线程把 `U` 个元素写进 `(rank+1)%C` 的槽 `j=r%S` 后，用 `fence.acq_rel.cluster` + `volatile`
+  写自己在该槽的就绪标志；同一线程再 `volatile` 轮询**本地**就绪标志（由邻居写进本 block SMEM）；
+  读完写 done 标志回生产者做背压。**全程零 `cluster.sync`、零 `__syncthreads`**（初始化后）。
+
+### 88.1 §A 资源表：`ring1` 与 `push` 逐项同资源；`ring` 因 SMEM 更小而占用率更高
+
+```
+  载体   U=1            U=4            U=8            U=16
+  push  regs=26 occ=3  regs=28 occ=3  regs=32 occ=3  regs=32 occ=3
+  ring1 regs=31 occ=3  regs=32 occ=3  regs=32 occ=3  regs=32 occ=3
+  ring  regs=27 occ=5  regs=32 occ=4  regs=32 occ=3  regs=32 occ=3   (S=min(4,tiles))
+  pull/pulls 每 U 亦 occ=3（对照，§87）
+```
+
+`ring1` 与 `push` 的寄存器/占用率**逐项一致**（occ=3 由 64 KB 动态 SMEM 钉死，§82.5）⇒ 二者的
+吞吐差**只能归因于每 round 同步次数**，是一个干净的**单变量**对照。`ring` 把 `rcv` 缩到 `S` 个槽、
+再腾出标志区，SMEM 更小故 `U≤4` 时占用率反而更高（occ 5/4）——后文比较时须留意。
+
+### 88.2 §B（Q1）`ring1` 与 `push` 一样稳到 `grid=1056`
+
+`C=2, U=8, rounds=64`，单发探针扫 `grid`：
+
+```
+   grid |  push(G)  | ring1(L)
+  ------+-----------+----------
+      2 |   1/1     |   1/1
+     16 |   1/1     |   1/1
+     32 |   1/1     |   1/1
+     64 |   1/1     |   1/1
+    132 |   1/1     |   1/1
+    264 |   1/1     |   1/1
+    528 |   1/1     |   1/1
+   1056 |   1/1     |   1/1
+```
+
+**删掉第二次同步不引入任何新的失稳**：`ring1` 在 §87 的「保持静默」区间（`grid≤1056`）全稳，
+与 `push` 逐点相同。⇒ 「环形槽 + 单次同步」是和「双次同步」一样**结构性稳**的远端写路径。
+
+### 88.3 §C（Q2 headline）每 round 少一次同步把低-`U` 吞吐抬 1.1–1.6×（`C` 越大越明显）
+
+`grid=264`，min-of-20，`push`（W）对 `ring1`（M）：
+
+```
+  C=2      U=1      U=2      U=4      U=8      U=16
+  push   219.1    424.1    749.9   1347.5   2174.1  GB/s
+  ring1  331.1    527.5    951.9   1628.5   2484.4  GB/s
+  ratio   1.51x    1.24x    1.27x    1.21x    1.14x
+  ns/lap 1234→816.5   1275→1025   1442→1136   1605→1328   1989.5→1741
+
+  C=4      U=1      U=8      U=16
+  push   181.7   1098.1   1742.3   GB/s
+  ring1  284.0   1461.3   2123.4   GB/s   (1.56x / 1.33x / 1.22x)
+
+  C=8      U=1      U=8      U=16
+  push   174.2   1028.4   1739.9   GB/s
+  ring1  282.8   1452.0   2096.1   GB/s   (1.62x / 1.41x / 1.20x)
+```
+
+三点读法：
+1. **收益集中在低 `U`**（`U=1` 1.5–1.6×），随 `U` 单调收窄（`U=16` 1.14–1.22×）——这与 §87.4
+   的判断一致：低 `U` 时吞吐被**每 round 固定同步开销**主导，`ring1` 恰好砍掉其中一半。
+2. **省下的每 lap 时间是「一次 `cluster.sync`」量级**：`C=2`、`grid=264`、`U=1` 从
+   **1234 ns/lap → 816.5 ns/lap**（−417.5 ns）；`grid=528` 从 **2412.5 → 1504.5**（−908 ns）。
+   对照 §19.3（`C=2` 单 cluster `cluster.sync` = 399.8 ns）与 §86 §E（`C=2` = 498 ns），
+   **省下的正是被删掉的那一次同步**。
+3. **`C` 越大收益越大**：`C=8, U=1` 1.62×。因为 `cluster.sync` 成本随 `C` 上升（§86 §E：
+   `C=2→16` 为 498→767 ns），而 `ring1` 只留一次——**这正是「环形化/去全同步」在 megakernel 里的
+   量化理由**（`docs/12` §4–§7 的 ring barrier / `docs/17` §3 的对称显存交换）。
+
+### 88.4 §D 大 `grid` 下同一结论成立（`C=2, grid=528`）
+
+```
+     U=1      U=8      U=16
+push 224.1   1228.1   1848.6   GB/s
+ring1 359.4  1687.0   2275.3   GB/s   (1.60x / 1.37x / 1.23x)
+```
+
+`grid` 翻倍（132 cluster）不改变结论：`ring1` 对 `push` 的增益与 `grid=264` 同形，低 `U` 仍最受益。
+
+### 88.5 §E（Q4 headline 二）**完全无 `cluster.sync` 的每槽 release/done 在 DSM 上不可用**
+
+`ring`（无任何 `cluster.sync`，纯 `volatile` + `fence.acq_rel.cluster` 的每槽握手）：
+
+```
+  单发探针（O）  C=2 U=8 rounds=64   grid=2  1/1 | 16 1/1 | 24 0/1 | 32 0/1 | 48 1/1
+  重复 20 发（N）C=2 U=8 rounds=64   grid=2  0/20 | 8 3/20 | 16 0/20
+```
+
+- **失败边界既非「grid 越大越脆」也非单调**（单发探针 `grid=24/32` 失败、`grid=48` 反而通过），
+  且**重复 launch 时连 `grid=2`（单 cluster）都 0/20**——**它在任何规模上都只是「碰运气」**，不是
+  「低于某规模就好」。
+- 失败是 **`unspecified launch failure`**（与 §86.7/§87 的远端读失稳同一错误），进程内
+  `cudaDeviceSynchronize` 返回；`compute-sanitizer --tool memcheck` 在 `grid=64` 下**报 0 error 且
+  1/1 通过**（sanitizer 的序列化改变了时序）⇒ 这是**时序/可见性**问题，不是越界或竞争检测到的 data race。
+- 结论：**教科书式的「无 barrier 的 SPSC release/done」不能直接搬到 cluster DSM 的远端写通道上**——
+  在 H100/sm90a 上它间歇挂起/失稳，正是 §86.7 那条「跨 SM 交换必须低并发/批量/环形化 + 保留
+  硬件同步原语（`cluster.sync`/mbarrier）」的又一印证。**能用的形态是 `ring1`（环形槽 + 单次
+  `cluster.sync`），而不是「零同步」。**
+
+### 88.6 踩到的坑（已记入「已知坑」）
+
+- **`st.release.cluster` / `ld.acquire.cluster` 直接作用在 `.shared::cluster` 上并不可靠**：先用
+  `__cvta_generic_to_shared` 把 `map_shared_rank` 的（远端）指针转成共享地址、再发
+  `st.release.cluster.shared::cluster.u32`，在本机 `grid=2` 即间歇失稳；改成 generic 指针
+  `st.release.cluster.u32` 稍好但仍间歇失败。
+- **轮询本地标志时必须用「本地」指针**：若把 `map_shared_rank(flag, 自己 rank)` 得到的
+  **cluster 指针**用于自旋读，编译器会发出 **`ld.shared::cluster`**（哪怕目标是自己的 SMEM），
+  于是撞上 §86/§87 记录的**远端读 `ld.shared::cluster` 持续流量脆弱**那条路——改为直接用
+  **未映射的本地指针**（普通 `ld.shared`）后，失败率显著下降（但纯握手仍不稳，见 §88.5）。
+- 这两条合起来说明：**在 cluster DSM 上做细粒度握手，同步原语的选型（`cluster.sync`/mbarrier）
+  和指针来源（local vs cluster）都会改结果**，不能把 CPU 上的 SPSC 直觉直接平移。
+
+### 88.7 结论、判据与局限
+
+- **结论一（headline）**：§87 `push` 的**每 round 第二次 `cluster.sync` 是多余的**——数据已摊在
+  多个环形槽上，单次同步（把两块压在同一步）就足以同时保证「写后可见」与「读前不被覆写」。删掉它
+  （`ring1`）在**与 `push` 逐项相同的寄存器/占用率**下把低-`U` 吞吐抬 **1.1–1.6×**，且**稳到
+  `grid=1056`**；省下的每 lap 时间恰是一次 `cluster.sync`（`C=2` ~0.4 µs，§19.3/§86 §E），
+  `C` 越大收益越大（`C=8,U=1` 1.62×）。这是「环形缓冲替代每 round 全同步」在**保留硬件屏障**前提下的
+  可落地形态。
+- **结论二（否定性）**：把同步**完全去掉**、改用最朴素的「每槽 release/done」纯握手（`ring`）在
+  H100 DSM 上**不可用**（间歇 `unspecified launch failure`、边界非单调、sanitizer 干净）——
+  「跨 SM 交换必须低并发/批量/环形化 + 保留同步原语」（§86.7）再获一条硬证据。
+- **对 MPK / 生产案例**：MPK 的 ring barrier / event queue（`docs/12` §4–§7）与 DeepGEMM symmetric
+  memory 的 ring barrier（`docs/17` §3）都不是「零同步」，而是**「保留一个便宜的同步点 + 用环形槽把
+  同步频率降到最低」**——本节给出该设计在 Hopper 硬件原语层的确切收益（低-`U` 1.1–1.6×）与
+  「不能再省那最后一个同步」的边界。
+- **判据（C1–C5，`docs/00` §3）**：三载体均单常驻 kernel、设备侧推进、`cluster.sync` 细化 **C4**；
+  **仍不是 C5**（无固定角色 worker/scheduler 动态派发，与 §18–§23/§86/§87 同档）。
+- **局限（诚实标注）**：只测 H100/sm90a（DSM 的真正家是 SM100 2SM，本机不可执行）；`ring` 的失败
+  只报错误码、未在设备侧埋点定位到具体 warp/指令（且 sanitizer 会掩盖）；`ring1` 的「删第二次
+  同步」论证依赖 `S=min(4,tiles)≥2`（本实验所有 `U` 满足 `tiles≥2`，未测 `tiles==1` 的退化角）；
+  `S` 未单独扫（固定 `min(4,tiles)`）；搬运的是合成 `float`、非真实 task tile；计时取 min-of-20，
+  绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；`C=8` 某些单独 `push` 计时曾出现离群
+  （harness 内已复测，取 harness 的 min-of-20 为准）。

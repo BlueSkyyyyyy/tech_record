@@ -1,0 +1,147 @@
+== A. 资源表：pull/push/pulls/ring/ring1 各 U 的 numRegs / localB / 占用率（T=256）==
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring A
+# §87 §A / §88 §A 资源表（T=256，sb=32KB；pull/push/pulls SMEM=64KB，ring 见下）
+  pull  U= 1 regs=30 localB=0 occ=3 blk/SM
+  push  U= 1 regs=26 localB=0 occ=3 blk/SM
+  pulls U= 1 regs=23 localB=0 occ=3 blk/SM
+  ring  U= 1 regs=27 localB=0 occ=5 blk/SM (S=min(4,tiles))
+  ring1 U= 1 regs=31 localB=0 occ=3 blk/SM
+  pull  U= 2 regs=32 localB=0 occ=3 blk/SM
+  push  U= 2 regs=26 localB=0 occ=3 blk/SM
+  pulls U= 2 regs=23 localB=0 occ=3 blk/SM
+  ring  U= 2 regs=30 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  ring1 U= 2 regs=32 localB=0 occ=3 blk/SM
+  pull  U= 4 regs=32 localB=0 occ=3 blk/SM
+  push  U= 4 regs=28 localB=0 occ=3 blk/SM
+  pulls U= 4 regs=23 localB=0 occ=3 blk/SM
+  ring  U= 4 regs=32 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  ring1 U= 4 regs=32 localB=0 occ=3 blk/SM
+  pull  U= 8 regs=32 localB=0 occ=3 blk/SM
+  push  U= 8 regs=32 localB=0 occ=3 blk/SM
+  pulls U= 8 regs=30 localB=0 occ=3 blk/SM
+  ring  U= 8 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  ring1 U= 8 regs=32 localB=0 occ=3 blk/SM
+  pull  U=16 regs=32 localB=0 occ=3 blk/SM
+  push  U=16 regs=32 localB=0 occ=3 blk/SM
+  pulls U=16 regs=32 localB=0 occ=3 blk/SM
+  ring  U=16 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  ring1 U=16 regs=32 localB=0 occ=3 blk/SM
+
+== B.（Q1 稳定性）ring1（单次 sync/round）对 push（双次 sync/round）的 grid 标度 ==
+-- ring1（L）：grid 2..1056，U=8, rounds=64（单发探针） --
+  M C=2 grid=   2 U= 8 rounds= 64 | 1/1 ok
+  M C=2 grid=  16 U= 8 rounds= 64 | 1/1 ok
+  M C=2 grid=  32 U= 8 rounds= 64 | 1/1 ok
+  M C=2 grid=  64 U= 8 rounds= 64 | 1/1 ok
+  M C=2 grid= 132 U= 8 rounds= 64 | 1/1 ok
+  M C=2 grid= 264 U= 8 rounds= 64 | 1/1 ok
+  M C=2 grid= 528 U= 8 rounds= 64 | 1/1 ok
+  M C=2 grid=1056 U= 8 rounds= 64 | 1/1 ok
+-- push（G）：同 grid（单发探针，对照） --
+  W C=2 grid=   2 U= 8 rounds= 64 | 1/1 ok
+  W C=2 grid=  16 U= 8 rounds= 64 | 1/1 ok
+  W C=2 grid=  32 U= 8 rounds= 64 | 1/1 ok
+  W C=2 grid=  64 U= 8 rounds= 64 | 1/1 ok
+  W C=2 grid= 132 U= 8 rounds= 64 | 1/1 ok
+  W C=2 grid= 264 U= 8 rounds= 64 | 1/1 ok
+  W C=2 grid= 528 U= 8 rounds= 64 | 1/1 ok
+  W C=2 grid=1056 U= 8 rounds= 64 | 1/1 ok
+
+== C.（Q2 headline）ring1 vs push 的吞吐：C=2/4/8，grid=264，扫 U（min-of-20）==
+-- C=2 push（W） --
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 2 264 32 64 1
+W C=2 grid= 264 sb= 32KB U= 1 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0    78.976 us |    219.1 GB/s(远端) | 1234.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 2 264 32 64 2
+W C=2 grid= 264 sb= 32KB U= 2 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0    81.600 us |    424.1 GB/s(远端) | 1275.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 2 264 32 64 4
+W C=2 grid= 264 sb= 32KB U= 4 rounds= 64 regs=28 occ=3 | ok=20/20 maxerr 0 bad 0    92.288 us |    749.9 GB/s(远端) | 1442.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 2 264 32 64 8
+W C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   102.720 us |   1347.5 GB/s(远端) | 1605.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 2 264 32 64 16
+W C=2 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   127.328 us |   2174.1 GB/s(远端) | 1989.500 ns/lap
+-- C=2 ring1（M） --
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 2 264 32 64 1
+M C=2 grid= 264 sb= 32KB U= 1 rounds= 64 regs=31 occ=3 | ok=20/20 maxerr 0 bad 0    52.256 us |    331.1 GB/s(远端) | 816.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 2 264 32 64 2
+M C=2 grid= 264 sb= 32KB U= 2 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    65.600 us |    527.5 GB/s(远端) | 1025.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 2 264 32 64 4
+M C=2 grid= 264 sb= 32KB U= 4 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    72.704 us |    951.9 GB/s(远端) | 1136.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 2 264 32 64 8
+M C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    84.992 us |   1628.5 GB/s(远端) | 1328.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 2 264 32 64 16
+M C=2 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   111.424 us |   2484.4 GB/s(远端) | 1741.000 ns/lap
+-- C=4 push（W） --
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 4 264 32 64 1
+W C=4 grid= 264 sb= 32KB U= 1 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0    95.232 us |    181.7 GB/s(远端) | 1488.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 4 264 32 64 2
+W C=4 grid= 264 sb= 32KB U= 2 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0    98.496 us |    351.3 GB/s(远端) | 1539.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 4 264 32 64 4
+W C=4 grid= 264 sb= 32KB U= 4 rounds= 64 regs=28 occ=3 | ok=20/20 maxerr 0 bad 0   109.888 us |    629.8 GB/s(远端) | 1717.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 4 264 32 64 8
+W C=4 grid= 264 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   126.048 us |   1098.1 GB/s(远端) | 1969.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 4 264 32 64 16
+W C=4 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   158.880 us |   1742.3 GB/s(远端) | 2482.500 ns/lap
+-- C=4 ring1（M） --
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 4 264 32 64 1
+M C=4 grid= 264 sb= 32KB U= 1 rounds= 64 regs=31 occ=3 | ok=20/20 maxerr 0 bad 0    60.928 us |    284.0 GB/s(远端) | 952.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 4 264 32 64 2
+M C=4 grid= 264 sb= 32KB U= 2 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    67.360 us |    513.7 GB/s(远端) | 1052.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 4 264 32 64 4
+M C=4 grid= 264 sb= 32KB U= 4 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    72.288 us |    957.4 GB/s(远端) | 1129.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 4 264 32 64 8
+M C=4 grid= 264 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    94.720 us |   1461.3 GB/s(远端) | 1480.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 4 264 32 64 16
+M C=4 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   130.368 us |   2123.4 GB/s(远端) | 2037.000 ns/lap
+-- C=8 push（W） --
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 8 264 32 64 1
+W C=8 grid= 264 sb= 32KB U= 1 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0    99.296 us |    174.2 GB/s(远端) | 1551.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 8 264 32 64 2
+W C=8 grid= 264 sb= 32KB U= 2 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   102.464 us |    337.7 GB/s(远端) | 1601.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 8 264 32 64 4
+W C=8 grid= 264 sb= 32KB U= 4 rounds= 64 regs=28 occ=3 | ok=20/20 maxerr 0 bad 0   112.480 us |    615.3 GB/s(远端) | 1757.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 8 264 32 64 8
+W C=8 grid= 264 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   134.592 us |   1028.4 GB/s(远端) | 2103.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 8 264 32 64 16
+W C=8 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   159.104 us |   1739.9 GB/s(远端) | 2486.000 ns/lap
+-- C=8 ring1（M） --
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 8 264 32 64 1
+M C=8 grid= 264 sb= 32KB U= 1 rounds= 64 regs=31 occ=3 | ok=20/20 maxerr 0 bad 0    61.184 us |    282.8 GB/s(远端) | 956.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 8 264 32 64 2
+M C=8 grid= 264 sb= 32KB U= 2 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    68.992 us |    501.6 GB/s(远端) | 1078.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 8 264 32 64 4
+M C=8 grid= 264 sb= 32KB U= 4 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    72.672 us |    952.3 GB/s(远端) | 1135.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 8 264 32 64 8
+M C=8 grid= 264 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    95.328 us |   1452.0 GB/s(远端) | 1489.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 8 264 32 64 16
+M C=8 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   132.064 us |   2096.1 GB/s(远端) | 2063.500 ns/lap
+
+== D.（Q3 headline 二）push vs ring1 在大 grid：C=2，grid=528，扫 U（min-of-20）==
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 2 528 32 64 1
+W C=2 grid= 528 sb= 32KB U= 1 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   154.400 us |    224.1 GB/s(远端) | 2412.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 2 528 32 64 8
+W C=2 grid= 528 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   225.408 us |   1228.1 GB/s(远端) | 3522.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring W 2 528 32 64 16
+W C=2 grid= 528 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   299.488 us |   1848.6 GB/s(远端) | 4679.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 2 528 32 64 1
+M C=2 grid= 528 sb= 32KB U= 1 rounds= 64 regs=31 occ=3 | ok=20/20 maxerr 0 bad 0    96.288 us |    359.4 GB/s(远端) | 1504.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 2 528 32 64 8
+M C=2 grid= 528 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   164.096 us |   1687.0 GB/s(远端) | 2564.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring M 2 528 32 64 16
+M C=2 grid= 528 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   243.328 us |   2275.3 GB/s(远端) | 3802.000 ns/lap
+
+== E.（Q4）完全无 cluster.sync 的 ring（每槽 release/done，N/O）：可靠性 ==
+-- 单发探针（O）：grid 2..48，U=8, rounds=64 --
+  N C=2 grid=   2 U= 8 rounds= 64 | 1/1 ok
+  N C=2 grid=  16 U= 8 rounds= 64 | 1/1 ok
+  N C=2 grid=  24 U= 8 rounds= 64 | 0/1 ok
+  N C=2 grid=  32 U= 8 rounds= 64 | 0/1 ok
+  N C=2 grid=  48 U= 8 rounds= 64 | 1/1 ok
+-- 重复 20 发（N）：grid=2/8/16，U=8, rounds=64 --
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring N 2 2 32 64 8
+N C=2 grid=   2 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=0/20 FAIL
+[unspecified launch failure]
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring N 2 8 32 64 8
+N C=2 grid=   8 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=3/20 CUDA ERROR ~/proj/tech_record/code/mega-kernel/src/cluster_concurrency.cu:335: unspecified launch failure
+$ CUDA_VISIBLE_DEVICES=1 /tmp/cluster_ring N 2 16 32 64 8
+N C=2 grid=  16 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=0/20 FAIL
+[unspecified launch failure]
