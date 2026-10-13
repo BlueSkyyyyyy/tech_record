@@ -4062,6 +4062,41 @@
       句柄缓存三分支。设备侧 NCCL API 与端到端 dispatch/combine 仅分析。配套博客
       `content/posts/mega-moe-140-deepep-comm-context`（索引页新增第 140 篇）。
 
+### P131 增量（opt-in，把「通信」真正放回 MoE 图：多卡 EP 端到端前向/反向）
+
+- [x] **P131-1** **多卡 EP 端到端 MoE 前向/反向 vs 单卡稠密参考**（8×H100 真通信）。
+      第 99 篇（P89-1）的前向数值复刻、第 111 篇（P101-1）的反向数值复刻都是**单卡**的——作者
+      **明确把 dispatch/combine 的通信折算成单卡 gather/scatter**（第 99 篇 §2「跳过通信」）；
+      第 95 篇（P85-1）虽跨 8×H100 跑了真实 `refs.dispatch`，但只验「两个原语互为转置」这条
+      **线性代数恒等式**、**没把 EP 接进完整 MoE 图**、没量**参数梯度**。本篇补这个结构性空档：
+      在 8×H100 上用真实 NCCL `all_to_all_single` 实现 expand 版 dispatch/combine
+      （行空间与 DeepEP `do_expand=True` 一致），把 `dispatch→L1→SwiGLU→L2→combine` 与它的
+      autograd 反向逐张量与**单卡稠密参考**对拍。**反向的关键事实**（第 4/14/95/104 篇的
+      「反向无 mega-kernel」）被**写成代码**：`all_to_all_single` 是 in-place、**不挂 autograd**
+      （实测 `out.requires_grad=False`），故手写 `_A2AFn`——`forward` 用 `send_counts/recv_counts`、
+      `backward` **对调**再跑同一原语（= `README.md:204-220/242-258` 的 `dispatch_backward`=combine、
+      `combine_backward`=dispatch）。**dispatch 语义**：`refs.py:10-123` 是**非 expand**（`:16`
+      「Not expanded」、`:67` 按目的 rank 整行复制、`:76-77` 越界槽置 `-1`，第 95 篇度 degree≈3.3
+      的来源），训练用 **expand**（`ep.py:577/619`、`README.md:253-255`）；收方 `argsort` 成
+      **m-grouped contiguous**（第 11 篇的布局在此长出来）后跑 L1/L2，`w` 乘在激活里（第 99 篇 §1，
+      combine 退化成纯求和）。
+      → `docs/141-ep-e2e-moe.md`（真实行号核对）。H100 实测
+      `harness/exp_ep_e2e_moe.{py,sh,out.txt}`（`world=8,E=64`，四组梯度 vs 稠密、沿 rank 求和）：
+      **fp64** 前向 `4.3e-8` / 四梯度 `2.7e-8~4.4e-8`（= router 的 `softmax(·.float())` fp32 地板，
+      **算法精确等价**）；**真 fp32**（`allow_tf32=False`）前向 `3.2e-7` / 四梯度 `1.7e-7~4.2e-7`
+      （**把通信放回图里 EP ≡ 稠密到单精度**）；**tf32**（NGC 容器默认
+      `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1`、`fp32_precision=='tf32'`）`2.8e-4`（**不是 EP 的错**，
+      是「fp32 名字下的 TF32」两实现 matmul 形状不同导致的舍入分歧；记下：**NGC 容器做 fp32 对拍
+      须显式关 TF32**）；**bf16** 前向 `2.3e-3` / 反向 `4~6e-3`（输出舍入地板）；loss 逐位对上。
+      真实通信量：平衡负载下等价于 `[world,T_local,H]` all-to-all（`H=7168,bf16,topk=2`），
+      单向搬运 `8·T_local·topk·H·2B`——坐实第 1 篇**「K 倍放大」**；本次在**共享节点**
+      （GPU0 利用率 100%）测得 **104–123 GB/s** 为**受争用下界**，同机无争用时第 1 篇对同样字节数
+      量到 **303–392 GB/s**（~NVLink 上限 82%），对照说明通信带宽对「同卡还有谁在用」极敏感。
+      **边界**：Mega MoE 融合 kernel（UMMA/UTCCP/TMEM/NVLink 直写与 readiness）与 DeepEP 真实
+      设备路径（NCCL GIN，本机 2.29.7 不匹配，见「阻塞」）**SM100 专属 / 仅分析**；本篇复刻的是
+      **语义**、不复刻 SM 内重叠。配套博客 `content/posts/mega-moe-141-ep-e2e-moe`
+      （索引页新增第 141 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4084,11 +4119,31 @@
 - DeepGEMM editable 安装后，JIT 需要 `deep_gemm/include/{cute,cutlass}`；editable 不会自动拷，
   要手动 `cp -r third-party/cutlass/include/{cute,cutlass} deep_gemm/include/`（详见 `docs/08` §2）。
   另需 `apt-get install -y libdw-dev`，并确保 `third-party/deep_jit` 子模块与 gitlink 一致（`2efdab4`）。
+- **NGC 容器默认开 TF32**：`TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1` 使 `matmul.allow_tf32=True`
+  （`fp32_precision=='tf32'`）。做 **fp32 数值对拍必须显式 `allow_tf32=False`**，否则会把 TF32
+  舍入差（~1e-4）当成算法误差（见 `docs/141` §5）。
+- **8 卡节点是共享的**：并行自驱任务会同时占用 GPU，通信/带宽测量可能是**受争用的下界**；
+  报数时注明环境或与无争用基线（如第 1 篇）交叉对照。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P130 各增量完成（P15-1…P41-1、P42-1…P130-1）。**
-  本轮 P130-1：新建 `docs/140-deepep-comm-context.md`
+- 当前进度：**P0~P14 全部完成；P15~P131 各增量完成（P15-1…P41-1、P42-1…P131-1）。**
+  本轮 P131-1：新建 `docs/141-ep-e2e-moe.md`
+  （+`harness/exp_ep_e2e_moe.{py,sh,out.txt}`）——把「通信」真正放回 MoE 图：在 **8×H100** 上用真实
+  NCCL `all_to_all_single` 实现 expand 版 dispatch/combine，把 `dispatch→L1→SwiGLU→L2→combine`
+  与其 autograd 反向逐张量与**单卡稠密参考**对拍。补的空档：第 99 篇（前向）/第 111 篇（反向）
+  的数值复刻都是**单卡**（明确「跳过通信」），第 95 篇虽跨 8×H100 但只验**伴随恒等式**、没接进
+  完整 MoE 图也不量参数梯度。**反向的关键事实写成代码**：`all_to_all_single` 不挂 autograd
+  （实测 `out.requires_grad=False`）→ 手写 `_A2AFn`，`backward` 把 `send/recv` split **对调**再跑
+  同一原语（= `README.md:204-220/242-258`）。**H100 实测**：**fp64** 前向 `4.3e-8`、四梯度
+  `2.7e-8~4.4e-8`（= router `softmax(·.float())` 的 fp32 地板，**算法精确等价**）；**真 fp32**
+  （`allow_tf32=False`）前向 `3.2e-7`、四梯度 `1.7e-7~4.2e-7`（**EP ≡ 稠密到单精度**）；
+  **tf32**（NGC 容器默认 `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1`）`2.8e-4`（「fp32 名字下的 TF32」
+  两实现分歧，**非 EP 的错**；记为坑）；**bf16** 前向 `2.3e-3`/反向 `4~6e-3`；loss 逐位对上。
+  真实通信量坐实「K 倍放大」；**共享节点**（GPU0 100%）测得 104–123 GB/s 为**受争用下界**，
+  对照第 1 篇同字节数 303–392 GB/s。Mega MoE 融合 kernel 与 DeepEP 真实设备路径（NCCL GIN，
+  本机 2.29.7，见「阻塞」）**SM100 专属 / 仅分析**。索引页新增第 141 篇。
+  上一轮 P130-1：新建 `docs/140-deepep-comm-context.md`
   （+`harness/exp_deepep_context.{py,sh,out.txt}`、`src/deepep_context_arith.cu`）——补齐 DeepEP 所有
   通信篇目脚下的 **host 通信上下文 `comm::Context`**（`csrc/kernels/comm/context.cpp`，268 行）。
   前面第 7/48/51/53/63/64/66/68/69/73/86/121 篇都从一个已存在的「上下文/窗口」讲起，这个对象从没被
