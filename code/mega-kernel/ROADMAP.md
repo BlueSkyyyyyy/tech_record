@@ -2245,6 +2245,37 @@
     **单跑曲线未做 in-situ/迭代不动点**（本节核心发现即它不够，最直接下一步）、曲线只采 14 点、
     `bind` 用 O=1、合成访问、单 `U=4`/`__maxnreg__(32)`、未对 SM100。
 
+### P87 实验扩展 66：SM 分配器「单跑曲线 vs in-situ 迭代不动点」（`docs/04-experiments.md` §75）
+
+- [x] **P87-1** 补掉 P86-1（§74）**§74.9 明文尾巴**（原话）「`bind_opt` 的速率曲线是**单跑**测得
+      （本节的核心发现即它不够），**未做 in-situ/迭代不动点**——这是最直接的下一步」：把 SM 分配器的
+      速率来源从**单跑（solo）**换成**当前并发下实测（in-situ）**——(a) `bind_insitu`（map=4）**迭代
+      不动点**：从 §74 的 `bind_opt`（单跑曲线）出发、用**实测整机 makespan** 做**局部爬山**（挪
+      `step` 个 SM、改善 >0.5% 才接受、`step=16→…→1`），只用 in-situ 测量、不需任何速率模型；
+      (b) **条件 in-situ 速率曲线**：两模式扫 `n_p`、用设备侧 `clock64` 量**并发下**各分区实测速率。
+      见 `docs/04-experiments.md` **§75**，源码 `src/hetero_sm_insitu.cu`、脚本
+      `harness/hetero_sm_insitu.sh`、原始输出 `harness/hetero_sm_insitu.out.txt`（目标卡 H100/sm90a、
+      **自动选最闲 device（落 device 6）**、nvcc 13.2、`numSM=132`、逻辑总读 1 GiB、`T=1024,O=1`、
+      `__maxnreg__(32)`、`U=4`；`pat_hetero` 32 regs/0 spill/8192 B smem）。四种模式/既有四映射**完全
+      复用 §71–§74**，**唯一新变量 = 速率来源**。核心结论：
+      - **§A** 正确性 `sink` 逐位对 host 参考（`1791753031`，`OK`）；**§B** 单模式基线/SM 曲线复现 §73/§74。
+      - **§C（headline 一）in-situ 完全收回 §74 的崩盘**：`coal+sparse` 从 `bind_opt` 的 **0.664 → 1.024**
+        （追平 `interleave` 1.032）；`coal+l2res` 0.886→**1.168**、`scalar+l2res` 0.983→**1.030**（均反超
+        `interleave`）。**§74 的崩盘确系「单跑曲线把『给已饱和模式加 SM』的边际价值估高」。**
+      - **§C（headline 二）两类东西 in-situ 也修不了**：① `coal+scalar` 的 ~5% **全局发射税反不回**
+        （`bind_insitu` **0.952** ≈ `bind_opt` 0.953）；② **`equal4` 的角色绑定结构上限**——四模式全混时
+        `bind_insitu` **0.789** 仍输 `interleave` 1.043（任何静态 SM 分区都不如「共享 SM + 交错」）。
+      - **§D（headline 三）条件 in-situ 曲线 = 病因**：单跑 `solo_coal(n)` 一路涨，但 in-situ `rate_coal`
+        直到 `n≈64` 仅 627–1082（并发争用压低）；in-situ `rate_sparse` 随 coal 扩张**单调下降**
+        （704→626→592→…→558），overall 峰值在 **`n_coal≈32`**——而单跑贪心选了 `n_coal=9`。**in-situ
+        一眼看清「给已饱和 sparse 加 SM 边际价值≈0/为负」。**
+      - **§E** `bind_insitu` 把 `coal+sparse` 从 `[9,123]` 纠回 `[33,99]`；**§F** 爬山轨迹 15 次评测即把
+        崩盘案 766.5→1172.1（>50%），`coal+scalar` 原地不动（起点已最优）；**§G ncu** 两分配器硬件计数
+        **逐项相同**（DRAM 1.07 GB / sectors / 活跃 warp / 发射），差纯是并发时序。
+      判据 **C1–C5 全不满足**（纯数据面微基准）。**本轮新增实验**；P87-1 新留尾巴（§75.9）：`bind_insitu`
+      是**局部爬山**（`equal4` 两次运行收敛到不同分配，`l2res16M` 对运行序敏感）、条件曲线只 2 条两模式对、
+      `n` 步长 16、`bind` 用 O=1、合成访问、单 `U=4`/`__maxnreg__(32)`、未对 SM100。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2307,10 +2338,34 @@
   （`sparse`）**的混合上**比常数斜率还差**（`coal+sparse` 0.936→**0.664**）——**单跑曲线把「加 SM 到已饱和
   模式」的边际价值估高了，是「常数速率谬误」的另一种坐标**。分配改变争用、争用改变速率，是一个**不动点**，
   故真实 megakernel 里一条 task 类型的「速率 vs 给的 SM 数」必须在别的 task 同时在跑时量。
+- **`clock64`/`%clock` 是 per-SM 计数器、跨 SM 相位/频率可能不同**：用 `clock64` 做 per-block 计时时，
+  必须用**每条 block 自己的 `(end-start)`**，**不能**跨 block 取 `max(end)-min(start)`——后者会把不同 SM
+  的时钟偏移串进去（P87-1/§75：首版跨 SM 相减算出 0.1 GB/s 的假速率，改用 `(end-start)` 后正常）。
+  要跨 SM 比较绝对时刻应改用 `%globaltimer`（全局同步）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P86-1 完成（1/1）**。补掉 P85-1（§73）**§73.8 明文尾巴**「`bind_bal` 用**常数**每 SM
+- 当前进度：**P87-1 完成（1/1）**。补掉 P86-1（§74）**§74.9 明文尾巴**「`bind_opt` 的速率曲线是
+  **单跑**测得，**未做 in-situ/迭代不动点**」：把 SM 分配器的速率来源从**单跑**换成**当前并发下实测**——
+  (a) `bind_insitu`（map=4）从 §74 `bind_opt`（单跑曲线）出发、用**实测整机 makespan** 做**局部爬山**
+  （挪 `step` 个 SM、改善 >0.5% 才接受、`step=16→…→1`）；(b) **条件 in-situ 速率曲线**（两模式扫 `n_p`、
+  设备侧 `clock64` 量并发下各分区实测速率）。见 `docs/04-experiments.md` **§75**，源码
+  `src/hetero_sm_insitu.cu`、脚本 `harness/hetero_sm_insitu.sh`、原始输出
+  `harness/hetero_sm_insitu.out.txt`（目标卡 H100/sm90a、自动选最闲 device、nvcc 13.2、`numSM=132`、
+  逻辑总读 1 GiB、`T=1024,O=1`、`__maxnreg__(32)`、`U=4`；`pat_hetero` 32 regs/0 spill/8192 B smem）。
+  四模式/四映射**完全复用 §71–§74**，**唯一新变量 = 速率来源**。核心结论：
+  **(1) §C headline 一——in-situ 完全收回 §74 崩盘**：`coal+sparse` 由 `bind_opt` **0.664→1.024**（追平
+  `interleave` 1.032）、`coal+l2res` 0.886→**1.168**、`scalar+l2res` 0.983→**1.030**（均反超 interleave），
+  **§74 崩盘确系「单跑曲线把『给已饱和模式加 SM』的边际价值估高」**；**(2) §C headline 二——两类东西
+  in-situ 也修不了**：`coal+scalar` 的 ~5% 全局发射税反不回（0.952≈bind_opt 0.953）、`equal4` 的角色绑定
+  结构上限（0.789 仍输 interleave 1.043，任何静态分区不如共享 SM+交错）；**(3) §D headline 三——条件
+  in-situ 曲线即病因**：单跑 `solo_coal` 一路涨、in-situ `rate_coal` 到 `n≈64` 仅 627–1082，in-situ
+  `rate_sparse` 随 coal 扩张单调降（704→…→558），overall 峰值 `n_coal≈32`，而单跑贪心选 `n_coal=9`；
+  **(4) §E/§F** `bind_insitu` 把 `[9,123]` 纠回 `[33,99]`、15 次评测使崩盘案 766.5→1172.1；**§G ncu**
+  两分配器硬件计数逐项相同（差纯并发时序）。判据 **C1–C5 全不满足**（纯数据面微基准）。**本专题此前
+  P0–P86 全完成，本轮为其新增的实验增量**；P87-1 新留尾巴见 §75.9（`bind_insitu` 局部爬山、`equal4`
+  对运行序敏感、条件曲线只 2 条两模式对、`bind` O=1、合成访问、未对 SM100）。
+- 此前：**P86-1 完成（1/1）**。补掉 P85-1（§73）**§73.8 明文尾巴**「`bind_bal` 用**常数**每 SM
   速率模型（`r1_p`），未用「SM 数→速率」曲线，故其差**部分**是模型粗糙而非分区本身；未做按曲线最优
   配平」：把 §73 的**常数斜率** SM 分配（`bind` ∝ 份额 / `bind_bal` ∝ `f_p/r1_p`）对照**实测「SM 数→
   分区速率」曲线 + 贪心 makespan 最小化**（`bind_opt`）。见 `docs/04-experiments.md` **§74**，源码
