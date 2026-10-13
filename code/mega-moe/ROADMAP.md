@@ -4316,8 +4316,37 @@
       没被计算盖住**。**结论**：EPI-B 是真的、可跑的（`TMA_REDUCE_ADD_2D`），但「多出来的 235MB/步读」
       在 wgrad 形状下**彻底暴露（157%）**，EPI-B 只拿回对 fp32 累积的 1.7×、并不优于「批量 fresh +
       一次流式归约」。载体是 BF16 操作数（FP8 1D2D `sm90_fp8_gemm_1d2d.hpp:81` 不支持累加），
-      SM100 wgrad `tn` 同族 fp32 累积、**仅分析**。配套博客
-      `content/posts/mega-moe-149-wgrad-epib-accumulate`（索引页新增第 149 篇）。
+       SM100 wgrad `tn` 同族 fp32 累积、**仅分析**。配套博客
+       `content/posts/mega-moe-149-wgrad-epib-accumulate`（索引页新增第 149 篇）。
+
+### P140 增量（opt-in，把 P139-1 结尾的「减少字节」落到「折进收缩维 K」这条路）
+
+- [x] **P140-1** **MoE wgrad 的 big-K 折叠：把 S 步梯度累积折进收缩维，能不能消掉每步累积税**
+      （`csrc/apis/gemm.hpp:373-427/403`、`csrc/jit_kernels/impls/sm90_fp8_gemm_1d1d.hpp:84`、
+      `sm90_fp8_gemm_1d2d.hpp:81`、`deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh:346`、
+      `deep_gemm/__init__.py:48/56`；对照第 12/135/145/146/147/148/149 篇）。
+      第 145~149 篇把 wgrad 慢的根因量化到底（真凶=每专家一份 fp32 `[M,N]` 输出占 96%；bf16 输出快
+      2.27× 但端到端封顶 ~1.55×；融合进优化器 1.67×；把归约藏进 GEMM 被 SM90 `232448 B/SM` 堵死；
+      真 kernel EPI-B 多出的 235MB/步读彻底暴露 157%），收尾结论是「**要再快只剩减少字节的路**」、
+      点名「把读一份 D 也省掉的分块归约」。本篇把它做成**结构性正面答案**：**「每步累积」只是
+      「S 次独立 launch」的产物**——沿收缩维 K 拼接 S 步激活，`dW_e = Σ_s A_{e,s}^T B_{e,s} =
+      [A_{e,1};…;A_{e,S}]^T [B_{e,1};…;B_{e,S}]` 恒等于一个 **K=S·k_e 的单次 GEMM**，累加器全程住 TMEM、
+      只最后一次 fresh 落盘，**跨 launch 的累积器读写（RMW）归零**。**源码契约**：REF
+      `k_grouped_fp8_gemm_nt_contiguous`（`gemm.hpp:373-427`）必传 `c`（`:403`）+ 必 fp32
+      （`sm90_fp8_gemm_1d1d.hpp:84`）+ epilogue `SM90_TMA_REDUCE_ADD_2D`（`sm90_fp8_gemm_1d1d.cuh:346`）
+      = 每步读回+写；big-K 走现成稠密 1D2D，契约相反 `not c` + 必 bf16（`sm90_fp8_gemm_1d2d.hpp:81`）
+      = 一次写。**不需要改内核**（与第 146~149 篇都要改协议/kernel 不同），仅需现成 `fp8_gemm_nt`
+      （`deep_gemm/__init__.py:48`）。**H100 实测**（`harness/exp_wgrad_bigk.{sh,py,out.txt}`，空闲 GPU，
+      `dW2 [M=2048,N=7168]`、E=8、k_e=512）：**Part A** S=4 逐专家 REF-vs-BIG-K relerr **3.68e-2**、
+      与两者各自 vs fp64（3.64e-2/3.69e-2）**同层**=纯 FP8 量化噪声、**同一算子**；**Part B** `S=1→8`：
+      REF `644.8→4141.4us`、ALT-R（每步 fresh+归约、同 bf16）`602.6→2599.0us`、**BIG-K `220.7→870.5us`**，
+      `REF/BIG-K 2.92→4.76×`、`ALT-R/BIG-K ≈ 3.0×`（恒定），BIG-K **1105 TFLOPS**；**Part C** 输出流量
+      REF `S·8B·E·M·N` vs BIG-K 一次 `2B·E·M·N`（S=8 省 **7.3GB**），算术强度 REF 恒 `83~116`（≪591）
+      → BIG-K `441→1792`（**越过拐点、计算受限**，治好「小 k_e 访存受限」宿疾）；**前提**：S 步激活须
+      同时在手（fp8 驻留 `(M+N)·SUM_K·S`，S=8=302MB，随 S 线性涨）。**收益分解**：纯「折叠」≈3.0×，
+      再叠「fp32 累积器→bf16 一次直写」到 4.76×。**遗留**：FP8 累加器路线（8B→2B）未做、误差-字节边界待量化。
+      SM100 `tn`（`gemm.hpp:320-371`）同结构、**仅分析**。配套博客
+      `content/posts/mega-moe-150-wgrad-bigk-fold`（索引页新增第 150 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4349,8 +4378,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P139 各增量完成（P15-1…P41-1、P42-1…P139-1）。**
-  本轮 P139-1：新建 `docs/149-wgrad-epib-accumulate.md`
+- 当前进度：**P0~P14 全部完成；P15~P140 各增量完成（P15-1…P41-1、P42-1…P140-1）。**
+  本轮 P140-1：新建 `docs/150-wgrad-bigk-fold.md`
+  （+`harness/exp_wgrad_bigk.{sh,py,out.txt}`）——把第 149 篇结尾的「减少字节」路线落到**「折进收缩维 K」**。
+  **核心观察**：wgrad 的「每步梯度累积」只是「S 次独立 launch」的产物；沿 K 拼接 S 步激活后
+  `dW_e = Σ_s A_{e,s}^T B_{e,s} = [A_{e,1};…;A_{e,S}]^T [B_{e,1};…;B_{e,S}]` 恒等于一个 **K=S·k_e 的单次
+  GEMM**，累加器全程住 TMEM、只最后一次 fresh 落盘，**跨 launch 的累积器 RMW 归零**。**契约**：REF
+  `k_grouped`（`gemm.hpp:403` 必传 `c`、`sm90_fp8_gemm_1d1d.hpp:84` 必 fp32、epilogue
+  `SM90_TMA_REDUCE_ADD_2D` `sm90_fp8_gemm_1d1d.cuh:346`）每步读回+写；big-K 走现成 1D2D
+  （`sm90_fp8_gemm_1d2d.hpp:81` `not c`+bf16）一次写。**不需要改内核**（对比第 146~149 篇都要改协议）。
+  **H100 实测**（`dW2 [2048,7168]`、E=8、k_e=512，空闲 GPU）：Part A S=4 逐专家 REF-vs-BIG-K relerr
+  **3.68e-2** == 两者 vs fp64 同层（纯 FP8 噪声，同一算子）；Part B `S=1→8`：REF `644.8→4141.4us`、
+  ALT-R `602.6→2599.0us`、**BIG-K `220.7→870.5us`**，`REF/BIG-K 2.92→4.76×`、`ALT-R/BIG-K≈3.0×`（恒定），
+  BIG-K **1105 TFLOPS**；Part C 输出流量 REF `S·8B·E·M·N` vs BIG-K 一次 `2B·E·M·N`（S=8 省 **7.3GB**），
+  算术强度 REF 恒 `83~116`（≪591）→ BIG-K `441→1792`（越过拐点、计算受限）。**前提**：S 步激活须同时在手
+  （fp8 驻留 `(M+N)·SUM_K·S`，S=8=302MB）。**收益分解**：纯「折叠」≈3.0×，再叠「fp32 累积器→bf16 直写」到 4.76×。
+  **遗留**：FP8 累加器路线未做。SM100 `tn` 同结构、仅分析。索引页新增第 150 篇。
+  上一轮 P139-1：新建 `docs/149-wgrad-epib-accumulate.md`
   （+`harness/exp_wgrad_epib.{sh,py,out.txt}`）——把第 148 篇留下的「同 kernel EPI-B」**在真 kernel 上落地**。
   **发现**：SM90 BF16 稠密 `bf16_gemm_nt(c=d)` 本就是 **bf16 累加器 RMW**（`sm90_bf16_gemm.hpp:91`
   `with_accumulation`；epilogue `SM90_TMA_REDUCE_ADD_2D` `sm90_bf16_gemm.cuh:381-384`），**无需改 kernel**。
@@ -5912,7 +5956,23 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P139 已完成（最新 **P139-1 把 wgrad 的 EPI-B 落到真 kernel：多出来的 235MB/步读，藏住了吗**：
+- **下一步**：P0~P140 已完成（最新 **P140-1 把 wgrad 的 S 步累积折进收缩维 K（big-K 折叠）：每步累积税能不能消掉**：
+  承接第 149 篇结尾「要再快只剩减少字节的路」，把它做成**结构性正面答案**——「每步累积」只是「S 次独立 launch」
+  的产物；沿 K 拼接 S 步激活后 `dW_e = Σ_s A_{e,s}^T B_{e,s} = [A_{e,1};…;A_{e,S}]^T [B_{e,1};…;B_{e,S}]` 恒等于
+  **一个 K=S·k_e 的单次 GEMM**，累加器全程住 TMEM、只最后一次 fresh 落盘、跨 launch RMW 归零。**契约**：REF
+  `k_grouped`（`gemm.hpp:403` 必传 `c`、`sm90_fp8_gemm_1d1d.hpp:84` 必 fp32、`SM90_TMA_REDUCE_ADD_2D`
+  `sm90_fp8_gemm_1d1d.cuh:346`）每步读回+写；big-K 走现成 1D2D（`sm90_fp8_gemm_1d2d.hpp:81` `not c`+bf16）一次写，
+  **不改内核**。**H100 实测**（`dW2 [2048,7168]`、E=8、k_e=512，空闲 GPU）：Part A S=4 REF-vs-BIG-K relerr **3.68e-2**
+  == vs fp64 同层（同一算子）；Part B `S=1→8`：REF `644.8→4141.4us`、ALT-R `602.6→2599.0us`、**BIG-K `220.7→870.5us`**，
+  `REF/BIG-K 2.92→4.76×`、`ALT-R/BIG-K≈3.0×`（恒定）、BIG-K **1105 TFLOPS**；Part C REF 输出流量 `S·8B·E·M·N` vs
+  BIG-K 一次 `2B·E·M·N`（S=8 省 **7.3GB**），算术强度 REF 恒 `83~116`→BIG-K `441→1792`（越过拐点、计算受限）。
+  **前提**：S 步激活须同时在手（fp8 驻留 `(M+N)·SUM_K·S`，S=8=302MB）。**收益分解**：纯折叠≈3.0×，再叠 fp32→bf16 直写到 4.76×。
+  **遗留**：FP8 累加器路线未做。SM100 `tn` 同结构、仅分析。索引页新增第 150 篇）。
+  可继续（均为增量、非承诺）：
+  ① 量化第 ① 条路线（**FP8 累加器**：把每步 RMW 的 8B 压到 2B）的**误差-字节边界**，与 big-K 折叠对比；
+  ② 对 P96/P97/P123 的轻微漂移清单关键路径定点复核；
+  ③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上）。
+  上一轮 P139-1 把 wgrad 的 EPI-B 落到真 kernel：多出来的 235MB/步读，藏住了吗：
   第 148 篇留的口子（「在一个可改的 SM90 GEMM 分支上做 EPI-B 端到端验证」，可继续①）**落地了**。**发现**：
   DeepGEMM SM90 BF16 稠密 `bf16_gemm_nt(c=d)` 本就是 **bf16 累加器 RMW**（`sm90_bf16_gemm.hpp:91`
   `with_accumulation`；epilogue `SM90_TMA_REDUCE_ADD_2D` `sm90_bf16_gemm.cuh:381-384`），**无需改 kernel**。
@@ -5924,10 +5984,6 @@
   EPI-B 读 **312.75MB（+237.97MB=恰好一份 D）**/写 214.33MB/300.5us → **多读的那份 D 按满速 2.43 TB/s
   露在墙上**。**结论**：EPI-B 真实可跑，但「多出来的 235MB/步读」在 wgrad 形状下**彻底暴露（157%）**，
   它只拿回对 fp32 累积的 1.7×、并不优于「批量 fresh + 一次流式归约」；要再快只剩「减少字节」的路。索引页新增第 149 篇）。
-  可继续（均为增量、非承诺）：
-  ① 把「减少字节」的路走深——例如让 wgrad 的累加器/输出更小（FP8 累加器、或把「读一份 bf16 D」也省掉的分块
-  归约），量端到端能否越过 1.77×；② 对 P96/P97/P123 的轻微漂移清单关键路径定点复核；
-  ③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）。详见上）。
   上一轮 P138-1 把 wgrad 的 S 步归约藏进 GEMM：epilogue 融合 / 侧流重叠到底行不行：
   第 147 篇留的口子（「每步 bf16 梯度要串行读一遍」）**走到了能核对的数，是个双重否定的负结果**。
   ① **字节账**：批量 ALT-OPT `470·S+940`；侧流增量 INC-F `1410·S` / INC-B `940·S`（每步 RMW master）；
