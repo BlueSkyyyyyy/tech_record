@@ -1302,6 +1302,24 @@
        **结论**：`K∈{64,128}` 折叠逐位正确；缺口只因参照写死 `KD`、非折叠本身；`K=256` 是资源而非正确性边界。
        默认部署仍 §45 的 `cf`。见 `docs/07` §95。**边界**：`K=256` 不可行、只 `V=K`、非 TMA/非 bf16、
        `intra`×`K≠128` 的 `ncu` 未做。
+ - [x] **P7-93** 关闭 §95.6/§94.7 空白 (2) 的另一半——**`intra` 折叠 × `K≠128` 的 `ncu` pipe 归因**。
+       在**同一个核**上对 `prod`（`-DB2M_PROD -DB2M_HDW`）vs `prod_intra`（`+ -DB2M_INTRA`）做 `ncu`
+       逐项对比（`K=V∈{64,128}`、`b8t2048h8`），回答「折叠多出的 ~27% 落在哪个 pipe、`K` 变了是否换地方」。
+       **`b2_mma_probe.cu` 一行未改**。新增 `harness/ncu_b2_k128_intra_driver.py` +
+       `harness/probe_b2_k128_intra_ncu.sh`（`probe_b2_k128_intra_ncu.out.txt`，空闲卡）+ `docs/07` §96。
+       **读数**：`dur` **1.277×(K=64) / 1.266×(K=128)**；`dram_read` **+1.6%/+0.6%**、`dram_write`
+       **+0.1%/+1.1%**、`lts__t_bytes` **+4.9%/+5.6%**（字节中性）；全局读 sector 增量 **+3.41M/+6.55M**
+       ÷grid=**416/800 sector/block=13.3/25.6 KB ≈ `3·BT·KD·4`(q/k/g 重读)+`BT·BT·4`(dAqk)**（逐项对上）；
+       **bank conflict 7.12→15.52M（×2.18）/ 23.52→36.36M（×1.55）**、**wavefronts ×1.43/×1.26**（所有计数里
+       最大相对变化，K=128 的 **+12.85M** 与 §87 的「恒 +12.8M」逐值吻合）；`tensor%` ~1、`sm%` 持平/略降、
+       `warps_active` **逐值不变**（K=64 二者都 2 block/SM、K=128 都 1）。**归因**：折叠的代价在**共享内存读
+       pipe（bank conflict/wavefront）**，字节/张量中性、占用率不变、无新瓶颈——是**关键路径串行尾巴**（§66.4/§66.6），
+       不是 pipe 饱和。**crossover 解释**：独立 `b3` 算量 ∝ `T·BT·KD`、`prod` ∝ `T·KD·V`（`V=K`）⟹ `b3/prod ∝ BT/K`
+       （K 翻倍相对成本减半、§95 ~30%→~20%），而折叠增量稳定 ~26–28% ⟹ K=64 净赢（b3 30% > 增量 28%）、
+       K=128 略输；`fold/prod=1.266` 配 `b3≈20%` ⟹ `fold/(p+b3)≈1.055`，与 §95 的 1.049 自洽。**设计输入**：
+       K=128 折叠要翻正，预算投 **smem staging 布局**（`q/k/g`/intra A-B swizzle/pad 或 bf16 staging），非省字节。
+       默认部署仍 §45 的 `cf`。**边界**：单 shape `b8t2048h8`、`K=V∈{64,128}`、fp32/HDW/非 TMA/非 bf16；
+       `K=256` 折叠仍不可行（smem）。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1815,12 +1833,36 @@
   **278656 B = 272.1 KiB > 231424/232448**，`cudaFuncSetAttribute` 失败（launch `rc=-3`）。凡「折叠/staging
   随 `K` 线性」的改动，先算 `smem_prod + 增量 ≤ 227 KiB`。**是资源边界、非正确性**；要收 `K=256` 需先复用
   已在 smem 的 `kg`（`skg`）或降 staging dtype。
+- **折叠/追加段的代价常落「非最紧 pipe」的共享内存读侧，且是「串行尾巴」而非 pipe 饱和**（P7-93，§96.3）：
+  `intra` 折叠让 `prod` 的同核 `ncu` 里 **bank conflict ×2.18/×1.55、shared wavefronts ×1.43/×1.26**
+  （所有计数里相对变化最大），而 **字节、`tensor%`、`sm__warps_active` 全中性**、没有一条 pipe 被推成
+  新瓶颈——`dur` 却 **+27.7%/+26.6%**。诊断这类改动别找「哪条 pipe 涨了」，要找「新增的活是否在关键路径上
+  且未被重叠」（同 §64/§66/§67 的「段内成本 vs 整核关键路径」），微观落点常在 smem 片元的 bank conflict
+  （tf32 无 16-bit `ldmatrix`，§47.6）。**推论**：`K=128` 折叠要翻正、`K=256` 要可行，预算应投 **staging
+  布局**（swizzle/pad 或 bf16 降位），**不是省字节**。**判 crossover 的杠杆是「被替代的独立核相对成本」**：
+  独立 `b3` ∝ `T·BT·KD`、`prod` ∝ `T·KD·V` ⟹ `b3/prod ∝ BT/K`（K 翻倍减半），故折叠在 `K=64` 净赢、
+  `K=128` 略输——**不是折叠本身变贵，是被替代者变便宜**。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-92 补测 + P8-3**。
-  - P7-92（本轮）：**关闭 §94.7（P7-91）的最后一条边界——`intra` 折叠（`-DB2M_INTRA`）× `K≠128` 的
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-93 补测 + P8-3**。
+  - P7-93（本轮）：**关闭 §95.6/§94.7 空白 (2) 的另一半——`intra` 折叠 × `K≠128` 的 `ncu` pipe 归因**。
+    在同一个 `b2mma_kernel` 上对比 `prod`（`-DB2M_PROD -DB2M_HDW`）vs `prod_intra`（`+ -DB2M_INTRA`）
+    （`K=V∈{64,128}`、`b8t2048h8`）；**`b2_mma_probe.cu` 一行未改**。新增
+    `harness/ncu_b2_k128_intra_driver.py` + `harness/probe_b2_k128_intra_ncu.sh`
+    （`..._k128_intra_ncu.out.txt`，空闲卡）+ `docs/07` §96。**读数**：`dur` **1.277×/1.266×**；
+    `dram_read +1.6%/+0.6%`、`dram_write +0.1%/+1.1%`、`lts__t_bytes +4.9%/+5.6%`（字节中性）；全局读
+    sector **+3.41M/+6.55M** ÷8192 = **416/800 sector/block = 13.3/25.6 KB**，恰 = `3·BT·KD·4`（q/k/g 重读）
+    + `BT·BT·4`（dAqk）；**bank conflict 7.12→15.52M（×2.18）/ 23.52→36.36M（×1.55）**、**wavefronts
+    ×1.43/×1.26**（最大相对变化；K=128 的 **+12.85M** 与 §87「恒 +12.8M」逐值吻合）；`tensor% ~1`、
+    `sm%` 持平、`warps_active` 逐值不变（K=64 都 2 block/SM、K=128 都 1）。**归因**：折叠代价在**共享内存
+    读 pipe**（bank conflict/wavefront），字节/张量/占用率中性、无新瓶颈 ⟹ **关键路径串行尾巴**（§66.4/§66.6）。
+    **crossover**：独立 `b3` 相对成本 ∝ `BT/K`（K 翻倍减半，§95 ~30%→~20%），折叠增量稳定 ~26–28%
+    ⟹ K=64 净赢、K=128 略输；`1.266/1.20≈1.055` 与 §95 的 1.049 自洽。**设计输入**：K=128 折叠要翻正、
+    及 K=256 收口，预算投 **smem staging 布局**（swizzle/pad 或 bf16 staging），非省字节。默认部署仍
+    §45 的 `cf`。见 `docs/07` §96。
+  - P7-92（上轮）：**关闭 §94.7（P7-91）的最后一条边界——`intra` 折叠（`-DB2M_INTRA`）× `K≠128` 的
     纠错**。§94.7 点名「`b3_intra_probe.cu` 的 standalone 参照 `KD=128` 写死，需先 K 泛化才能做独立核对」。
     本轮先做该泛化（`-DB3I_KD` 宏 + `BW=KD/NW`/`NBW=BW/8`、`nt<2→nt<NBW`；`BW==16` 下逐字等价），再逐位核对；
     **`b2_mma_probe.cu` 一行未改**（折叠的 K 轴累加器 `idq/idk/idg` P7-90 已 `nt<NBW` 泛化，`prod_intra` 在
@@ -3156,8 +3198,19 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-92 补测（+ P8-2/P8-3 一页纸补全）**，进入收尾/维护。
-  **P7-92（本轮）**：关闭 §94.7 的最后一条边界——**`intra` 折叠（`-DB2M_INTRA`）× `K≠128` 的纠错**。
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-93 补测（+ P8-2/P8-3 一页纸补全）**，进入收尾/维护。
+  **P7-93（本轮）**：关闭 §95.6/§94.7 空白 (2) 的另一半——**`intra` 折叠 × `K≠128` 的 `ncu` pipe 归因**。
+  同核 `prod` vs `prod_intra`（`K=V∈{64,128}`、`b8t2048h8`），`b2_mma_probe.cu` 一行未改；新增
+  `harness/ncu_b2_k128_intra_driver.py` + `harness/probe_b2_k128_intra_ncu.sh`
+  （`probe_b2_k128_intra_ncu.out.txt`）+ `docs/07` §96。**读数**：`dur` 1.277×/1.266×；字节中性
+  （`dram_read +1.6%/+0.6%`、`lts +4.9%/+5.6%`）；全局读 sector 增量 = `3·BT·KD·4`+`BT·BT·4`（q/k/g+dAqk
+  重读，逐项对上）；**bank conflict ×2.18/×1.55、wavefronts ×1.43/×1.26**（最大相对变化，K=128 +12.85M
+  与 §87 吻合）；tensor/占用率中性。**归因**：折叠代价在**共享内存读 pipe**、属**关键路径串行尾巴**，
+  非 pipe 饱和。**crossover**：独立 `b3` 相对成本 ∝ `BT/K`、折叠增量稳定 ~26–28% ⟹ K=64 净赢/K=128 略输。
+  **设计输入**：K=128 折叠翻正（及 K=256 收口）预算投 smem staging 布局，非省字节。默认部署仍 §45 的 `cf`。
+  **下一步（可选）**：把折叠 staging 的 swizzle/pad 或 bf16 降位做出来以关掉 K=128/`K=256` 的 smem 头寸；
+  或专题维持维护态。
+  **P7-92（上轮）**：关闭 §94.7 的最后一条边界——**`intra` 折叠（`-DB2M_INTRA`）× `K≠128` 的纠错**。
   §94.7 点名「`b3_intra_probe.cu` 的 standalone 参照 `KD=128` 写死，需先 K 泛化才能做独立核对」；本轮先
   泛化该参照（`-DB3I_KD` 宏 + `BW=KD/NW`/`NBW=BW/8`、`nt<2→nt<NBW`，`BW==16` 逐字等价），再逐位核对。
   **`b2_mma_probe.cu` 一行未改**（折叠 K 轴累加器 P7-90 已 `nt<NBW`，`prod_intra` 在 `K=64/128/256` 均编得过）。

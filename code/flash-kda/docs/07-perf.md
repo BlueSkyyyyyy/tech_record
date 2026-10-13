@@ -10026,3 +10026,100 @@ bf16 值的 `v`**）：
   `K≠128` 仍未组合，`intra` staging 在 bf16 build 下是否也随之降 dtype 未查）。
 - **`intra` 折叠 × `K≠128` 的 `ncu` pipe 归因未做**（§94.7 空白 (2) 的另一半）。
 - Part C 为单一 CUPTI `dev` 口径、未与 FLA 比（本核无对应 FLA 对手）。
+
+## 96. 关闭 §95.6/§94.7 空白 (2) 的另一半——`intra` 折叠 × `K≠128` 的 `ncu` pipe 归因（P7-93）
+
+§95（P7-92）在 `K∈{64,128}` 把 `-DB2M_INTRA` 折叠的正确性逐位核完，但在 §95.6 诚实边界里
+留了两条：**`K=256` 因 smem 不可行**（资源，非正确性）与**「`intra` 折叠 × `K≠128` 的 `ncu`
+pipe 归因未做」（§94.7 空白 (2) 的另一半）**。本轮把后者关掉：在**同一个核**上把
+`prod`（`-DB2M_PROD -DB2M_HDW`）与 `prod_intra`（`+ -DB2M_INTRA`）的 `ncu` 逐项对比
+（`K=V∈{64,128}`、`b8t2048h8`），回答「折叠多出来的那 ~27% 时间到底落在哪个 pipe、`K` 变了
+是否换地方」。**`b2_mma_probe.cu` 一行未改**（折叠的 `K` 泛化是 P7-90/P7-92 已完成的）。
+新增 `harness/ncu_b2_k128_intra_driver.py` + `harness/probe_b2_k128_intra_ncu.sh`
+（`harness/probe_b2_k128_intra_ncu.out.txt`，空闲卡）。
+
+### 96.1 口径：同核对照，且为什么逐项读数
+
+折叠是「把独立 B3 `intra` 核的活塞进 `prod` 的每个 CTA」（§65/§66）。要归因的是**这笔活本身**
+落在哪条 pipe，故最干净的对照是**同一个 `b2mma_kernel` 的 `prod` vs `prod_intra`**（同 grid、
+同操作数、同 chunk 结构），而不是 `prod` vs `prod+b3`（后者换了一个核的 grid/occupancy，混账）。
+`ncu` 单核抓取（`-k regex:b2mma_kernel -c 1 --launch-skip 3`），`.so` 在 ncu 外预编（P7-16）。
+shape 取 `b8t2048h8`（`grid=(128,64,1)=8192` block，填满 SM），`K=V`。
+
+### 96.2 读数（`b8t2048h8`，`V=K`）
+
+| 计数 | K=64 `prod` | K=64 `prod_intra` | 比 | K=128 `prod` | K=128 `prod_intra` | 比 |
+|---|---|---|---|---|---|---|
+| `gpu__time_duration` | 408.35 µs | 521.60 µs | **1.277** | 1.28 ms | 1.62 ms | **1.266** |
+| `dram__bytes_read` | 512.68 MB | 520.97 MB | 1.016 | 1.56 GB | 1.57 GB | 1.006 |
+| `dram__bytes_write` | 211.13 MB | 211.35 MB | 1.001 | 418.89 MB | 423.33 MB | 1.011 |
+| `lts__t_bytes` | 1.44 GB | 1.51 GB | 1.049 | 3.91 GB | 4.13 GB | 1.056 |
+| `l1tex__t_sectors…global_op_ld` | 30.54 M | 33.95 M | 1.112 | 75.37 M | 81.92 M | 1.087 |
+| `l1tex__data_bank_conflicts…shared_op_ld` | 7.12 M | 15.52 M | **2.179** | 23.52 M | 36.36 M | **1.546** |
+| `l1tex__data_pipe_lsu_wavefronts…shared_op_ld` | 28.81 M | 41.08 M | **1.426** | 70.25 M | 88.53 M | **1.260** |
+| `sm__pipe_tensor…hmma_cycles_active` | 2.81 % | 2.83 % | ~1 | 3.34 % | 3.05 % | 0.91 |
+| `sm__throughput` | 37.43 % | 37.38 % | ~1 | 22.69 % | 21.89 % | 0.96 |
+| `sm__warps_active` | 24.43 % | 24.44 % | 1 | 12.46 % | 12.46 % | 1 |
+| `launch__registers_per_thread` | 64 | 90 | | 112 | 128 | |
+| `…occupancy_limit_registers / _shared_mem` | 4 / 2 | 2 / 2 | | 2 / 1 | 2 / 1 | |
+| `dram__throughput` / `lts__throughput` | 52.9 / 62.2 % | 41.9 / 51.3 % | | 46.3 / 57.0 % | 36.7 / 48.7 % | |
+
+（`gpu__time_duration` 在 `K=128` 只 3 位有效数字，`1.266` 系两位读数之比，取「≈ +26.6%」。）
+
+### 96.3 归因：折叠的代价在**共享内存读侧（bank conflict + wavefront）**，不在字节、不在 tensor
+
+1. **DRAM/L2 字节几乎中性**：`dram__bytes_read` **+0.6% / +1.6%**、`dram__bytes_write`
+   **+0.1% / +1.1%**、`lts__t_bytes` **+4.9% / +5.6%**。折叠**不产生新的 DRAM 往返**——
+   它多读的 `q/k/g`/`dAqk` 是刚被门控读过的热数据，被 L2 吸收。
+2. **全局读 sector 的增量可逐项对上折叠的 staging**：`+3.41 M`（K=64）/`+6.55 M`（K=128）
+   ÷ `grid 8192` = **416 / 800 sector/block = 13.3 / 25.6 KB/block**，正好 =
+   `3·BT·KD·4`（`q/k/g` staging 重读：12.0 / 24.0 KB）+ `BT·BT·4`（`dAqk`：1 KB）。
+   ⟹ 折叠的**唯一新访存**就是「每个 chunk 把 `q/k/g`+`dAqk` 再搬一遍进 smem」（§66.4/§95.1 的原话）。
+3. **代价的实测落点是共享内存读 pipe**：`bank_conflicts` **+8.40 M / +12.85 M（×2.18 / ×1.55）**、
+   `wavefronts` **+12.26 M / +18.29 M（×1.43 / ×1.26）**——这两个是**所有计数里最大的相对变化**，
+   其余（字节、sector）都 ≤1.5%。共享读的冲突占比从 `prod` 的 **24.7% / 33.5%** 抬到
+   `prod_intra` 的 **37.8% / 41.1%**。与 §66.4（"bank conflict +55%"）、§87（"恒 +12.8 M"，
+   本处 K=128 的 **+12.85 M** 逐值吻合）一致——**折叠把 `q/k/g` 片元与 intra 的 A/B 片元读
+   引到同一条已较忙的 smem 读路径上**（tf32 无 16-bit `ldmatrix`，只能按 fragment 直读，§47.6）。
+4. **tensor/占用率都没变**：`tensor%` ~1（2.81→2.83、3.34→3.05）、`sm__throughput` 持平或略降、
+   `sm__warps_active` **逐值不变**（K=64 二者都 **2 block/SM**——`prod` 的 `regs=64` 本可 4 block
+   但被 smem 限到 2；`prod_intra` 的 `regs=90` 把 reg-limit 压到 2，与 smem-limit 2 相等，
+   故占用率不动；K=128 二者都 **1 block/SM**，smem 限）。
+   ⟹ 折叠**没有把任何一条 pipe 推成新的瓶颈**（`prod` 在 K=128 最紧本就是 L2 57%），
+   却让核慢了 ~27%——这是**关键路径/串行尾巴**的症状（§66.4/§66.6 的"每 CTA 关键路径尾部的
+   串行尾巴"），其微观代价正是那笔 bank-conflict 重的 smem 片元读，**不是字节、不是张量**。
+
+### 96.4 为什么 `K=64` 折叠净赢、`K=128` 大 shape 略输——独立 B3 的相对成本随 `K` 缩，折叠的不缩
+
+折叠替代的是「`prod` + 独立 `b3intra`」。两者的**字节契约几乎相同**（都读同一 `q/k/g`+`dAqk`），
+差别在结构：独立 B3 是一批**只做 intra** 的 CTA（其工作量在 executor 层更好重叠），折叠把它变成
+每个生产 CTA 的**串行尾巴**。故 crossover 由「独立 B3 相对 `prod` 的时长」对「折叠增量」决定：
+
+- 独立 B3 的算量 ∝ `T·BT·KD`、`prod` 的算量 ∝ `T·KD·V`（`V=K`）⟹ **`b3/prod ∝ BT/K`**，
+  即 `K` 翻倍、B3 的相对成本**减半**（§95 Part C 实测 ~30% → ~20%）。
+- 折叠增量实测**稳定在 ~26–28%**（本处 `K=64 1.277`、`K=128 1.266`）。
+- ⟹ `K=64` 时 `b3` 的 ~30% **大于**折叠增量 ~28%（净赢，§95 的 0.84–0.91×）；`K=128` 时
+  `b3` 的 ~20% **小于**折叠增量 26.6%（略输）。
+- **交叉验证**：本处 `K=128` `fold/prod=1.266` 配独立 `b3≈20%` ⟹ `fold/(prod+b3)≈1.266/1.20
+  =1.055`，与 §95 Part C 的 **1.049**（`B2T1024H8`）自洽；`K=64` 配 `b3≈30%` ⟹ `≈1.277/1.30
+  =0.982`（`b8` 上接近平价）——比 §95 小 shape 的 0.84–0.91× 更接近 1，因为 `b8` 的第二个
+  launch 被更好地摊薄（**诚实标注：本轮 `ncu` 只跑了 `b8t2048h8`**，§95 Part C 用的是
+  `B2T1024H8`/`T512H4`）。
+
+### 96.5 设计输入与结论
+
+- **§94.7 空白 (2) 的另一半关闭**：`intra` 折叠 × `K≠128` 的 `ncu` 归因＝**代价落在共享内存读
+  pipe（bank conflict/wavefront）**，字节与张量中性、占用率不变，属**关键路径尾巴**而非 pipe 饱和。
+- **`K=128` 的折叠要翻正，预算应投在 smem staging 的布局**（`q/k/g`/intra A-B 的 swizzle/pad，
+  或 bf16 staging，§78/§80 已有入口），**不是省字节**——这与 §47.6（tf32 无 16-bit `ldmatrix`）
+  同一类问题，也与 §95.6 提的 `K=256` 收口路径（复用 `skg` / 降 staging dtype）同向。
+- **不改变目标卡部署输入**：默认反向仍是 §45 的 `cf`；`K=V=128` 零差异（折叠的部署形态）。
+
+### 96.6 边界（诚实）
+
+- 单一 shape `b8t2048h8`；只 `K=V∈{64,128}`；只 `BT=16`/`NW=8`、fp32/`-DB2M_HDW`/非 TMA/
+  非 `BF16`。`K=256` 折叠仍不可行（smem，§95.3），未在此归因。
+- `ncu` 的 `gpu__time_duration` 与 CUPTI `dev` 口径不同（replay 效应）；本轮只用**同口径
+  `prod` vs `prod_intra` 之比**作归因，绝对时长不作横向断言。
+- 只做了「折叠 vs 同核 `prod`」的 pipe 归因；**未**对独立 `b3intra` 本身做 `ncu`（其相对成本
+  用 §95 Part C 的 CUPTI `dev` 数字换算，非本轮新测）。
