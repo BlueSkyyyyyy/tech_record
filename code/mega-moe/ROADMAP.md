@@ -3734,7 +3734,34 @@
       `8f05c0443af4daf5`）：同款 flag / `_C` / 索引 TU，但**无 NCCL、无 runtime 静态库**（device kernel
       全走 JIT）。**与本机「阻塞」的关系**：`context.cpp` 编译通过 → 问题**不在构建**、而在运行期
       加载哪份 soname（第 86/117 篇）。配套博客 `content/posts/mega-moe-129-deepep-cmake-debug-build`
-      （索引页新增第 129 篇）。
+       （索引页新增第 129 篇）。
+
+### P120 增量（opt-in，补齐第 5 篇只做前向、第 117 篇只覆盖 Mega Gate 的「mHC 反向」）
+
+- [x] **P120-1** **Mega mHC（HyperConnection）变换的反向**（`tests/test_mega_mhc.py:123-210` /
+      `csrc/apis/mega_mhc.hpp` / `layout/mega_mhc.cuh` / `impls/sm100_mega_mhc.cuh` /
+      `epilogue/sm100_mega_mhc.cuh`）。第 5 篇（P5-2）拆了 mHC **前向**、第 4 篇处理 **MoE router**
+      反向、第 127 篇补 **Mega Gate** 反向，但 **mHC 这条「残差改写 + 系数生成」通路的反向一直没有**——
+      DeepGEMM 的 Mega mHC **只有前向**（主 kernel SM100 专属），而它正是 HyperConnection 真正改写
+      残差流的地方。→ `docs/130-mega-mhc-backward.md`（真实行号核对）：**前向**（权威参考
+      `test:123-210`）① 残差多流混合 `new_residual = post_mix⊙x + comb_res_mix@residual`、**bf16
+      舍入是共享数值边界**（`impls:486-497`，`NOTES` 在 `:496`、`__float22bfloat162_rn` 在 `:497`）；
+      ② 投影 `z@fnᵀ` 乘 `g=rsqrt(Σz²/(hc·H)+eps)`（平方和 `impls:501`、尺度 `epilogue:43`）再分段
+      `scales+bases`、sigmoid（`epilogue:53-56`）；③ Sinkhorn 交替行/列归一化（`epilogue:63-86`，
+      softmax `:66-69`、`get_col_sum` 两次 `shfl_xor` `:71-76`、iters `:80-83`）；④ RMSNorm
+      （**均方 over H，与 ②的 `hc*H` 平方和是两个量**，`epilogue:188-244`、shifted `:323-365`）；
+      `kIsShifted` 只改「用哪套 pre、是否输出 pre」（`mega_mhc.hpp:78,155-157`）。**反向三处非平凡**：
+      (1) **Sinkhorn 迭代 VJP**——不是一次归一化的反而是整条序列逆放，每步「除以和」同时改分子/分母
+      （`dX=dY/(S+eps)−Σ(dY·X)/(S+eps)²`）；(2) **`g` 的耦合项 `dq`**——24 个投影输出被同一 `q`
+      拉起，漏掉只错「经 `q` 的残差/输入梯度」；(3) 两处 bf16 边界 straight-through + 两条易漏回流
+      （投影路 `dz` 要回流到 `s`）。与第 127 篇对照：top-k 权重和 / Sinkhorn 行·列 / RMSNorm 共享同一类
+      「跨槽·跨维耦合」Jacobian。**H100(sm90) 真机**（`harness/exp_mega_mhc_backward.{sh,py,out.txt}` +
+      `src/mega_mhc_backward.cu`）：A 手写 VJP vs **torch autograd**（float64，6 组形状 × 9~10 个张量
+      梯度，normal/shifted）**最坏 relerr 1.01e-15**、Sinkhorn 反向 vs autograd `2e-16`、vs 中心差分
+      `~1e-11`；B2 **负向对照**：含 `dq` 项 `dx relerr=1.09e-16`、**丢 `dq` 项 `6.18e-02`** 而
+      `dfn/dgamma` 不变；C double 参考自身中心差分抽 7 个标量最差 `3.6e-11`；D 同一模板 device(fp32) vs
+      double **relerr 8e-8~3.6e-7**、4×4 Sinkhorn VJP vs 有限差分 `~1e-11`。主 kernel UMMA/TMEM/
+      SplitBarrier **仅分析**。配套博客 `content/posts/mega-moe-130-mega-mhc-backward`（索引页新增第 130 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3761,8 +3788,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P119 各增量完成（P15-1…P41-1、P42-1…P119-1）。**
-  本轮 P119-1：新建 `docs/129-deepep-cmake-debug-build.md`
+- 当前进度：**P0~P14 全部完成；P15~P120 各增量完成（P15-1…P41-1、P42-1…P120-1）。**
+  本轮 P120-1：新建 `docs/130-mega-mhc-backward.md`
+  （+`harness/exp_mega_mhc_backward.{py,sh,out.txt}`、`src/mega_mhc_backward.cu`）——补齐第 5 篇
+  只做前向、第 117 篇只覆盖 Mega Gate 的 **Mega mHC（HyperConnection）变换反向**：残差多流混合 +
+  投影 GEMM + sigmoid/仿射 + **Sinkhorn 迭代 VJP** + RMSNorm 的反向推导。**三个非平凡点**：Sinkhorn
+  交替归一化的整条序列逆放、`g` 把 24 个投影输出耦合到同一 `q` 的 `dq` 项、两处 bf16 共享边界 +
+  投影路 `dz` 回流到 `s`。H100(sm90) 真机：手写 VJP vs **torch autograd**（float64，6 组形状 ×
+  9~10 个张量梯度）**最坏 relerr 1.01e-15**、Sinkhorn 反向 vs 中心差分 `~1e-11`、负向对照（丢 `dq`）
+  `dx relerr 6.18e-2` 而权重梯度不变、device(fp32) vs double `8e-8~3.6e-7`。主 kernel SM100 专属、
+  仅分析。索引页新增第 130 篇。
+  上一轮 P119-1：新建 `docs/129-deepep-cmake-debug-build.md`
   （+`harness/exp_deepep_cmake_build.{sh,py,out.txt}`）——补齐 P124 只一句话带过的 **DeepEP CMake 调试
   构建链**：一套模板两个产物（`setup.py` 只编三个 host TU vs CMake 的 `_C` + 两个 runtime 静态库 +
   索引 TU）、`RUNTIME_CUDA_LIBRARIES` 的 `CACHE INTERNAL` 解耦、nvcc 诊断 flag 只作用于 `csrc/indexing/
@@ -5078,7 +5114,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P119 已完成（最新 **P119-1 DeepEP 的 CMake 调试构建链**：
+- **下一步**：P0~P120 已完成（最新 **P120-1 Mega mHC（HyperConnection）变换的反向**：
+  残差多流混合 + 投影 GEMM + sigmoid/仿射 + **Sinkhorn 迭代 VJP** + RMSNorm 的梯度推导；
+  三个非平凡点——Sinkhorn 交替归一化整条序列逆放、`g` 把 24 个投影输出耦合到同一 `q` 的 `dq` 项、
+  两处 bf16 共享边界 + 投影路 `dz` 回流到 `s`；H100(sm90) 真机手写 VJP vs torch autograd 最坏
+  relerr 1.01e-15、device(fp32) vs double 8e-8~3.6e-7、丢 `dq` 负向对照 `dx relerr 6.18e-2`；
+  主 kernel SM100 专属、仅分析；索引页新增第 130 篇。
+  可继续（均为增量、非承诺）：
+  第 127 篇 Mega Gate 反向与第 130 篇 mHC 反向已把两条门控通路的梯度补齐；剩余可选：把 mHC 反向
+  （尤其 Sinkhorn VJP）在 SM100 上的 kernel 级实现做「仅分析」推演、或在 H100 上量化 fused mHC
+  backward 的算力/带宽账；另 P96/P97 的轻微漂移清单关键路径定点复核。详见上）。
+  上一轮 P119-1：P0~P119 已完成（最新 **P119-1 DeepEP 的 CMake 调试构建链**：
   一套模板两个产物——`setup.py`（只编三个 host TU）vs `CMakeLists.txt`（`_C` 扩展 + `runtime_comm`/
   `runtime_driver` 两个 host 静态库 + `csrc/indexing/main.cu` 索引 TU）；`RUNTIME_CUDA_LIBRARIES` 的
   `CACHE INTERNAL` 解耦、`-DNCCL_ROOT_DIR` 判 CMake 变量、nvcc 诊断 flag 只作用于索引 TU（host `.cpp`
