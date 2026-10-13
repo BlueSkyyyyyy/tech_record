@@ -4829,6 +4829,42 @@
       主 kernel 融合/重叠 SM100 专属、**仅分析**。→ `docs/169-moe-train-step-ledger.md`。
       配套博客 `content/posts/mega-moe-169-moe-train-step-ledger`（索引页新增第 169 篇）。
 
+### P160 增量（opt-in，补齐 `deep_jit/utils/` 里被反复引用却从没单独读过的 7 个支撑头）
+
+- [x] **P160-1** **DeepJIT 的支撑工具层**（`third-party/deep_jit/include/deep_jit/utils/`
+      `filesystem.hpp`(120) / `command.hpp`(39) / `str.hpp`(28) / `uuid.hpp`(25) /
+      `json.hpp`(131) / `gil.hpp`(24) / `no_ref_ptr.hpp`(10)；消费点 `cache/disk.hpp:47-48/60/72/124/130`、
+      `backend/cuda/backend.hpp:64/83/93/109/115/137/145/155/157/161/167/187/210/215`、
+      `backend/cuda/kernel.hpp:24-30`、`backend/ascend/backend.hpp`）。第 33 篇拆了 DeepJIT 管线、第 47 篇
+      post_hook 与磁盘产物、第 38 篇 `env`、第 40/80 篇 `lazy`、第 116 篇 error/assert，但夹在中间的
+      「任何一行设备代码跑起来之前就已定型」的支撑层（`meta.json`、`<uuid>` 临时目录、
+      `call_external_command`、`str::join`、`GilScopedRelease`）一直当黑盒。**纯 host C++、架构无关，
+      H100(sm90) 直接 include 真实头文件真机跑**（纯 host 程序 + pybind GIL 探针）。
+      → `docs/170-deepjit-utils-layer.md`（真实行号核对）。**要点**：`filesystem.hpp` 的
+      `read:18-22` / `fsync_file:24-39` / `fsync_dir:43-51`（自底向上）/ `write_file_sync:73-83` /
+      `make_dirs:53-59` / `try_update_mtime:65-69`（`noexcept` + 吞失败，注释 `:61-64`）/ 
+      `safe_remove_all:88-108`（**不用 `remove_all`**，分布式 FS 多进程并发会 segfault；`:102` 先
+      `increment` 再递归）/ `normalize_path:110-114` / `is_executable:116-118`；`command.hpp` 的
+      `call_external_command:13-37`（追加 `" 2>&1"` `:18`；**信号特判** `WIFEXITED?WEXITSTATUS:128+WTERMSIG`
+      `:34`，注释 `:31-32`）；`str.hpp` 的 `join:10-26`（进缓存键 `backend/cuda/options.hpp:138`）；
+      `uuid.hpp` 的 `get_uuid:14-23`（thread_local 种子 `:15-20`）；`json.hpp` 的
+      `object_t=vector<pair>` `:17`（保序 + 重复键）、整数有无符号分开 `:27-32`、`optional`/`vector`
+      构造 `:38-47`、`dump_string:55-92`（控制字符 `\u00xx` `:81-88`），**只序列化不解析**；
+      `gil.hpp` 的 `GilScopedRelease:9-22`（仅 `Py_IsInitialized() and PyGILState_Check()` 才释放
+      `:13-16`、禁拷贝 `:18-21`）；`no_ref_ptr.hpp` 的 `NoRefPtr:6-8`（消费 `kernel.hpp:24-30`，
+      **全仓无派生类型** = 休眠设施，对照第 55 篇 `probe.cuh`）。H100 实测
+      `src/deepjit_utils.cpp` + `src/deepjit_gil.cpp` + `harness/exp_deepjit_utils.{sh,py,out.txt}`
+      **C++ 43/43 + Python 21/21 = ALL PASS**：json dump vs Python `json.loads` 一致、**重复键保留末值**
+      （`{"k":1,"k":2}`→`{"k":2}`）、转义含 `\u0001`、uuid 同线程 **10 万次唯一** + 8 线程
+      **160000/160000 无碰撞**、`exit 3` 抛异常含 `exit code 3`、**`kill -TERM $$` → 143**、
+      `try_update_mtime` 存在→真/缺失→假且 `noexcept`、`normalize_path("a/b/../c")`→`/…/a/c`、
+      `NoRefPtr{&x}` 参数指针==`&x`、GIL 探针 Python 持锁进 `before=1/inside=0/after=1`、预释放进
+      `before=0/inside=0`（不重复释放）。**两个真坑**：① `write_file_sync` 传字符串字面量会退化成
+      `string_view(const char*)` **在 NUL 截断**（首版 `len=6` 假 PASS）；② 直接 `echo x 1>&2` **测不到**
+      `2>&1` 合并（追加重定向在内层之后），须 `sh -c`。另录 `gil.hpp:9` 的 `-Wattributes` 可见性告警。
+      至此 `deep_jit/utils/` **13 个头全部被专篇覆盖**。配套博客
+      `content/posts/mega-moe-170-deepjit-utils-layer`（索引页新增第 170 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4861,8 +4897,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P159 各增量完成（P15-1…P41-1、P42-1…P159-1）。**
-  本轮 P159-1：新建 `docs/169-moe-train-step-ledger.md` + `harness/exp_moe_train_step.{py,sh,out.txt}`
+- 当前进度：**P0~P14 全部完成；P15~P160 各增量完成（P15-1…P41-1、P42-1…P160-1）。**
+  本轮 P160-1：新建 `docs/170-deepjit-utils-layer.md` + `src/deepjit_utils.cpp` + `src/deepjit_gil.cpp` +
+  `harness/exp_deepjit_utils.{sh,py,out.txt}`——把 `deep_jit/utils/` 里被反复引用却从没单独读过的
+  7 个支撑头（filesystem/command/str/uuid/json/gil/no_ref_ptr，共 377 行）拆透：
+  `filesystem` 的分布式 FS 缓存发布（`safe_remove_all:88-108` **不用 `remove_all`**、`try_update_mtime:65-69`
+  `noexcept` 吞失败）、`command` 的**信号退出码特判**（`:34`）、`json` 的 `object_t=vector<pair>`
+  （保序 + 重复键，只写不读）、`gil` 的**条件释放**（`:13-16`）。**H100(sm90) 真机**（直接 include 真实头）：
+  C++ **43/43** + Python **21/21** ALL PASS——uuid 16 万次无碰撞、`kill -TERM $$`→**143**、GIL 探针
+  `before=1/inside=0/after=1`、**两个真坑**（字面量 NUL 截断、`echo x 1>&2` 测不到 `2>&1` 合并）。
+  至此 `deep_jit/utils/` 13 个头全部被专篇覆盖。纯 host、架构无关，索引页新增第 170 篇。
+  上一轮 P159-1：新建 `docs/169-moe-train-step-ledger.md` + `harness/exp_moe_train_step.{py,sh,out.txt}`
   ——补两格：① **共享专家反向 = 组数 E=1 的同一对 grouped GEMM**（`k_grouped` wgrad / `m_grouped` dgrad，
   与路由四 GEMM 形状角色逐项同形；`gemm.hpp:373/181`、`check_k_grouped_args:55-76`、`mega_moe.hpp:52-53/90`）；
   ② **一个训练步（前向+反向）的分段成本账**（前向 4 GEMM + 反向 8 GEMM + SwiGLU/combine/量化逐段计时）。
@@ -6640,16 +6685,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P159 已完成（最新 **P159-1 补齐「反向图里的共享专家」并给出「一个训练步（前向+反向）」
-  的分段成本账**：共享反向=组数 E=1 的同一对 grouped GEMM，四路 vs 反量化参考 ~3e-4；一个训练步
-  T=2048 19.29ms / T=4096 31.40ms，反向占 ~2/3、wgrad 最贵、共享反向 ~13%、激活量化参考实现 ~30%。
-  详见 `docs/169`。索引页新增第 169 篇）。上一轮 P158-1 把路由 + 共享专家 + combine 合成同一张 H100
-  前向数值闭环（`docs/168`）。
+- **下一步**：P0~P160 已完成（最新 **P160-1 把 `deep_jit/utils/` 里被反复引用却从没单独读过的 7 个
+  支撑头拆透**：filesystem/command/str/uuid/json/gil/no_ref_ptr（377 行），纯 host、架构无关，H100 真机
+  C++ 43/43 + Python 21/21 ALL PASS；至此 `deep_jit/utils/` 13 个头全部被专篇覆盖。详见 `docs/170`，
+  索引页新增第 170 篇）。上一轮 P159-1 补齐「反向图里的共享专家」并给出「一个训练步（前向+反向）的
+  分段成本账」（`docs/169`）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
   （需 NCCL≥2.32.3，见「阻塞」）；② 把 indexer 反向（连续/分页/稀疏/分页稀疏）**端到端接进真实前向 kernel**
   （需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体定点复核；③ **已由 P157-1 完成**：单进程
-  「Mega-MoE-like 单 kernel」原型（结论：融合需异步张量核）；④ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余
-  小角落做定点复核。详见上。
+  「Mega-MoE-like 单 kernel」原型（结论：融合需异步张量核）；④ **已由 P160-1 完成**：`deep_jit/utils/`
+  剩余 7 个支撑头；继续可选 DeepGEMM/DeepEP `csrc/utils/` 或 `deep_jit/utils/` 之外的小角落做定点复核。
+  详见上。
   上一轮 P151-1：把多卡 EP MoE 图接上真实 SM90 FP8 grouped kernel
   上一轮 P146-1：把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」推到契约层——数值可行（真实
   `math.cuh` store 分支逐位复现，FP8 0/16777216、SF 0/524288），但契约是「单输出 + 无逐元素索引 + 无状态」，

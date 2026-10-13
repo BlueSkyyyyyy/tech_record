@@ -1,0 +1,174 @@
+== DeepJIT 版本坐标 ==
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+g++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+
+== 被拆源码 sha256 ==
+e55bc574d3ae1016f7ad83c850ec3f9a067e2bdc673dcdb57ac5388da2c4fe2d  ~/github/DeepGEMM/third-party/deep_jit/include/deep_jit/utils/filesystem.hpp
+7fde3af103340960c8b22aaf73c35f7d971618bace929705db7e9dedd3fa80a0  ~/github/DeepGEMM/third-party/deep_jit/include/deep_jit/utils/command.hpp
+4d87fa25d6ccd3efa125279d42afbc857fc2a4083c0dbc0bd4f7b1b74f455436  ~/github/DeepGEMM/third-party/deep_jit/include/deep_jit/utils/str.hpp
+5fff8c1a7f77be5ec12ebb38fc8e14877fe6793804379ca2121a3216111898be  ~/github/DeepGEMM/third-party/deep_jit/include/deep_jit/utils/uuid.hpp
+93ab8203302324388f02a91e77dea0d33a8483572f8fe13482a7298871dba328  ~/github/DeepGEMM/third-party/deep_jit/include/deep_jit/utils/json.hpp
+1429d4b4a789d3ab781a58b6693afc316f7f8809a579268a06f8daa358ab9ab2  ~/github/DeepGEMM/third-party/deep_jit/include/deep_jit/utils/gil.hpp
+49e43c9708565e0b16dad38afe7531cb148ca7ad3b5e72656107e7a13a405c55  ~/github/DeepGEMM/third-party/deep_jit/include/deep_jit/utils/no_ref_ptr.hpp
+
+== 消费点（谁 include / 调用它们）==
+deep_jit/cache/disk.hpp:47:        write_file_sync(path / kCommitFileName, "");
+deep_jit/cache/disk.hpp:48:        fsync_dir(path);
+deep_jit/cache/disk.hpp:60:            safe_remove_all(path);
+deep_jit/cache/disk.hpp:72:            safe_remove_all(path);
+deep_jit/cache/disk.hpp:124:                try_update_mtime(path / kCommitFileName);
+deep_jit/backend/cuda/backend.hpp:93:        write_file_sync(source_path, source);
+deep_jit/backend/cuda/backend.hpp:157:            write_file_sync(sass_path, sass);
+deep_jit/backend/cuda/backend.hpp:167:        write_file_sync(dir / "meta.json", metadata.dump());
+deep_jit/backend/cuda/backend.hpp:210:        DJ_HOST_ASSERT(is_executable(nvcc), "NVCC compiler is not executable: {}", nvcc.string());
+deep_jit/backend/cuda/backend.hpp:215:            is_executable(cuobjdump_path) ? std::optional(cuobjdump_path) : std::nullopt;
+deep_jit/backend/ascend/backend.hpp:90:        write_file_sync(source_path, source);
+deep_jit/backend/ascend/backend.hpp:122:        safe_remove_all(relocatable_path);
+deep_jit/backend/ascend/backend.hpp:148:        write_file_sync(dir / "meta.json", metadata.dump());
+deep_jit/backend/ascend/backend.hpp:171:        DJ_HOST_ASSERT(is_executable(bisheng), "Bisheng compiler is not executable: {}", bisheng.string());
+deep_jit/backend/ascend/backend.hpp:172:        DJ_HOST_ASSERT(is_executable(ld_lld), "Ascend linker is not executable: {}", ld_lld.string());
+deep_jit/backend/cuda/options.hpp:153:            .update(*post_hook).update(read(path))
+---
+deep_jit/backend/cuda/backend.hpp:64:        const auto version = call_external_command(toolkit.nvcc.string() + " --version");
+deep_jit/backend/cuda/backend.hpp:115:        const auto compiler_output = call_external_command(cd_command + command, print_compiler_command);
+deep_jit/backend/cuda/backend.hpp:137:            call_external_command(hook_command, print_compiler_command);
+deep_jit/backend/cuda/backend.hpp:145:            call_external_command(cd_command + str::join(ptx_args), print_compiler_command);
+deep_jit/backend/cuda/backend.hpp:155:            const auto sass = call_external_command(cd_command + sass_command, print_compiler_command);
+deep_jit/backend/cuda/backend.hpp:187:                auto path = call_external_command("which nvcc");
+deep_jit/backend/ascend/backend.hpp:67:            .version = call_external_command(toolkit.bisheng.string() + " --version"),
+deep_jit/backend/ascend/backend.hpp:69:            .linker_version = call_external_command(toolkit.ld_lld.string() + " --version"),
+deep_jit/backend/ascend/backend.hpp:120:        call_external_command(cd_command + bisheng_command, print_compiler_command);
+deep_jit/backend/ascend/backend.hpp:121:        call_external_command(cd_command + linker_command, print_compiler_command);
+deep_jit/backend/ascend/backend.hpp:137:            call_external_command("cd " + asm_dir.string() + " && " + str::join(asm_args),
+---
+deep_jit/backend/cuda/options.hpp:138:        hasher.update(str::join(get_flags()));
+deep_jit/backend/ascend/options.hpp:108:        hasher.update(str::join(get_bisheng_flags()));
+deep_jit/backend/ascend/options.hpp:109:        hasher.update(str::join(get_linker_flags()));
+deep_jit/backend/cuda/backend.hpp:109:        const auto command = str::join(args);
+deep_jit/backend/cuda/backend.hpp:145:            call_external_command(cd_command + str::join(ptx_args), print_compiler_command);
+deep_jit/backend/ascend/backend.hpp:106:        const auto bisheng_command = str::join(bisheng_args);
+deep_jit/backend/ascend/backend.hpp:116:        const auto linker_command = str::join(linker_args);
+deep_jit/backend/ascend/backend.hpp:137:            call_external_command("cd " + asm_dir.string() + " && " + str::join(asm_args),
+---
+130:        const auto temporary_path = paths[0] / "tmp" / get_uuid();
+---
+deep_jit/runtime/config.hpp:57:        return json::object_t {
+deep_jit/backend/cuda/backend.hpp:44:            return json::object_t {
+deep_jit/backend/cuda/backend.hpp:161:        const json metadata = json::object_t {
+deep_jit/backend/cuda/backend.hpp:167:        write_file_sync(dir / "meta.json", metadata.dump());
+deep_jit/backend/cuda/options.hpp:159:        return json::object_t {
+---
+deep_jit/runtime/runtime.hpp:88:        GilScopedRelease gil_release;
+deep_jit/backend/cuda/kernel.hpp:50:        GilScopedRelease gil_release;
+deep_jit/backend/cuda/kernel.hpp:94:        GilScopedRelease gil_release;
+deep_jit/backend/cuda/backend.hpp:83:        GilScopedRelease gil_release;
+---
+25:    if constexpr (std::is_base_of_v<NoRefPtr, std::decay_t<T>>) {
+
+== 编译纯 host 程序（直接 include 真实头文件）==
+build OK
+
+== 运行（json/str/uuid/command/filesystem/no_ref_ptr）==
+== DeepJIT utils 工具层：纯 host 真机 ==
+--- json ---
+JSON_BASIC {"a":1,"b":"x","c":[1,2,3],"d":null,"e":true}
+[A] PASS json.basic_dump : {"a":1,"b":"x","c":[1,2,3],"d":null,"e":true}
+JSON_INT -5
+JSON_UINT 18446744073709551615
+[A] PASS json.int64 : -5
+[A] PASS json.uint64 : 18446744073709551615
+[A] PASS json.bool_not_int
+[A] PASS json.int_literal
+JSON_ESC "\"\\\b\f\n\r\t\u0001"
+[A] PASS json.escape : "\"\\\b\f\n\r\t\u0001"
+[A] PASS json.optional_value
+[A] PASS json.optional_empty
+[A] PASS json.vector_ctor
+JSON_DUP {"k":1,"k":2}
+[A] PASS json.object_is_ordered_vector : {"k":1,"k":2}
+JSON_NEST {"x":[{"y":null}]}
+[A] PASS json.nested : {"x":[{"y":null}]}
+--- str ---
+[A] PASS str.join.empty
+[A] PASS str.join.single : a
+[A] PASS str.join.default_sep : a b c
+[A] PASS str.join.custom_sep : a, b, c
+[A] PASS str.join.empty_sep : ab
+STR_JOIN -O3 --use_fast_math -std=c++17
+--- uuid ---
+UUID 3826896-21ea7f55-252a1872-5bee67f5
+[A] PASS uuid.pid_prefix : 3826896-21ea7f55-252a1872-5bee67f5
+[A] PASS uuid.length : 3826896-21ea7f55-252a1872-5bee67f5
+[A] PASS uuid.unique_100k : 100000
+[A] PASS uuid.thread_local_no_collision : 160000/160000
+--- command ---
+CMD_SUCCESS hi
+[A] PASS command.success : hi
+
+CMD_STDERR to_stderr
+[A] PASS command.stderr_merged : to_stderr
+
+[A] PASS command.nonzero_throws : Assertion error (~/github/DeepGEMM/third-part
+[A] PASS command.signal_death_143 : Assertion error (~/github/DeepGEMM/third-part
+[A] PASS command.empty_asserts : Assertion error (~/github/DeepGEMM/third-part
+CMD_WHICH_NVCC /usr/local/cuda/bin/nvcc
+[A] PASS command.which_nvcc : /usr/local/cuda/bin/nvcc
+
+--- filesystem ---
+FS_ROUNDTRIP len=14
+[A] PASS fs.write_read_roundtrip : 14
+[A] PASS fs.make_dirs_nested
+[A] PASS fs.read_missing_throws : Assertion error (~/github/DeepGEMM/third-part
+[A] PASS fs.try_update_mtime_existing
+[A] PASS fs.try_update_mtime_missing_false
+[A] PASS fs.fsync_dir_recursive
+[A] PASS fs.safe_remove_all_nested
+[A] PASS fs.safe_remove_all_missing_silent
+FS_NORMALIZE ~/proj/tech_record/code/kernel-opt/a/c
+[A] PASS fs.normalize_relative
+[A] PASS fs.normalize_nullopt
+[A] PASS fs.normalize_empty
+[A] PASS fs.is_executable_true
+[A] PASS fs.is_executable_non_exec_file
+[A] PASS fs.is_executable_missing
+--- no_ref_ptr ---
+[A] PASS no_ref_ptr.pointer_is_storage
+[A] PASS no_ref_ptr.plain_takes_address
+[A] PASS no_ref_ptr.sizeof_is_pointer
+CPP_SUMMARY pass=43 fail=0
+
+== 编译 GilScopedRelease pybind 探针 ==
+In file included from ~/proj/tech_record/code/mega-moe/src/deepjit_gil.cpp:9:
+~/github/DeepGEMM/third-party/deep_jit/include/deep_jit/utils/gil.hpp:9:7: warning: ‘deep_jit::GilScopedRelease’ declared with greater visibility than the type of its field ‘deep_jit::GilScopedRelease::release’ [-Wattributes]
+    9 | class GilScopedRelease {
+      |       ^~~~~~~~~~~~~~~~
+build OK
+
+== Python 侧判定 ==
+C++ 段自检: pass=43 fail=0
+[B] PASS cpp.no_fail
+[B] PASS cpp.check_count : 43
+[B] PASS json.python_loads_basic : {"a":1,"b":"x","c":[1,2,3],"d":null,"e":true}
+[B] PASS json.int64_literal
+[B] PASS json.uint64_literal
+[B] PASS json.escape_roundtrip : '"\\"\\\\\\b\\f\\n\\r\\t\\u0001"'
+[B] PASS json.escape_control_uses_u0001 : "\"\\\b\f\n\r\t\u0001"
+[B] PASS json.ordered_dup_keys : {"k":1,"k":2}
+[B] PASS json.python_keeps_last_dup : Python 解析保留末值
+[B] PASS json.nested_loads : {"x":[{"y":null}]}
+[B] PASS str.join_matches_expected : -O3 --use_fast_math -std=c++17
+[B] PASS str.join_equals_python_join
+[B] PASS uuid.format : 3826896-21ea7f55-252a1872-5bee67f5
+[B] PASS uuid.pid_prefix_positive_int : 3826896-21ea7f55-252a1872-5bee67f5
+[B] PASS command.echo
+[B] PASS command.stderr_merged
+[B] PASS command.which_nvcc : CMD_WHICH_NVCC /usr/local/cuda/bin/nvcc
+[B] PASS fs.roundtrip_len_14 : FS_ROUNDTRIP len=14
+[B] PASS fs.normalize_absolute_c : ~/proj/tech_record/code/kernel-opt/a/c
+GIL probe (python 持 GIL): before=1 inside=0 after=1
+[B] PASS gil.released_inside_restored_after : 1/0/1
+GIL probe (call_guard 预释放): before=0 inside=0
+[B] PASS gil.no_double_release_when_already_free : 0/0
+
+Python 侧: PASS=21 FAIL=0
+总判定: ALL PASS
