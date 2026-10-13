@@ -302,5 +302,14 @@ DRAM write 基本不变（**不是带宽**）、L2 字节 **−52%**、tensor �
 （§24 标量 store 时 1.63 → TMA store 兑现「大 shape 追平 FLA」）；小 shape `2.0–2.7×`（残差＝每 warp
 发射效率）。**BT=16 无法在探针测**（FLA 前向只支持 chunk 32/64），部署口径仍归 §37.3。**踩坑（新）**：
 run-to-run 确定性扫描暴露 `base` kernel 在 `NSTAGE≥2` 大 shape 上不可复现（`BT=16 NS=2` 3.64e-2、
-`BT=32 NS=3` 4.52e-3），`NSTAGE=1` 全 `BT` 稳定 → §35/§36 的「逐位相同」属**观测而非保证**，根因
-（`full`/`empty` parity 在 `NS≥2`）待验证。**回授**：§24「最优回到 `NS=1`」同时是唯一有保证正确的配置。
+`BT=32 NS=3` 4.52e-3），`NSTAGE=1` 全 `BT` 稳定 → §35/§36 的「逐位相同」属**观测而非保证**。
+
+**P7-36（`docs/07` §39）**：**定位并修掉**上条竞态。根因不是 `full`/`empty` parity，而是手写 TMA 流水
+复用的 stage 缓冲缺一条 **`fence.proxy.async`**：`full`/`empty` mbarrier 只在 **generic proxy** 内定序，
+consumer 用普通 `ld` 读 `st->e`、producer 用 `cp.async.bulk.tensor`（**async proxy**）回填同一缓冲，WAR
+未定序 → 间歇读到被覆写的字节。9 变体 run-to-run 扫描（`B8T2048H8 NR=40`）：`base` racy（`16/2`=39/40、
+`32/3`=19/40）、`noetma`/`dropread`=0、`proxy`/`pro`/`con`（`fence.proxy.async`，两侧任一侧单独加都够）
+**全 0/40**、`esync`/`evol` 修不了、`sync` 能修但折回串行。错误形状＝**一整个 compute warp 的 16 列
+V-slice 跨连续若干 chunk**（WAR 指纹）。`proxy/base`=**0.96–1.02（免费）**，`proxy` `NS=2/3` vs `base`
+`NS=1` `dh` **逐位相同**。**回授撤回**：多 stage 安全不需要 CUTLASS `PipelineTmaAsync`，`-DB1T_EPROXY`
+即修复；手写「TMA 复用缓冲」的握手必须显式 `fence.proxy.async`（`__threadfence_block`/`volatile` 会漏）。

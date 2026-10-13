@@ -3859,3 +3859,112 @@ CUPTI `us/call`。`xFLA = ours / FLA_bf16`，`BT=64` 与 FLA `dhu` 的默认 chu
   否则会把间歇竞态当正确性通过。这与 §25.5（归因窗口）、§37（dtype/chunk 对齐）并列。
 - **下一步**：与 §35/§36 一致——手写 mbarrier 已到结构上限，若要安全地吃多 stage 的收益需换
   CUTLASS `PipelineTmaAsync`（本节的竞态是又一条动机）。
+
+## 39. 定位并修掉手写 TMA 流水在 `NSTAGE≥2` 的竞态——缺一条 `fence.proxy.async`（P7-36）
+
+§38.3（P7-35）在加 `BT=16` 覆盖时发现：K2 形状的手写 CUDA B1（`b1_tma_probe.cu`，`-DB1T_ETMA`
+基线）在大 grid、`NSTAGE≥2` 下 **run-to-run 不可复现**，而 `NSTAGE=1` 稳定；当时只把它**观测**下来，
+根因留作 **待验证**（猜是 `full`/`empty` parity 的 off-by-one）。本轮用一组受控变体把它**钉死并修掉**。
+新增 `harness/check_bwd_b1_race.py`（`harness/check_bwd_b1_race.out.txt`，空闲卡 `CUDA_VISIBLE_DEVICES=1`）。
+
+### 39.1 Part A：竞态由「消费 TMA 落盘的 `st->e`」触发，`fence.proxy.async` 是唯一非暴力解
+
+在同一份 `b1_tma_probe.cu` 上编译 9 个变体，对每个变体**连跑同一个 kernel `NR=40` 次、逐次比 `dh`**
+（`B8 T2048 H8`，大 grid = 复现区间）：
+
+| BT | NS | base | noetma | dropread | **proxy** | **pro** | **con** | esync | evol | sync |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 16 | 2 | **39/40** | 0 | 0 | **0** | **0** | **0** | 39/40 | 10/40 | 0 |
+| 16 | 3 | **11/40** | 0 | 0 | **0** | **0** | **0** | 10/40 | 39/40 | 0 |
+| 32 | 3 | **19/40** | 0 | 0 | **0** | **0** | **0** | 7/40 | 0 | 0 |
+| 32 | 2 | 1/40 | 0 | 0 | **0** | **0** | **0** | 0 | 0 | 0 |
+| 64 | 2 | 0/40 | 0 | 0 | **0** | **0** | **0** | 0 | 0 | 0 |
+
+（cell = 与第 0 次不同的 run 数 / 40；0 表示 run-to-run 逐位一致。变体：`noetma` = 关掉 ETMA、
+E^tot 直接读 global；`dropread` = 仍发 E 的 TMA、但 op2/op3 读 global；`proxy` = 两个循环里各加一条
+`fence.proxy.async`；`pro`/`con` = 只在 producer / 只在 consumer 一侧加；`esync` = op2/op3 前
+`__syncwarp`；`evol` = `volatile` 读 `st->e`；`sync` = 两个循环各加 `__syncthreads`。）
+
+**读法**：
+
+- 竞态的**触发条件是「消费 TMA 落盘的 `st->e`」**：`noetma` 与 `dropread`（都不碰被复用的
+  `st->e`）全程 0/40，而只要 op2/op3 读 `st->e` 就复现。
+- **`fence.proxy.async` 是解，且两侧任一侧单独加都够**：`proxy`/`pro`/`con` 全 0/40。这不是
+  parity 问题（`sep`——给 E 单独的 mbarrier——在 §38 的表里仍 racy），而是**跨 proxy 的内存序**问题。
+- **`esync`/`evol` 修不了**：`__syncwarp` 只同步 warp 内执行、`volatile` 只约束编译器，二者都不
+  建立 **generic proxy ↔ async proxy** 之间的顺序，所以 racy 照旧。
+- **`sync`（`__syncthreads`）能修，但代价是把流水退化成串行**：它强制 producer 与所有 consumer
+  每轮 rendezvous，等于把 `NSTAGE` 折回 1——§38 说「`NS=1` 是唯一有保证正确的配置」正是这个原因。
+- base 的「racy 计数」本身**每次扫描都在抖**（`16/2` 这格先后测到 39、14、39；`32/3` 测到 19、24），
+  这就是**间歇性竞态**的直接指纹。
+
+### 39.2 Part B：损坏的形状——**一整个 compute warp 的 16 列 V-slice × 连续若干 chunk**
+
+对 racy 的 `base`（`BT=32 NS=3`，`NR=60`）程序化统计每次失败 run 里 `dh` 的错误元素落点：
+
+- **非可复现 run：29/59**（run 0 之后）。
+- **chunk 局部性**：错的是**连续一段 chunk**（span 内的 chunk 基本都被污染，平均只漏 ~3.7 个），
+  说明一个 chunk 的输入操作数错后会沿递推往后传几个 chunk。
+- **K-row 直方图**（128 行）最高的是 **56–61 行各命中 29 次**（即整个 16 行的 `m=3` K-tile）。
+- **V-col 直方图**（按 16 列一个 warp-slice 归并）：**`[0,16)` 命中 320 次、`[64,80)` 命中 240 次**，
+  其余 slice（`[16,32)`/`[32,48)`/`[48,64)`）几乎不出现。
+
+`cols=[0,16)` 是 `v0=0` 那个 CTA 的 **compute warp 0** 的 V 列，`[64,80)` 是 `v0=64` 那个 CTA 的
+**compute warp 0**——即**永远是每个 CTA 的第 0 个 compute warp**，且是**整段 16 列**一起错。
+这只有一种解释：**该 warp 正在读某个 stage 缓冲时，producer 用下一轮的 TMA 把这块缓冲整个覆写了**
+（WAR）——被覆写的 q/k/w/dO/dV/E 一起错，所以整段 V-slice 丢失；而 `m=3` K-tile 高亮是**E 那 512 B
+的 TMA 最先落盘**、只污染到 E 对应的行（`st->e[m*16+g]`）的时序残影。其他 warp 偶发落后不多、或
+引用 §38 的 rance 窗口，故不被命中。
+
+### 39.3 Part C：两个「安全解」的开销——`fence.proxy.async` ≈ 免费，回读 global 要贵 4–27%
+
+CUPTI `us/call`，空闲卡：
+
+| shape | BT | NS | base | noetma | **proxy** | noetma/base | **proxy/base** |
+|---|---|---|---|---|---|---|---|
+| B2 T1024 H8 | 16 | 1 | 236.1 | 283.8 | 236.3 | 1.20 | **1.00** |
+| B2 T1024 H8 | 32 | 1 | 141.1 | 150.5 | 141.3 | 1.07 | **1.00** |
+| B2 T1024 H8 | 32 | 3 | 132.6 | 138.2 | 133.3 | 1.04 | **1.01** |
+| B2 T1024 H8 | 64 | 1 | 91.7 | 95.6 | 93.8 | 1.04 | **1.02** |
+| B8 T2048 H8 | 16 | 1 | 499.7 | 636.9 | 499.8 | 1.27 | **1.00** |
+| B8 T2048 H8 | 32 | 1 | 290.6 | 328.7 | 295.8 | 1.13 | **1.02** |
+| B8 T2048 H8 | 32 | 3 | 370.1 | 332.8 | 356.4 | 0.90 | **0.96** |
+| B8 T2048 H8 | 64 | 1 | 195.2 | 218.1 | 198.2 | 1.12 | **1.02** |
+
+**放弃 ETMA（`noetma`，回读 global）要贵 4–27%**（正是 §21/§24 当初引入 ETMA 的理由）；而
+**`proxy` 相对 racy 的 `base` 是 0.96–1.02（在噪声内）**——修竞态**不花性能**。这条正是 §21 的
+`long_sb` 归因没看到的那一块：E 留在流水里是对的，只是**欠一条 proxy fence**。
+
+### 39.4 Part D：修完之后多 stage 与 `NS=1` **逐位相同**（只修了竞态，没动数值）
+
+`proxy` 变体在 `NS=2/3` 下 vs `base` 的 `NS=1`，`dh` **max_abs 全部 0.000e+00**（`BT=16/32/64`、
+两组 shape，12 格）：
+
+| shape | BT | proxy NS=2 vs base NS=1 | proxy NS=3 vs base NS=1 |
+|---|---|---|---|
+| B2 T1024 H8 | 16/32/64 | 0.000e+00 | 0.000e+00 |
+| B8 T2048 H8 | 16/32/64 | 0.000e+00 | 0.000e+00 |
+
+即：**加 fence 后多 stage 与单 stage 数值完全一致**，`NSTAGE≥2` 从此可安全使用；§38 里「`NS=1`
+是唯一有保证正确的配置」这条**回授被撤回**（改为「需先加 proxy fence」）。
+
+### 39.5 结论 / 对目标卡的设计输入
+
+- **根因（已定位，非待验证）**：手写 TMA 流水的 `full`/`empty` mbarrier 握手**只在 generic proxy
+  内定序**；consumer 用普通 `ld` 读 `st->e`（generic proxy），producer 用 `cp.async.bulk.tensor`
+  回填同一缓冲（**async proxy**），这一对 **WAR 缺 `fence.proxy.async`**。因为每个 stage 的
+  `st->e` 是「读后即被下一轮覆写」的复用缓冲，缺 fence 时 consumer 可能读到 producer 已回填的
+  错误字节。`st->e` 最先暴露是因为它的 TMA（512 B）最早落盘、且它用的是普通标量 `ld`（q/k/w/dO
+  走 `ldmatrix` 且结果进 `mma`，完成度被数据依赖逼出来），故同一 hazard 在 E 上最先可见——
+  **但对所有被 TMA 复用的 stage 缓冲，这条 fence 都是必需的**。
+- **修法**：在**任一**侧加一条 `fence.proxy.async.shared::cta`（`b1_tma_probe.cu:59-61` 的
+  `fence_proxy_async()`；producer 在 `empty` wait 之后、发 TMA 之前 `:282-284`，或 consumer 在读完
+  `st->e`、`empty` arrive 之前 `:518-520`）。**代价在噪声内**（Part C），值取 `-DB1T_EPROXY`。
+- **撤回 §24.5/§38.4 的过度悲观**：多 stage 的安全**不需要**换 CUTLASS `PipelineTmaAsync`——那条
+  路子仍更省心，但「手写 pipeline 不能安全开多 stage」的结论是**错的**，一条 fence 即可。**新增
+  方法学约束**：手写「TMA 复用缓冲」的流水，其 buffer-reuse 握手上必须显式 `fence.proxy.async`；
+  确定性扫描（§38 的 Part D）是抓它的必要手段，`__threadfence_block`/`volatile` 会漏。
+- **本条的边界**：实测都在**标量 store 的 `-DB1T_ETMA`** 基线（§38 不可复现的那个变体）上做；
+  `+TMADH/+TMADV`（`tma2`）的 store 路径用的是 `cp.async.bulk` store + `bulk_group`，其复用握手
+  同样建议补 fence，**待验证**（本轮未对其做同样的确定性扫描修复，但 §38 Part A 的 `tma2/base`
+  逐位一致结果不受影响）。

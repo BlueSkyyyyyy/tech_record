@@ -53,6 +53,12 @@ DEV void mbar_arrive_tx(uint64_t* b, uint32_t bytes) {
     asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n"
                  ::"r"(saddr(b)), "r"(bytes) : "memory");
 }
+// B1T_EPROXY (P7-36): order the generic-proxy smem reads against the async-proxy
+// (TMA) writes to the same stage buffer.  `__threadfence_block` (membar.cta) does NOT
+// order across the two proxies; the correct primitive is fence.proxy.async.
+DEV void fence_proxy_async() {
+    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
+}
 DEV void mbar_wait(uint64_t* b, int ph) {
     asm volatile(
         "{\n\t.reg .pred P;\n"
@@ -212,6 +218,9 @@ struct alignas(1024) Shared {
 #endif
     alignas(8) uint64_t full[NSTAGE];
     alignas(8) uint64_t empty[NSTAGE];
+#ifdef B1T_ETMA_SEP
+    alignas(8) uint64_t efull[NSTAGE];
+#endif
 };
 
 // ------------------------------------------------------------------------ kernel
@@ -246,7 +255,11 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
     // ---- init barriers ----
     if (threadIdx.x == 0) {
         #pragma unroll
-        for (int s = 0; s < NSTAGE; ++s) { mbar_init(&sh->full[s], 1); mbar_init(&sh->empty[s], NW); }
+        for (int s = 0; s < NSTAGE; ++s) { mbar_init(&sh->full[s], 1); mbar_init(&sh->empty[s], NW);
+#ifdef B1T_ETMA_SEP
+            mbar_init(&sh->efull[s], 1);
+#endif
+        }
         asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory");
     }
     __syncthreads();
@@ -256,11 +269,23 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
         if (l == 0) {
             constexpr uint32_t BYTES = (uint32_t)(8 * BT * 128);   // 3 qkv halves*2 + dO+dV
             for (int i = 0; i < NT; ++i) {
+#if defined(B1T_SYNC)
+                __syncthreads();
+#endif
+#if defined(B1T_FENCE)
+                __threadfence_block();
+#endif
                 const int c = NT - 1 - i;
                 const int s = i % NSTAGE;
                 const int t0 = c * BT;
                 if (i >= NSTAGE) mbar_wait(&sh->empty[s], ((i / NSTAGE) + 1) & 1);
-#ifdef B1T_ETMA
+#if defined(B1T_EPROXY) || defined(B1T_EPROXY_PRO)
+                fence_proxy_async();
+#endif
+#if defined(B1T_ETMA) && defined(B1T_ETMA_SEP)
+                mbar_arrive_tx(&sh->full[s], BYTES);
+                mbar_arrive_tx(&sh->efull[s], (uint32_t)(KD * 4));
+#elif defined(B1T_ETMA)
                 mbar_arrive_tx(&sh->full[s], BYTES + (uint32_t)(KD * 4));
 #else
                 mbar_arrive_tx(&sh->full[s], BYTES);
@@ -279,7 +304,11 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                 tma5d(&dVmap, st->dV[0], 0, vhalf, h, t0, n, bar);
 #ifdef B1T_ETMA
                 // E^tot tile [B,NT,H,KD] fp32: dims {KD, NT*H, B}, box {KD,1,1}
+#ifdef B1T_ETMA_SEP
+                tma3d(&emap, st->e, 0, c * H + h, n, &sh->efull[s]);
+#else
                 tma3d(&emap, st->e, 0, c * H + h, n, bar);
+#endif
 #endif
             }
         }
@@ -304,11 +333,27 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
         const __nv_bfloat162 scale2 = __floats2bfloat162_rn(scale, scale);
 
         for (int i = 0; i < NT; ++i) {
+#if defined(B1T_SYNC)
+            __syncthreads();
+#endif
+#if defined(B1T_FENCE)
+            __threadfence_block();
+#endif
             const int c = NT - 1 - i;
             const int s = i % NSTAGE;
             mbar_wait(&sh->full[s], (i / NSTAGE) & 1);
+#ifdef B1T_ETMA_SEP
+            mbar_wait(&sh->efull[s], (i / NSTAGE) & 1);
+#endif
             const Stage<BT>* st = &sh->st[s];
             const int vbase = v0 + warp * BW;
+#if defined(B1T_ETMA) && defined(B1T_ECOPY)
+            // P7-36: snapshot E^tot into registers immediately after the full-wait, so a
+            // later WAR overwrite of st->e cannot be mistaken for a late read.
+            float e_copy[KD];
+            #pragma unroll
+            for (int z = 0; z < KD; ++z) e_copy[z] = st->e[z];
+#endif
 
             // ---- publish S: per-warp bf16 mirror (+ `dh` store: scalar or TMA) ----
             {
@@ -424,11 +469,23 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 #endif
 
             // ---- op2/op3: S = S*e + scale*(q^T @ do) - (w^T @ du) ----
+#ifdef B1T_ESYNC
+            __syncwarp();
+#endif
             #pragma unroll
             for (int m = 0; m < MTK; ++m) {
-#ifdef B1T_ETMA
+#if defined(B1T_ETMA) && !defined(B1T_ETMA_DROPREAD)
+#ifdef B1T_EVOL
+                const volatile float* ep = st->e;
+                float e0 = ep[m * 16 + g];
+                float e1 = ep[m * 16 + g + 8];
+#elif defined(B1T_ECOPY)
+                float e0 = e_copy[m * 16 + g];
+                float e1 = e_copy[m * 16 + g + 8];
+#else
                 float e0 = st->e[m * 16 + g];
                 float e1 = st->e[m * 16 + g + 8];
+#endif
 #else
                 float e0 = etot[((int64_t)(n * NT + c) * H + h) * KD + m * 16 + g];
                 float e1 = etot[((int64_t)(n * NT + c) * H + h) * KD + m * 16 + g + 8];
@@ -458,6 +515,9 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                 }
             }
             __syncwarp();
+#if defined(B1T_EPROXY) || defined(B1T_EPROXY_CON)
+            fence_proxy_async();
+#endif
             if (l == 0) mbar_arrive(&sh->empty[s]);   // one arrival per consumer warp
         }
 

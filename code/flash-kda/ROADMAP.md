@@ -559,6 +559,22 @@
       有保证**；根因（手写 `full`/`empty` parity 在 `NS≥2` 的覆写窗口）**待验证**。**回授**：§24「最优回到
       `NS=1`」同时是**唯一有保证正确**的配置，多 stage 收益须换 CUTLASS `PipelineTmaAsync` 才安全。
       **新方法学**：多 stage 手写流水必须做 run-to-run 确定性检查（与 §25.5 归因窗口、§37 dtype 对齐并列）。
+- [x] **P7-36** 定位并**修掉** P7-35 遗留的 `NSTAGE≥2` run-to-run 竞态（§38.3 只说「parity 待验证」）。
+      新增 `harness/check_bwd_b1_race.py`（`check_bwd_b1_race.out.txt`，空闲卡）+ `docs/07` §39；
+      探针加 `-DB1T_EPROXY`（`fence.proxy.async.shared::cta`，`b1_tma_probe.cu:59-61`）与
+      `_PRO`/`_CON`/`_ECOPY` 变体。**Part A（9 变体 run-to-run 扫描，`B8T2048H8 NR=40`）**：`base` 在
+      `BT=16 NS=2`=39/40、`BT=32 NS=3`=19/40 racy 且**每次扫描计数都在抖**；`noetma`/`dropread`
+      （不碰复用的 `st->e`）=0，`proxy`/`pro`/`con`=`fence.proxy.async`（两侧任一侧单独加都够）**全 0/40**，
+      `esync`/`evol`**修不了**，`sync`（`__syncthreads`）能修但把流水折回串行。**Part B（程序化）**：
+      racy `base` 29/59 run 失败，错误是**一整个 compute warp 的 16 列 V-slice**（`[0,16)`/`[64,80)`）
+      跨**连续一段 chunk**（K-row 直方图最高在 `m=3` 的 56–61 行×29）＝**producer 用下一轮 TMA 覆写了
+      该 warp 还在读的 stage 缓冲**（WAR）。**根因**：`full`/`empty` mbarrier 只在 **generic proxy** 内
+      定序；consumer 普通 `ld` 读 `st->e`、producer `cp.async.bulk.tensor` 回填同一缓冲（**async proxy**），
+      缺 `fence.proxy.async`。**Part C**：`proxy/base`=**0.96–1.02（噪声内，修竞态免费）**，而放弃 ETMA
+      回读 global（`noetma`）要贵 **4–27%**。**Part D**：`proxy` `NS=2/3` vs `base` `NS=1` `dh`
+      **逐位相同（max_abs=0，12 格）**→ 多 stage 数值不受影响。**撤回 §38.4 回授**：多 stage 安全**不需要**
+      换 CUTLASS `PipelineTmaAsync`，一条 fence 即可。**边界**：本轮在标量 store 的 `-DB1T_ETMA` 上做，
+      `+TMADH/+TMADV`（`tma2`）store 侧的复用握手同样建议补 fence（**待验证**）。
 
 ### P8 小结 / 一页纸
 
@@ -591,11 +607,29 @@
 - workspace 字段是 head-major `[H, total_tiles, CHUNK, D]`；展平到 FLA 的 token-major
   `[B,T,H,D]` 必须 `permute(0,1,3,2,4)`（按 `(NT,CHUNK,H)`），直接 reshape 会交错 head/chunk 轴
   （指纹：`qg/kg` 相对误差≈1.0）。`INV` 即 $P[o_t,o_A]$，不需转置。
+- **手写 TMA 流水的「缓冲复用」必须显式 `fence.proxy.async`**（P7-36）：`full`/`empty` mbarrier
+  只在 **generic proxy** 内定序，consumer 用普通 `ld` 读、producer 用 `cp.async.bulk.tensor`（**async
+  proxy**）回填同一 stage 缓冲时，WAR 未定序 → 间歇性读到被覆写的字节。指纹＝**整段 warp V-slice
+  错、跨连续 chunk、`NSTAGE≥2` 且 `NSTAGE=1` 免疫**；`__threadfence_block`/`volatile`/`__syncwarp`
+  修不了，`fence.proxy.async.shared::cta`（`b1_tma_probe.cu:59-61`）修得掉且免费。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-35 补测**。
-  - P7-35（本轮）：把「K2 形状 CUDA B1」的累计收益**收口成 matched-bf16 的 `xFLA`**，并**发现手写
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-36 补测**。
+  - P7-36（本轮）：**定位并修掉 P7-35 遗留的 `NSTAGE≥2` run-to-run 竞态**——根因是手写 TMA 流水
+    复用的 stage 缓冲缺一条 **`fence.proxy.async`**（generic proxy 的普通 `ld` 读 vs async proxy 的
+    TMA 回填，WAR 未定序），不是 §38.3 猜的 `full`/`empty` parity。新增 `harness/check_bwd_b1_race.py`
+    （`check_bwd_b1_race.out.txt`，空闲卡）+ `docs/07` §39；探针加 `-DB1T_EPROXY`/`_PRO`/`_CON`/`_ECOPY`。
+    **Part A**（9 变体、`B8T2048H8` `NR=40` 逐次比 `dh`）：`base` racy（`16/2`=39/40、`32/3`=19/40，且
+    每次扫描计数抖动），`noetma`/`dropread`=0，**`proxy`/`pro`/`con` 全 0/40**（两侧任一侧单独加都够），
+    `esync`/`evol` 修不了，`sync`（`__syncthreads`）能修但折回串行。**Part B**（程序化）：失败 run 的
+    错误是**一整个 compute warp 的 16 列 V-slice 跨连续若干 chunk**（`[0,16)`×320 / `[64,80)`×240、
+    K-row 最高在 `m=3` 的 56–61 行×29）＝producer TMA 覆写了该 warp 仍在读的 stage 缓冲（WAR）。
+    **Part C**：`proxy/base`=**0.96–1.02（免费）**，放弃 ETMA 回读 global（`noetma`）=贵 **4–27%**。
+    **Part D**：`proxy` `NS=2/3` vs `base` `NS=1` `dh` **逐位相同（max_abs=0，12 格）**。**撤回 §38.4
+    回授**：多 stage 安全**不需要** CUTLASS `PipelineTmaAsync`，一条 fence 即可；`-DB1T_EPROXY` 即修复。
+    **边界（待验证）**：本轮在标量 store 的 `-DB1T_ETMA` 上做，`tma2` 的 store 侧复用握手同样建议补 fence。
+  - P7-35（上轮）：把「K2 形状 CUDA B1」的累计收益**收口成 matched-bf16 的 `xFLA`**，并**发现手写
     pipeline 在 `NSTAGE≥2` 的 run-to-run 竞态**。新增 `harness/check_bwd_b1_xfla.py`
     （`check_bwd_b1_xfla.out.txt`，空闲卡）+ `docs/07` §38。三变体 `base`/`tma`/`tma2`。**正确性**：
     `tma2` vs `base`（`BT=32/64 NS=1/2`、含非整除 `T=250`）**逐位相同**、vs 直接 bf16 FLA `dhu` 1 ulp。
@@ -1078,7 +1112,10 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-34 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-36 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-36 的边界（待验证）**：`tma2`（`+TMADH/+TMADV`）的 TMA store 侧复用握手（`dho`/`duo`
+    双缓冲 + `cp.async.bulk` store + `bulk_group`）本轮**未**做同样的确定性扫描修复；按 P7-36 的
+    根因，store 侧「读 smem → TMA store → 覆写」的握手同样应补 `fence.proxy.async`（**待验证**）。
   - **P7-34（`docs/07` §37）澄清两个 FLA `dhu` baseline 并更正 §25**：同一条
     `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64` 的 ~23µs（bf16 直接调用）与 ~137µs（fp32 链内）
     差的是 **operand dtype**（fp32 载入 2× + `tl.dot` 落 tf32，实测 fp32/bf16 = 4.0–5.5×），非 direct/chain。
