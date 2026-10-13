@@ -1,0 +1,77 @@
+DeepEP comm::Context host 算术 + NCCL 运行时版本闸门 —— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 nccl (2, 29, 7) sms 132
+DeepEP 源码：93eb6eb
+
+CUDA host-arithmetic program OK
+
+============================================================================================
+P130-1 · DeepEP comm::Context host 算术 + NCCL 运行时版本闸门 —— H100 真机
+============================================================================================
+DeepEP = ~/github/DeepEP
+
+--- §0 真实常量（src/deepep_context_arith.cu 直接 include 真实头文件） ---
+  kNumTMAAlignmentBytes = 32
+  kNumRDMAAlignmentBytes = 64
+  kNumAllocationAlignmentBytes = 2097152
+  kNumMaxRanks = 1024
+  kNumMaxQPs = 1024
+  kDefaultQPDepth = 1024
+  sizeof_topk_idx_t = 8
+
+--- §1 常量 python(parsed) vs cuda(real) ---
+  [PASS] const kNumTMAAlignmentBytes py=32 cuda=32
+  [PASS] const kNumRDMAAlignmentBytes py=64 cuda=64
+  [PASS] const kNumAllocationAlignmentBytes py=2097152 cuda=2097152
+  [PASS] const kNumMaxRanks py=1024 cuda=1024
+  [PASS] const kNumMaxQPs py=1024 cuda=1024
+  [PASS] const kDefaultQPDepth py=1024 cuda=1024
+  [PASS] align 关系 RDMA%TMA==0 
+  [PASS] align 关系 Alloc%RDMA==0 
+  [PASS] kNumAllocationAlignmentBytes==2MiB 
+
+--- §2 advance_ptr 布局（context.cpp:200-213 同构） ---
+  [PASS] ptr workspace_off py=0 cuda=0
+  [PASS] ptr buffer_off py=1024 cuda=1024
+  [PASS] ptr storage_base_off py=4096 cuda=4096
+  [PASS] ptr local_storage_off py=4608 cuda=4608
+  [PASS] ptr storage_window_0_off py=4096 cuda=4096
+  [PASS] ptr storage_window_1_off py=4352 cuda=4352
+  [PASS] ptr storage_window_2_off py=4608 cuda=4608
+  [PASS] ptr storage_window_3_off py=4864 cuda=4864
+
+--- §3 域分解逐行对拍（context.cpp:166-183） ---
+  [PASS] 域分解全部逐字段一致 60 行 mismatch=0
+  [PASS] 逻辑域乘积恒等 num_ranks（hybrid）/ 单级（非 hybrid） 
+
+--- §4 NCCL 运行时版本闸门（context.cpp:156-162） ---
+  pip   header 2.32.3 code=23203 | runtime code=23203 (2.32.3)
+  system header 2.29.7 code=22907 | runtime code=22907 (2.29.7)
+  本机 torch 实际链接的 NCCL（torch.cuda.nccl.version）: 2.29.7（= system）
+  header code >= NCCL_VERSION(2,31,0)=23100 时走 runtime 分支
+
+  组合判定：
+    pip header 2.32.3 vs pip runtime 2.32.3              -> runtime-version  ok=True
+    pip header 2.32.3 vs system runtime 2.29.7           -> runtime-version  ok=True
+    system header 2.29.7 vs system runtime 2.29.7        -> assert-equality  ok=True
+    hypothetical header 2.30.0 vs runtime 2.29.7         -> assert-equality  ok=False
+  [PASS] pip header 走 runtime 分支（本机 DeepEP 编译期分支） 
+  [PASS] pip header 不要求 runtime 相等（2.32.3 分支） 
+  [PASS] 2.29.7 system header 走 assert-equality 分支且自洽 
+  [PASS] 旧 header(2.30.0) 对 2.29.7 runtime 会被断言拦下 
+
+  check_nccl_so 的二进制比对（deep_ep/__init__.py:19-41）：
+    loaded(torch, system)=/lib/x86_64-linux-gnu/libnccl.so
+    linked(expected, pip )=/usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2
+  [PASS] loaded(system) vs linked(pip) 二进制不等（=本机阻塞根因） 
+  [PASS] loaded(system) vs linked(system) 二进制相等 
+
+--- §5 NCCLCommHandle 缓存/托管语义（handle.py:12-77） ---
+  [PASS] NCCLCommHandle 有 __del__ 且受 managed 门控 
+  [PASS] 首次 reuse torch comm（managed=False） 
+  [PASS] 同 group 命中缓存 
+  [PASS] force_new 绕过缓存并新建 managed=True 
+
+============================================================================================
+总计：PASS=29 / FAIL=0
+============================================================================================

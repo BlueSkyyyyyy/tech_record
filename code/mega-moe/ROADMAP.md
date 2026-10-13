@@ -4025,6 +4025,43 @@
       800 步 28.04→1.03），**坐实 DeepSeek-V3 aux-loss-free 的工程动机**。本层纯 host/Python、架构无关。
       配套博客 `content/posts/mega-moe-139-moe-load-balance`（索引页新增第 139 篇）。
 
+### P130 增量（opt-in，补齐 DeepEP 所有通信篇目脚下的 host 上下文对象）
+
+- [x] **P130-1** **DeepEP 的 host 通信上下文 `comm::Context`**（`csrc/kernels/comm/context.cpp`；
+      `csrc/kernels/comm/api.hpp:31-88`；`csrc/kernels/comm/symmetric.hpp`；
+      `deep_ep/comm/handle.py`；`deep_ep/include/deep_ep/common/compiled.cuh:67-82`）。
+      第 7/48/51/53/63/64/66/68/69/73/86/121 篇把 DeepEP 的 dispatch/combine、epilogue、
+      屏障、对称内存、Buffer 家族都拆过，但它们**全部从一个已经存在的「上下文/窗口」讲起**——
+      把「一个 PyTorch NCCL 通信组」变成「一块可对称寻址、可发起 GIN RDMA、可两级域编排的窗口」
+      的那**一个 host 对象** `Context`（268 行）从没被单独读过。**端到端 NCCL 设备 API
+      （`ncclDevCommCreate`/`ncclCommWindowRegister`）本机 2.29.7 不提供 → 仅分析**；
+      但**全部 host 算术**（域分解、signal 预算、偏移布局、版本闸门判据、句柄缓存语义）
+      架构无关，H100(sm90) 真机逐条实测。
+      → `docs/140-deepep-comm-context.md`（真实行号核对）：`Context` 字段三组（域分解/NCCL 句柄/
+      缓冲指针，`api.hpp:37-63`）+ `symmetric_memory` 是 `shared_ptr`（多 Context 共享一块内存）；
+      host 引导 `get_local_unique_id/create_nccl_comm/destroy_nccl_comm`（`context.cpp:23-50`，
+      comm 指针当 int64 返回）+ `handle.py:44-77` 三分支缓存（cache / 复用 torch `_comm_ptr`
+      `managed=False` / 新建 `managed=True`）；三查询 `get_physical_domain_size`（`:52-57`）、
+      `get_logical_domain_size`（`:59-63`，hybrid=物理域 / 单级=`(1,num_ranks)`）、
+      `get_gin_min_stride`（`:65-73`）；**GIN 需求逐字段**（`:121-155`：`ginType=GDAKI`、
+      `ginContextCount=num_allocated_qps`、`ginQueueDepth=1024`、**`ginSignalCount=num_ranks+4`**
+      （=第 63 篇免复位屏障的槽来源）、三级连接 `CUSTOM_STRIDE/RAIL/FULL`、`ginTrafficClass` 三级
+      优先级）；**NCCL 运行时版本闸门**（`:156-164`：`>=2.31` 走 `useRuntimeVersion` +
+      `devCommRuntimeVersionSize`，`<2.31` 断言 `NCCL_VERSION_CODE==nccl_runtime_version`）——
+      并**厘清本机「阻塞」是两个独立闸门**：本处（pip 头 2.32.3 走 runtime 分支、不要求相等）
+      与更外层 `deep_ep/__init__.py:19-41` 的 `check_nccl_so` **二进制比对**（torch 载系统 2.29.7
+      ≠ DeepEP 期望 pip 2.32.3）；域分解恒等式（`:166-183`，rank=`rdma*nvl+nvl_idx` 行主序）+
+      对称窗口（`:195-205`，`ncclCommWindowRegister` **集合操作**免屏障、链式加法
+      workspace→buffer→multimem、仅 owner 清零）+ RDMA storage 窗口（`:207-223`，每
+      `gin_min_stride` 片一个 `NCCL_WIN_GIN_ONLY` 窗口 + 拷到 device）+ `get_sym_ptr` 偏移翻译
+      （`:226-232`）+ `finalize()` 拆除逆序（`:244-266`）。H100 实测
+      `harness/exp_deepep_context.{py,sh,out.txt}`（设备常量来自 `src/deepep_context_arith.cu`
+      **直接 include 真实头文件**）：**29 PASS / 0 FAIL**——真实头文件常量 6/6（2MiB 分配对齐等）、
+      `advance_ptr` 布局 8/8（storage windows/local）、域分解 **60 行逐字段 0 不符** + 乘积不变量、
+      NCCL 版本闸门四组合（ctypes 读 system 2.29.7 / pip 2.32.3）+ `check_nccl_so` 两条二进制比对、
+      句柄缓存三分支。设备侧 NCCL API 与端到端 dispatch/combine 仅分析。配套博客
+      `content/posts/mega-moe-140-deepep-comm-context`（索引页新增第 140 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4050,8 +4087,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P129 各增量完成（P15-1…P41-1、P42-1…P129-1）。**
-  本轮 P129-1：新建 `docs/139-moe-load-balance.md`
+- 当前进度：**P0~P14 全部完成；P15~P130 各增量完成（P15-1…P42-1、P42-1…P130-1）。**
+  本轮 P130-1：新建 `docs/140-deepep-comm-context.md`
+  （+`harness/exp_deepep_context.{py,sh,out.txt}`、`src/deepep_context_arith.cu`）——补齐 DeepEP 所有
+  通信篇目脚下的 **host 通信上下文 `comm::Context`**（`csrc/kernels/comm/context.cpp`，268 行）。
+  前面第 7/48/51/53/63/64/66/68/69/73/86/121 篇都从一个已存在的「上下文/窗口」讲起，这个对象从没被
+  单独读过。**端到端 NCCL 设备 API（`ncclDevCommCreate`/`ncclCommWindowRegister`）本机 2.29.7
+  不提供 → 仅分析**；**全部 host 算术架构无关，H100(sm90) 真机逐条实测**。要点：① `Context` 字段三组
+  （域分解/NCCL 句柄/缓冲指针，`api.hpp:37-63`）+ `symmetric_memory` 是 `shared_ptr`（多 Context
+  共享一块内存）；② **GIN 需求逐字段**（`context.cpp:121-155`：`GDAKI`、`ginContextCount=QPs`、
+  **`ginSignalCount=num_ranks+4`**=第 63 篇免复位屏障槽来源、三级连接 `CUSTOM_STRIDE/RAIL/FULL`）；
+  ③ **NCCL 运行时版本闸门**（`:156-164`：`>=2.31` 走 `useRuntimeVersion`+`devCommRuntimeVersionSize`、
+  `<2.31` 断言版本相等）——并厘清本机「阻塞」是**两个独立闸门**（本处不要求相等；真正卡住的是
+  `deep_ep/__init__.py:19-41` 的 `check_nccl_so` **二进制比对**：torch 载系统 2.29.7 ≠ 期望 pip 2.32.3）；
+  ④ 域分解恒等式（`:166-183`，rank=`rdma*nvl+nvl_idx`）+ 对称窗口（`:195-205`，
+  `ncclCommWindowRegister` **集合操作**免屏障、链式加法 workspace→buffer→multimem、仅 owner 清零）+
+  RDMA storage 窗口（`:207-223`，每 `gin_min_stride` 片一个 `NCCL_WIN_GIN_ONLY`）+ `get_sym_ptr`
+  偏移翻译（`:226-232`）+ `finalize()` 拆除逆序（`:244-266`）。H100 真机 **29 PASS / 0 FAIL**（设备常量
+  来自 `src/deepep_context_arith.cu` 直接 include 真实头文件）：常量 6/6、`advance_ptr` 布局 8/8、
+  域分解 **60 行逐字段 0 不符** + 乘积不变量、版本闸门四组合（ctypes 读 system 2.29.7 / pip 2.32.3）+
+  两条二进制比对、句柄缓存三分支。索引页新增第 140 篇。
+  上一轮 P129-1：新建 `docs/139-moe-load-balance.md`
   （+`harness/exp_moe_load_balance.{py,sh,out.txt}`）——补齐训练侧一直缺席的**路由负载均衡**算子与反向。
   第 4 篇 router 反向 / 第 127 篇 Mega Gate 反向都把 `bias` 当给定常量（stop-grad），而 DeepGEMM 的
   Mega Gate 只**消费** `bias`（`mega_gate.hpp:41-43`）、不产生它。**三种机制**：**① aux load-balancing
@@ -5475,7 +5531,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P129 已完成（最新 **P129-1 MoE 路由负载均衡三件套（aux-loss / router z-loss /
+- **下一步**：P0~P130 已完成（最新 **P130-1 DeepEP 的 host 通信上下文 `comm::Context`**：
+  GIN 需求逐字段 + NCCL 运行时版本闸门（厘清本机「阻塞」是**两个独立闸门**：本处不要求相等、
+  真正卡住的是 `deep_ep/__init__.py:19-41` 的 `check_nccl_so` 二进制比对）+ 对称窗口 / RDMA
+  storage 窗口字节布局 + `get_sym_ptr` 偏移翻译 + `finalize()` 拆除逆序；NCCL 设备 API 仅分析，
+  host 算术 H100 真机 **29 PASS / 0 FAIL**；索引页新增第 140 篇）。
+  上一轮 P129-1 MoE 路由负载均衡三件套（aux-loss / router z-loss /
   aux-loss-free bias）及其反向**：补齐训练侧一直缺席的「负载均衡」算子——第 4/127 篇把 `bias` 当常量是对的，
   但「bias 从哪来、怎么更新」与 aux/z loss 的梯度从没写过。三种机制的前向公式 + 梯度 + 与 Mega Gate 的
   对接（`mega_gate.hpp:56-57`、`impls:396-398`、`epilogue:212-213`）全部讲清，H100 真机 21 PASS / 0 FAIL：
