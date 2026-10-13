@@ -4700,7 +4700,33 @@
        kernel 的 L1 段 **bit-compatible**（官方 `torch.equal` 验收成立的前提）；④ 吞吐
        **122.2us/686 GB/s**（T=8192,I=2048；带宽受限的元素级融合，mega 把它折进 L1 epilogue 省掉
        这次 global 往返）。融合 kernel 本体 SM100 专属、仅分析。→ `docs/163-tilelang-swiglu-apply-weight-fp8.md`。
-       配套博客 `content/posts/mega-moe-163-tilelang-swiglu-apply-weight-fp8`（索引页新增第 163 篇）。
+        配套博客 `content/posts/mega-moe-163-tilelang-swiglu-apply-weight-fp8`（索引页新增第 163 篇）。
+
+### P154 增量（opt-in，补齐第 49 篇 §10 明确留下的「TF32 WGMMA RS 路径数值」）
+
+- [x] **P154-1** **SM90 TF32 WGMMA 的 RS（寄存器 A）路径 + tf32 舍入的真正来源**
+      （`deep_gemm/include/deep_gemm/mma/sm90.cuh:151-190` 的 `TF32MMARS`/`TF32MMASelector`；
+      `cute/atom/mma_traits_sm90_gmma.hpp:446-448` 的 `ALayout_64x8`；
+      `impls/sm90_tf32_hc_prenorm_gemm.cuh:157/162/172-200/224`；
+      `csrc/jit_kernels/impls/runtime_utils.hpp:85-90` 的 `aten_dtype_to_tensor_map_dtype`；
+      `csrc/jit_kernels/impls/sm90_tf32_hc_prenorm_gemm.hpp:34-43`）。
+      第 39 篇（P39-1，第 49 篇）拆了 SM90 WGMMA 描述符/选择器/异步组并跑了 BF16/FP8 的 **SS** 数值，
+      §10 明确把「`TF32MMASelector` 的 RS 路径数值」列为未做。本篇补上——TF32 是 DeepGEMM 里
+      **唯一走 RS 的选择器**（`kUseRS=false` 直接 `DG_STATIC_ASSERT` `:187`），唯一消费者是
+      HC prenorm GEMM（`sm90_...:157`）。**A 寄存器布局** `ALayout_64x8`（`k=lane%4+4·(reg/2)`、
+      `m=(lane/4)%8+16·(lane/32)+8·(reg%2)`）与 kernel 手写取址、cute 公式**三方互证**（512 项 0 不符、
+      双射 512/512）。**H100(sm90a) 真机** `harness/exp_tf32_rs_wgmma.{sh,out.txt}` +
+      `src/tf32_rs_wgmma.cu`（真实头文件，nvcc 直接 include + `-lcuda`）：整数输入**逐位精确**、
+      分数输入**单元素探针 8/8 == 截断**——`wgmma...f32.tf32.tf32` 对裸 fp32 是**截断**（A 寄存器与
+      B smem 都如此）。**反直觉发现（修正第 16 篇归因）**：`tf32_hc_prenorm_gemm` 观测到的「RNE」
+      来自 **TMA 描述符**——`runtime_utils.hpp:88-89` 在 `allow_tf32 and dtype==kFloat` 时返回
+      **`CU_TENSOR_MAP_DATA_TYPE_TFLOAT32`**（B 是 fp32 且 host 传 `allow_tf32=true`；A 是 bf16 不触发）。
+      直接验证：同一批 fp32 边界值 no-swizzle 2D TMA 载入 smem——`FLOAT32` 与原字节 **8/8 相同**、
+      `TFLOAT32` == RNE-to-tf32 **8/8**；DeepGEMM 端到端 delta 探针 B == RNE **8/8**，三者闭环。
+      **结论**：tf32 的就近舍入发生在 **TMA（TFLOAT32 描述符）**、不是 MMA；想拿「就近」就让 TMA 用
+      tf32 dtype，直接喂 fp32 给 WGMMA 得到截断。另 `TF32MMASelector<64,false>` 编译期被拒（负样本）。
+      总判定 **ALL PASS**。SM100 的 UMMA TS 变体仅分析。配套博客
+      `content/posts/mega-moe-164-sm90-tf32-rs-wgmma`（索引页新增第 164 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4734,8 +4760,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P153 各增量完成（P15-1…P41-1、P42-1…P153-1）。**
-  本轮 P153-1：新建 `docs/163-tilelang-swiglu-apply-weight-fp8.md` +
+- 当前进度：**P0~P14 全部完成；P15~P154 各增量完成（P15-1…P41-1、P42-1…P154-1）。**
+  本轮 P154-1：新建 `docs/164-sm90-tf32-rs-wgmma.md` + `harness/exp_tf32_rs_wgmma.{sh,out.txt}` +
+  `src/tf32_rs_wgmma.cu`——补齐第 49 篇（P39-1）§10 明确留下的「`TF32MMASelector` 的 RS 路径数值」。
+  **TF32 是 DeepGEMM 里唯一走 RS 的选择器**（`mma/sm90.cuh:168-190`，`kUseRS=false` 直接 static_assert
+  `:187`），唯一消费者是 HC prenorm GEMM（`sm90_tf32_hc_prenorm_gemm.cuh:157`）。A 寄存器布局
+  `ALayout_64x8`（`mma_traits_sm90_gmma.hpp:446-448`）与 kernel 手写取址（`:180-200`）、cute 公式
+  **三方互证**（512 项 0 不符、双射 512/512）。**H100(sm90a) 真机**：真实 `wgmma...f32.tf32.tf32` RS
+  在整数输入**逐位精确**、分数输入**单元素探针 8/8 == 截断**。**顺手修正第 16 篇归因**——
+  `wgmma` 对裸 fp32 是**截断**，`tf32_hc_prenorm_gemm` 的「RNE」来自 **TMA 描述符**：`runtime_utils.hpp:88-89`
+  在 `allow_tf32 and dtype==kFloat` 时返回 **`CU_TENSOR_MAP_DATA_TYPE_TFLOAT32`**（B 是 fp32 且 host
+  传 `allow_tf32=true`）。直接验证：no-swizzle 2D TMA `FLOAT32` 与原字节 **8/8 相同**、`TFLOAT32`
+  == RNE-to-tf32 **8/8**；DeepGEMM 端到端 delta 探针 B == RNE **8/8**，三者闭环。总判定 ALL PASS。
+  索引页新增第 164 篇。
+  上一轮 P153-1：新建 `docs/163-tilelang-swiglu-apply-weight-fp8.md` +
   `harness/exp_tilelang_swiglu.{py,sh,out.txt}` + `src/swiglu_mega_epilogue.cu`
   ——补上官方验收测试 `tests/test_mega_moe.py` 的 baseline 里一直没单独读过的 **TileLang SwiGLU
   算子**（`third-party/tilelang_ops/swiglu_apply_weight_to_fp8.py`，`run_baseline` 的 L1→L2 之间），
