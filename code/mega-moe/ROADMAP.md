@@ -4441,6 +4441,8 @@
 - 目标卡代号敏感：写「目标卡」。
 - Mega MoE 是 SM100 专属；H100 上**不要**试图跑 `fp8_fp4_mega_moe`，会编译/运行失败。
 - 被内联的 `docs/*.md` 里**不要写 `{{< >}}` 短代码**；站内链接只在 `content/posts` 里用 `relref`。
+- `check_refs.py` 会把**新写的文档自身**也扫进去：审计类文档里举例的「坏引用」会被 linter 当成
+  真 near_miss。写这种例子要放进 ``` 代码块（默认跳过）或用 `refcheck:ignore` / `refcheck:ignore-begin`-`-end` 包裹。
 - 行号引用必须真实核对过。
 - 容器 workdir 是 `code/kernel-opt`，`docker exec` 跑脚本要用**绝对路径**。
 - DeepGEMM editable 安装后，JIT 需要 `deep_gemm/include/{cute,cutlass}`；editable 不会自动拷，
