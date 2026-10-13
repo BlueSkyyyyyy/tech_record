@@ -1,0 +1,174 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190  triton=3.6.0
+==============================================================================
+Part A: isolated B2, deployed dtype mix -- bf16 vs fp32 h/dh
+==============================================================================
+
+# T=512 H=4  (h/dh fp32 -> bf16)
+    delta dq                 max_abs=3.947e-04  max_rel=1.240e-03  ref_max=3.183e-01
+    delta dk                 max_abs=5.149e-04  max_rel=2.050e-03  ref_max=2.511e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.960e-02
+    delta db                 max_abs=6.638e-06  max_rel=1.353e-05  ref_max=4.908e-01
+    delta dg                 max_abs=4.711e-05  max_rel=1.362e-03  ref_max=3.459e-02
+    delta dA                 max_abs=6.104e-05  max_rel=9.875e-05  ref_max=6.181e-01
+
+# B2 T=1024 H=8  (h/dh fp32 -> bf16)
+    delta dq                 max_abs=4.848e-04  max_rel=1.299e-03  ref_max=3.733e-01
+    delta dk                 max_abs=8.971e-04  max_rel=2.303e-03  ref_max=3.896e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.891e-02
+    delta db                 max_abs=1.335e-05  max_rel=1.514e-05  ref_max=8.818e-01
+    delta dg                 max_abs=6.611e-05  max_rel=1.368e-03  ref_max=4.831e-02
+    delta dA                 max_abs=2.441e-04  max_rel=3.990e-04  ref_max=6.119e-01
+
+# B8 T=2048 H=8  (h/dh fp32 -> bf16)
+    delta dq                 max_abs=7.994e-04  max_rel=1.502e-03  ref_max=5.323e-01
+    delta dk                 max_abs=7.696e-04  max_rel=1.189e-03  ref_max=6.472e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.777e-02
+    delta db                 max_abs=1.887e-05  max_rel=2.141e-05  ref_max=8.813e-01
+    delta dg                 max_abs=1.220e-04  max_rel=1.897e-03  ref_max=6.432e-02
+    delta dA                 max_abs=2.441e-04  max_rel=2.267e-04  ref_max=1.077e+00
+
+# T=250 H=3 nondiv  (h/dh fp32 -> bf16)
+    delta dq                 max_abs=3.249e-04  max_rel=1.622e-03  ref_max=2.003e-01
+    delta dk                 max_abs=2.731e-04  max_rel=1.455e-03  ref_max=1.877e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.026e-02
+    delta db                 max_abs=7.778e-06  max_rel=1.493e-05  ref_max=5.211e-01
+    delta dg                 max_abs=4.293e-05  max_rel=1.777e-03  ref_max=2.416e-02
+    delta dA                 max_abs=3.052e-05  max_rel=5.078e-05  ref_max=6.010e-01
+
+worst-case bf16-vs-fp32 h/dh delta (max_rel): {'dq': '1.6e-03', 'dk': '2.3e-03', 'dv': '0.0e+00', 'db': '2.1e-05', 'dg': '1.9e-03', 'dA': '4.0e-04'}
+==============================================================================
+Part A2: isolated B2 timing, deployed mix -- fp32 vs bf16 h/dh
+==============================================================================
+  case               |  fp32 dev  bf16 dev  dev x | fp32 bench bf16 bench bench x
+  T=512 H=4          |      12.7      12.4  0.98x |       28.2       26.7   0.95x
+  B2 T=1024 H=8      |     108.5      98.1  0.90x |      117.8      106.6   0.91x
+  B8 T=2048 H=8      |     800.0     724.6  0.91x |      807.2      729.0   0.90x
+  T=250 H=3 nondiv   |      11.6      11.7  1.01x |       23.5       23.8   1.01x
+==============================================================================
+Part B: occupancy sweep -- BK/BV/num_warps (regs, spills, dev)
+==============================================================================
+
+# T=512 H=4
+  BK= 32 BV= 32 nw=4: regs=162 spill=  0 dev=    19.9us
+  BK= 32 BV= 32 nw=8: regs=173 spill=  0 dev=    22.7us
+  BK= 32 BV= 64 nw=4: regs=250 spill=  0 dev=    16.9us
+  BK= 32 BV= 64 nw=8: regs=222 spill=  0 dev=    19.2us
+  BK= 64 BV= 32 nw=4: regs=250 spill=  0 dev=    14.1us
+  BK= 64 BV= 32 nw=8: regs=210 spill=  0 dev=    15.1us
+  BK= 64 BV= 64 nw=4: regs=252 spill=  0 dev=    12.6us
+  BK= 64 BV= 64 nw=8: regs=224 spill=  0 dev=    13.5us
+  BK=128 BV= 32 nw=4: regs=255 spill=232 dev=    28.3us
+  BK=128 BV= 32 nw=8: regs=255 spill=164 dev=    31.9us
+  BK=128 BV= 64 nw=4: regs=255 spill=292 dev=    31.2us
+  BK=128 BV= 64 nw=8: regs=255 spill=146 dev=    26.8us
+
+# B8 T=2048 H=8
+  BK= 32 BV= 32 nw=4: regs=162 spill=  0 dev=   993.0us
+  BK= 32 BV= 32 nw=8: regs=173 spill=  0 dev=  2318.5us
+  BK= 32 BV= 64 nw=4: regs=250 spill=  0 dev=  1038.9us
+  BK= 32 BV= 64 nw=8: regs=222 spill=  0 dev=  1780.2us
+  BK= 64 BV= 32 nw=4: regs=250 spill=  0 dev=   940.2us
+  BK= 64 BV= 32 nw=8: regs=210 spill=  0 dev=  1499.3us
+  BK= 64 BV= 64 nw=4: regs=252 spill=  0 dev=   795.7us
+  BK= 64 BV= 64 nw=8: regs=224 spill=  0 dev=  1157.4us
+  BK=128 BV= 32 nw=4: regs=255 spill=228 dev=  1315.1us
+  BK=128 BV= 32 nw=8: regs=255 spill=164 dev=  1814.7us
+  BK=128 BV= 64 nw=4: regs=255 spill=300 dev=  1570.9us
+  BK=128 BV= 64 nw=8: regs=255 spill=146 dev=  1596.0us
+
+==============================================================================
+Part C: land bf16 h/dh into the assembled chain -- correctness vs FLA + baseline
+==============================================================================
+
+# T=128 H=2
+    bf16 dq vs FLA           max_abs=8.603e-04  max_rel=1.280e-03  ref_max=6.721e-01
+    bf16 dk vs FLA           max_abs=8.872e-04  max_rel=1.304e-03  ref_max=6.802e-01
+    bf16 dv vs FLA           max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    bf16 dbeta vs FLA        max_abs=1.732e-03  max_rel=4.354e-03  ref_max=3.977e-01
+    bf16 dg vs FLA           max_abs=1.424e-04  max_rel=4.113e-03  ref_max=3.462e-02
+    bf16 dh0 vs FLA          max_abs=2.068e-04  max_rel=4.982e-03  ref_max=4.150e-02
+    delta dq (bf16-fp32)     max_abs=2.673e-04  max_rel=3.977e-04  ref_max=6.722e-01
+    delta dk (bf16-fp32)     max_abs=2.604e-04  max_rel=3.830e-04  ref_max=6.801e-01
+    delta dv (bf16-fp32)     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    delta dbeta (bf16-fp32)  max_abs=5.106e-06  max_rel=1.278e-05  ref_max=3.994e-01
+    delta dg (bf16-fp32)     max_abs=4.748e-05  max_rel=1.372e-03  ref_max=3.462e-02
+
+# T=256 H=4
+    bf16 dq vs FLA           max_abs=1.569e-03  max_rel=2.272e-03  ref_max=6.908e-01
+    bf16 dk vs FLA           max_abs=1.259e-03  max_rel=1.578e-03  ref_max=7.980e-01
+    bf16 dv vs FLA           max_abs=2.517e-04  max_rel=4.128e-03  ref_max=6.098e-02
+    bf16 dbeta vs FLA        max_abs=3.258e-03  max_rel=5.522e-03  ref_max=5.900e-01
+    bf16 dg vs FLA           max_abs=2.204e-04  max_rel=6.414e-03  ref_max=3.436e-02
+    bf16 dh0 vs FLA          max_abs=2.451e-04  max_rel=7.172e-03  ref_max=3.418e-02
+    delta dq (bf16-fp32)     max_abs=3.314e-04  max_rel=4.801e-04  ref_max=6.902e-01
+    delta dk (bf16-fp32)     max_abs=4.982e-04  max_rel=6.248e-04  ref_max=7.974e-01
+    delta dv (bf16-fp32)     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    delta dbeta (bf16-fp32)  max_abs=4.217e-06  max_rel=7.126e-06  ref_max=5.918e-01
+    delta dg (bf16-fp32)     max_abs=4.195e-05  max_rel=1.221e-03  ref_max=3.437e-02
+
+# T=250 H=3 (non-div)
+    bf16 dq vs FLA           max_abs=1.849e-03  max_rel=3.569e-03  ref_max=5.180e-01
+    bf16 dk vs FLA           max_abs=7.919e-04  max_rel=1.521e-03  ref_max=5.206e-01
+    bf16 dv vs FLA           max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    bf16 dbeta vs FLA        max_abs=2.716e-03  max_rel=5.586e-03  ref_max=4.863e-01
+    bf16 dg vs FLA           max_abs=3.399e-04  max_rel=5.478e-03  ref_max=6.205e-02
+    bf16 dh0 vs FLA          max_abs=2.924e-04  max_rel=5.322e-03  ref_max=5.493e-02
+    delta dq (bf16-fp32)     max_abs=3.322e-04  max_rel=6.418e-04  ref_max=5.177e-01
+    delta dk (bf16-fp32)     max_abs=5.372e-04  max_rel=1.032e-03  ref_max=5.203e-01
+    delta dv (bf16-fp32)     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    delta dbeta (bf16-fp32)  max_abs=9.023e-06  max_rel=1.856e-05  ref_max=4.862e-01
+    delta dg (bf16-fp32)     max_abs=5.085e-05  max_rel=8.168e-04  ref_max=6.225e-02
+
+# T=512 H=4 g=2
+    bf16 dq vs FLA           max_abs=1.906e-03  max_rel=2.878e-03  ref_max=6.623e-01
+    bf16 dk vs FLA           max_abs=1.981e-03  max_rel=3.071e-03  ref_max=6.452e-01
+    bf16 dv vs FLA           max_abs=3.343e-04  max_rel=4.933e-03  ref_max=6.776e-02
+    bf16 dbeta vs FLA        max_abs=2.704e-03  max_rel=5.286e-03  ref_max=5.115e-01
+    bf16 dg vs FLA           max_abs=2.424e-04  max_rel=3.573e-03  ref_max=6.785e-02
+    bf16 dh0 vs FLA          max_abs=3.859e-04  max_rel=5.489e-03  ref_max=7.031e-02
+    delta dq (bf16-fp32)     max_abs=6.737e-04  max_rel=1.017e-03  ref_max=6.623e-01
+    delta dk (bf16-fp32)     max_abs=9.308e-04  max_rel=1.443e-03  ref_max=6.448e-01
+    delta dv (bf16-fp32)     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    delta dbeta (bf16-fp32)  max_abs=2.455e-05  max_rel=4.824e-05  ref_max=5.090e-01
+    delta dg (bf16-fp32)     max_abs=1.120e-04  max_rel=1.652e-03  ref_max=6.781e-02
+
+# B2 T=513 H=2 (non-div)
+    bf16 dq vs FLA           max_abs=1.674e-03  max_rel=2.779e-03  ref_max=6.022e-01
+    bf16 dk vs FLA           max_abs=1.228e-03  max_rel=1.842e-03  ref_max=6.666e-01
+    bf16 dv vs FLA           max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    bf16 dbeta vs FLA        max_abs=2.641e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    bf16 dg vs FLA           max_abs=3.356e-04  max_rel=8.148e-03  ref_max=4.118e-02
+    bf16 dh0 vs FLA          max_abs=1.691e-04  max_rel=6.996e-03  ref_max=2.417e-02
+    delta dq (bf16-fp32)     max_abs=3.936e-04  max_rel=6.540e-04  ref_max=6.018e-01
+    delta dk (bf16-fp32)     max_abs=4.128e-04  max_rel=6.196e-04  ref_max=6.663e-01
+    delta dv (bf16-fp32)     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.469e-02
+    delta dbeta (bf16-fp32)  max_abs=4.962e-06  max_rel=5.628e-06  ref_max=8.817e-01
+    delta dg (bf16-fp32)     max_abs=7.285e-05  max_rel=1.769e-03  ref_max=4.118e-02
+
+# T=192 H=2 g=0
+    bf16 dq vs FLA           max_abs=4.187e-04  max_rel=7.844e-04  ref_max=5.337e-01
+    bf16 dk vs FLA           max_abs=4.725e-04  max_rel=8.169e-04  ref_max=5.784e-01
+    bf16 dv vs FLA           max_abs=3.922e-04  max_rel=5.982e-03  ref_max=6.556e-02
+    bf16 dbeta vs FLA        max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    bf16 dg vs FLA           max_abs=3.708e-05  max_rel=6.105e-03  ref_max=6.074e-03
+    bf16 dh0 vs FLA          max_abs=5.197e-05  max_rel=8.267e-03  ref_max=6.287e-03
+    delta dq (bf16-fp32)     max_abs=7.137e-05  max_rel=1.337e-04  ref_max=5.337e-01
+    delta dk (bf16-fp32)     max_abs=2.886e-04  max_rel=4.990e-04  ref_max=5.784e-01
+    delta dv (bf16-fp32)     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    delta dbeta (bf16-fp32)  max_abs=9.015e-07  max_rel=2.240e-06  ref_max=4.024e-01
+    delta dg (bf16-fp32)     max_abs=8.363e-06  max_rel=1.377e-03  ref_max=6.073e-03
+
+worst-case max_rel (bf16-h/dh chain vs FLA): {'dq': '3.6e-03', 'dk': '3.1e-03', 'dv': '6.8e-03', 'dbeta': '6.0e-03', 'dg': '8.1e-03', 'dh0': '8.3e-03'}
+
+==============================================================================
+Part D: chain timing -- fp32 vs bf16 h/dh (naive cast) + B2-kernel attribution
+==============================================================================
+  case               | fp32 dev bf16 dev  dev x | fp32 wall bf16 wall |   B2k fp   B2k bf   B2 x
+  T=512 H=4          |     85.9     95.7  1.11x |     385.4     410.8 |     18.4     17.9  0.97x
+  B2 T=1024 H=8      |    286.3    346.4  1.21x |     389.9     413.8 |    113.7    102.3  0.90x
+  B8 T=2048 H=8      |   1863.4   2307.9  1.24x |    1888.6    2335.6 |    803.9    725.5  0.90x
+  T=250 H=3 nondiv   |     59.5     63.8  1.07x |     385.8     407.3 |     12.2     12.7  1.04x
+
+DONE

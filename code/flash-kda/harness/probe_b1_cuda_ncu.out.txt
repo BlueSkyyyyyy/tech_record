@@ -6,9 +6,16 @@ torch: 2.12.0a0+0291f960b6.nv26.04.48445190
 # ours-CUDA B1 BT=64 NS=1 (T512 H4)
 #   which=ours B=1 T=512 H=4 bt=64 ns=1 cflags='' kernel=b1_dhu_cuda
 ################################################################################
-[2180794] python3.12@127.0.0.1
-  void b1_dhu_cuda<64, 1>(const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const __nv_bfloat16 *, const float *, __nv_bfloat16 *, float *, __nv_bfloat16 *, int, int, int, float) (4, 4, 1)x(64, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
-    Section: Command line profiler metrics
+Available Kernels:
+1. chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64
+2. chunk_gated_delta_rule_fwd_kernel_h_blockdim64
+3. chunk_kda_bwd_kernel_dAv
+4. chunk_kda_fwd_kernel_inter_solve_fused
+5. chunk_kda_fwd_kernel_intra_token_parallel
+6. chunk_local_cumsum_vector_kernel
+7. recompute_w_u_fwd_kda_kernel
+8. vectorized_elementwise_kernel
+ profiler metrics
     ------------------------------------------------------------------------- ----------- ------------
     Metric Name                                                               Metric Unit Metric Value
     ------------------------------------------------------------------------- ----------- ------------
