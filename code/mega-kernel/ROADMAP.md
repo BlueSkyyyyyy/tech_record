@@ -3235,6 +3235,34 @@
       （weight 35）并更新 `mega-kernel-00-index` 第 34 项；并把「scale warp 需等 `ab_empty` 防 UTCCP
       覆盖赛跑」与「`fp8_group_gemm_sm100.cuh` 三个本地 helper 未接线」补进「已知坑」。
 
+### P120 SM100 第二套 device 身体：CuTe 线性 + MLA-MTP decode 走读（`docs/34-mpk-sm100-cute-tasks.md`）
+
+- [x] **P120-1** 把 `docs/32`（P118-1）**§7「局限」明留的两条尾巴**（`docs/33` §11 已明确「本文未处理」）
+  一起走完——「**身体 B**（`linear_fp8_1d2d_sm100.cuh`）的 CuTe 主循环只核了结构与惯用法、未逐行走完
+  727 行」与「**`mla_mtp_tpN_main` 主体仍未走**」。见 `docs/34-mpk-sm100-cute-tasks.md`（快照
+  `mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`，与 `docs/06`–`docs/33` 同快照；**纯源码走读
+  （资料分析），本轮无新实验**——SM100 `sm_100f` 在目标卡 H100/sm90 不可执行）。headline：
+  **(A) 身体 B 是「CuTe 高层」第二实现、生产未接线**：`linear_fp8_1d2d_sm100.cuh`（727 行）用
+  `cute::make_tiled_mma`（`:143`）/`SM100_MMA_MXF8F6F4_SS<…,float_ue8m0_t,MMA_M,MMA_N,K,K>`（`:134-141`）/
+  `local_tile`（`:158/161`）/`partition_shape_A/B`（`:164-174`）/`UMMA::tile_to_mma_shape`+`Layout_K_SW128_Atom`
+  （`:182-188`）写四段流水（warp5 loader `:350-446`、warp4 UTCCP+4×UMMA `:450-609`、warps0-3 epilogue
+  `:613-718`，`PipedSharedStorageWithSF` 见 `storage.cuh:69-100`）；`grep` 全仓**只有定义无调用者**、
+  `task_header.cuh:37` 只 `#include`，公开 pybind `linear_fp8_1d2d_sm100`
+  （`runtime_kernel_wrapper_sm100.cu:1101`）实走身体 A 的 `launch_linear_fp8_1d1d_sm100`（`:962`）。
+  **(B) MLA-MTP decode 家族**（`mla_mtp_decode_sm100.cuh` 748 行 + `tp{2,4,8}`）：把一份完整 MLA attention
+  （QK→softmax→PV→online rescale→归一化，`:77-671`）+ reduce（`:676-746`）压进一个 device task，
+  `NUM_HEADS=128/64/32/16`；揭示**常驻 kernel 内跨 task 复用的三类 device 适配**——① **TMEM alloc/dealloc
+  必须用 warp0**（与共驻 FP8 CUTLASS task 一致，否则后续 FP8 task 挂在其 `allocate()`，TP 版注释
+  `:190-195`）；② **命名屏障 `bar.sync 12,128`**（只同步活跃 128 线程，避 `bugfix.md` Bug 14；ID 须落
+  CUTLASS 用户区避 Bug 19）替代 `__syncthreads`；③ **256→128 线程守卫 + dual-dispatch gate（`Q_LEN>8`
+  return）**。(C) 生产布线：8 个 `TaskType`（269/270/287–292），`graph.cc:791-840` dispatch、
+  `task_register.cc:4405-4471`，前端 `persistent_kernel.py:1778/1812`、DeepSeek-V3
+  `builder.py:744/748`；TP 变体是**对 ferret standalone 的机械 port**（文件头 `tp2:3-13`，删 PDL）。
+  判据**不贡献任何 C 判据**（同 `docs/29`–`docs/33`；C1/C2/C4/C5 由运行层拿）。配套博客 post
+  `mega-kernel-35-mpk-sm100-cute`（weight 36）并更新 `mega-kernel-00-index` 第 35 项；并把一条坑补进
+  「已知坑」（常驻 kernel 内 TMEM alloc/dealloc 必须同一 warp）。**本专题此前任务清单全完成，本轮为其
+  新增的增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3444,10 +3472,31 @@
   `fp8_tcgen05_after_thread_sync`（`:153-155`）——MMA warp 实际调的是 `sm100_utils.cuh` 的
   `make_sf_desc`/`advance_umma_desc_lo`，scale warp 用的是 `fence_view_async_shared`。按函数名/文件内定义
   推断「哪份实现真在跑」会错（同 `docs/16`/`docs/20`/`docs/32` 的「已实现未接线」族）；须 `grep` 调用者。
+- **常驻 kernel 内共驻的 SM100 task：TMEM alloc/dealloc 必须用同一个 warp**（P120-1/`docs/34` §3.5）：
+  CuTe 的 TMEM allocator 要求 `tcgen05.alloc/dealloc` 由**同一 warp** 在所有共驻于持久化 kernel 的 task
+  里发出。MPK 的 FP8 CUTLASS 家族（`linear_fp8`/`moe_linear`/`fp8_group_gemm`）都用 **warp0**；若别的
+  task（如 MLA-MTP decode）用别的 warp 分配 TMEM，同 worker 上**后续 FP8 task 会挂在其
+  `tmem_allocator.allocate()`** 里（`mla_mtp_decode_tp2_sm100.cuh:190-195` 注释）。写/移植常驻 device task
+  时先确认它与邻居用同一 warp 做 TMEM 生命周期。另：MPK worker 是 256 线程、许多手写 task 只用前 128，
+  **提前 `return` 的半 CTA 会在 SM100 ITS 下漂移领先、使后续 `__syncthreads()`（bar0）在缺席 warp 上
+  触发 → 静默跳过下一个 task 身体 → 挂起**（`bugfix.md` Bug 14）；正确做法是只同步活跃半 CTA 的**命名
+  屏障 `bar.sync 12,128`**（ID 须落 CUTLASS 用户区 `≥8`，误用保留区 ID 1–7 会留脏状态毒死后续 task，
+  Bug 19）。`bugfix.md` 本身**不在快照里**，以上仅为源码注释自陈因果。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P119-1 完成（1/1）**。补齐 `docs/32`（P118-1）**§7「局限」明留的「未展开的更深层」**
+- 当前进度：**P120-1 完成（1/1）**。把 `docs/32`（P118-1）**§7 明留、`docs/33` §11 明确「未处理」的两条
+  尾巴**一起走完——**身体 B**（`linear_fp8_1d2d_sm100.cuh` 的 CuTe 主循环）与 **`mla_mtp_tpN_main` 主体**。
+  见 `docs/34-mpk-sm100-cute-tasks.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。headline：**(A)** 身体 B
+  是「CuTe 高层」第二实现（727 行四段流水、`PipedSharedStorageWithSF`），**生产未接线**（无调用者、pybind
+  `linear_fp8_1d2d_sm100` 实走身体 A）；**(B)** MLA-MTP decode 家族（单卡 748 行 + TP2/4/8，`NUM_HEADS`
+  128/64/32/16）把完整 MLA attention+reduce 压进一个 device task，揭示**常驻共驻的三类 device 适配**
+  （TMEM alloc 用 warp0 / 命名屏障 `bar.sync 12,128` / 256→128 线程守卫 + dual-dispatch）；**(C)** 生产 8 个
+  `TaskType`（269/270/287–292）、前端 `persistent_kernel.py:1778/1812`、DeepSeek-V3 builder；TP 是对 ferret
+  standalone 的机械 port。判据**不贡献任何 C 判据**。配套博客 post `mega-kernel-35-mpk-sm100-cute`
+  （weight 36）并更新 `mega-kernel-00-index` 第 35 项；新增一条「已知坑」（常驻 kernel 内 TMEM alloc/dealloc
+  必须同一 warp）。
+- 此前：**P119-1 完成（1/1）**。补齐 `docs/32`（P118-1）**§7「局限」明留的「未展开的更深层」**
   （`fp8_group_gemm_sm100.cuh` 的 UMMA 主循环 / UTCCP 序列 / epilogue scatter 未逐行）——把 SM100
   block-scaled FP8 MoE group-GEMM 的 device 身体逐段打开，见 `docs/33-mpk-fp8-group-gemm.md`
   （快照 `f9eb70c`，**纯源码走读、无新实验**）。headline：**(A)** 1 个 CTA 跑 **3 条 warp 特化流水**
