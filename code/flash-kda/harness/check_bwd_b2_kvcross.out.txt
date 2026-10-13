@@ -375,10 +375,10 @@ Part B: -DB2M_INTRA smem boundary -- sizeof(Shared) over K x V (and the launch r
     256   128 |     219776        270464         50688 |     198784         OK
     256   256 |     227968        278656         50688 |     206976         OK
 
-  analytic intra increment (default pads=0, NW=4): 3*BT*K*4 + BT*BT*4 + NW*BT*4
-    K= 64 -> 13568 B (=3072*3*4 + 1024 + 256)
-    K=128 -> 25856 B (=6144*3*4 + 1024 + 256)
-    K=256 -> 50432 B (=12288*3*4 + 1024 + 256)
+  analytic intra increment (default pads=0, NW=8): 3*BT*K*4 + BT*BT*4 + NW*BT*4
+    K= 64 -> 13824 B (=3072*3*4 + 1024 + 512)
+    K=128 -> 26112 B (=6144*3*4 + 1024 + 512)
+    K=256 -> 50688 B (=12288*3*4 + 1024 + 512)
 
   actual launch probe for the fp32 K=256 fold (expect rc=-3 at the smem set-attribute):
     (K=256,V=64) launch rejected: b2prod_intra_launch rc=-3

@@ -63,6 +63,7 @@ from check_bwd_b2_intra import (run_prod_intra, run_b3, load_b3,        # noqa: 
                                 ptr, stream)
 
 BT = 16
+NW = 8                              # warps = b2_mma_probe.cu:72 (constexpr int NW = 8)
 SCALE = 1.0 / (128 ** 0.5)          # deployment scale (matches run_prod/run_prod_intra)
 CU = os.path.join(HARNESS, "b2_mma_probe.cu")
 B3 = os.path.join(HARNESS, "b3_intra_probe.cu")
@@ -247,11 +248,11 @@ def part_b():
             print("  %5d %5d | %10d %13d %13d | %10d %10s"
                   % (K, V, s_p, s_i, s_i - s_p, s_b,
                      "OK" if s_b <= MAX_SMEM else "INFEAS"))
-    print("\n  analytic intra increment (default pads=0, NW=4): 3*BT*K*4 + BT*BT*4 + NW*BT*4")
+    print("\n  analytic intra increment (default pads=0, NW=8): 3*BT*K*4 + BT*BT*4 + NW*BT*4")
     for K in (64, 128, 256):
         print("    K=%3d -> %d B (=%d*3*4 + %d + %d)" %
-              (K, 3 * BT * K * 4 + BT * BT * 4 + 4 * BT * 4,
-               3 * BT * K, BT * BT * 4, 4 * BT * 4))
+              (K, 3 * BT * K * 4 + BT * BT * 4 + NW * BT * 4,
+               3 * BT * K, BT * BT * 4, NW * BT * 4))
     print("\n  actual launch probe for the fp32 K=256 fold (expect rc=-3 at the smem set-attribute):")
     for V in (64, 128):
         so_i, _ = build(INTRA, 256, V, "intra")
