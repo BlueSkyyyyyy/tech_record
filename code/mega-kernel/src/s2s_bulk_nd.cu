@@ -207,6 +207,75 @@ __global__ void nd_sw(float* __restrict__ out, int rounds, int rows, int cols, i
   if (tid == 0) out[blockIdx.x] = (float)acc;
 }
 
+// ---------------- P179-1 §104：源/目的 pitch 组合 + 「整段连搬 vs 逐行拆搬」 ----------------
+// §103 只测了「源带行距 spitch、目的打包 dpitch=cols」。本节把**目的行距 dpitch** 也变成
+// 变量（源打包→目的带距、两端都带距），并加一个关键对照 **full**：当 tile 就住在一条带行距
+// 的缓冲里时，**把 padding 一起当一整段连搬（1 笔、payload=rows*spitch）** vs **只搬有效列
+// 逐行拆搬（rows 笔、payload=rows*cols）**——同一份有效数据、两种搬法（§103.8 推荐的「先打包
+// 再一笔」之外的第三条路：不打包，直接把 padding 也搬过去）。slotpitch = full?spitch:dpitch。
+__global__ void nd_tma_dp(double* __restrict__ out, int rounds, int rows, int cols,
+                          int spitch, int dpitch, int K, int full) {
+  extern __shared__ float sm[];
+  int slotpitch = full ? spitch : dpitch;
+  size_t tile_snd = (size_t)rows * spitch;
+  size_t tile_slot = (size_t)rows * slotpitch;
+  float* snd = sm;
+  float* rcv = sm + tile_snd;
+  uint64_t* readyBar = (uint64_t*)(rcv + (size_t)SLOTS * tile_slot);
+  uint64_t* ackBar = readyBar + SLOTS;
+  cg::cluster_group cl = cg::this_cluster();
+  int C = cl.num_blocks();
+  int rank = cl.block_rank();
+  int tid = threadIdx.x;
+  for (int i = tid; i < (int)tile_snd; i += blockDim.x) snd[i] = fval(i, rank);
+  if (tid == 0)
+    for (int j = 0; j < SLOTS; j++) { mbar_init(cvta_smem(&readyBar[j]), 1);
+                                      mbar_init(cvta_smem(&ackBar[j]), TH); }
+  __syncthreads();
+  asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  cl.sync();
+  int dstRank = (rank + 1) % C, srcRank = (rank - 1 + C) % C;
+  float* dst = (float*)cl.map_shared_rank(rcv, dstRank);
+  unsigned rBar = cvta_smem(&readyBar[0]), aBar = cvta_smem(&ackBar[0]);
+  unsigned dstRBar0 = 0;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(dstRBar0)
+               : "r"(rBar), "r"((unsigned)dstRank));
+  int cw = cols / K;
+  bool onebulk = (full != 0) || (spitch == cols && dpitch == cols && K == 1);
+  unsigned payload = onebulk && full ? (unsigned)(tile_snd * 4)
+                                     : (unsigned)((size_t)rows * cols * 4);
+  long long acc = 0;
+  for (int r = 0; r < rounds; r++) {
+    int j = r % SLOTS, m = r / SLOTS;
+    if (m >= 1) mbar_wait(aBar + 8 * (unsigned)j, (unsigned)((m - 1) & 1));
+    if (tid == 0) {
+      unsigned bar = dstRBar0 + 8 * (unsigned)j;
+      mbar_arrive_expect_tx_remote(bar, payload);
+      float* dslot = dst + (size_t)j * tile_slot;
+      if (onebulk) {
+        bulk_s2s(cvta_smem(dslot), cvta_smem(snd), payload, bar);
+      } else {
+        for (int rr = 0; rr < rows; rr++)
+          for (int c = 0; c < K; c++)
+            bulk_s2s(cvta_smem(dslot + (size_t)rr * dpitch + (size_t)c * cw),
+                     cvta_smem(snd + (size_t)rr * spitch + (size_t)c * cw),
+                     (unsigned)(cw * 4), bar);
+      }
+    }
+    mbar_wait(rBar + 8 * (unsigned)j, (unsigned)(m & 1));
+    float* rslot = rcv + (size_t)j * tile_slot;
+    int c4 = cols / 4, n4 = rows * c4;
+    for (int k = tid; k < n4; k += blockDim.x) {
+      int rr = k / c4, c = k - rr * c4;
+      float4 v = *(const float4*)(rslot + (size_t)rr * slotpitch + 4 * (size_t)c);
+      acc += (long long)v.x + (long long)v.y + (long long)v.z + (long long)v.w;
+    }
+    mbar_arrive_remote(aBar + 8 * (unsigned)j, (unsigned)srcRank);
+  }
+  cl.sync();
+  atomicAdd(&out[blockIdx.x], (double)acc);   // 全 block 逐元素和（布局无关；out 用前须清零）
+}
+
 // out[bx] 只存 tid0 的 acc（i 为 TH 的倍数）。数据来自上游 srcRank=(rank-1+C)%C。
 static void reference_t0(int grid, int C, int rows, int cols, int pitch, int rounds,
                          long long* out_exp) {
@@ -281,6 +350,89 @@ static int run_tma(int C, int grid, int rows, int cols, int pitch, int K, int ro
   return ok > 0 ? 0 : 2;
 }
 
+static size_t smem_bytes_dp(int rows, int cols, int spitch, int dpitch, int full) {
+  int slotpitch = full ? spitch : dpitch;
+  return ((size_t)rows * spitch + (size_t)SLOTS * rows * slotpitch) * 4 + (size_t)2 * SLOTS * 8;
+}
+
+// §104 的参考：全 tile 逐元素和（布局无关）；与 kernel 的 double atomicAdd 对拍。
+static void check_x(int grid, int C, int rows, int cols, int spitch, int rounds, double* dout) {
+  double* o = (double*)malloc((size_t)grid * sizeof(double));
+  CK(cudaMemcpy(o, dout, (size_t)grid * sizeof(double), cudaMemcpyDeviceToHost));
+  double maxerr = 0; int bad = 0;
+  for (int bx = 0; bx < grid; bx++) {
+    int rank = bx % C;
+    int src = (rank - 1 + C) % C;
+    double acc = 0;
+    for (int r = 0; r < rounds; r++)
+      for (int rr = 0; rr < rows; rr++)
+        for (int c = 0; c < cols; c++) acc += (double)fval(rr * spitch + c, src);
+    double d = o[bx] - acc; if (d < 0) d = -d;
+    if (d > maxerr) maxerr = d;
+    if (d > 1e-6) bad++;
+  }
+  printf("maxerr %g bad %d ", maxerr, bad);
+  free(o);
+}
+
+static int run_tma_dp(int C, int grid, int rows, int cols, int spitch, int dpitch,
+                      int K, int rounds, int full) {
+  if (K < 1 || cols % (K * 4) != 0 || spitch < cols || dpitch < cols ||
+      cols % 4 != 0 || spitch % 4 != 0 || dpitch % 4 != 0) {
+    printf("X C=%d rows=%d cols=%d spitch=%d dpitch=%d K=%d full=%d | SKIP(bad params)\n",
+           C, rows, cols, spitch, dpitch, K, full);
+    return 3;
+  }
+  if (full && (spitch != dpitch || K != 1)) {
+    printf("X | SKIP(full requires spitch==dpitch && K==1)\n");
+    return 3;
+  }
+  size_t smem = smem_bytes_dp(rows, cols, spitch, dpitch, full);
+  double* out; CK(cudaMalloc(&out, (size_t)grid * sizeof(double)));
+  cudaFuncSetAttribute((const void*)nd_tma_dp, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+  cudaFuncAttributes a; CK(cudaFuncGetAttributes(&a, nd_tma_dp));
+  int occ = 0; CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, nd_tma_dp, TH, smem));
+  const int N = 20;
+  cudaEvent_t e0, e1; cudaEventCreate(&e0); cudaEventCreate(&e1);
+  double best = 0; int ok = 0; cudaError_t last = cudaSuccess;
+  for (int i = 0; i < N; i++) {
+    cudaEventRecord(e0);
+    cudaError_t e = launch_cluster(C, dim3(grid), dim3(TH), smem, nd_tma_dp,
+                                   out, rounds, rows, cols, spitch, dpitch, K, full);
+    cudaEventRecord(e1); cudaEventSynchronize(e1);
+    if (e != cudaSuccess) { last = e; cudaGetLastError(); continue; }
+    float ms = 0; cudaEventElapsedTime(&ms, e0, e1);
+    if (ok == 0 || ms < best) best = ms;
+    ok++;
+  }
+  double t = ok ? best : -1;
+  printf("X C=%d grid=%4d rows=%2d cols=%3d spitch=%3d dpitch=%3d K=%2d full=%d rounds=%3d "
+         "regs=%d occ=%d smem=%zuB | ok=%d/%d %s",
+         C, grid, rows, cols, spitch, dpitch, K, full, rounds, a.numRegs, occ, smem, ok, N,
+         t < 0 ? (last == cudaSuccess ? "FAILED\n" : "FAIL\n") : "");
+  if (t >= 0) {
+    int slotpitch = full ? spitch : dpitch;
+    bool onebulk = (full != 0) || (spitch == cols && dpitch == cols && K == 1);
+    double moved = (double)grid * rounds *
+                   (onebulk && full ? (double)rows * spitch : (double)rows * cols) * 4.0;
+    double useful = (double)grid * rounds * rows * cols * 4.0;
+    int xfer = onebulk ? 1 : rows * K;
+    CK(cudaMemset(out, 0, (size_t)grid * sizeof(double)));
+    launch_cluster(C, dim3(grid), dim3(TH), smem, nd_tma_dp,
+                   out, rounds, rows, cols, spitch, dpitch, K, full);
+    CK(cudaDeviceSynchronize());
+    check_x(grid, C, rows, cols, spitch, rounds, out);
+    printf("%8.3f us | %8.1f GB/s(moved) %8.1f GB/s(useful) | xfer/round=%d ns/xfer=%7.1f "
+           "slotpitch=%d\n",
+           t * 1e3, moved / t / 1e6, useful / t / 1e6, xfer,
+           t * 1e6 / ((double)rounds * xfer), slotpitch);
+  } else if (last != cudaSuccess) {
+    printf("[%s]\n", cudaGetErrorString(last));
+  }
+  cudaEventDestroy(e0); cudaEventDestroy(e1); cudaFree(out);
+  return ok > 0 ? 0 : 2;
+}
+
 static int run_sw(int C, int grid, int rows, int cols, int pitch, int rounds) {
   if (pitch < cols) { printf("W | SKIP(bad params)\n"); return 3; }
   size_t smem = smem_bytes(rows, cols, pitch);
@@ -331,7 +483,8 @@ static int probe_tma(int C, int grid, int rows, int cols, int pitch, int K, int 
 
 int main(int argc, char** argv) {
   if (argc < 2) {
-    printf("usage: s2s_bulk_nd <A|T|W|F|G> ...\n");
+    printf("usage: s2s_bulk_nd <A|Y|T|X|W|F|G> ...\n"
+           "       X <C> <grid> <rows> <cols> <spitch> <dpitch> <K> <rounds> <full>  # §104 pitch 组合\n");
     return 1;
   }
   const char* cmd = argv[1];
@@ -354,6 +507,24 @@ int main(int argc, char** argv) {
     }
     return 0;
   }
+  if (!strcmp(cmd, "Y")) {
+    printf("# §104 资源表（T=%d，SLOTS=%d）：src/dst pitch 组合与 full\n", TH, SLOTS);
+    int cfg[][5] = {{16,256,256,256,0},{16,256,320,256,0},{16,256,256,320,0},
+                    {16,256,320,320,0},{16,256,320,320,1},{32,256,320,320,1}};
+    for (int i = 0; i < 6; i++) {
+      int rows = cfg[i][0], cols = cfg[i][1], sp = cfg[i][2], dp = cfg[i][3], full = cfg[i][4];
+      size_t smem = smem_bytes_dp(rows, cols, sp, dp, full);
+      cudaFuncSetAttribute((const void*)nd_tma_dp, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+      cudaFuncAttributes a; CK(cudaFuncGetAttributes(&a, nd_tma_dp));
+      int occ = 0; CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, nd_tma_dp, TH, smem));
+      printf("  rows=%2d cols=%3d sp=%3d dp=%3d full=%d smem=%6zuB | regs=%d occ=%d\n",
+             rows, cols, sp, dp, full, smem, a.numRegs, occ);
+    }
+    return 0;
+  }
+  if (!strcmp(cmd, "X"))
+    return run_tma_dp(atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]),
+                      atoi(argv[6]), atoi(argv[7]), atoi(argv[8]), atoi(argv[9]), atoi(argv[10]));
   if (!strcmp(cmd, "T"))
     return run_tma(atoi(argv[2]), atoi(argv[3]), atoi(argv[4]), atoi(argv[5]),
                    atoi(argv[6]), atoi(argv[7]), atoi(argv[8]));

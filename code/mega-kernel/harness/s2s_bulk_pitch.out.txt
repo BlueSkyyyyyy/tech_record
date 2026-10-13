@@ -1,0 +1,108 @@
+# §104 S2S bulk pitch 组合（DEV=6, TH=256, SLOTS=4, cols=256 gap=64 C=2 grid=132 rounds=64）
+
+== A. 资源表（numRegs / 占用率 / SMEM；X 内核）==
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd Y
+# §104 资源表（T=256，SLOTS=4）：src/dst pitch 组合与 full
+  rows=16 cols=256 sp=256 dp=256 full=0 smem= 81984B | regs=26 occ=2
+  rows=16 cols=256 sp=320 dp=256 full=0 smem= 86080B | regs=26 occ=2
+  rows=16 cols=256 sp=256 dp=320 full=0 smem= 98368B | regs=26 occ=2
+  rows=16 cols=256 sp=320 dp=320 full=0 smem=102464B | regs=26 occ=2
+  rows=16 cols=256 sp=320 dp=320 full=1 smem=102464B | regs=26 occ=2
+  rows=32 cols=256 sp=320 dp=320 full=1 smem=204864B | regs=26 occ=1
+
+== B.（headline 之一）源/目的 pitch 组合矩阵（rows=16）==
+-- p1  = 源打包→目的打包，1 笔（天花板） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 256 256 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=256 dpitch=256 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=81984B | ok=20/20 maxerr 0 bad 0  141.920 us |    975.3 GB/s(moved)    975.3 GB/s(useful) | xfer/round=1 ns/xfer= 2217.5 slotpitch=256
+-- r_pd = 源带距→目的打包，rows 笔（§103 形态） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 256 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=256 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=86080B | ok=20/20 maxerr 0 bad 0  225.920 us |    612.7 GB/s(moved)    612.7 GB/s(useful) | xfer/round=16 ns/xfer=  220.6 slotpitch=256
+-- r_dp = 源打包→目的带距，rows 笔（新） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 256 320 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=256 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=98368B | ok=20/20 maxerr 0 bad 0  225.984 us |    612.5 GB/s(moved)    612.5 GB/s(useful) | xfer/round=16 ns/xfer=  220.7 slotpitch=320
+-- r_dd = 两端带距，rows 笔（新） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  226.496 us |    611.1 GB/s(moved)    611.1 GB/s(useful) | xfer/round=16 ns/xfer=  221.2 slotpitch=320
+-- f_dd = 两端带距，整段连搬（含 padding），1 笔（新 headline） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 1 64 1
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  149.248 us |   1159.2 GB/s(moved)    927.4 GB/s(useful) | xfer/round=1 ns/xfer= 2332.0 slotpitch=320
+
+== C.（headline 之二）扫 gap：逐行拆搬 r_dd vs 整段连搬 f_dd（rows=16）==
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 256 256 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=256 dpitch=256 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=81984B | ok=20/20 maxerr 0 bad 0  141.632 us |    977.3 GB/s(moved)    977.3 GB/s(useful) | xfer/round=1 ns/xfer= 2213.0 slotpitch=256
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 288 288 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=288 dpitch=288 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=92224B | ok=20/20 maxerr 0 bad 0  225.696 us |    613.3 GB/s(moved)    613.3 GB/s(useful) | xfer/round=16 ns/xfer=  220.4 slotpitch=288
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  226.080 us |    612.2 GB/s(moved)    612.2 GB/s(useful) | xfer/round=16 ns/xfer=  220.8 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 384 384 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=384 dpitch=384 K= 1 full=0 rounds= 64 regs=26 occ=1 smem=122944B | ok=20/20 maxerr 0 bad 0  226.048 us |    612.3 GB/s(moved)    612.3 GB/s(useful) | xfer/round=16 ns/xfer=  220.7 slotpitch=384
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 512 512 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=512 dpitch=512 K= 1 full=0 rounds= 64 regs=26 occ=1 smem=163904B | ok=20/20 maxerr 0 bad 0  226.592 us |    610.8 GB/s(moved)    610.8 GB/s(useful) | xfer/round=16 ns/xfer=  221.3 slotpitch=512
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 288 288 1 64 1
+X C=2 grid= 132 rows=16 cols=256 spitch=288 dpitch=288 K= 1 full=1 rounds= 64 regs=26 occ=2 smem=92224B | ok=20/20 maxerr 0 bad 0  145.952 us |   1066.9 GB/s(moved)    948.3 GB/s(useful) | xfer/round=1 ns/xfer= 2280.5 slotpitch=288
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 1 64 1
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  149.312 us |   1158.7 GB/s(moved)    927.0 GB/s(useful) | xfer/round=1 ns/xfer= 2333.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 384 384 1 64 1
+X C=2 grid= 132 rows=16 cols=256 spitch=384 dpitch=384 K= 1 full=1 rounds= 64 regs=26 occ=1 smem=122944B | ok=20/20 maxerr 0 bad 0  156.480 us |   1326.8 GB/s(moved)    884.5 GB/s(useful) | xfer/round=1 ns/xfer= 2445.0 slotpitch=384
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 512 512 1 64 1
+X C=2 grid= 132 rows=16 cols=256 spitch=512 dpitch=512 K= 1 full=1 rounds= 64 regs=26 occ=1 smem=163904B | ok=20/20 maxerr 0 bad 0  170.592 us |   1622.7 GB/s(moved)    811.4 GB/s(useful) | xfer/round=1 ns/xfer= 2665.5 slotpitch=512
+
+== D. 扫 rows：逐行拆搬 r_dd vs 整段连搬 f_dd（gap=64）==
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 2 256 320 320 1 64 0
+X C=2 grid= 132 rows= 2 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=8 smem=12864B | ok=20/20 maxerr 0 bad 0  100.960 us |    171.4 GB/s(moved)    171.4 GB/s(useful) | xfer/round=2 ns/xfer=  788.8 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 4 256 320 320 1 64 0
+X C=2 grid= 132 rows= 4 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=8 smem=25664B | ok=20/20 maxerr 0 bad 0  123.360 us |    280.5 GB/s(moved)    280.5 GB/s(useful) | xfer/round=4 ns/xfer=  481.9 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 8 256 320 320 1 64 0
+X C=2 grid= 132 rows= 8 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=4 smem=51264B | ok=20/20 maxerr 0 bad 0  157.184 us |    440.3 GB/s(moved)    440.3 GB/s(useful) | xfer/round=8 ns/xfer=  307.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  226.336 us |    611.5 GB/s(moved)    611.5 GB/s(useful) | xfer/round=16 ns/xfer=  221.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 32 256 320 320 1 64 0
+X C=2 grid= 132 rows=32 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=1 smem=204864B | ok=20/20 maxerr 0 bad 0  361.504 us |    765.8 GB/s(moved)    765.8 GB/s(useful) | xfer/round=32 ns/xfer=  176.5 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 2 256 320 320 1 64 1
+X C=2 grid= 132 rows= 2 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=8 smem=12864B | ok=20/20 maxerr 0 bad 0   92.992 us |    232.6 GB/s(moved)    186.1 GB/s(useful) | xfer/round=1 ns/xfer= 1453.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 4 256 320 320 1 64 1
+X C=2 grid= 132 rows= 4 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=8 smem=25664B | ok=20/20 maxerr 0 bad 0  104.256 us |    414.9 GB/s(moved)    331.9 GB/s(useful) | xfer/round=1 ns/xfer= 1629.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 8 256 320 320 1 64 1
+X C=2 grid= 132 rows= 8 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=4 smem=51264B | ok=20/20 maxerr 0 bad 0  120.320 us |    719.0 GB/s(moved)    575.2 GB/s(useful) | xfer/round=1 ns/xfer= 1880.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 1 64 1
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  150.784 us |   1147.4 GB/s(moved)    917.9 GB/s(useful) | xfer/round=1 ns/xfer= 2356.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 32 256 320 320 1 64 1
+X C=2 grid= 132 rows=32 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=1 smem=204864B | ok=20/20 maxerr 0 bad 0  209.792 us |   1649.4 GB/s(moved)   1319.5 GB/s(useful) | xfer/round=1 ns/xfer= 3278.0 slotpitch=320
+
+== E. 固定 rows=16 扫拆分 K（r_dd，两端带距；每行再切 K 段 ⇒ rows*K 笔）==
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  225.888 us |    612.7 GB/s(moved)    612.7 GB/s(useful) | xfer/round=16 ns/xfer=  220.6 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 2 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 2 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  263.488 us |    525.3 GB/s(moved)    525.3 GB/s(useful) | xfer/round=32 ns/xfer=  128.7 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 4 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 4 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  313.504 us |    441.5 GB/s(moved)    441.5 GB/s(useful) | xfer/round=64 ns/xfer=   76.5 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 8 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 8 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  415.840 us |    332.8 GB/s(moved)    332.8 GB/s(useful) | xfer/round=128 ns/xfer=   50.8 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 16 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K=16 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  629.728 us |    219.8 GB/s(moved)    219.8 GB/s(useful) | xfer/round=256 ns/xfer=   38.4 slotpitch=320
+
+== F. grid / C 敏感与稳定性（rows=16 gap=64）==
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 4 132 16 256 320 320 1 64 0
+X C=4 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  232.608 us |    595.0 GB/s(moved)    595.0 GB/s(useful) | xfer/round=16 ns/xfer=  227.2 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 264 16 256 320 320 1 64 0
+X C=2 grid= 264 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  234.912 us |   1178.4 GB/s(moved)   1178.4 GB/s(useful) | xfer/round=16 ns/xfer=  229.4 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 264 16 256 320 320 1 64 1
+X C=2 grid= 264 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  161.888 us |   2137.5 GB/s(moved)   1710.0 GB/s(useful) | xfer/round=1 ns/xfer= 2529.5 slotpitch=320
+
+== G. 多 grid 稳定性（r_dd 与 f_dd；每档 20 次 launch 全 ok）==
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 1 64 0
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  226.656 us |    610.7 GB/s(moved)    610.7 GB/s(useful) | xfer/round=16 ns/xfer=  221.3 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 264 16 256 320 320 1 64 0
+X C=2 grid= 264 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  234.368 us |   1181.2 GB/s(moved)   1181.2 GB/s(useful) | xfer/round=16 ns/xfer=  228.9 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 528 16 256 320 320 1 64 0
+X C=2 grid= 528 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  464.896 us |   1190.9 GB/s(moved)   1190.9 GB/s(useful) | xfer/round=16 ns/xfer=  454.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 1056 16 256 320 320 1 64 0
+X C=2 grid=1056 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=0 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  923.104 us |   1199.5 GB/s(moved)   1199.5 GB/s(useful) | xfer/round=16 ns/xfer=  901.5 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 132 16 256 320 320 1 64 1
+X C=2 grid= 132 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  149.184 us |   1159.7 GB/s(moved)    927.8 GB/s(useful) | xfer/round=1 ns/xfer= 2331.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 264 16 256 320 320 1 64 1
+X C=2 grid= 264 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  160.576 us |   2154.9 GB/s(moved)   1723.9 GB/s(useful) | xfer/round=1 ns/xfer= 2509.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 528 16 256 320 320 1 64 1
+X C=2 grid= 528 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  317.696 us |   2178.4 GB/s(moved)   1742.7 GB/s(useful) | xfer/round=1 ns/xfer= 4964.0 slotpitch=320
+$ CUDA_VISIBLE_DEVICES=6 /tmp/s2s_bulk_nd X 2 1056 16 256 320 320 1 64 1
+X C=2 grid=1056 rows=16 cols=256 spitch=320 dpitch=320 K= 1 full=1 rounds= 64 regs=26 occ=2 smem=102464B | ok=20/20 maxerr 0 bad 0  628.704 us |   2201.5 GB/s(moved)   1761.2 GB/s(useful) | xfer/round=1 ns/xfer= 9823.5 slotpitch=320
