@@ -1694,6 +1694,22 @@
        为 0）→ 下一杠杆＝降 L2 流量/消冲突。**扫描**：`BVK/NS` 六档，大 shape 最优 `64/2`（0.90×）。**结论**：
        §48.4 首位动作方向正确且首次兑现正收益；K2 形状三要素（tensor core + 流式操作数 + 小累加器分片）
        被 §47 反例与本轮正例双向钉死；剩余头寸仍在非 GEMM 段，本核可作其 GEMM 段基座。
+- [x] **P7-100** 关闭 §102.7（P7-99）的两条边界——**`K≠V` 与 `INTRA`/`DAMMA` 的「同时」交叉**（§101
+       Part B 只做过 fp32 `prod`）与 **`V=64`**：放回同一写侧三段分解（L1 store 扇区 $S_{L1}$ → L2 write
+       扇区 → `dram__bytes_write`）。新增 `harness/probe_b2_write_cross3_ncu.sh`
+       （`harness/probe_b2_write_cross3_ncu.out.txt`）+ `harness/check_bwd_b2_write_cross3.py`
+       （`harness/check_bwd_b2_write_cross3.out.txt`）；**`b2_mma_probe.cu` 一行未改**。**Part A**：
+       `(K,V)=(64,128)`（`K<V`）与 `(128,64)`（`K>V`）各四点（`prod/damma/intra/intra_damma`）**$S_{L1}$
+       与 store 请求逐位相同**（`18 022 400`/`2 301 952` 与 `22 282 240`/`2 826 240`），$S_{L1}\cdot32/U=
+       2.004/1.997$；`(64,128)` 的 `prod` 值还**逐位互证 §101 Part B**。**Part B**：`V=64` 标定成立
+       （`(64,64)` `prod`==`intra`=`13 828 096`、2.005；`(256,64)` `prod`=`39 190 528`、1.992；`(64,256)`
+       `intra`=`26 411 008` 与 §101 `prod` 逐位）。**新资源边界（关键）**：`-DB2M_INTRA` 的 **`K=256` 折叠
+       在 `V=64` 下仍不可启动**（`rc=-3`，`cudaFuncSetAttribute` 拒 227 KiB）——`intra` staging
+       `siq/sik/sig[BT][KD]`（`b2_mma_probe.cu:629-631`）**只按 `K` 计费、不随 `V` 缩**，故 `K=256` 折叠
+       只能靠 bf16 streamed staging（§98.3）、降 `V` 无用。**口径修订**：`ncu` 的 `gpu__time_duration.sum`
+       每 launch 自选单位（`ns/us/ms`），解析须读单位（旧 `cross*.py` 一律按 `ms` 读只因恰好命中 `ms` 档；
+       不影响任何 $S_{L1}$/字节结论）。**边界**：`K≠V`×`INTRA/DAMMA` 只在两种 `(K,V)`、`V=64` 只
+       `K∈{64,256}`、未叠 `TMA`/`BF16MMA`/`VECST`；`(K,V)` 双非 128 的独立数值核对标待验证。见 `docs/07` §103。
 
 ### P8 小结 / 一页纸
 
@@ -1731,6 +1747,11 @@
       `flash-kda-08-summary` 页面正常生成、渲染出新段落、0 ERROR**；全站唯一 1 条 ERROR 来自**另一专题**
       （`mega-moe-00-index` 引用未来日期文章 `mega-moe-162`，其 `date` 05:20 晚于构建时刻，Hugo 默认
       `buildFuture=false` 未建该页），**与本轮改动无关**（只改了 `code/flash-kda/` 两文件）。
+- [x] **P8-6** 再次补全一页纸（`docs/08-summary.md`）——把「比写量」判据收口弧从 **P7-97…P7-99（§100–§102）**
+      扩到 **P7-97…P7-100（§100–§103）**：新增 §103 的 bullet（`K≠V`×`INTRA`/`DAMMA` 两极性 `S_L1` 逐位 +
+      `V=64` 标定 + **`K=256` `intra` 折叠在 `V=64` 下仍 `rc=-3` 的资源边界** + `ncu` duration 单位口径修订）
+      与「最终部署建议」的 `K=256` 折叠补句（**收窄 `V` 不是杠杆、只能靠 bf16 staging**）。修正文档头
+      `P8-1…P8-5` → `P8-1…P8-6`。数字复用 `docs/07` §103 本机实测、未新增实验（遵循 P8-1…P8-5 口径）。
 
 ## 每轮增量流程（autopilot）
 
@@ -1964,12 +1985,30 @@
    generic `st.global`）；`dram__bytes_write` 相对解析输出的偏差是**跨配置 [−8,+33] MB 的散点、正负
    都有**（`bf16tma` 比解析输出还低），且**非 dtype/非 TMA/非 duration/非占用率的单调函数**（`bf16mma`
    更快却少写）。`BVK` 对写侧零影响（`prod`==`prod64`）。
+- **`ncu` 的 `gpu__time_duration.sum` 每次 launch 自选单位（`ns`/`us`/`ms`/`s`），解析必须读单位**（P7-100，
+  §103.1）：`ncu --metrics gpu__time_duration.sum` 打印形如 `gpu__time_duration.sum  us  600.48`，单位在
+  数值前一列。早前 `check_bwd_b2_write_cross.py`/`cross2.py` 一律把数值当 `ms` 读，只因那些配置恰好落入
+  `ms` 档而未暴露；本轮 `cross3.py` 改为按单位换算（`ns→1e-6/µs→1e-3/ms→1/s→1e3`）。**只影响 `dur` 的
+  合法性、不触及任何 $S_{L1}$/store 请求/字节整数计数**（那些与单位无关）。判据只用整数计数。
 
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-99 补测 + P8-3/P8-4/P8-5**。
-  - P8-5（本轮）：**补全一页纸 `docs/08-summary.md` 的后半段**——此前正文收在 **P7-96**（`docs/07` §99），
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-100 补测 + P8-3…P8-6**。
+  - P7-100 + P8-6（本轮）：**关闭 §102.7（P7-99）明确留的两条边界——`K≠V` 与 `INTRA`/`DAMMA` 的「同时」
+    交叉、以及 `V=64`**；并把一页纸从 §100–§102 扩到 §100–§103。新增
+    `harness/probe_b2_write_cross3_ncu.sh`（`probe_b2_write_cross3_ncu.out.txt`）+
+    `harness/check_bwd_b2_write_cross3.py`（`check_bwd_b2_write_cross3.out.txt`）；`b2_mma_probe.cu` 一行未改。
+    **Part A**：`(K,V)=(64,128)`/`(128,64)` 各四点（`prod/damma/intra/intra_damma`）`S_L1` 与 store 请求
+    **逐位相同**（`18 022 400`/`22 282 240`），$S_{L1}\cdot32/U=2.004/1.997$；`(64,128)` 的 `prod` 逐位互证
+    §101 Part B。**Part B**：`V=64` 标定成立（`(64,64)` prod==intra `13 828 096`、`(256,64)` `1.992`、
+    `(64,256)` intra 与 §101 prod 逐位）。**新资源边界（关键）**：`-DB2M_INTRA` 的 **`K=256` 折叠在 `V=64`
+    下仍不可启动**（`rc=-3`，smem>227 KiB）——`intra` staging 只按 `K` 计费、不随 `V` 缩，故 `K=256` 折叠
+    只能靠 bf16 streamed staging（§98.3）。**口径修订**：`ncu` `gpu__time_duration.sum` 每 launch 自选
+    单位（`ns/us/ms`），解析须读单位（旧 `cross*.py` 按 `ms` 读只因恰好命中 `ms` 档；不影响 `S_L1`/字节）。
+    见 `docs/07` §103。**下一步（可选）**：专题维持维护态；若继续，`(K,V)` 双非 128 的独立数值核对、
+    `K≠V`×`INTRA`/`DAMMA`×`BF16MMA` 四向、或 `V=64`×`TMA`。
+  - P8-5（上轮）：**补全一页纸 `docs/08-summary.md` 的后半段**——此前正文收在 **P7-96**（`docs/07` §99），
     缺失 **「比写量」判据收口弧 P7-97…P7-99（`docs/07` §100–§102）**。新增「**P7-97…P7-99……「比写量」判据的
     收口**」一段（§100 六形态 `TMA`/`BF16MMA` 的 `S_L1` 逐位 + `+35 MB` 既非 dtype 也非 TMA；§101
     `INTRA`/`DAMMA`/`K≠V` 的 `S_L1` 逐位 + `bf16⊗damma` 把 `+32.7` 翻成 `−7.9` MB + `S_L1·32=2U` 标定；
