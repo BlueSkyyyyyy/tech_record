@@ -3508,7 +3508,46 @@
   是单 CTA 两趟全词表归约的重活）。配套博客 post `mega-kernel-42-mpk-prob-bookkeeping`（weight 43）
   并更新 `mega-kernel-00-index` 第 42 项。P127-1 新留尾巴（§6）：注释过时只记不判、`blockDim>256`
   越界与 `pos` 越界静默只作静态约束记录、`mtp_float_scatter`（`mtp_token_ops.cuh`）身体未逐行、
-  `target_verify_*` 如何消费 `prob_extract` 输出只按注释转述、未构建。**本轮新增增量。**
+   `target_verify_*` 如何消费 `prob_extract` 输出只按注释转述、未构建。**本轮新增增量。**
+
+### P128 MTP 验证链消费链走读（`docs/42-mpk-mtp-verify-chain.md`）
+
+- [x] **P128-1** 补掉 `docs/41`（P127-1）**§6 明留的两条尾巴**——「`mtp_float_scatter` 的 device
+  身体（`mtp_token_ops.cuh`）未逐行」与「`target_verify_*` 如何消费 `prob_extract` 的输出（拒绝采样
+  比较 `P_target > u·P_draft`）只按注释转述」（`docs/39` §9 也把它列为三条未走读之一）；
+  也即 `ROADMAP`「下一步候选」第二条。见 `docs/42-mpk-mtp-verify-chain.md`（快照
+  `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`–`docs/41` 同快照；**纯源码走读
+  （资料分析），本轮无新实验**；整条链只登记 SM100 路径、特性上下文本机不具备）。三条 headline：
+  - **(A) 概率 MTP 拒绝采样是一条「两处生产、一次消费」的跨迭代链**（`docs/41` 只给每段坐标、
+    `docs/39` 只给各身体摘要，均未串起数据流）：draft 侧 `softmax_gather(q:1876) →
+    mtp_float_scatter(q:1885, slot_idx=step)` 写 `_draft_prob_buffer[:, step]`；main graph 侧
+    `softmax_gather(q:2220) → prob_scatter(q:2229, step_counter=step)` 写 `_target_prob_buffer[:, step]`；
+    verify 侧 `prob_extract(q:1993, offset=step) → target_probs` + `_draft_prob_buffer` 一起送
+    `target_verify_probabilistic(q:2007) → accepted_count/output_tokens → mtp_accept_commit(q:2037)`。
+    时序锚点：**写入端用 `step`、读出端用 device 侧硬编码 `offset+1`**（`prob_scatter_sm100.cuh:42-46`
+    vs `:68`）；draft 侧无位移（verify 从 `i=0` 平读 `:145`）。
+  - **(B) `mtp_token_ops.cuh` 四身体分属两套 batch 索引契约**（`docs/39` §5 未并置）：
+    `mtp_{token,float}_scatter`（`:37-64`）用 `b=threadIdx.x` **批并行**（`blockDim≥BATCH`，写满
+    `[BATCH,NUM_SLOTS]`）；`mtp_prepare_verify_input`（`:104`）/`mtp_build_embed_input`（`:175`）用
+    `task_metadata.request_id` **按请求**索引。前者靠编译期 `SLOT_IDX`、后者靠运行期 `step`。
+    `mtp_float_scatter` 与 `mtp_token_scatter` 逐字节同构（仅载体 `float` vs `long long`），登记
+    `task_register.cc:2791-2806`/`:5039-5056`、`graph.cc` 均 `(1,1)`（`:736-739`/`:881-884`）。
+  - **(C) verify/commit 家族「无 `request_id`、从 0 索引」的批元素契约**（`docs/39`/`docs/41`
+    摘要未点出）：`target_verify_{greedy,strict,probabilistic}`、`mtp_accept_commit`、`eagle3_commit`
+    签名都不带 `request_id`，且 `draft_ids[i]`/`target_ids[i]`/`output_tokens[i]`/`accepted_count[0]`/
+    `current_position[0]` 一律从 0 索引 ⇒ **device 侧只处理批元素 0**（`target_verify_mtp.cuh:28-29`
+    注释自陈「one batch element per thread block」），与调用方 `grid_dim=(mbt,1,1)` 的多维入参不符；
+    `seed[0]` 为标量 ⇒ 「每请求独立种子」未兑现。**只作静态契约记录、不判 bug**。
+  另补 builder 侧三处**新落差**（`docs/41` 未记，可由 `_cached_new_tensor` 按 name 缓存 `:1172-1181`
+  核实）：局部 `draft_probs`（`:1967-1969`）**是死张量**（真正传的是 `_draft_prob_buffer` `:2011`）；
+  `rng_seed` **被建两次**（`:1977`/`:2002`，同 name 缓存 ⇒ 第二次冗余、且无初始化）；
+  `mtp_verify_probabilistic_layer`（`:2007`）**在 `prob_extract` 的 guard（`:1992`）之外无条件调用**
+  且传 `target_probs`（`:2010`），`step_tensor` 缺失时该张量未写入。判据**只贡献 C1+C3**，与
+  `docs/29`–`docs/41` device task 走读同档；跨度对应 `docs/08` §2 的跨迭代 view/barrier 边。
+  配套博客 post `mega-kernel-43-mpk-mtp-verify-chain`（weight 44）并更新 `mega-kernel-00-index`
+  第 43 项。P128-1 新留尾巴（§7）：`seed` 实际初始化位置未追、`comment/落差`只记不判、
+  `_draft_prob_buffer` 是 probabilistic 专属、`mtp_build_embed_input` 多 block 覆写整向量只记不判、
+  未构建、未与生产端到端对跑。**本轮新增增量。**
 
 ## 每轮增量流程（autopilot）
 
@@ -3772,7 +3811,28 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P127-1 完成（1/1）**。补掉 `docs/39`（P125-1）**§9「未展开的更深层」**第一句与
+- 当前进度：**P128-1 完成（1/1）**。补掉 `docs/41`（P127-1）**§6 明留的两条尾巴**——「`mtp_float_scatter`
+  的 device 身体（`mtp_token_ops.cuh`）未逐行」与「`target_verify_*` 如何消费 `prob_extract` 的输出
+  （拒绝采样比较 `P_target > u·P_draft`）只按注释转述」，也即 `ROADMAP`「下一步候选」第二条。见
+  `docs/42-mpk-mtp-verify-chain.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
+  **(A)** 概率 MTP 拒绝采样是一条「两处生产、一次消费」的跨迭代链——draft 侧
+  `softmax_gather(:1876)→mtp_float_scatter(:1885,slot_idx=step)`、main graph 侧
+  `softmax_gather(:2220)→prob_scatter(:2229,step)`、verify 侧 `prob_extract(:1993,offset=step)→
+  target_verify_probabilistic(:2007)→mtp_accept_commit(:2037)`，时序锚点是「写 `step`、读 device 侧
+  硬编码 `offset+1`」（`prob_scatter_sm100.cuh:42-46` vs `:68`）；**(B)** `mtp_token_ops.cuh` 四身体
+  分属两套 batch 索引契约——两个 scatter 批并行（`b=threadIdx.x`）、prepare/embed 按 `request_id`；
+  **(C)** verify/commit 家族（`target_verify_{greedy,strict,probabilistic}`/`mtp_accept_commit`/
+  `eagle3_commit`）**无 `request_id`、从 0 索引 ⇒ device 侧只处理批元素 0**（注释 `:28-29` 自陈），
+  `seed[0]` 为标量。另补 builder 三处新落差（死 `draft_probs` `:1967-1969`、双 `rng_seed`
+  `:1977`/`:2002`、guard 外调用 `:2007`）。判据只贡献 C1+C3。配套博客 post
+  `mega-kernel-43-mpk-mtp-verify-chain`（weight 44）并更新 `mega-kernel-00-index` 第 43 项。
+  P128-1 新留尾巴见 §7（`seed` 初始化未追、落差只记不判、`_draft_prob_buffer` probabilistic 专属、
+  `mtp_build_embed_input` 多 block 覆写只记不判、未构建）。
+- 下一步候选：`docs/41` §6 两条尾巴与 `ROADMAP`「下一步候选」第二条已闭合；可继续走
+  `ROADMAP`「下一步候选」第二条剩余——`docs/35` §9 遗留的其它未走读相邻层（`mla_prefill_host.cu`
+  原型、CUTLASS `collective_builder` 侧 QK/PV atom），或 `eagle3_commit_kernel` 的 device 身体
+  （`eagle3_ops.cuh:157-315`，`docs/39` §6.3 已摘要、未逐行）与 `accept_hist` 调试历史。
+- 此前：**P127-1 完成（1/1）**。补掉 `docs/39`（P125-1）**§9「未展开的更深层」**第一句与
   `ROADMAP`「下一步候选」第一条——把 `softmax_gather_sm100.cuh`/`prob_scatter_sm100.cuh`（含
   `prob_extract_task_impl`）三个概率簿记 device 身体逐行打开，见 `docs/41-mpk-prob-bookkeeping.md`
   （快照 `f9eb70c`，**纯源码走读、无新实验**；三者均为 SM100 路径）。三条 headline：**(A)** 全仓
@@ -3790,10 +3850,6 @@
   判据只贡献 C1+C3。配套博客 post `mega-kernel-42-mpk-prob-bookkeeping`（weight 43）并更新
   `mega-kernel-00-index` 第 42 项。P127-1 新留尾巴见 §6（注释过时只记不判、`mtp_float_scatter` 身体
   未逐行、`target_verify_*` 消费 `prob_extract` 只按注释转述、未构建）。
-- 下一步候选：`docs/39` §9 第一条已闭合；可继续走 `ROADMAP`「下一步候选」第二条——`docs/35` §9
-  遗留的其它未走读相邻层（`mla_prefill_host.cu` 原型、CUTLASS `collective_builder` 侧 QK/PV atom），
-  或 `docs/37` §3.3 同族里 `mtp_float_scatter` 的 device 身体（`mtp_token_ops.cuh`）与
-  `target_verify_*` 对 `prob_extract` 输出的拒绝采样消费链（本卷 §6 新留）。
 - 此前：**P126-1 完成（1/1）**。补掉 `docs/39`（P125-1）§9 尾巴与 `ROADMAP`「下一步候选」第二条——把仓库里**唯一归档在 `tasks/deprecated/` 下的 task** `paged_attention.cuh`（496 行）逐段打开，见 `docs/40-mpk-deprecated-paged-attention.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** 它是仓库里唯一把「paged-attention 计算 + 新 token K/V 写回页缓存」融进同一 task 的 device 身体（`:473-484`），而今天拆成「只读 attention + 独立 KV store + 独立 norm/rope」——**融合边界不是越融越好，「把写回从读里拆出去」是 task 可复用/可调度的先决条件**；**(B)** 自包含单 batch×单 KV head×单 CTA 的 FA2 手写实现（`m16n16k16` mma 的 1x4x1/1x1x4、在线 softmax、4 warp 分片 + warp0 全量合并、融合 QK-norm/RoPE、NHD 页缓存 + 双缓冲 64-key tile），是后世全部特性的最早期快照；**(C)** 接线是「彻底的孤儿」——无任何 include、`DEPRECATED_TESTS` 全仓无人 `#define`、`using`/`m.def` 全被注释、wrapper 只 include ampere/blackwell `task_header`。另记两条静态观察只记不判（`page_indices` 只写尾段、`S_O_BUFFER_SIZE` 被注释）与旧式裸 include 约定。判据**只贡献 C3 的范围**（且是被淘汰的划分）。配套博客 post `mega-kernel-41-mpk-deprecated-paged-attention`（weight 42）并更新 `mega-kernel-00-index` 第 41 项。P126-1 新留尾巴见 §5（退役原因系推断、布局/旧 norm/rope 内部未展开、未构建）。
 - 此前：**P125-1 完成（1/1）**。补掉 `docs/14`/`docs/24`/`docs/26` 只列名字、`docs/34`–`docs/37` 只走 MLA-MTP attention 的那一整层 device 目录 `tasks/speculative_decoding/`（5 头文件 1014 行），见 `docs/39-mpk-speculative-decoding.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** 全部是「查答案 / 搬 token」的簿记型 device 身体、无一吃 TC，却是投机正确性枢纽（`accepted_count`/`new_token_nums`/`tokens[]` 落位→运行时步进），是 `docs/04` §8/§10「task 数/事件扇入扇出」来源；**(B)** 同一「验证 draft」语义三套并行实现接线各异——prompt-lookup 贪心（`TaskType 114`）、DeepSeek-V3 MTP strict/probabilistic/commit（`271/283/272`）、两枚「有定义零调用者」死代码（`target_verify_synthetic_kernel`、`find_ngram_global_kernel_sequential`）；**(C)** Eagle3 Python 落差——类注释声明完整 verify 管线但 `build_draft_loop` 只跑 draft loop，`copy_layer`/`eagle3_commit_layer` 快照无调用者。§1 记静态 include 落差（`target_verify.cuh`/`prompt_lookup.cuh` 不在生产 `task_header` include 集、单测 `using`/`m.def` 被注释，只记不判）；§6.3 转述 `eagle3_commit_kernel` 注释里 `paged_attention_sm100` `MAX_TOKENS=3` slot-0 分歧的 bug 调查（同 `docs/38` §6 `"+f"` 的 MMA_ITERS_M>1 family）。判据**只贡献 C1+C3**。配套博客 post `mega-kernel-40-mpk-speculative-decoding`（weight 41）并更新 `mega-kernel-00-index` 第 40 项。P125-1 新留尾巴见 §9（include 落差只记不判、`softmax_gather`/`prob_scatter`/`prob_extract` 三身体未逐行、`MAX_TOKENS=3` slot-0 分歧未独立复现、接受率数字为注释自报、`lookahead`/`eagle3` handler 字典缺失只记 `ValueError`）。
 - 此前：**P124-1 完成（1/1）**。补掉 `docs/37`（P123-1）**§8「局限」明留的两条尾巴**——「`sampling_from_logits_kernel`（`tasks/common/sampling.cuh` 的 CUB BlockReduce 内部）未展开、`mma_m16n16k16`（`tasks/ampere/mma.cuh`）汇编未逐条」与「`mla_prefill_host.cu` 原型来源仍未走」。见 `docs/38-mpk-common-primitives.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** `tasks/common/` 是全部 device task 的 arch-agnostic 地基（伞状 `common_header.cuh` 被 41 个 task 引用、`utils.cuh` 被 33 个直引；`ampere/mma.cuh` 被两个非 MLA SM100 attention 引用）——「Blackwell」目录的通用 attention 仍在用 Ampere 手写 `mma.sync` + `cp.async` + CUB；**(B)** `common/sampling.cuh` 是 FlashInfer 移植的一趟式 Gumbel-Max（借 CUB `BlockReduce::Sum` 当 argmax 归约），生产登记 `TASK_SAMPLING_SM100`、与 SM100 分块版共用同一 `TaskType`；**(C)** `ampere/mma.cuh` 的 `"+f"` in-place 累加器修复是 load-bearing 的（决定 `attention_sm100` `MMA_ITERS_M>1`、进而 EAGLE3 token 流正确）。另记 `clear_smem_buffer` 的 128/256 线程口径落差、`copy_sm80.cuh` 即 `docs/04` §39–§56 实测原语本体、`mla_prefill_host.cu` 收口为「不在快照、外部来源」。判据**只贡献 C3**。配套博客 post `mega-kernel-39-mpk-common-primitives`（weight 40）并更新 `mega-kernel-00-index` 第 39 项。P124-1 新留尾巴见 §9（CUB 内部未展开、`bfloat16.h` 只读接口、`clear_smem_buffer` 128/256 口径并存不判、原型源文件缺失不可核、未与生产端到端对跑）。

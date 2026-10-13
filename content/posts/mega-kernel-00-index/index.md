@@ -66,4 +66,6 @@ categories: ["算子开发"]
 
 42. [MPK 概率簿记 task 走读：`softmax_gather` / `prob_scatter` / `prob_extract`]({{< relref "mega-kernel-42-mpk-prob-bookkeeping" >}}) —— 把全仓最小的 device 身体（三个函数共 193 行、SM100 专属簿记 task）逐行打开：`softmax_gather` 的两趟全词表归约（`__expf` + `smem_max[8]/smem_sum[8]` 两级蝶形、越界取 `-1e30`）与「Grid/Block 注释、`log_sum` 写法、单 block 串行 batch」三方落差，`prob_scatter` 的单线程编译期/运行期槽号写（越界静默）与 `prob_extract` 的 `offset+1` 运行期切片（越界补 0），并核对五层生产布线（`TaskType` 282/284/286、`register`/`graph.cc`/前端/builder）与概率 MTP 旁路「device 全实现、builder 仍留 TODO」的半实现状态
 
+43. [MPK MTP 验证链走读：scatter → verify → commit 的消费链与批元素契约]({{< relref "mega-kernel-43-mpk-mtp-verify-chain" >}}) —— 把 draft 概率 / target 概率 / 拒绝采样 / 提交接成一条跨迭代链：`mtp_float_scatter`（编译期槽）与 `prob_scatter`（运行期 `step`）两路写法 + `prob_extract` 的 device 侧硬编码 `offset+1` 位移，`target_verify_probabilistic` 的 `P_target > u·P_draft` LCG 采样与贪心回退，以及 `mtp_token_ops` 四身体的两套索引契约（批并行 scatter vs request 级 prepare/embed）与 verify/commit 家族「无 `request_id`、从 0 索引」的批元素契约，并记 builder 侧三处静态落差（死 `draft_probs`、双 `rng_seed`、guard 外调用）
+
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
