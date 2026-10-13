@@ -3422,7 +3422,48 @@
       占用**，坐实「带宽探测必须与 NVML 能力探测分开」。附 **pynvml 绑定坑**：`NVML_P2P_CAPS_INDEX_READ`
       在本机版本被导出成 tuple `(0,)`、直接调用抛 `ctypes.ArgumentError`（DeepEP 用 `NVLINK` int
       不受影响）。附 vLLM 同款实现链接（源码注释 `:170`）。配套博客
-      `content/posts/mega-moe-119-deepep-nvlink-p2p-check`（索引页新增第 119 篇）。
+       `content/posts/mega-moe-119-deepep-nvlink-p2p-check`（索引页新增第 119 篇）。
+
+### P110 增量（opt-in，补齐四个调度器里最后一个、也是 Mega MoE 主 kernel 自己的任务调度器）
+
+- [x] **P110-1** **DeepGEMM 的 Mega MoE 任务调度器 `scheduler/mega_moe.cuh`（481 行）**：
+      本专题已单独拆过另外三个调度器——`scheduler/gemm.cuh`（第 108 篇，稠密/grouped/MoE 反向 GEMM
+      共用）、`scheduler/mega_gate.cuh` + `scheduler/mega_mhc.cuh`（第 92 篇）。唯独 Mega MoE 主 kernel
+      自己的任务调度器被 100+ 篇以行号引用了 15+ 次、却只在第 02 篇 §4 有一节概述。它是整条
+      **dispatch + linear1 + SwiGLU + linear2 + combine** 流水线**把工作切成 task、并发给 5 类 warp 分身**
+      的唯一入口，也是 host 侧 ring 容量公式 `get_num_max_live_pool_blocks` 的唯一定义处。
+      **纯整数/布局运算，不碰 UMMA/TMA/tcgen05，H100(sm90) 可直接 include 真实头文件跑真实设备代码**
+      （唯一 SM100 专属是 `publish_task` 的 `ptx::st_async_cluster` + cluster barrier，仅分析）。
+      → `docs/120-mega-moe-scheduler.md`（真实行号核对）：**四个非平凡点**——① **行容量公式**：
+      `get_num_l1_warmup_waves:17-45`（L1 预热波的两个下界：第一个 L2 波触及多 M block +
+      `(ntb-1)*(l1n-l2n)` 交错残留，避免 L1→L2 死锁）+ `get_num_max_live_pool_blocks:48-80`
+      （预热后活跃块 + 前沿增长 + 波余量，min 到 `ntb`）；host 用它做 ring 分配
+      （`csrc/apis/mega_moe.hpp:55-63`：对 `kCandidateBlockM` 取 `max(live*block_m)` 后对齐 1920），
+      是**host 与 device 之间唯一的几何契约**；② **`L2KBlockDependency:142-166`**：一位一 L1 N 块的
+      位图，`arrive` 用 `ptx::red_xor_rel`（`ld_st.cuh:328-330`）**翻转**不累加、`wait` 用
+      `(ptx::ld_acq_gpu(mask) ^ expected_mask)` 自旋（`expected_mask = generation&1 ? 0 : kFullMask`），
+      把「L1→L2 细粒度依赖」与 **ring 世代奇偶**绑死——依赖正确性与 ring 容量强耦合（源码 `:140-141`
+      注释点明）；消费者 `impls/sm100_fp8_fp4_mega_moe.cuh:723-726`、生产者（L1 epilogue 落盘后）
+      `:1246`；③ **`create_task:309-342`** 不用任何 host 预建的 `grouped_layout` 表——每 lane 缓存名下
+      专家 token 数（`fetch_expert_recv_count:286-307`，自旋到 `value>>32 == kNumSMs*kNumRanks` 即
+      dispatch 完成）、`math::warp_inclusive_sum` 现算前缀和、`__ballot_sync` + `ptx::exchange` 在 warp
+      内求出 `(local_expert_idx, owner_m_block_idx, valid_m)`；`get_pool_block_offset:272-280` 的
+      `__reduce_add_sync` 是池块前缀和；④ **locality-domain 分域 + 工作窃取**（`get_next_task_idx:344-370`）：
+      `kNumLocalClusters = kNumClusters/kNumLocalityDomains`、本域队列空了才偷邻域、门槛
+      `kNumMinStealWaves=2`（`:225`/`:368-369`，本波任务 ≥2 个全局波才偷，避免跨 die 延迟）。
+      **发布/消费顺序契约**：生产 `wait empty → get_next_task() → publish_task`（`:457-465` 注释：
+      `get_next_task()` 会推进全局计数、不能早于消费者释放槽），消费端**只有 epilogue release**
+      （`impls:982-990`，因为只有它知道 UMMA `tmem_full` 何时到），故 `task_info_empty_barriers` 的
+      init 计数是 `2*kNumEpilogueThreads`（kernel `:276-278`，`kNumScheduleStages=2`）。
+      **H100(sm90a) 真机 34 PASS / 0 FAIL**（`harness/exp_mega_moe_scheduler.{sh,out.txt}` +
+      `src/mega_moe_scheduler.cu`，同一 `.cu` 兼编 `sm_90a` 运行 / `sm_100a` 仅编译覆盖；源 sha256
+      `1bf76529…`）：A 行容量公式 vs 独立复刻 10 形状全对；A2 复刻 host ring 分配（DeepSeek 量级
+      `block_m=240`、`ring=119280`→对齐 1920 得 **120960**）；B `TaskInfo` ABI（`sizeof=32`/`alignof=16`/
+      `get_umma_aligned_valid_m(100)=112`）；C `L2KBlockDependency` 的 XOR 翻转 + 世代奇偶（`kNumL1BlockNs=32`、
+      perK=2）；D/E `create_task` 8 专家 12 池块**逐块 0 不符**、`get_num_tokens` 0 不符；
+      F 分域枚举双射（两域并集覆盖 `m×n`）+ 窃取阈值。主 kernel UMMA/TMA 与 cluster 写仅分析。
+      配套博客 `content/posts/mega-moe-120-mega-moe-scheduler`（索引页新增第 120 篇；并修掉索引页
+      重复的第 119 条）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3449,8 +3490,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P108 各增量完成（P15-1…P41-1、P42-1…P108-1）。**
-  本轮 P108-1：新建 `docs/118-deepep-process-bootstrap.md`
+- 当前进度：**P0~P14 全部完成；P15~P110 各增量完成（P15-1…P41-1、P42-1…P110-1）。**
+  本轮 P110-1：新建 `docs/120-mega-moe-scheduler.md`
+  （+`harness/exp_mega_moe_scheduler.{sh,out.txt}`、`src/mega_moe_scheduler.cu`）——补齐四个调度器里
+  **最后一个、也是 Mega MoE 主 kernel 自己**的任务调度器 `deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh`
+  （481 行）。要点：行容量公式 `get_num_max_live_pool_blocks:48-80` + `get_num_l1_warmup_waves:17-45`
+  （host ring 分配的唯一几何契约，`csrc/apis/mega_moe.hpp:55-63`）；`L2KBlockDependency:142-166` 的
+  XOR 位图 + ring 世代奇偶；`create_task:309-342` 的 warp 现算池块映射（无 host 分组表）；
+  locality-domain 分域 + 工作窃取 `kNumMinStealWaves=2`；发布/消费顺序契约（只有 epilogue release）。
+  除 `publish_task` 的 cluster 写外全架构无关，**H100(sm90a) 真机 34 PASS / 0 FAIL**（同一 `.cu` 兼编
+  sm_90a/sm_100a）。索引页新增第 120 篇（并修掉索引页重复的第 119 条）。
+  上一轮 P109-1：新建 `docs/119-deepep-nvlink-p2p-check.md`（+`harness/exp_deepep_nvlink_p2p.{sh,out.txt}`、
+  `src/nvlink_p2p_matrix.cu`）——DeepEP 的 NVLink 连接自检 `check_nvlink_connections`（`envs.py:146-181`）
+  与 H100 P2P 拓扑；H100 真机 16 PASS / 0 FAIL。
+  上一轮 P108-1：新建 `docs/118-deepep-process-bootstrap.md`
   （+`harness/exp_deepep_process_bootstrap.{sh,out.txt}`）——补齐每个 DeepEP 测试跑之前都会执行、
   却从没单独成篇的 **进程 / 环境引导层** `deep_ep/utils/envs.py`（与第 117 篇 `EP_*` 环境变量面、
   第 40 篇 **DeepGEMM 的** `init_dist` 成对照；同名函数两仓库不同物）。要点：`init_dist:89-133` 三件
@@ -4675,13 +4728,23 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P108 已完成（最新 **P108-1 DeepEP 的测试 / 进程引导层**：`init_dist` 三件 host 事
+- **下一步**：P0~P110 已完成（最新 **P110-1 Mega MoE 主 kernel 的任务调度器
+  `scheduler/mega_moe.cuh`（481 行）**：补全四个调度器的最后一格——行容量公式
+  `get_num_max_live_pool_blocks`/`get_num_l1_warmup_waves`（host ring 分配的唯一几何契约）、
+  `L2KBlockDependency` 的 XOR 位图 + ring 世代奇偶、`create_task` 的 warp 现算池块映射、
+  locality-domain 分域 + 工作窃取、发布/消费顺序契约（只有 epilogue release）；
+  H100(sm90a) 真机 **34 PASS / 0 FAIL**；索引页新增第 120 篇（并修掉索引页重复的第 119 条）。
+  可继续（均为增量、非承诺）：
+  `semantic.py` 的 `weak_lru`/`find_pkgs` setup 侧（第 83/86 篇已覆盖大半）、
+  或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P109-1：P0~P109 已完成（最新 **P109-1 DeepEP 的 NVLink 连接自检
+  `check_nvlink_connections` 与 H100 P2P 拓扑**：字符串门 / PCIe 硬上限 / NVML 8×8 能力矩阵 /
+  `can_device_access_peer` / `cudaMemcpyPeerAsync` 带宽矩阵；H100 真机 16 PASS / 0 FAIL；
+  索引页新增第 119 篇）。
+  上一轮 P108-1：P0~P108 已完成（最新 **P108-1 DeepEP 的测试 / 进程引导层**：`init_dist` 三件 host 事
   + 返回新建子组 + `device_id` 兼容、`setdefault` 压 SL 到 1、`init_seed` 的 `local=global+rank`、
   `get_local_seed` 死 API、`dist_print` 静音仍屏障、`EnvOverride` 三元 enable + 精确回滚；
-  H100 真机 30 PASS / 0 FAIL；索引页新增第 118 篇。可继续（均为增量、非承诺）：
-  `semantic.py` 的 `weak_lru`/`find_pkgs` setup 侧（第 83/86 篇已覆盖大半）、
-  `check_nvlink_connections:146-181` 的 P2P 探测（第 86 篇一带而过），
-  或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  H100 真机 30 PASS / 0 FAIL；索引页新增第 118 篇。详见上）。
   上一轮 P107-1：P0~P107 已完成（最新 **P107-1 DeepEP 的环境变量 / 开关面**：
   persistent envs 只补不覆盖、`get_env<T>` 的未初始化栈垃圾、全库 16 个带引号 `EP_*`（11 条运行时
   开关）、`EP_BUFFER_DEBUG` 跨语言分歧、`EP_NUM_MAX_LOCAL_RANKS`/`NCCL_WIN_STRIDE`、`check_nccl_so`

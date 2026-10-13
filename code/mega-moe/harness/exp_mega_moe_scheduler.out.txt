@@ -1,0 +1,48 @@
+== 环境坐标 ==
+057ca59 Public release 26/09/30 (#462)
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+Build cuda_13.2.r13.2/compiler.37668154_0
+1bf76529e321bd54 mega_moe.cuh
+53008d96b7eeaeec mega_moe.cuh
+481 ~/github/DeepGEMM/deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh
+
+== 编译（sm_90a 运行 + sm_100a 仅编译覆盖 SM100 分支）==
+build OK (sm90a + sm100a)
+
+== 运行（H100, sm90a cubin）==
+DeepGEMM scheduler/mega_moe.cuh —— H100(sm90) 架构无关部分实测
+Template: BM=128 BN=128 BK=128 L1=[4096,7168] L2=[7168,2048] experts=8 sm=64 dom=2
+kNumExpertsPerLane=1 kNumL1Clusters=16 kNumL2Clusters=28
+== Part A: 行容量公式 get_num_max_live_pool_blocks / get_num_l1_warmup_waves ==
+   ntb=64    nsm=132  h=7168  i=2048  : live=42    (host 42   ) warm=2   (host 2  )
+   ntb=128   nsm=132  h=7168  i=2048  : live=69    (host 69   ) warm=2   (host 2  )
+   ntb=512   nsm=132  h=7168  i=2048  : live=234   (host 234  ) warm=2   (host 2  )
+   ntb=1024  nsm=132  h=7168  i=2048  : live=453   (host 453  ) warm=2   (host 2  )
+   ntb=34    nsm=132  h=7168  i=2048  : live=29    (host 29   ) warm=2   (host 2  )
+   ntb=7     nsm=64   h=7168  i=2048  : live=7     (host 7    ) warm=2   (host 2  )
+   ntb=300   nsm=148  h=7168  i=2048  : live=144   (host 144  ) warm=2   (host 2  )
+   ntb=256   nsm=80   h=7168  i=2048  : live=118   (host 118  ) warm=2   (host 2  )
+   ntb=96    nsm=132  h=7168  i=1024  : live=95    (host 95   ) warm=2   (host 2  )
+   ntb=200   nsm=132  h=4096  i=2048  : live=14    (host 14   ) warm=2   (host 2  )
+
+== Part A2: 行容量公式 -> host ring 分配（复刻 csrc/apis/mega_moe.hpp:55-63）==
+   num_max_routed_tokens=262144, 候选 BLOCK_M 扫描 -> 最大 ring=119280 (block_m=240), 对齐 1920 -> 120960
+
+== Part B: TaskInfo ABI 与语义 ==
+   sizeof=32 alignof=16 valid_m->umma=112  offsets(valid_m=20,shape_k=28)
+   is_valid(None)=0  is_shared per phase sum=2
+
+== Part C: L2KBlockDependency（L1->L2 位图依赖）==
+   arrive bits {0,1,2,3} -> mask=0xF; wait K0,K1 均返回; kNumL1BlockNs=32 perK=2
+   gen=1 & mask=0 -> wait K0 直接返回（expected_mask=0 语义）; mask=0x0
+
+== Part D/E: create_task 的 warp 协作映射 + pool block 前缀和 ==
+   total pool blocks=12 (host 12)
+   create_task 全 12 块 (expert,owner_m,valid_m) 对拍：0 不符；get_num_tokens 0 不符
+
+== Part F: locality-domain 分域枚举（双射）==
+   domain 0: 80 tasks, 期望 union 覆盖 m in [0,5) x n in [0,16) : 0 不符
+   domain 1: 80 tasks, 期望 union 覆盖 m in [0,5) x n in [16,32) : 0 不符
+   work-steal 阈值: num_m*32 >= 2*(64/2)=64  ->  num_m>=2 才偷域
+
+==== 汇总: 34 PASS / 0 FAIL ====
