@@ -3081,6 +3081,36 @@
       `grouped_layout` 从 256256 变 1256）。SM100 分支仅编译期覆盖、本机不可运行。配套博客
       `content/posts/mega-moe-108-deepgemm-gemm-scheduler`（索引页新增第 108 篇）。
 
+### P99 增量（opt-in，补齐贯穿训练/推理部署的 CUDA Graph 兼容性面）
+
+- [x] **P99-1** **DeepGEMM / DeepEP 的 CUDA Graph 兼容性面与 capture 前的 warm-up 契约**
+      （`csrc/apis/mega_mhc.hpp:26-39`、`csrc/apis/mega_gate.hpp:13-26`、
+      `csrc/apis/attention.hpp:284-301`、`csrc/runtime/runtime.hpp:67-76`、
+      `third-party/deep_jit/.../backend/cuda/kernel.hpp:116-152/169`、
+      `tests/test_mega_mhc.py:259-283/298-315`；
+      DeepEP `csrc/buffers/ep.hpp:163-170`、`csrc/utils/event.hpp:15`、
+      `deep_ep/utils/event.py:27-29`、`csrc/buffers/bucket.hpp:48-58`）。
+      第 50/52/98 篇分别拆过 `Runtime` 生命周期、`cuLaunchKernelEx` 发射层、DeepEP 编译配置面，
+      但「把算子放进 CUDA Graph 会怎样」这条贯穿部署的线索一直没被单独讲过。**主体 kernel/API
+      SM100 专属、仅分析**（三处断言都在 `arch_major==10` 闸门之后）；**发射层与真实 SM90 kernel
+      在 graph 下的 capture/replay H100 真机实测**。→ `docs/109-cuda-graph-capture.md`（真实行号核对）。
+      **三层时间轴**是根因：host 一次性初始化 / capture（把 stream 上操作录成 DAG）/ replay；
+      懒初始化落在捕获里 → 一次性工作被录进 DAG 并每次 replay 重放。三个 API 用同一模板（按
+      `CUDAStream` 懒分配一块**必须为零**的 scratch + 首次分配前断言
+      `c10::cuda::currentStreamCaptureStatusMayInitCtx() == CaptureStatus::None`，
+      torch 头 `c10/cuda/CUDAGraphsC10Utils.h:70`）。**关键对照**：cuBLASLt workspace 也是按 stream
+      懒分配，但用 `torch::empty`（无 zeroing）**故不需要断言**。发射层全部 capture-safe
+      （`cuFuncSetAttribute` 是 host 侧属性不进 DAG；cooperative/cluster/PDL 三属性 +
+      `cuLaunchKernelEx` 受支持）。H100 实测 `harness/exp_cuda_graph_capture.{py,sh,out.txt}`
+      **18 PASS / 0 FAIL**：A) 忠实 Python 复刻三 API 契约（未 warm-up 拒绝且未分配 / warm-up 后
+      capture 且复用同对象 / 新 stream 独立 / capture 内 zeroing 被重放 / `empty` capture-safe）；
+      B) 真实 SM90 `bf16_gemm_nt`（自研/默认 cuBLASLt）与 `fp8_gemm_nt`（1d2d）、`set_pdl(True)`
+      的 capture+replay 与 eager **逐位相等**（含「全新 stream 首次调用即在 capture 内」的 workspace
+      懒分配）；C) 64×`256³` bf16 eager **12.14 us/call** vs graph replay **6.77 us/call**、**1.79×**；
+      D) profiler 抓到 replay 发射的 `deep_gemm::sm90_bf16_gemm_impl<...>`。另对照 DeepEP 的
+      `EP_AVOID_RECORD_STREAM`（`record_stream` 对 graph 不感知）路线。配套博客
+      `content/posts/mega-moe-109-cuda-graph-capture`（索引页新增第 109 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3106,8 +3136,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P98 各增量完成（P15-1…P41-1、P42-1…P98-1）。**
-  本轮 P98-1：新建 `docs/108-deepgemm-gemm-scheduler.md`（+`src/gemm_scheduler.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P99 各增量完成（P15-1…P41-1、P42-1…P99-1）。**
+  本轮 P99-1：新建 `docs/109-cuda-graph-capture.md`（+`harness/exp_cuda_graph_capture.{py,sh,out.txt}`）
+  ——补齐**贯穿训练/推理部署、却一直没被单独讲过的 CUDA Graph 兼容性面与 capture 前的 warm-up 契约**。
+  要点：三层时间轴（host 一次性初始化 / capture / replay）是根因——懒初始化落在捕获里会把「一次性」
+  工作录进 DAG 并每次 replay 重放；DeepGEMM 三个 API（`get_split_barriers` `mega_mhc.hpp:26-39`、
+  `get_score_barriers` `mega_gate.hpp:13-26`、`get_sparse_mqa_logits_workspace` `attention.hpp:284-301`）
+  用同一模板（按 `CUDAStream` 懒分配**必须为零**的 scratch + 断言 `currentStreamCaptureStatusMayInitCtx
+  == CaptureStatus::None`）；**关键对照**是 cuBLASLt workspace（`runtime.hpp:67-76`）用 `torch::empty`
+  **故不需要断言**；发射层（`cuFuncSetAttribute`/cooperative/cluster/PDL/`cuLaunchKernelEx`）全部
+  capture-safe。**H100(sm90) 真机 18 PASS / 0 FAIL**：契约用忠实 Python 复刻验证（三 API 在 `arch==10`
+  闸门后、H100 不可达），真实 SM90 `bf16`（自研+cuBLASLt+PDL）/`fp8 1d2d` 的 capture+replay 逐位相等，
+  64×`256³` bf16 eager 12.14 → graph 6.77 us/call（**1.79×**），profiler 抓到 replay 真实 kernel。
+  索引页新增第 109 篇。
+  上一轮 P98-1：新建 `docs/108-deepgemm-gemm-scheduler.md`（+`src/gemm_scheduler.cu`、
   `harness/exp_gemm_scheduler.{sh,out.txt}`）——补齐**所有 GEMM / 反向 grouped GEMM 共用、
   被 15+ 次引用却从没单独读过的任务调度器** `scheduler/gemm.cuh`（314 行）。要点：`Scheduler` 一个模板
   覆盖 7 种 `GemmType`；三个非平凡点——① `get_num_1d_blocks_per_group` 编译期用代理代价在 `{8,16}`

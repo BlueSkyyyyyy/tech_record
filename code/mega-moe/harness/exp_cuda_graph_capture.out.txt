@@ -1,0 +1,54 @@
+== 环境坐标 ==
+057ca59 Public release 26/09/30 (#462)
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 cuda 13.2
+CurrentStreamCaptureStatusMayInitCtx header sha256:
+  89213765e613b7fcc6cdc71d168455616ebda2c5001dd96e805abd49445ad895 /usr/local/lib/python3.12/dist-packages/torch/include/c10/cuda/CUDAGraphsC10Utils.h
+
+== 实验 ==
+/usr/local/lib/python3.12/dist-packages/torch/cuda/graphs.py:126: UserWarning: The CUDA Graph is empty. This usually means that the graph was attempted to be captured on wrong device or stream. (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/cuda/CUDAGraph.cpp:175.)
+  super().capture_end()
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+
+========================================================================
+Part A  三个 API 的 per-stream 懒分配 + capture 前 warm-up 契约
+========================================================================
+[PASS] A1a eager 时 is_current_stream_capturing()==False
+[PASS] A1b capture 体内 is_current_stream_capturing()==True
+[PASS] A2a 未 warm-up 的 stream 在 capture 中取 scratch 被拒绝  get_split_barriers(clone): expected c10::cuda::CaptureStatus::None, warm up the stream before CUDA graph captu
+[PASS] A2b 被拒后未发生分配（alloc_count==0）
+[PASS] A3a warm-up 分配并清零 (alloc_count==1)
+[PASS] A3b warm-up 后同一 stream 可成功 capture
+[PASS] A3c 同一 stream 复用同一 scratch 对象（is）
+[PASS] A3d 新 stream 分配独立 scratch（alloc_count==2）  streams=[150597056, 150652224]
+[PASS] A4a capture 内的 zeroing 被录进 graph，replay 时重放（buf 归零）
+[PASS] A5 torch.empty 在 capture 中分配成功（无 zeroing，无需断言）
+
+========================================================================
+Part B  真实 DeepGEMM SM90 kernel 的 capture / replay
+========================================================================
+device: NVIDIA H100 80GB HBM3 | torch: 2.12.0a0+0291f960b6.nv26.04.48445190 | deep_gemm: ~/github/DeepGEMM/deep_gemm/__init__.py
+[PASS] B1b bf16_gemm_nt（自研 sm90_bf16_gemm）capture+replay 逐位相等  max|Δ|=0.000e+00
+[PASS] B2a bf16_gemm_nt（cuBLASLt 回退）capture+replay 逐位相等  max|Δ|=0.000e+00
+[PASS] B2b cuBLASLt：全新 stream 上『首次调用即在 capture 内』成功（workspace 懒分配 capture-safe）  max|Δ|=0.000e+00
+[PASS] B3 fp8_gemm_nt（sm90_fp8_gemm_1d2d）capture+replay 逐位相等  max|Δ|=0.000e+00
+[PASS] B4 set_pdl(True) 下 capture+replay 逐位相等（PDL 属性 capture-safe）  max|Δ|=0.000e+00
+[PASS] B5 两 stream 各自的 graph replay 结果一致
+
+========================================================================
+Part C  小 GEMM ×N：eager 连发 vs graph replay
+========================================================================
+  N=64 次 256x256x256 bf16：eager 776.7us/iter（12.14us/call） | graph 433.1us/iter（6.77us/call） | 加速 1.79x
+[PASS] C1 graph replay 比 eager 连发快  1.79x
+
+========================================================================
+Part D  profiler：graph replay 发射的 kernel 名
+========================================================================
+    64x  void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 0u, 256u, 
+[PASS] D1 profiler 抓到 graph 内真实 GEMM kernel
+
+========================================================================
+汇总
+========================================================================
+PASS=18  FAIL=0
