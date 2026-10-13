@@ -2931,6 +2931,30 @@
       **与 `docs/05`（v1 一页纸）、`docs/22`（源码侧手册）、`docs/11`–`docs/13`（实验侧三手册）并列，
       本文是整专题第二代总纲。**
 
+### P110 生产路径 task 目录源码走读（`docs/24-mpk-task-catalog.md`）
+
+- [x] **P110-1** 补齐 `docs/14`（P100-1）**§7 明留的尾巴**——「未逐行走读全部 95 个任务分支」：
+      把 `src/kernel/graph.cc` 的 `register_task` 95 分支大表**打开**，给出 MPK 生产路径的
+      **`TaskType` 能力边界面**。见 `docs/24-mpk-task-catalog.md`（快照 `mirage-project/mirage`
+      分支 `mpk` commit `f9eb70c`，与 `docs/06`–`docs/22` 同快照；**纯源码走读（资料分析），本轮无
+      新实验**）。headline——**`enum TaskType`（`runtime_header.h:87-225`）按「硬件代际 / 模型家族」
+      切成预留 ID 块**：0/10 控制标记、101-121 通用 compute、150-198 Hopper、200-204 scheduler、
+      230-299 SM100（最多，55 条）、300-349 多卡 NVSHMEM、350-399 Inkling、400-449 GLM、450-499
+      GPT-OSS；块间留洞（234/237-247/250 等）是「只增不改」的后果——`TaskType` 进 `TaskDesc`/
+      序列化（`docs/06` §2），删号不能回收。§2 列全 116 条命名条目（12 个 `*_BEGIN/_END` 占位符）
+      + 每条的 `register_task` 名字与 `(num_inputs, num_outputs)`。§3 精确计数：**96 个
+      `name == "..."` 字符串 / 95 处 `task_config[op]=` 赋值 → 92 个不同 `TaskType`**（`docs/14`
+      §3.2 的「95 分支」被坐实），4 组「多 name 共用一 Type」（`silu_mul`/`moe_silu_mul`、
+      `sampling_sm100`/`_reduce_`、`quantize_fp8_sm100`/`_f32scale_`、`linear_with_residual_sm100`
+      `||` `linear_with_bias_sm100`——源码注释自陈 *"two variants of one task type"*）。§4 求差得
+      **只有 3 个可执行 `TaskType` 无前端生产者**（`TASK_ATTENTION_2`/`TASK_PAGED_ATTENTION_2` 遗留、
+      `TASK_ALLREDUCE` 注释 *"will be removed soon"*，后者旁证：`allreduce_layer` 实走
+      `nvshmem_*`+`reduction`）；`TASK_ATTN_SM100` **确由 `paged_attention_sm100` 登记**（抽 7/8 输入
+      由 `params[11]>0` 定）。§6 与论文 §4.1（自动路径）、`docs/02`（DeepGEMM MoE W13/W2）、
+      `docs/17`（两种 AllReduce）、`docs/23` §5「少而重」对照。判据不变（生产路径的 task 定义）。
+      配套博客 post `mega-kernel-25-mpk-task-catalog`（weight 26）并更新 `mega-kernel-00-index`
+      第 25 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3089,10 +3113,26 @@
   `TensorDimConstraints const &constraints = {}`（`search.h:90-91`），但函数体只用
   `subexpr_to_final_expr` 查 egg 子表达式、**完全没用 `constraints`**（`search.cc:504-519`）。
   代数的（e-graph）与几何的（range）两路剪枝当前只有前者生效。
+- **`TaskType` 的三个计数口径别混用**（P110-1/`docs/24` §7）：`enum TaskType` 是 **116 条命名条目**
+  （含 12 个 `*_BEGIN/_END` 范围占位符 + 控制/scheduler/TMA 标记），`register_task` 是 **95 处
+  `task_config[op]=` 赋值 / 96 个 `name == "..."` 字符串**（一对 `||` 合并分支），二者求交得
+  **92 个被登记的 `TaskType`**。`docs/14` §3.2 说的「95 分支」指赋值数，不是枚举数；`TASK_ATTN_SM100`
+  **由 `paged_attention_sm100` 登记**（不是死码），真正的无生产者可执行 `TaskType` 只有 3 个
+  （`TASK_ATTENTION_2`/`TASK_PAGED_ATTENTION_2`/`TASK_ALLREDUCE`）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P109-1 完成（1/1）**。把 P0–P108 的 100+ 增量收口成**第二代总纲**
+- 当前进度：**P110-1 完成（1/1）**。补齐 `docs/14` §7 尾巴「未逐行走读全部 95 个任务分支」——把
+  MPK 生产路径的 **`TaskType` 目录**打开：见 `docs/24-mpk-task-catalog.md`（快照 `f9eb70c`，
+  **纯源码走读、无新实验**）。headline——**`enum TaskType` 按硬件代际/模型家族切成预留 ID 块**
+  （0/10 控制、101-121 通用、150-198 Hopper、200-204 scheduler、230-299 SM100、300-349 多卡、
+  350-399 Inkling、400-449 GLM、450-499 GPT-OSS），块间留洞=只增不改；§2 列全 116 条命名条目
+  （含 12 个范围占位符），§3 坐实 `docs/14` 的「95 分支」= **96 name / 95 赋值 → 92 个 `TaskType`**
+  （4 组多 name 共用一 Type），§4 求差得**仅 3 个可执行 `TaskType` 无前端生产者**
+  （`TASK_ATTENTION_2`/`TASK_PAGED_ATTENTION_2`/`TASK_ALLREDUCE`）；并坐实 `TASK_ATTN_SM100` 由
+  `paged_attention_sm100` 登记（非死码）。配套博客 post
+  `mega-kernel-25-mpk-task-catalog`（weight 26）并更新 `mega-kernel-00-index` 第 25 项。
+- 此前：**P109-1 完成（1/1）**。把 P0–P108 的 100+ 增量收口成**第二代总纲**
   `docs/23-megakernel-capstone.md`（补齐 `docs/05` 只到 P6、源码侧/实验侧各有手册但**无整专题总纲**的
   缺口）。headline——**五层结论地图 + 六张实测校准表 + 14 条工程坑 + 适用边界 v2**；关键修正
   「**C1/C2/C4/C5 只在运行层拿到**」（`docs/22` §8）；损失三的 ncu 字节证据（= Q）、损失一单 kernel 内
