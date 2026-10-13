@@ -4804,6 +4804,31 @@
       融合 kernel 本体 SM100 专属、**仅分析**。→ `docs/167-mega-moe-single-kernel-prototype.md`。
       配套博客 `content/posts/mega-moe-167-single-kernel-prototype`（索引页新增第 167 篇）。
 
+### P159 增量（opt-in，补齐「反向图里的共享专家」+「前向+反向同框的一个训练步成本账」）
+
+- [x] **P159-1** **MoE 一个训练步（前向 + 反向）的分段成本账 + 共享专家反向的同图闭环**
+      （`csrc/apis/gemm.hpp:181/373/55-76/383/403`、`csrc/apis/mega_moe.hpp:52-53/90/211-213`、
+      `scheduler/mega_moe.cuh:181-185`、`sm100_fp8_fp4_mega_moe.cuh:1068/1160-1212`）。
+      前面第 14 篇（P4-4）的反向图**只有路由分支**、第 168 篇（P158-1）把共享专家接进**前向**却没接反向；
+      且前向/反向从没放进**同一次计时**。本篇补两格：
+      ① **共享专家反向 = 「组数 E=1」的同一对 grouped GEMM**——wgrad 走
+      `k_grouped_fp8_gemm_nt_contiguous`（`gemm.hpp:373`，`check_k_grouped_args :55-76` 组数 1 合法、
+      强制 `recipe=(1,1,128) :383`、`c` 必填 `:403`）、dgrad 走 `m_grouped_fp8_fp4_gemm_nt_contiguous`
+      （`:181`，D 必 bf16 `:209`、contiguous `grouped_layout.numel()==m :217-218`），B 是 `W2sᵀ`/`W1sᵀ`；
+      与路由四 GEMM **形状角色逐项同形**（wgrad M=H/N=2S/K=token、dgrad M=token/N/K 固定）。
+      ② **一个训练步的分段账**：把 4 条前向 GEMM（路由 L1/L2 + 共享 L1/L2 dense）+ 8 条反向 GEMM
+      （路由/共享各 dgrad+wgrad×2）+ SwiGLU/combine/scatter/激活量化逐段独立计时。
+      **H100(sm90) 真机** `harness/exp_moe_train_step.{py,sh,out.txt}`：
+      **Part A** 共享反向四路 vs 反量化参考 **~3e-4**（kernel+布局）、vs fp32 autograd dW2s 3.2–3.4e-2 /
+      dW1s 4.9–5.1e-2 / dxs 5.1e-2、**cos ≥ 0.9987**（FP8 地板，与路由侧同量级）；
+      **Part B** DeepSeek 量级：T=2048 一个训练步 **19.29ms**（前向 31.6% / 反向 68.4%、GEMM 49.8%），
+      T=4096 **31.40ms**（35.8% / 64.2%、GEMM 42.4%）；**wgrad 最贵**（路由 wgrad L1+L2=5163us 占反向 39%、
+      TFLOPS 仅 68–71→T 翻倍 127–133，坐实第 15/135 篇访存受限）；**共享反向仅占 ~13%**（单组大 K，
+      146–184 TFLOPS，效率高于路由 wgrad）；**激活量化 torch 参考实现占 ~30%**（生产融进 L1 epilogue，
+      `kernel:1160-1212`，第 168 篇注记/第 163 篇官方算子 122us），扣掉后 T=2048 13.50ms、T=4096 20.43ms。
+      主 kernel 融合/重叠 SM100 专属、**仅分析**。→ `docs/169-moe-train-step-ledger.md`。
+      配套博客 `content/posts/mega-moe-169-moe-train-step-ledger`（索引页新增第 169 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4836,8 +4861,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P158 各增量完成（P15-1…P41-1、P42-1…P158-1）。**
-  本轮 P158-1：新建 `docs/168-mega-moe-forward-shared.md` + `harness/exp_mega_moe_forward_shared.{py,sh,out.txt}`
+- 当前进度：**P0~P14 全部完成；P15~P159 各增量完成（P15-1…P41-1、P42-1…P159-1）。**
+  本轮 P159-1：新建 `docs/169-moe-train-step-ledger.md` + `harness/exp_moe_train_step.{py,sh,out.txt}`
+  ——补两格：① **共享专家反向 = 组数 E=1 的同一对 grouped GEMM**（`k_grouped` wgrad / `m_grouped` dgrad，
+  与路由四 GEMM 形状角色逐项同形；`gemm.hpp:373/181`、`check_k_grouped_args:55-76`、`mega_moe.hpp:52-53/90`）；
+  ② **一个训练步（前向+反向）的分段成本账**（前向 4 GEMM + 反向 8 GEMM + SwiGLU/combine/量化逐段计时）。
+  **H100(sm90) 真机**：共享反向四路 vs 反量化参考 ~3e-4、vs autograd 2.5e-2~5.1e-2/cos≥0.9987；DeepSeek 量级
+  T=2048 一个训练步 **19.29ms**（前向 31.6%/反向 68.4%、GEMM 49.8%）、T=4096 **31.40ms**（35.8%/64.2%、GEMM 42.4%）；
+  **wgrad 最贵**（占反向 39%、TFLOPS 68–133）、**共享反向仅 ~13%**（单组大 K 更高效）、**激活量化 torch 参考实现
+  占 ~30%**（生产融进 epilogue），扣掉后 13.50ms/20.43ms。主 kernel 融合 SM100 专属、仅分析。索引页新增第 169 篇。
+  上一轮 P158-1：新建 `docs/168-mega-moe-forward-shared.md` + `harness/exp_mega_moe_forward_shared.{py,sh,out.txt}`
   ——把第 99 篇（P89-1，路由分支 H100 复刻）与第 44 篇（P34-1，共享专家语义 + bf16 数值）两条线**合到同一张
   H100 前向图**上：共享走 **dense FP8** `fp8_gemm_nt`、路由走 `m_grouped_fp8_gemm_nt_contiguous`、combine 把
   共享项按 `kNumTopk` 槽 fp32 相加一次无权重。**三条语义真实行号**：`scheduler:181-185`（L1 沿 N / L2 沿 K）、
@@ -6607,9 +6640,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P158 已完成（最新 **P158-1 把路由 + 共享专家 + combine 合成同一张 H100 前向数值闭环**：
-  共享走 dense FP8、路由走 grouped FP8，端到端 6.28–6.34e-2、共享占整层 FLOP 31.4%、吞吐与路由同级，
-  反例坐实「共享项只加一次无权重」。详见 `docs/168`。索引页新增第 168 篇）。
+- **下一步**：P0~P159 已完成（最新 **P159-1 补齐「反向图里的共享专家」并给出「一个训练步（前向+反向）」
+  的分段成本账**：共享反向=组数 E=1 的同一对 grouped GEMM，四路 vs 反量化参考 ~3e-4；一个训练步
+  T=2048 19.29ms / T=4096 31.40ms，反向占 ~2/3、wgrad 最贵、共享反向 ~13%、激活量化参考实现 ~30%。
+  详见 `docs/169`。索引页新增第 169 篇）。上一轮 P158-1 把路由 + 共享专家 + combine 合成同一张 H100
+  前向数值闭环（`docs/168`）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
   （需 NCCL≥2.32.3，见「阻塞」）；② 把 indexer 反向（连续/分页/稀疏/分页稀疏）**端到端接进真实前向 kernel**
   （需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体定点复核；③ **已由 P157-1 完成**：单进程
