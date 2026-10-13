@@ -176,7 +176,9 @@ B3（`intra`，`docs/06` §6.7 P6-5）**均已做成最小可运行 Triton kerne
 FlashKDA K1 当场写的 workspace `kGTotal` 对到 1.6e-5~8.1e-5），四条支路全覆盖；且 P6-8（`06` §6.10）
 已把整条链**架在 FlashKDA 自己的 K1 workspace 上端到端跑通**（六项梯度对 autograd 最坏 6.4e-3）。
 剩余的是把最小 kernel 工程化为 CUTLASS/TMA + warp-specialization 的目标卡 CUDA（复用 K1 workspace、
-`CHUNK=16`），属更大工程，留待有明确需求时再做。**B1 的 CHUNK=16 粒度损失**已由 P7-10 通过
+`CHUNK=16`）；**该工程化已由 P7-13…P7-71 完成并收口**——B1 做成 K2 形状手写 CUDA（TMA 输入 + TMA store +
+`fence.proxy.async`），B2/B3 做成 K2 形状 CUDA 六段生产核（逐位无损、但整核非净赢），最终部署取
+`cf`（`dAv→CUDA-B1→融合 Triton B2/B3→反向 cumsum`），见文末「K2 形状 CUDA B2 反向终局」段。**B1 的 CHUNK=16 粒度损失**已由 P7-10 通过
 「从 16-chunk workspace 免重算恢复 64-chunk 操作数」消掉（B1@64 快 2.1–2.3×，但 torch 原型恢复 ~ms 是
 硬伤）；**P7-11**（`docs/07` §14）把该恢复融成**单个 Triton pass**（对角块复用落盘 $P16$、只新算 6 个
 非对角 $A_{ij}$ + 4×4 块前代合并 + $w64$），kernel-only 降到 **41–953 µs（ieee）/ 16–492 µs（tf32）**、
@@ -339,7 +341,9 @@ vs kernel；组装链 B1 一直是 Triton）。给 `b1_tma_probe.cu` 补 `dht`�
 下 CUDA-B1 vs Triton-B1 `dh/dv2/dh0` `max_abs` 1.4e-5~3.7e-4（=1 bf16 ulp）。**链级正确性**：
 CUDA-B1 链（`BT=16`、`NSTAGE=4`）vs FLA 六项最坏 `dq 3.42e-3…dh0 9.37e-3`，与 Triton-B1 链同阶
 （`dq`/`dh0` 逐位相同）。**链级 wall**：CUDA-B1 链 0.94–1.03× Triton-B1（`B8T2048H8` 快 6%），
-不拖慢整链；`T250H3` 的 1.65× 回归＝launch 每次重编码张量图的 host 税（**待验证**）。**单核**：
+不拖慢整链；~~`T250H3` 的 1.65× 回归＝launch 每次重编码张量图的 host 税（**待验证**）~~——
+**P7-40（`docs/07` §43）已撤回**：加 `-DB1T_MAPCACHE`（编码一次复用）后 cache 只省 0.15–0.75µs、
+空闲卡 `T250H3` 实为 **1.049×**，1.65× 不可复现（§42 的 Triton 基线抽到低离群）。**单核**：
 部署 `BT=16` 下小 shape CUDA 1.05–1.63×、大 shape **0.53×**（1.9× 快）——「手写 CUDA 是否比
 Triton 快」**依赖 shape**。至此目标卡 CUDA 反向**第一次端到端可跑**（B1=CUDA、其余 Triton）。
 
@@ -354,3 +358,49 @@ P7-44 把「放弃 `tl.dot` 手写 SIMT」读法**证伪**（慢同 op Triton �
 0.73×、`no_all`（大操作数不读）**170µs=0.16×**；ncu：`full` DRAM 55.9% SOL、tensor 6.21%、issue 0.14/cyc、
 1 block/SM。**结论**：头寸＝**大操作数（h/dh）常驻寄存器→spill/发射饥饿**，非纯字节、非占用率；`h/dh` bf16
 非独立杠杆；K2 形状端口首位动作＝**大操作数出寄存器保活、只留 warp 分片小累加器**。
+
+**P7-46…P7-71（`docs/07` §49–§74）——K2 形状 CUDA B2 反向的「可行 → 贵 → 收口」全过程**：这一整段把
+§47/§48 定位出的「融合 B2/B3 有 ~1.9× 延迟头寸、Triton 够不着」真正做成手写 CUDA，并诚实收口为「**结构
+闭合、逐位无损，但整核仍比融合 Triton 慢 ~1.7×**」。链条：
+
+- **§49（P7-46）首个正面**：保留 `mma.sync.m16n8k8.tf32` + `cp.async` 流式操作数 + 寄存器只留每 warp `[16,16]`
+  小累加器的 K2 形状 B2 GEMM 核，`B8T2048H8` **CUDA 517µs vs identical-op Triton 554µs = 0.93×**（本专题
+  **第一个跑赢同 op Triton 的反向 CUDA 核**，离 §47 地板 442µs 1.17×）；regs **226→70**、occ 12.4→24.6%、
+  DRAM 79.9→**84.6% SOL**。**§47 的「放弃 `tl.dot`、手写 SIMT fp32」读法在同轮被证伪**（慢同 op Triton 3–5×、
+  L1/TEX 89.6% bound），故端口**必须保留 tensor core**——SIMT vs tensor 判据是「**算术强度 op/word**」。
+- **§50–§54（P7-47…51）把核做成 K2 形状的正确形态**：bank conflict **8.81M 的 ~97% 来自 `dgk` 列归约**
+  （`-DB2M_DGKCF` 归零，但部署 shape 不兑现）；L2 **+35%** 拆成 **`cp.async .BYPASS` 读路径（+0.64GB）
+  \+ 逐标量 32-bit store（+0.13GB）**，**TMA 输入**把读放大整条消掉且**净赢 ~5%**（`tma_vecst` 比 identical-op
+  Triton 快 **1.12×**、贴 DRAM 地板 1.11×）；`TMA+BVK=64` 只能走 **NAT 个 128B swizzle atom** 拆分
+  （`SWIZZLE_NONE` 2.5–3× 不可用），`atom64/base32` **0.853–0.974×**。**向量化 store 一律做**（免费逐位、小 shape 10%+）。
+- **§55–§60（P7-52…57）六段非 GEMM 全搬进 CUDA**：`dv2`(tf32)/`dkgb`(tf32)/`dApre`(fp32 **5.31e-7**，但贵
+  1.49–1.84×，收缩维是全 `V`/`K` 的标量 FMA)/`dA` sandwich(近免费 1.02–1.10×，**并更正 §57 的 `dw` 符号**)/
+  `db`(fp32 1.3–1.8e-7，+2~13%)/门控链(`dq` 逐位、`dg` fp32 序 2.2e-7，**最贵 +30~38%**)。
+  **至此 B2 六项 `dq/dk/dv2/db/dg/dA` 全在 CUDA**。
+- **§61（P7-58）把门控「`q/k/g` 合流进 smem」证伪**：非 TMA 版常驻三张 `[BT,KD]` tile 把 smem 顶过占用率
+  阈值（2→1 block/SM）→ 反慢 **1.11–1.51×**；TMA 版 global-load sector 确 **−34%** 但本核 **DRAM/L2 双 bound**、
+  `Duration +8.7%`——**散读被 L2 吸收、不进端到端**（ncu 计数当成本前须做受控对拍）。
+- **§62–§64（P7-59…61）六段并成单生产 launch**：`-DB2M_PROD`（一次 launch 摊掉两份重复 GEMM 核，**−47~53%**）、
+  `-DB2M_HDW`（同 CTA `dw` 交接，`dw` 从 ABI 消失；隔离段快 7–9% 但生产核 **wash**——原往返被流水藏住，
+  交接反成串行尾巴）、B3 对角 intra 折进 K2 形状（`b3_intra_probe.cu`，比 Triton MMA B3 快 **1.3–1.45×**）。
+  **K2 形状 CUDA 化在结构上闭合**（中间量要么本就核内、要么可核内）。
+- **§65–§68（P7-62…65）折进 vs 多核的诚实账**：`-DB2M_INTRA`（B3 intra 折进单 launch）**逐位无损但大 shape
+  反慢 1.04–1.06×**、小 shape 0.88–0.89×（独立 B3 的工作量在 executor 层被更好流水，折进成关键路径尾部串行尾巴）；
+  生产核落完整链**正确**（`dv/dh0` 与最优链 `cf` 逐位）但**整核比融合 Triton B2/B3 慢 1.27–1.73×**；
+  逐段归因（`-DB2M_LEVEL=k`）六段非 GEMM 共 **651.6µs**、**OUT+DA+GATE 占 83%**——是**交付物 IO + 标量数学**，
+  不是可再融合掉的中间量（重新融回寄存器上界仅 ~40µs）。
+- **§69–§74（P7-66…71）研究形态内部收尾**：`mma.sync` 化 DA（段内边际 185→**83µs = 0.45×**，整核仅
+  0.93–0.95×）；TMA×DAMMA（`mma_tma/mma` 0.978–1.006，**TMA 的生产代价原本就是「标量 DA 的 +4.85M bank
+  conflict」**，随 DA 实现切换）；DAMMA 进链（六项逐位/≤8e-6、链级快 1–2.5%）；`dA/dApre` 的 `st2` store
+  （0.93–0.96×，**相邻列扇区已最小、向量化只砍指令数**）；`-DB2M_VECST` 落整链并与 TMA/DAMMA 三向交叉
+  （**四对孪生六项全逐位 `max_abs=0`**、链级 0.968–1.003×）。**方法学**：同叫「标量 store」先看线程→地址映射
+  （是否连续）再看 bound 类型；「段内砍 2×」与「整核砍 2×」是两回事（要乘段占比）。
+
+**最终部署建议（`docs/07` §45/§67/§74）**：目标卡 CUDA 反向默认 ＝
+**`dAv`(Triton) → **CUDA-B1**（K2 形状、TMA store、`NSTAGE≥4`、`BT=16`）→ **融合 Triton B2/B3** → **反向 cumsum**
+（代号 `cf`）：
+整链反向 `dev/FLA` **0.31–0.37×**（FLA 反向还额外重算了前向状态）、两优化**可加**（`cf/cu` 0.67–0.71×）、
+对全 Triton 反向链 `cf/fu` 大 shape **0.91×**（小 shape 因 B1 依 shape 交叉 1.05–1.16×，故 **B1 按 grid 切换**）。
+**CUDA B2 生产核**（六段单 launch）**正确、逐位可核验，但在部署链上不是净赢（~1.6–1.7×），不作为默认**——
+它每一段都「CUDA 赢 Triton」，六段叠进同一个 1 block/SM、tensor 3%、发射受限的核后，反被 Triton「中间量留寄存器
+\+ 融进一张 `tl.dot` 图」打败。**核心判据**：段级赢**不能外推**到整核，凡「把独立核合起来」必须以**整链 `dev`** 收口。
