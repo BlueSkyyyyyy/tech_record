@@ -51,6 +51,17 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 #ifndef B2M_NS
 #define B2M_NS 2
 #endif
+// P7-47 diagnostics:
+//   B2M_NODGK : skip the `dgk` column reduction entirely (dgk stored as 0) -- isolates
+//               whether the 8.81M smem bank conflicts live in the dgk loop or in the
+//               direct mma-fragment reads (§49.4.3).
+//   B2M_DGKCF : conflict-free `dgk` reduction -- 8 kcols per warp instruction (see below).
+#ifndef B2M_NODGK
+#define B2M_NODGK 0
+#endif
+#ifndef B2M_DGKCF
+#define B2M_DGKCF 0
+#endif
 constexpr int BVK = B2M_BVK;   // V-tile (contraction) depth staged per pipeline stage
 constexpr int NS  = B2M_NS;    // pipeline stages
 constexpr int BVP = BVK + 4;   // padded row stride (16B keeps 4-float cp.async aligned)
@@ -134,6 +145,7 @@ b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
         #pragma unroll
         for (int x = 0; x < 4; ++x) { accq[nt][x] = 0.f; acck[nt][x] = 0.f; accw[nt][x] = 0.f; }
     float gpart = 0.f;
+    float gpart1 = 0.f;   // B2M_DGKCF second kcol half (kcol = warp*BW + 8 + c)
 
     const int nvt = VD / BVK;
     for (int s = 0; s < NS - 1; ++s) {
@@ -180,7 +192,25 @@ b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
                 mma8(accw[nt], aw, bh, accw[nt]);
             }
         }
-        // dgk column reduction: lane l handles column warp*BW + (l&15), split v by l>>4
+#if !B2M_NODGK
+  #if B2M_DGKCF
+        // Conflict-free `dgk` column reduction.  smem word addr = kcol*BVP + vv with
+        // BVP=36 -> bank = (4*kcol + vv) & 31; 16 consecutive kcols therefore alias as
+        // (kcol, kcol+8).  Use only 8 kcols per instruction: c = l&7 (kcol low bits),
+        // s = l>>3 (the vv subclass), so banks = 4*c + s cover 0..31 exactly.
+        {
+            const int c = l & 7, s = l >> 3;
+            #pragma unroll
+            for (int ph = 0; ph < 2; ++ph) {
+                const int kcol = warp * BW + ph * 8 + c;
+                float p = 0.f;
+                for (int vv = s; vv < BVK; vv += 4)
+                    p += st->h[kcol][vv] * st->dh[kcol][vv];
+                if (ph == 0) gpart += p; else gpart1 += p;
+            }
+        }
+  #else
+        // baseline dgk column reduction: lane l handles column warp*BW + (l&15), split v by l>>4
         {
             const int kcol = warp * BW + (l & 15);
             float p = 0.f;
@@ -188,6 +218,8 @@ b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
                 p += st->h[kcol][vv] * st->dh[kcol][vv];
             gpart += p;
         }
+  #endif
+#endif
         __syncthreads();
     }
 
@@ -210,11 +242,25 @@ b2mma_kernel(const float* __restrict__ v, const float* __restrict__ vn,
             dw[o1] = accw[nt][2]; dw[o1 + 1] = accw[nt][3];
         }
     }
+  #if B2M_DGKCF
+    // reduce over s in {0,1,2,3} = lanes {l, l^8, l^16, l^24}; lane l<8 then holds both
+    // halves' sums for kcol = warp*BW + l and warp*BW + 8 + l.
+    gpart  += __shfl_xor_sync(0xffffffffu, gpart,  8);
+    gpart1 += __shfl_xor_sync(0xffffffffu, gpart1, 8);
+    gpart  += __shfl_xor_sync(0xffffffffu, gpart,  16);
+    gpart1 += __shfl_xor_sync(0xffffffffu, gpart1, 16);
+    if (l < 8) {
+        const int64_t base = ((int64_t)(n * NT + i_t) * H + hh) * KD + warp * BW + l;
+        dgk[base] = gpart;
+        dgk[base + 8] = gpart1;
+    }
+  #else
     gpart += __shfl_xor_sync(0xffffffffu, gpart, 16);
     if (l < 16) {
         const int kcol = warp * BW + l;
         dgk[((int64_t)(n * NT + i_t) * H + hh) * KD + kcol] = gpart;
     }
+  #endif
 }
 
 extern "C" int b2mma_launch(const void* v, const void* vn, const void* h, const void* dh,

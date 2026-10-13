@@ -850,8 +850,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-46 补测**。
-  - P7-46（本轮）：**「K2 形状 CUDA 化」第二刀＝B2 GEMM 核保留 `mma.sync` + 流式操作数，首次正面**。
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-47 补测**。
+  - P7-47（本轮）：**更正 §49.4.3 的 bank conflict 归因：B2 K2-mma 核那 8.81M smem bank conflict
+    ≈97% 来自 `dgk` 列归约（16-`kcol` 别名），不是 mma 片段读**。受控消融给 `b2_mma_probe.cu` 加
+    `-DB2M_NODGK`（删整段 `dgk`）与 `-DB2M_DGKCF`（无冲突映射：一条指令只用 8 个 `kcol`，`c=l&7`/`s=l>>3`
+    使 bank `4c+s` 铺满 `0..31`，两半 `ph=0/1` 覆盖 `kcol` 0–7/8–15，`__shfl_xor` 归约）。新增
+    `harness/check_bwd_b2_dgk.py`（`check_bwd_b2_dgk.out.txt`，空闲卡）+ `harness/probe_b2_dgk_ncu.sh`
+    （`probe_b2_dgk_ncu.out.txt`）+ `docs/07` §50。**Part A**：`nodgk`/`dgkcf` 的 `dq/dk/dw` 与 `base`
+    **逐位相同**（受控）；`dgkcf` 的 `dgk` vs torch 仍 **1.31e-7**（与 base 同）。**Part B/ncu**（`B8T2048H8`）：
+    冲突 **8.81M→0.29M/0.33M（−96%）**、shared wavefronts 42.65M→25.45M/34.09M；但 **Duration
+    519.9/518.5/520.1µs、L2 字节三变体全 3.03GB**——部署主 shape **DRAM 84.6%/L2 88.7% bound，零兑现**。
+    **小 shape**（延迟主导）`nodgk` 省 **20–23%**、`dgkcf` 省 **3–4%**（残差是循环本身）。**结论**：更正归因
+    （fragment 读因 `BVP=36` 的 `4g+t` 展开本就无冲突）；`-DB2M_DGKCF` 免费位级安全但只值小 shape；§49.4.3
+    的「L2 +35%（3.03 vs 2.24GB）」与 `dgk`/冲突**无关**，是下一条独立待查线索（`cp.async` 粒度/`h/dh` L2）。
+  - P7-46（上轮）：**「K2 形状 CUDA 化」第二刀＝B2 GEMM 核保留 `mma.sync` + 流式操作数，首次正面**。
     在**保留 tensor core** 前提下把 B2 的 V-归约 GEMM 核写成 K2 形状（`h/dh/do/vn/dv` 按 V 分块经
     `cp.async` 流式喂 smem、寄存器只留每 warp `[16,16]` 小累加器）。新增 `harness/b2_mma_probe.cu`
     （`b2mma_launch`，`mma.sync.m16n8k8.tf32`）+ `harness/check_bwd_b2_mma.py`（`..._b2_mma.out.txt`）+
@@ -1489,7 +1501,13 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-46 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-47 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-47（`docs/07` §50）更正 §49.4.3 的 bank conflict 归因：8.81M 冲突 ≈97% 来自 `dgk` 列归约**（16-`kcol`
+    别名），不是 mma 片段读。受控消融（`-DB2M_NODGK` 删 `dgk` / `-DB2M_DGKCF` 无冲突映射）：`dq/dk/dw` 逐位，
+    冲突 **8.81M→0.29M/0.33M**、wavefronts 42.65M→25.45M/34.09M；但部署主 shape **Duration/L2 字节纹丝不动**
+    （DRAM 84.6%/L2 88.7% bound），小 shape `dgkcf` 省 **3–4%**、`nodgk` 省 20–23%。新增
+    `harness/check_bwd_b2_dgk.py`（`..._b2_dgk.out.txt`）+ `harness/probe_b2_dgk_ncu.sh`（`..._b2_dgk_ncu.out.txt`）。
+    **新待查线索**：§49.4.3 的 L2 +35%（3.03 vs 2.24GB）与 `dgk`/冲突无关，须直接定位 `cp.async` 粒度/`h/dh` L2 复用。
   - **P7-46（`docs/07` §49）「K2 形状 CUDA 化」第二刀＝B2 GEMM 核保留 `mma.sync` + 流式操作数，首次正面**：
     保留 tensor core，把 `h/dh/do/vn/dv` 按 V 分块经 `cp.async` 流式喂 smem、寄存器只留每 warp `[16,16]`
     小累加器。`B8T2048H8` **517µs vs identical-op Triton 554µs＝0.93×**（离地板 1.17×、Triton 1.25×）、

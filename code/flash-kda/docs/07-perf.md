@@ -5057,3 +5057,81 @@ K2 形状（`b2_mma_probe.cu`）：
   （§48.4 已证 `h/dh` bf16 在本结构下非独立杠杆）。
 - **下一步（真正工程化）**：把本核作为 GEMM 段基座，向其中补非 GEMM 段（同 CTA 内交接 `dA`/`dv2`/`db`），
   并把 L2 流量/bank conflict 收口；同时验证小 shape 是否值得单独维护一个短核。
+
+## 50. B2 K2-mma 核那 8.81M bank conflict 是谁：**不是 mma 片段读，是 `dgk` 列归约**（P7-47）
+
+§49.4.3 把 K2-mma CUDA B2 核的 `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld = 8.81M`
+归因到「直接从 smem 读 mma 片段（tf32 无 `ldmatrix`）」，并把它列为 §49.6 的下一杠杆之一。本轮用**受控消融**
+把这个归因证伪并给出正确来源与修复。
+
+证据：`harness/b2_mma_probe.cu`（新增 `-DB2M_NODGK` / `-DB2M_DGKCF`）+ `harness/check_bwd_b2_dgk.py`
+（`harness/check_bwd_b2_dgk.out.txt`，空闲卡）+ `harness/probe_b2_dgk_ncu.sh`（`harness/probe_b2_dgk_ncu.out.txt`）。
+
+### 50.1 受控消融：`dq/dk/dw` 逐位不动，只动 `dgk`
+
+三个变体共用同一份操作数、同一套 mma（`dq/dk/dw` 三条 V-归约 GEMM **一字不改**）：
+
+- `base`：§49 原核。
+- `nodgk`：**整段删掉** `dgk` 列归约（`b2_mma_probe.cu:199-209`；输出置 0，纯诊断）。
+- `dgkcf`：把 `dgk` 列归约改成**无冲突映射**（`b2_mma_probe.cu:199-217`）。
+
+`dgkcf` 的映射依据：smem word 地址 = `kcol*BVP + vv`、`BVP=36≡4 (mod 32)`，故 bank = `(4·kcol + vv) & 31`；
+**16 个连续 `kcol` 会以 `(kcol, kcol+8)` 两两别名**（`4·kcol` 与 `4·(kcol+8)` 相差 32）。原实现让 lane
+`l` 取 `kcol = warp*16 + (l&15)` 正好踩中这个别名（2-way）。改法：**一条指令只用 8 个 `kcol`**
+（`c = l&7` 作 `kcol` 低位、`s = l>>3∈{0,1,2,3}` 作 `vv` 子类），则 bank = `4·c + s` 恰好铺满 `0..31`，
+**与 `vv` 步进无关**；两半（`ph=0/1`）分别覆盖 `kcol` 的 `0..7` / `8..15`，最后对 `s` 方向做两次
+`__shfl_xor` 归约（lane `l<8` 持有两半之和）。工作量不变（每 lane 仍 32 次 smem load），只是不再重放。
+
+### 50.2 Part A — 受控消融正确性
+
+四组 shape（含非整除 `T=250`）：`nodgk` / `dgkcf` 的 **`dq/dk/dw` 与 `base` 逐位相同（`max_abs=0`）**——
+证明消融是受控的（只动了 `dgk`）。`dgkcf` 的 `dgk` vs torch fp32 **`max_rel=1.31e-7~1.63e-7`**，与 `base`
+**完全相同**（`base` 也是 `1.31e-7`）；两者互差 `max_abs=1.9e-6`（fp32 加法序，落在近零元素上）。
+
+### 50.3 Part B / `ncu` — 冲突 96% 来自 `dgk`，且**在部署 shape 上不值得换**
+
+`B8 T2048 H8`、`ncu`（同一份操作数）：
+
+| 变体 | bank conflicts | shared wavefronts | conflicts/ wavefronts | `mio_throttle` | regs | Duration | DRAM SOL | L2 SOL | L2 字节 |
+|---|---|---|---|---|---|---|---|---|---|
+| `base` | **8,807,285** | 42,650,502 | 20.6% | 2.37 | 70 | 519.9 µs | 84.6% | 88.8% | 3.03 GB |
+| `nodgk` | **285,832** | 25,454,248 | 1.1% | 2.21 | 47 | 518.5 µs | 84.9% | 89.0% | 3.03 GB |
+| `dgkcf` | **329,787** | 34,093,171 | 1.0% | 1.93 | 62 | 520.1 µs | 84.6% | 88.7% | 3.03 GB |
+
+读法：
+
+1. **归因证伪 + 定位**：删掉 `dgk` 后冲突从 **8.81M 掉到 0.29M（−96.7%）**，`dgkcf` 亦 **−96.3%**——那
+   8.81M **几乎全是 `dgk` 列归约**，**不是** mma 片段读。旁证：mma 片段读按 lane `(g,t)` 地址
+   `kcol/BVP = 4·g + t` 展开恰好铺满 `0..31`，`BVP=36` 的 padding **本身就是无冲突**的；删 `dgk` 后只剩
+   ~0.29M（1.1%）残差（prefetch 写/边界）。
+2. **`dgk` 的指令成本也是它**：`nodgk` 的 shared wavefronts 42.65M→**25.45M**（少 17.2M = 整个 `dgk`
+   循环的 load+重放）；`dgkcf` 保留工作量但去冲突，wavefronts 34.09M（比重放版少 8.6M）。
+3. **但在部署主 shape 上等于零**：三个变体 Duration 519.9 / 518.5 / 520.1 µs、DRAM 84.6–84.9%、L2
+   88.7–89.0%——**完全被 DRAM/L2 带宽钉住**，去冲突只把 `mio_throttle` 2.37→1.93，不兑现时间。
+   **L2 字节三个变体都是 3.03 GB**——§49.4.3 的「L2 +35%」也**与 `dgk` 无关**（另一条待查线索）。
+
+### 50.4 小 shape：`dgk` 的收益真实但只 ~3–4%
+
+`B2 T1024 H8` / `T512 H4` / `T250 H3`（`check_bwd_b2_dgk.out.txt`）：
+
+| shape | base | nodgk (删) | dgkcf (无冲突) |
+|---|---|---|---|
+| `B8 T2048 H8` | 517.9 | 516.1 (1.003×) | 517.0 (1.002×) |
+| `B2 T1024 H8` | 71.4 | 70.0 (1.020×) | 70.9 (1.006×) |
+| `T512 H4` | 9.6 | **7.9 (1.209×)** | 9.2 (1.041×) |
+| `T250 H3` | 8.7 | **7.1 (1.230×)** | 8.4 (1.032×) |
+
+小 shape（grid 只有 32/16 个 CTA、单核 ~6–10µs）是**延迟主导**：整个 `dgk` 循环（含重放）占 ~20%；
+`dgkcf` 消掉重放后拿回 **~3–4%**，剩余 ~17% 是「循环本身必须存在」的串行成本（与冲突无关，删掉才显示）。
+与 §49.3「小 shape 交给 Triton 短核」的结论一致：小 shape 不值得为这点收益维护 CUDA 分支。
+
+### 50.5 结论
+
+- **更正 §49.4.3/§49.6**：那 8.81M smem bank conflict **不是** mma 片段读（tf32 无 `ldmatrix`），而是
+  **`dgk` 列归约的 16-`kcol` 别名**；`BVP=36` 的 fragment padding 本就无冲突。
+- **修复免费且位级安全**：`-DB2M_DGKCF` 去冲突 96%、`dgk` 精度不变（1.3e-7）、`dq/dk/dw` 逐位不变；
+  但**部署主 shape 零收益**（DRAM/L2 bound）、小 shape 仅 3–4%——故 `base` 保持默认，`dgkcf` 留作
+  小 shape 或将来非 memory-bound 结构下的储备。
+- **新的待查线索**：§49.4.3 的「L2 字节比 Triton 高 35%（3.03 vs 2.24 GB）」在三个变体上**纹丝不动**，
+  与 `dgk`/冲突均无关；下一杠杆应直接定位这 0.79 GB 来自哪条 global 访存（`cp.async` 请求粒度/`h/dh`
+  的 L2 复用），而不是 smem swizzle。
