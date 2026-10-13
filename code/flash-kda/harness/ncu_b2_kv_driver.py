@@ -42,7 +42,7 @@ def main():
     V = int(os.environ.get("B2KV_V", "128"))
     tag = os.environ.get("B2KV_TAG", "fp32")
     intra = tag == "intra"
-    bf16 = tag == "bf16"
+    bf16 = tag.startswith("bf16")
     NT = (T + BT - 1) // BT
     gg = torch.Generator(device=dev).manual_seed(0)
     mk = lambda *s: torch.empty(*s, device=dev)

@@ -204,6 +204,14 @@ DEV void st2(float* p, float a, float b) {
 #if B2M_VVSTRIDE && (!B2M_BF16_VDW || B2M_TMA_ON)
 #error "B2M_VVSTRIDE is a non-TMA BF16_VDW diagnostic knob"
 #endif
+// P7-96 (diagnostic only): reserve extra *unused* dynamic shared memory (bytes) at launch so that
+// the occupancy limit (`launch__occupancy_limit_shared_mem`) can be pushed down without changing a
+// single instruction.  Default 0 = `sizeof(Shared)`.  Used solely to isolate the section 87.5
+// question (is the bf16 `dram__bytes_write` uptick a 2-block/SM L2-writeback effect?).  Must stay 0
+// in every deployment build.
+#ifndef B2M_SMEM_SLACK
+#define B2M_SMEM_SLACK 0
+#endif
 // P7-60: `-DB2M_PROD` compiles the *production* combination of all six non-GEMM segments in a
 // single kernel/launch (see the note further down for the rationale).  It forces the six
 // segment flags on, and must be defined before the per-segment `#ifndef` defaults below.
@@ -1964,7 +1972,7 @@ static int b2mma_launch_impl(const void* v, const void* vn, const void* h, const
 #endif
                              int B, int T, int H, int NT, void* stream) {
     dim3 grid(NT, B * H);
-    int smem = (int)sizeof(Shared);
+    int smem = (int)sizeof(Shared) + B2M_SMEM_SLACK;
     static int configured = 0;
     if (!configured) {
         if (cudaFuncSetAttribute(b2mma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -2082,7 +2090,7 @@ static int b2da_launch_impl(const void* v, const void* vn, const void* h, const 
                             void* dq, void* dk, void* dw, void* dgk, void* dApre,
                             int B, int T, int H, int NT, void* stream) {
     dim3 grid(NT, B * H);
-    int smem = (int)sizeof(Shared);
+    int smem = (int)sizeof(Shared) + B2M_SMEM_SLACK;
     static int configured = 0;
     if (!configured) {
         if (cudaFuncSetAttribute(b2mma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -2132,7 +2140,7 @@ static int b2sand_launch_impl(const void* v, const void* vn, const void* h, cons
                               void* dq, void* dk, void* dw, void* dgk, void* dApre, void* dA,
                               int B, int T, int H, int NT, void* stream) {
     dim3 grid(NT, B * H);
-    int smem = (int)sizeof(Shared);
+    int smem = (int)sizeof(Shared) + B2M_SMEM_SLACK;
     static int configured = 0;
     if (!configured) {
         if (cudaFuncSetAttribute(b2mma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -2187,7 +2195,7 @@ static int b2db_launch_impl(const void* v, const void* vn, const void* h, const 
                             void* dv2, void* dvb, void* db_out,
                             int B, int T, int H, int NT, void* stream) {
     dim3 grid(NT, B * H);
-    int smem = (int)sizeof(Shared);
+    int smem = (int)sizeof(Shared) + B2M_SMEM_SLACK;
     static int configured = 0;
     if (!configured) {
         if (cudaFuncSetAttribute(b2mma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
@@ -2263,7 +2271,7 @@ static int b2prod_launch_impl(const void* v, const void* vn, const void* h, cons
 #endif
                               int B, int T, int H, int NT, void* stream) {
     dim3 grid(NT, B * H);
-    int smem = (int)sizeof(Shared);
+    int smem = (int)sizeof(Shared) + B2M_SMEM_SLACK;
     static int configured = 0;
     if (!configured) {
         if (cudaFuncSetAttribute(b2mma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
