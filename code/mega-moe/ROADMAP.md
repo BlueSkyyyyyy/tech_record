@@ -1805,8 +1805,38 @@
       Python oracle 逐行跑 `test_pp.py:19-50` 的 `generate_stress_ops`（sha256 `56d5e37722ddc497`）
       验证「第 i 个 send 严格晚于第 i-F 个 recv」+ 计数 + 全序。**设备 PASS=4 / Python PASS=6 / FAIL=0**。
       GIN 第二跳（`put`/`signal`）与真实多 rank 端到端为 NCCL 设备 API 专属，仅分析。
-      → `docs/68-deepep-pp-send-recv.md`。配套博客 `content/posts/mega-moe-68-deepep-pp-send-recv`
-      （索引页新增第 68 篇）。
+       → `docs/68-deepep-pp-send-recv.md`。配套博客 `content/posts/mega-moe-68-deepep-pp-send-recv`
+       （索引页新增第 68 篇）。
+
+### P59 增量（opt-in，补齐 DeepEP 第四类通信原语：Engram 带索引的远程抓取）
+
+- [x] **P59-1** **DeepEP 的 Engram 远程抓取原语 `engram_fetch`**（`csrc/buffers/engram.hpp`、
+      `csrc/kernels/engram/engram.hpp`、`deep_ep/buffers/engram.py`、
+      `deep_ep/include/deep_ep/impls/engram/engram_fetch.cuh`、`.../engram_fetch_wait.cuh`、
+      `.../layout/engram/workspace.cuh`、`tests/engram/test_engram.py`）。
+      第 7/58/61 篇拆了 **EP all-to-all**、第 64 篇 **bucket 集合通信**、第 68 篇 **PP send/recv**，
+      本篇补上第四类：**带索引的随机远程读（indexed RDMA gather）**——每 rank 只存自己那部分 entry，
+      给全局索引把命中项从主人 rank 拉回本地、每层一个完成钩子。三个核心设计：① **数据面走 RDMA /
+      SF 面走 NVLink**（entry 本体只在主人 rank → `gin.get`；FP8 SF 每 rank 有副本 → 对称指针
+      `get_sym_ptr<ncclTeamTagLsa>` 直读）；② **发射/等待分离**（`fetch()` 发所有层请求、返回每层
+      hook，用哪层才 `hook()` 等）；③ **请求聚合**（同 peer 攒 32 一批 + 攒够 `flush_depth` 敲门铃）。
+      **布局层** `EngramLayout`（`workspace.cuh:28-74`：storage/recv 字节偏移、SF 行号/分片号）+
+      `EngramWorkspace`（`:9-21`：`BarrierSignals` + `issue_counters[128][2048]`）；**发射面**
+      `EngramIssueWarpLayout`（`cuh:13-39`）把 warp 切成 (peer, QP, tile)，issue 循环（`cuh:99-171`）
+      用 `__ballot_sync`/`__popc` 保序压入 64 深环形队列（多出一项恰好绕回翻转后的新队头），
+      `issue_batch`（`:109-131`）把 `(global_idx,entry_idx)` 翻成 `(window, src_off, dst_off, peer)`；
+      门铃前用 `issue_counters` 做到达计数（`:173-205`）；SF warp（`:208-254`）走 NVLink 分片桩 +
+      `sf_token_stride/sf_hidden_stride` 两布局；wait（`engram_fetch_wait.cuh:9-28`）逐 request `gin.wait`。
+      **host 公式**：`calculate_storage_size`（`engram.hpp:251-271`）、`get_theoretical_config`
+      （`:273-299`，读受限 QP 模型 + 溢出回退）、`write`（`:109-155`，层首尾相接 + NVL 分片）。
+      **H100(sm90) 真机**：逐行抽取 `EngramIssueWarpLayout`/issue 循环/SF 主体（sha256
+      `32673de73ceeb9ce`/`06b24f4417c29feb`/`6f80791f169522ad`，与 `DeepEP@93eb6eb` 一致）跑真实
+      设备代码 + Python 独立复刻布局/发射/请求/SF/两个 host 公式：**设备 PASS=5 / Python PASS=32 / 0
+      FAIL**（256 条索引含 43 条 OOB → 213 条请求 miss/extra/值不符全 0；SF 两种目的布局各 1024 元素
+      0 不符；溢出回退 `(33, 32768, True)`）。真实 `gin.get`/`gin.wait` 与多 rank 端到端为 NCCL GIN
+      设备 API 专属（README 点名 `ncclGinOptFlagsWarpGet`），仅分析。
+      → `docs/69-deepep-engram-fetch.md`。配套博客 `content/posts/mega-moe-69-deepep-engram-fetch`
+      （索引页新增第 69 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -1832,8 +1862,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P58 各增量完成（P15-1…P41-1、P42-1…P58-1）。**
-  本轮 P58-1：新建 `docs/68-deepep-pp-send-recv.md`（+`src/deepep_pp_send_recv.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P59 各增量完成（P15-1…P41-1、P42-1…P59-1）。**
+  本轮 P59-1：新建 `docs/69-deepep-engram-fetch.md`（+`src/deepep_engram_fetch.cu`、
+  `harness/exp_deepep_engram.{sh,py,out.txt}`）——补上 DeepEP **第四类通信原语 Engram**：
+  **带索引的随机远程读（indexed RDMA gather）**，把「外部键值存储 / 记忆库 / 长上下文缓存」
+  按全局索引从主人 rank 拉回本地、每层一个完成钩子。三个核心设计：① **数据面走 RDMA / SF 面走
+  NVLink**（entry 本体只在主人 rank → `gin.get`；FP8 block-scale 每 rank 有副本 → 对称指针
+  `get_sym_ptr<ncclTeamTagLsa>` 直读）；② **发射/等待分离**（`fetch()` 发所有层请求、返回每层
+  hook，用哪层才 `hook()` 等）；③ **请求聚合**（同 peer 攒 32 一批发 `AggregateRequests`、攒够
+  `flush_depth` 才敲一次门铃——瓶颈在 MPPS 不在字节）。布局层 `EngramLayout`（storage/recv 字节
+  偏移、SF 行号/分片号）+ `EngramWorkspace`（`issue_counters[128][2048]`）；发射面
+  `EngramIssueWarpLayout` 把 warp 切成 (peer, QP, tile)，issue 循环用 `__ballot_sync`/`__popc`
+  保序压入 64 深环形队列（多出一项恰好绕回翻转后的新队头，永不需要 memmove）；门铃前用
+  `issue_counters` 做到达计数。**H100(sm90) 真机**逐行抽取布局/发射/请求生成/SF 拷贝跑真实设备
+  代码 + Python 独立复刻两个 host 公式：**设备 PASS=5 / Python PASS=32 / FAIL=0**（256 条索引含
+  43 条 OOB → 213 条请求 miss/extra/值不符全 0；SF 两种目的布局各 1024 元素 0 不符；溢出回退
+  `(33, 32768, True)`）。真实 RDMA 与多 rank 端到端需 NCCL GIN 设备 API（README 点名
+  `ncclGinOptFlagsWarpGet`），仅分析。配套博客 `content/posts/mega-moe-69-deepep-engram-fetch`
+  （索引页新增第 69 篇）。
+  上一轮 P58-1：新建 `docs/68-deepep-pp-send-recv.md`（+`src/deepep_pp_send_recv.cu`、
   `harness/exp_deepep_pp.{sh,py,out.txt}`）——补上 DeepEP 通信设施里**第三类原语**：
   **流水线并行的相邻 rank send/recv**（前两类是第 7/58/61 篇的 EP all-to-all、第 64 篇的
   bucket 集合通信）。它服务「把一层激活/梯度在流水线相邻 stage 间前后传」这一步，没有计数/前缀和/
@@ -2637,9 +2684,11 @@
     逐行抽取 + 对称指针桩 H100 真机 19 PASS）；**「对称内存」的物理分配/映射/跨进程 shard 地基已由
      P56-1 补齐**（`comm/symmetric.hpp` + `allocator.py`，H100 真机 55+23 PASS）；**bucket 集合通信
      已由 P54-1 补齐**（`all_gather` copy-engine 真机跨 NVLink peer 逐字节一致）；**流水线并行
-     send/recv 已由 P58-1 补齐**（`pp_send_recv`，数据面 TMA 流水 + 寻址面索引 H100 真机 40/40
-     byte-exact + 168 有序对 0 不符）。DeepEP 侧余下的运行期空档（bucket 的 `all_reduce/reduce_scatter`
-     内核、`engram` fetch）都要 NCCL GIN 设备 API，待环境。
+      send/recv 已由 P58-1 补齐**（`pp_send_recv`，数据面 TMA 流水 + 寻址面索引 H100 真机 40/40
+      byte-exact + 168 有序对 0 不符）；**带索引的远程抓取 Engram 已由 P59-1 补齐**（`engram_fetch`，
+      布局/发射映射/请求索引/SF 拷贝 H100 真机设备 5 + Python 32 PASS）。DeepEP 侧余下的运行期空档
+      （bucket 的 `all_reduce/reduce_scatter` 内核、Engram 真实 RDMA 与端到端）都要 NCCL GIN 设备 API，
+      待环境。
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
     shared expert 分支的更深精读；端到端需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。
