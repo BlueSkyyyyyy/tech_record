@@ -1,0 +1,98 @@
+########## §61 数据面到真 HBM 峰值 × 控制面争用 ##########
+########################################################################
+# §61 数据面到真 HBM 峰值：占用率 × 载体（reg ldcs / TMA bulk）× 争用
+# 目标卡 H100/sm90a；每配置 = NBLK 读块 × BP uint4（总读 ≈ 4 GiB）+ PS 写块
+########################################################################
+
+===== §A 正确性（NBLK=16，BP=65536=1MiB，T=256，PS=0）：两载体 vs host 参考 =====
+  reg  : sink=2250042516360543 ref=2250042516360543 -> OK
+  tma  : sink=2250042516360543 ref=2250042516360543 -> OK
+
+===== §B 寄存器 ldcs 载体：B block/SM × T 扫描（总读 4 GiB，PS=0）=====
+  thr/SM=256             NBLK=132  PS=0   BP=2033601   T=256  oc=0 U=1  carrier=reg DC=0     -> OK     ms=3.6726 readGB/s=1169.5 writeGB/s=0.0
+  thr/SM=256             NBLK=132  PS=0   BP=2033601   T=256  oc=0 U=2  carrier=reg DC=0     -> OK     ms=2.1824 readGB/s=1968.0 writeGB/s=0.0
+  thr/SM=256             NBLK=132  PS=0   BP=2033601   T=256  oc=0 U=4  carrier=reg DC=0     -> OK     ms=1.5802 readGB/s=2718.1 writeGB/s=0.0
+  thr/SM=256             NBLK=132  PS=0   BP=2033601   T=256  oc=0 U=8  carrier=reg DC=0     -> OK     ms=1.8078 readGB/s=2375.7 writeGB/s=0.0
+  thr/SM=512             NBLK=264  PS=0   BP=1016800   T=256  oc=0 U=1  carrier=reg DC=0     -> OK     ms=1.9056 readGB/s=2253.9 writeGB/s=0.0
+  thr/SM=512             NBLK=264  PS=0   BP=1016800   T=256  oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.4401 readGB/s=2982.5 writeGB/s=0.0
+  thr/SM=512             NBLK=264  PS=0   BP=1016800   T=256  oc=0 U=4  carrier=reg DC=0     -> OK     ms=1.3507 readGB/s=3179.8 writeGB/s=0.0
+  thr/SM=512             NBLK=264  PS=0   BP=1016800   T=256  oc=0 U=8  carrier=reg DC=0     -> OK     ms=1.3798 readGB/s=3112.7 writeGB/s=0.0
+  thr/SM=1024            NBLK=528  PS=0   BP=508400    T=256  oc=0 U=1  carrier=reg DC=0     -> OK     ms=1.4235 readGB/s=3017.2 writeGB/s=0.0
+  thr/SM=1024            NBLK=528  PS=0   BP=508400    T=256  oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.3529 readGB/s=3174.7 writeGB/s=0.0
+  thr/SM=1024            NBLK=528  PS=0   BP=508400    T=256  oc=0 U=4  carrier=reg DC=0     -> OK     ms=1.3436 readGB/s=3196.6 writeGB/s=0.0
+  thr/SM=1024            NBLK=528  PS=0   BP=508400    T=256  oc=0 U=8  carrier=reg DC=0     -> OK     ms=1.3481 readGB/s=3185.9 writeGB/s=0.0
+  thr/SM=2048            NBLK=1056 PS=0   BP=254200    T=256  oc=0 U=1  carrier=reg DC=0     -> OK     ms=1.3693 readGB/s=3136.6 writeGB/s=0.0
+  thr/SM=2048            NBLK=1056 PS=0   BP=254200    T=256  oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.3615 readGB/s=3154.6 writeGB/s=0.0
+  thr/SM=2048            NBLK=1056 PS=0   BP=254200    T=256  oc=0 U=4  carrier=reg DC=0     -> OK     ms=1.3665 readGB/s=3143.1 writeGB/s=0.0
+  thr/SM=2048            NBLK=1056 PS=0   BP=254200    T=256  oc=0 U=8  carrier=reg DC=0     -> OK     ms=1.3566 readGB/s=3166.0 writeGB/s=0.0
+  thr/SM=512             NBLK=132  PS=0   BP=2033601   T=512  oc=0 U=1  carrier=reg DC=0     -> OK     ms=2.0778 readGB/s=2067.0 writeGB/s=0.0
+  thr/SM=512             NBLK=132  PS=0   BP=2033601   T=512  oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.5260 readGB/s=2814.6 writeGB/s=0.0
+  thr/SM=512             NBLK=132  PS=0   BP=2033601   T=512  oc=0 U=4  carrier=reg DC=0     -> OK     ms=1.3903 readGB/s=3089.2 writeGB/s=0.0
+  thr/SM=512             NBLK=132  PS=0   BP=2033601   T=512  oc=0 U=8  carrier=reg DC=0     -> OK     ms=1.4431 readGB/s=2976.2 writeGB/s=0.0
+  thr/SM=1024            NBLK=264  PS=0   BP=1016800   T=512  oc=0 U=1  carrier=reg DC=0     -> OK     ms=1.3977 readGB/s=3072.9 writeGB/s=0.0
+  thr/SM=1024            NBLK=264  PS=0   BP=1016800   T=512  oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.3496 readGB/s=3182.5 writeGB/s=0.0
+  thr/SM=1024            NBLK=264  PS=0   BP=1016800   T=512  oc=0 U=4  carrier=reg DC=0     -> OK     ms=1.3377 readGB/s=3210.7 writeGB/s=0.0
+  thr/SM=1024            NBLK=264  PS=0   BP=1016800   T=512  oc=0 U=8  carrier=reg DC=0     -> OK     ms=1.3409 readGB/s=3203.0 writeGB/s=0.0
+  thr/SM=2048            NBLK=528  PS=0   BP=508400    T=512  oc=0 U=1  carrier=reg DC=0     -> OK     ms=1.3638 readGB/s=3149.2 writeGB/s=0.0
+  thr/SM=2048            NBLK=528  PS=0   BP=508400    T=512  oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.3482 readGB/s=3185.6 writeGB/s=0.0
+  thr/SM=2048            NBLK=528  PS=0   BP=508400    T=512  oc=0 U=4  carrier=reg DC=0     -> OK     ms=1.3511 readGB/s=3178.9 writeGB/s=0.0
+  thr/SM=2048            NBLK=528  PS=0   BP=508400    T=512  oc=0 U=8  carrier=reg DC=0     -> OK     ms=1.3415 readGB/s=3201.7 writeGB/s=0.0
+  thr/SM=1024            NBLK=132  PS=0   BP=2033601   T=1024 oc=0 U=1  carrier=reg DC=0     -> OK     ms=1.4927 readGB/s=2877.3 writeGB/s=0.0
+  thr/SM=1024            NBLK=132  PS=0   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.3952 readGB/s=3078.4 writeGB/s=0.0
+  thr/SM=1024            NBLK=132  PS=0   BP=2033601   T=1024 oc=0 U=4  carrier=reg DC=0     -> OK     ms=1.4296 readGB/s=3004.3 writeGB/s=0.0
+  thr/SM=1024            NBLK=132  PS=0   BP=2033601   T=1024 oc=0 U=8  carrier=reg DC=0     -> OK     ms=1.4212 readGB/s=3022.0 writeGB/s=0.0
+  thr/SM=2048            NBLK=264  PS=0   BP=1016800   T=1024 oc=0 U=1  carrier=reg DC=0     -> OK     ms=1.3431 readGB/s=3197.9 writeGB/s=0.0
+  thr/SM=2048            NBLK=264  PS=0   BP=1016800   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.3386 readGB/s=3208.6 writeGB/s=0.0
+  thr/SM=2048            NBLK=264  PS=0   BP=1016800   T=1024 oc=0 U=4  carrier=reg DC=0     -> OK     ms=1.3344 readGB/s=3218.6 writeGB/s=0.0
+  thr/SM=2048            NBLK=264  PS=0   BP=1016800   T=1024 oc=0 U=8  carrier=reg DC=0     -> OK     ms=1.3382 readGB/s=3209.5 writeGB/s=0.0
+
+===== §C 强制 2 block/SM（__launch_bounds__(1024,2)）：T=1024 的 reg 载体 =====
+  forced-2/SM            NBLK=264  PS=0   BP=1016800   T=1024 oc=1 U=1  carrier=reg DC=0     -> OK     ms=1.3424 readGB/s=3199.4 writeGB/s=0.0
+  forced-2/SM            NBLK=264  PS=0   BP=1016800   T=1024 oc=1 U=2  carrier=reg DC=0     -> OK     ms=1.3387 readGB/s=3208.3 writeGB/s=0.0
+  forced-2/SM            NBLK=264  PS=0   BP=1016800   T=1024 oc=1 U=4  carrier=reg DC=0     -> OK     ms=1.3407 readGB/s=3203.4 writeGB/s=0.0
+
+===== §D TMA bulk 载体（SMEM 双缓冲，深度 2）：DC × T 扫描（总读 4 GiB，PS=0）=====
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=128  oc=0 U=1  carrier=tma DC=512   -> OK     ms=1.9291 readGB/s=2226.4 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=256  oc=0 U=1  carrier=tma DC=512   -> OK     ms=1.9721 readGB/s=2177.8 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=512  oc=0 U=1  carrier=tma DC=512   -> OK     ms=2.0336 readGB/s=2112.0 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=128  oc=0 U=1  carrier=tma DC=1024  -> OK     ms=1.4489 readGB/s=2964.3 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=256  oc=0 U=1  carrier=tma DC=1024  -> OK     ms=1.4445 readGB/s=2973.2 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=512  oc=0 U=1  carrier=tma DC=1024  -> OK     ms=1.4736 readGB/s=2914.6 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=128  oc=0 U=1  carrier=tma DC=2048  -> OK     ms=1.3994 readGB/s=3069.2 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=256  oc=0 U=1  carrier=tma DC=2048  -> OK     ms=1.3969 readGB/s=3074.6 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=512  oc=0 U=1  carrier=tma DC=2048  -> OK     ms=1.4069 readGB/s=3052.7 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=128  oc=0 U=1  carrier=tma DC=4096  -> OK     ms=1.4289 readGB/s=3005.8 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=256  oc=0 U=1  carrier=tma DC=4096  -> OK     ms=1.4279 readGB/s=3007.8 writeGB/s=0.0
+  tma-31775KB/block      NBLK=132  PS=0   BP=2033601   T=512  oc=0 U=1  carrier=tma DC=4096  -> OK     ms=1.4282 readGB/s=3007.3 writeGB/s=0.0
+
+===== §E 占用率/寄存器报告（cudaFuncGetAttributes + cudaOccupancyMaxActiveBlocksPerMultiprocessor）=====
+  reg U=1                      numRegs=21   localB=0   maxThreads=1024  -> blk/SM(T=1024)=2
+  reg U=2                      numRegs=28   localB=0   maxThreads=1024  -> blk/SM(T=1024)=2
+  reg U=4                      numRegs=40   localB=0   maxThreads=1024  -> blk/SM(T=1024)=1
+  reg U=8                      numRegs=44   localB=0   maxThreads=1024  -> blk/SM(T=1024)=1
+  reg U=1 (forced 2/SM)        numRegs=21   localB=0   maxThreads=1024  -> blk/SM(T=1024)=2
+  reg U=4 (forced 2/SM)        numRegs=32   localB=0   maxThreads=1024  -> blk/SM(T=1024)=2
+  tma DC=2048 (32KB buf)       numRegs=32   localB=0   maxThreads=1024  -> blk/SM(T=1024)=2
+
+===== §F 争用（峰值配置 × 写块 × 写量）：数据面读带宽是否被描述符写拖慢 =====
+  --- F1 写量扫描（PS=8 固定，NBLK=132 留 132 槽）：隔离 HBM 争用（reps=5）---
+  WU4=16384/block        NBLK=132  PS=8   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.4216 readGB/s=3021.2 writeGB/s=1.5
+  WU4=65536/block        NBLK=132  PS=8   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.4717 readGB/s=2918.3 writeGB/s=5.7
+  WU4=262144/block       NBLK=132  PS=8   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.5432 readGB/s=2783.1 writeGB/s=21.7
+  WU4=1048576/block      NBLK=132  PS=8   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.7066 readGB/s=2516.7 writeGB/s=78.6
+  WU4=4194304/block      NBLK=132  PS=8   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=2.1727 readGB/s=1976.8 writeGB/s=247.1
+  WU4=16777216/block     NBLK=132  PS=8   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=5.4106 readGB/s=793.8 writeGB/s=396.9
+  --- F2 写块数扫描（WU4=1048576/block 固定，NBLK=132，共驻，reps=5）---
+  PS=0                   NBLK=132  PS=0   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.4303 readGB/s=3002.8 writeGB/s=0.0
+  PS=1                   NBLK=132  PS=1   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.5423 readGB/s=2784.8 writeGB/s=10.9
+  PS=2                   NBLK=132  PS=2   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.5540 readGB/s=2763.9 writeGB/s=21.6
+  PS=4                   NBLK=132  PS=4   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.6200 readGB/s=2651.2 writeGB/s=41.4
+  PS=8                   NBLK=132  PS=8   BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.7022 readGB/s=2523.1 writeGB/s=78.8
+  PS=16                  NBLK=132  PS=16  BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.7578 readGB/s=2443.3 writeGB/s=152.7
+  PS=32                  NBLK=132  PS=32  BP=2033601   T=1024 oc=0 U=2  carrier=reg DC=0     -> OK     ms=1.8800 readGB/s=2284.5 writeGB/s=285.6
+  --- F3 对照：占满槽位（NBLK=264 + PS，writer 挤占 reader 槽）---
+  full PS=0              NBLK=264  PS=0   BP=1016800   T=1024 oc=1 U=2  carrier=reg DC=0     -> OK     ms=1.3413 readGB/s=3202.1 writeGB/s=0.0
+  full PS=8              NBLK=264  PS=8   BP=1016800   T=1024 oc=1 U=2  carrier=reg DC=0     -> OK     ms=1.5129 readGB/s=2839.0 writeGB/s=88.7
+  full PS=32             NBLK=264  PS=32  BP=1016800   T=1024 oc=1 U=2  carrier=reg DC=0     -> OK     ms=1.8580 readGB/s=2311.5 writeGB/s=288.9
+
+########## §61 完成 ##########
