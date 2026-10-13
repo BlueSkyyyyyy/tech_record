@@ -4360,3 +4360,115 @@ event 对包 `REPS=50` 次 launch** 的 wall（含 launch 开销但稳定），C
   不是纯 CPU；要隔离纯 CPU 须用**不发 launch** 的入口（本轮的 `b1t_encode_only`）。这与 §25.5
   （归因窗口）、§37 dtype 对齐并列，进入本专题的计时口径清单。
 
+
+## 44. 兑现 §24.5 的「换 CUTLASS `PipelineTmaAsync`」——一个**空结论**：手写 mbarrier 已在结构上限（P7-41）
+
+§23–§41 用**手写** per-stage `mbarrier` 握手把 K2 形状的 CUDA B1 推到 `xFLA` ~1.7–3.8×，§24.5 把残差归到
+「每 warp 发射效率」（`wait` = mma 固定延迟 ≈36% 发射间隔、`short_sb` = smem 取操作数），并留了两个选项：
+**(a) 换 CUTLASS `PipelineTmaAsync`**（把 producer/consumer 与 `cp.async.bulk` 完成延迟交给成熟实现），或
+**(b) 接受 Triton 版**。§36 又把 (a) 记成「唯一剩下的更大工程」。本轮把 (a) 做成**最小受控实验**：
+给 `b1_tma_probe.cu` 加 `-DB1T_CUTLASS`，**只**替换 pipeline 的管理（producer 的 `empty` 等待 + `full`
+`arrive_and_expect_tx`、consumer 的 `full` 等待 + `empty` arrive），TMA 拷贝（裸 PTX `cp.async.bulk.tensor`）、
+`Swizzle<3,4,3>` 操作数、`mma.sync` 计算、`dh`/`dv2` 的 TMA store、`fence.proxy.async` **一字未改**——故任何
+delta 只能归因于 pipeline 协议本身。
+
+**实现**（`harness/b1_tma_probe.cu`，`#ifdef B1T_CUTLASS` 分支）：
+
+- `Shared` 里用 `cutlass::PipelineTmaAsync<NSTAGE>::SharedStorage pipe;` 取代裸 `full[]`/`empty[]`
+  （`b1_tma_probe.cu:243-244`）。
+- 构造：`PipeT pipe(sh->pipe, pp, cute::Shape<_1,_1,_1>{});`，`pp.transaction_bytes` = 8 个 operand tile +
+  `E^tot`（`KD*4`，同 `B1T_ETMA` 合并路径）、`pp.is_leader = (warp==NW && l==0)`、`pp.num_consumers = NW*32`
+  （`b1_tma_probe.cu:285-300`）。CUTLASS 在 `initializing_warp==0`（=一个 compute warp）里 init barrier 对，
+  再 `fence_barrier_init`，与手写版语义一一对应。
+- producer：`auto pstate = cutlass::make_producer_start_state<PipeT>();`（起始 phase=1，令前 `NSTAGE` 次
+  `empty` 等待**立即通过**）；循环里 `pipe.producer_acquire(pstate)`（内含一次性 `arrive_and_expect_tx`）→
+  `pipe.producer_get_barrier(pstate)` 拿到 TMA 的 `mbarrier` 指针 → 原样发 8+1 条 TMA → `producer_commit`
+  （TMA 路径下是 NOP）→ `++pstate`（`b1_tma_probe.cu:318-371`）。
+- consumer：`PipeT::PipelineState cstate;`，循环里 `pipe.consumer_wait(cstate)` 取代
+  `mbar_wait(&full[s], (i/NSTAGE)&1)`；块末 `pipe.consumer_release(cstate); ++cstate;` 取代
+  `if(l==0) mbar_arrive(&empty[s])`——CUTLASS 的 `empty` 到达数 = `num_consumers = NW*32`，故**每线程都 arrive**
+  （`b1_tma_probe.cu:415-428`、`:614-615`）。
+
+### 44.1 Part A — 正确性：CUTLASS 是**逐位** drop-in
+
+`harness/check_bwd_b1_cutlass.py`（`harness/check_bwd_b1_cutlass.out.txt`）四个 build 全部 `-DB1T_ETMA`：
+
+| 变体 | pipeline | store |
+|---|---|---|
+| `base` | 手写 mbarrier | 标量 `dh`/`dv2` |
+| `hnd` | 手写 mbarrier | TMA `dh`/`dv2` + `EPROXY`+`SPROXY`（= §40 `tma2_full`） |
+| `cut` | CUTLASS `PipelineTmaAsync` | 标量 |
+| `cut2` | CUTLASS `PipelineTmaAsync` | TMA + 两侧 fence |
+
+16 格（4 shape × `BT∈{32,64}` × `NS∈{1,2}`，含非整除 `T=250`）实测：**`cut` vs `base` 与 `cut2` vs `hnd` 的
+`dh`/`dv2`/`dh0` 全部 `max_abs = 0.00e+00`**；`cut2` vs 直接 bf16 FLA `dhu` 仍 **1 bf16 ulp**（`dh 4.88e-4`、
+`dv2 4.88e-4`/`2.44e-4`）。即换 pipeline 库**不改一个 bit**（复现 §35/§36 的逐位结论）。
+
+### 44.2 Part B — 性能：**空结论**，`cut2/hnd = 0.985–1.003`
+
+CUPTI 内核时（µs/call，空闲卡），`FLAbf16` = 直接调用 bf16 FLA `dhu`（matched dtype，§37 口径）：
+
+| shape | BT | NS | `base` | `hnd` | `cut` | `cut2` | FLA bf16 | `cut2/hnd` | `cut2/FLA` |
+|---|---|---|---|---|---|---|---|---|---|
+| B1 T512 H4 | 32 | 1 | 66.3 | 40.3 | 63.6 | 39.7 | 20.5 | **0.987** | 1.94 |
+| B1 T512 H4 | 64 | 1 | 44.0 | 30.6 | 44.5 | 30.6 | 13.0 | **0.999** | 2.36 |
+| B1 T512 H4 | 64 | 2 | 42.7 | 25.9 | 42.6 | 25.6 | 13.0 | **0.992** | 1.98 |
+| B2 T1024 H8 | 32 | 2 | 128.0 | 65.0 | 130.8 | 65.1 | 37.6 | **1.003** | 1.73 |
+| B2 T1024 H8 | 64 | 2 | 84.1 | 48.2 | 82.8 | 47.4 | 23.3 | **0.985** | 2.03 |
+| B8 T2048 H8 | 32 | 2 | 341.2 | 138.1 | 351.0 | 138.2 | 170.5 | **1.001** | 0.81 |
+| B8 T2048 H8 | 64 | 1 | 194.6 | 138.7 | 196.0 | 138.7 | 119.1 | **1.000** | 1.16 |
+| B8 T2048 H8 | 64 | 2 | 204.7 | 99.3 | 201.2 | 99.1 | 119.1 | **0.998** | 0.83 |
+| B1 T250 H3 | 64 | 2 | 24.2 | 14.9 | 24.2 | 14.6 | 7.3 | **0.985** | 1.99 |
+
+全部 16 格 `cut2/hnd ∈ [0.985, 1.003]`（均值 ~0.995，噪声内）；标量对照 `cut/base` 同样噪声内。即把
+**手写 mbarrier 换成 CUTLASS `PipelineTmaAsync` 一点没变快**——§24.5 的残差（`wait`/`short_sb`）**不是
+pipeline 协议的实现开销**。`cut2/FLA` 仍 0.81–2.72×（与 §38 的 `tma2` 逐值一致），BT=64 大 shape 追平、
+小 shape 2× 残差仍是 §24.5/§37.3 的「每 warp 发射效率 + BT 粒度」。
+
+### 44.3 Part C — CUTLASS 顺带是**确定性**的（手写 parity 曾是 bug 源）
+
+同一 kernel 连跑两次比 `dh`（`max_abs`），`BT∈{16,32,64}` × `NS∈{1,2,3}`：
+
+- **`base`（未加 fence 的手写 pipeline）** 在 `B8 T2048 H8` 上不稳：`BT=16 NS=3` **3.76e-2**、
+  `BT=32 NS=3` **1.57e-3**（`NS=1/2` 免疫）——复现 §38/§39 的「手写 parity 在 `NS≥2` 的 WAR 竞态」。
+- **`hnd`（手写 + `EPROXY`/`SPROXY`）**、**`cut2`（CUTLASS）** 在**全部 18 格** run-to-run `0.00e+00`，
+  且 **`cut2` vs `hnd` 逐位相同**；`cut2-base` 只在 `base` 自身 racy 的格上非零（1.57e-3）。
+
+即 CUTLASS 的 phase/parity 记账**天然**避开了手写版那处 off-by-one（§36 靠一条 `fence.proxy.async` 修掉）。
+所以换 CUTLASS 的收益是**稳健性/可维护性**（省掉手写 parity 与 fence 的心智负担），**不是性能**。
+
+### 44.4 Part D — `ncu`：两支逐指标几乎重合
+
+`harness/probe_b1_cutlass_ncu.sh` / `ncu_b1_cutlass_driver.py`（`harness/probe_b1_cutlass_ncu.out.txt`），
+`BT=64 NS=2`：
+
+| metric | `hnd` (B8T2048H8) | `cut2` | `hnd` (B1T512H4) | `cut2` |
+|---|---|---|---|---|
+| Duration (µs) | 99.04 | **98.82** | 27.78 | **27.68** |
+| `wait` (inst/issue) | 1.42 | **1.38** | 1.44 | **1.39** |
+| `short_scoreboard` | 0.61 | 0.63 | 0.60 | 0.60 |
+| `long_scoreboard` | 0.96 | 1.00 | 0.77 | 0.77 |
+| `tensor` (% peak) | 22.29 | 22.37 | 20.77 | 21.04 |
+| bank-conflict (`ld`) | 445448 | 476930 | 6911 | 7407 |
+| regs/thread | 165 | 164 | 165 | 164 |
+| dyn smem (KB) | 220.16 | 220.16 | 220.16 | 220.16 |
+| achieved occ (%) | 7.77 | 7.79 | 7.40 | 7.34 |
+
+逐指标在噪声内重合：`wait ≈1.4` **纹丝不动**（§24.5 已证它是 mma 固定流水延迟、与协议无关）、
+`short_sb≈0.6`、`tensor≈22%`、`regs` 165→164、smem 同、占用率同。这从硬件计数上钉死「换 pipeline 库不动
+残差」。
+
+### 44.5 结论 / 对目标卡的设计输入
+
+- **§24.5 的选项 (a) 是空杠杆**：CUTLASS `PipelineTmaAsync` 相对手写 mbarrier **逐位相同、性能噪声内
+  （0.985–1.003×）**。K2 形状 CUDA B1 的残差（`wait`/`short_sb`，≈2× vs FLA bf16）**不是** pipeline 协议
+  能修的东西——手写 mbarrier 已经触及该结构的**上限**。§23.6/§24.5/§36 反复记的「换 CUTLASS 是唯一剩下的
+  更大工程」至此**关闭为空结论**。
+- **故 §24.5 的选项 (b)（直接接受 Triton 版）是正确路线**：Triton 版 `tl.range` 软件流水（§17/§25）在链级
+  已把 B1 追平/反超，而目标卡 CUDA 版停在 1.7–2.7×（小 shape）——省下的工程应投到**链级瓶颈 B2/B3**
+  （§26–§33 已收敛）与**部署粒度**，而非继续打磨 B1 的流水协议。
+- **CUTLASS 仍值得作为「实现基座」**：它天然确定（§44.3）、代码更短、省掉手写 parity/fence；若生产要长期
+  维护一支 CUDA B1，用 CUTLASS pipeline 是**更稳的工程选择**，但**不带来性能**。
+- **方法学**：把「换成熟实现」当优化假设时，先做**只替换该机制的受控实验**（本轮保留 TMA/计算/store/fence
+  一字不改）——否则会把 TMA/store/计算侧的既有收益误记到 pipeline 头上。
+

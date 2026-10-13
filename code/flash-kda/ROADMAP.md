@@ -653,6 +653,23 @@
       在 launch 队列打满时读的是 **GPU 吞吐速率**、非纯 CPU；隔离纯 CPU 须用**不发 launch** 的入口。
       见 `docs/07` §43。
 
+- [x] **P7-41** 兑现 §24.5/§36 的「换 CUTLASS `PipelineTmaAsync`」（K2 形状 CUDA B1 的最后一条
+      工程化选项），结论是**空杠杆**：给 `b1_tma_probe.cu` 加 `-DB1T_CUTLASS`，**只**把手写
+      `full`/`empty` mbarrier 握手换成 `cutlass::PipelineTmaAsync<NSTAGE>`（TMA 拷贝、swizzle、
+      `mma.sync`、`dh`/`dv2` TMA store、`fence.proxy.async` 一字未改）。新增
+      `harness/check_bwd_b1_cutlass.py`（`..._cutlass.out.txt`，空闲卡）+ `harness/ncu_b1_cutlass_driver.py` /
+      `probe_b1_cutlass_ncu.sh`（`..._cutlass_ncu.out.txt`）+ `docs/07` §44。**Part A**：四变体
+      （base/hnd/cut/cut2）16 格（`BT=32/64`、`NS=1/2`、含非整除 `T=250`）——`cut` vs `base`、
+      `cut2` vs `hnd`（=`tma2_full`）**逐位相同（`dh/dv2/dh0` max_abs=0）**、vs bf16 FLA `dhu` 仍 1 ulp。
+      **Part B（关键）**：`cut2/hnd = 0.985–1.003`（16/16 噪声内，均值 ~0.995）——**换 CUTLASS 一点没变快**，
+      §24.5 的残差（`wait`/`short_sb`）不是 pipeline 协议实现开销。**Part C**：`base`（未加 fence 的手写
+      pipeline）在 `B8T2048H8` `BT16/32 NS=3` 仍 racy（3.76e-2/1.57e-3），而 `hnd`/`cut2` 全 18 格 run-to-run
+      **0.00e+00**、`cut2` vs `hnd` 逐位 0——CUTLASS 的 phase/parity 记账**天然**避开手写 off-by-one（§36 靠
+      fence 修掉）。**Part D（ncu）**：`BT=64 NS=2` 逐指标重合（B8 Duration 99.04→98.82、`wait` 1.42→1.38、
+      `short_sb` 0.61/0.63、`tensor` 22.29/22.37、regs 165→164、smem 同、occ 7.77/7.79）。**结论**：§24.5 的
+      选项 (a) **关闭为空结论**——手写 mbarrier 已到该结构上限；选项 (b)「直接接受 Triton 版」是正确路线；
+      CUTLASS 的价值在**稳健/可维护**（天然确定、代码更短），不在性能。目标卡剩余投入应去**链级 B2/B3**。
+
 ### P8 小结 / 一页纸
 
 - [x] **P8-1** `docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总
@@ -710,7 +727,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-40 补测**。
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-41 补测**。
+  - P7-41（本轮）：**兑现 §24.5/§36「换 CUTLASS `PipelineTmaAsync`」＝空杠杆**——给 `b1_tma_probe.cu`
+    加 `-DB1T_CUTLASS`，**只**换 pipeline 管理（`Shared` 用 `PipelineTmaAsync<NSTAGE>::SharedStorage`
+    `:243-244`；`make_producer_start_state`+`producer_acquire/get_barrier/commit` `:318-371`；
+    `consumer_wait/release` `:415-428/614-615`），TMA/swizzle/`mma.sync`/TMA store/两侧 fence 一字未改。
+    新增 `harness/check_bwd_b1_cutlass.py`（`..._cutlass.out.txt`，空闲卡）+ `harness/ncu_b1_cutlass_driver.py`
+    / `probe_b1_cutlass_ncu.sh`（`..._cutlass_ncu.out.txt`）+ `docs/07` §44。**Part A**：`cut`≡`base`、
+    `cut2`≡`hnd`（=`tma2_full`）**逐位相同**（16 格，含非整除 T=250）、vs bf16 FLA `dhu` 1 ulp。**Part B**：
+    `cut2/hnd = 0.985–1.003`（均值 ~0.995）——**换 CUTLASS 零性能**。**Part C**：`base`（未加 fence）在
+    `B8T2048H8 BT16/32 NS=3` 仍 racy（3.76e-2/1.57e-3），`hnd`/`cut2` 全 18 格确定、`cut2`≡`hnd`——CUTLASS
+    的 parity 记账天然避开手写 off-by-one。**Part D（ncu）**：逐指标重合（B8 Duration 99.04→98.82、
+    `wait` 1.42→1.38、`tensor` 22.29/22.37、regs 165→164）。**结论**：§24.5 选项 (a) 关闭为空——手写
+    mbarrier 已到上限；选项 (b)「接受 Triton」是正确路线；CUTLASS 值在稳健/可维护，不在性能；剩余投入去链级 B2/B3。
   - P7-40（本轮）：**关闭 P7-39 §42 的 host 税待验证**——把「`T=250 H=3` 的 1.65× 链回归＝
     `launch_impl` 每次重编码张量图」直接测掉。给 `b1_tma_probe.cu` 加 `-DB1T_MAPCACHE`（`MapSet`+
     `encode_maps`，`b1_tma_probe.cu:661-687`；encode-once 复用 `:700-714`）+ 探测符号
@@ -1259,7 +1288,12 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-40 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-41 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-41（`docs/07` §44）关闭 §24.5/§36 的「换 CUTLASS `PipelineTmaAsync`」——空杠杆**：`-DB1T_CUTLASS`
+    只换 pipeline 管理，`cut`≡`base`/`cut2`≡`hnd` **逐位相同**、`cut2/hnd` **0.985–1.003**（零性能）、
+    `ncu` 逐指标重合（`wait` 1.42→1.38 纹丝不动）。**手写 mbarrier 已到该结构上限**；§24.5 选项 (b)「直接
+    接受 Triton 版」是正确路线；CUTLASS 的价值是**稳健/可维护**（天然确定、代码更短），不是性能。附带：
+    CUTLASS 的 parity 记账天然避开手写版 `NS≥2` 的 WAR 竞态（`base` 在 `BT16/32 NS=3` 仍 racy）。
   - **P7-40（`docs/07` §43）关闭 §42 的 host 税待验证**：加 `-DB1T_MAPCACHE`（张量图 encode-once
     复用，`b1_tma_probe.cu:661-687/700-714`）+ 探测符号 `b1t_encode_only`/`b1t_mapcache_miss`，
     新增 `harness/check_bwd_b1_launch_tax.py`（`..._launch_tax.out.txt`）。**纯编码 3.8–4.0µs/次**，

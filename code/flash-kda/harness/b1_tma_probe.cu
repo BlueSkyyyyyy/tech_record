@@ -27,6 +27,16 @@
 #include <cstdint>
 #include <cstdio>
 
+// P7-41: replace the hand-written `full`/`empty` mbarrier protocol (§23–§41) with the
+// mature CUTLASS `PipelineTmaAsync` (the exact "要么换 CUTLASS PipelineTmaAsync" next step
+// flagged by §24.5/§36).  Everything else (raw-PTX TMA copies, swizzle, mma.sync compute)
+// is unchanged, so a CUTLASS build differs from the `tma2_full` hand pipeline *only* in how
+// the producer/consumer handshake is expressed.
+#ifdef B1T_CUTLASS
+#include <cutlass/pipeline/sm90_pipeline.hpp>
+#include <cute/arch/cluster_sm90.hpp>
+#endif
+
 #define DEV __device__ __forceinline__
 using bf16 = __nv_bfloat16;
 
@@ -230,10 +240,14 @@ struct alignas(1024) Shared {
     // per-warp `dv2` store tile, unpadded [BT,BW] (token-major output); `B1T_SDEPTH`-deep
     alignas(1024) bf16 duo[B1T_SDEPTH][NW][BT][BW];
 #endif
+#ifdef B1T_CUTLASS
+    typename cutlass::PipelineTmaAsync<NSTAGE>::SharedStorage pipe;
+#else
     alignas(8) uint64_t full[NSTAGE];
     alignas(8) uint64_t empty[NSTAGE];
 #ifdef B1T_ETMA_SEP
     alignas(8) uint64_t efull[NSTAGE];
+#endif
 #endif
 };
 
@@ -268,6 +282,23 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
     const int g = l >> 2, t = l & 3;
 
     // ---- init barriers ----
+#ifdef B1T_CUTLASS
+    // CUTLASS `PipelineTmaAsync`: its ctor (initializing warp == 0) inits the full/empty
+    // barrier pair; every warp then fences.  `is_leader` is the producer lane only, so
+    // `producer_acquire` does the `arrive_and_expect_tx` exactly once per stage.
+    using PipeT = cutlass::PipelineTmaAsync<NSTAGE>;
+    typename PipeT::Params pp;
+    pp.transaction_bytes = (uint32_t)(8 * BT * 128);
+#ifdef B1T_ETMA
+    pp.transaction_bytes += (uint32_t)(KD * 4);
+#endif
+    pp.role = PipeT::ThreadCategory::ProducerConsumer;
+    pp.is_leader = (warp == NW && l == 0) ? 1u : 0u;
+    pp.num_consumers = (uint32_t)(NW * 32);
+    pp.num_producers = 1;
+    pp.initializing_warp = 0;
+    PipeT pipe(sh->pipe, pp, cute::Shape<cute::_1, cute::_1, cute::_1>{});
+#else
     if (threadIdx.x == 0) {
         #pragma unroll
         for (int s = 0; s < NSTAGE; ++s) { mbar_init(&sh->full[s], 1); mbar_init(&sh->empty[s], NW);
@@ -277,12 +308,16 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
         }
         asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory");
     }
+#endif
     __syncthreads();
 
     // =============================================================== producer warp
     if (warp == NW) {
         if (l == 0) {
             constexpr uint32_t BYTES = (uint32_t)(8 * BT * 128);   // 3 qkv halves*2 + dO+dV
+#ifdef B1T_CUTLASS
+            auto pstate = cutlass::make_producer_start_state<PipeT>();
+#endif
             for (int i = 0; i < NT; ++i) {
 #if defined(B1T_SYNC)
                 __syncthreads();
@@ -293,10 +328,16 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                 const int c = NT - 1 - i;
                 const int s = i % NSTAGE;
                 const int t0 = c * BT;
+#ifdef B1T_CUTLASS
+                pipe.producer_acquire(pstate);
+                uint64_t* bar = reinterpret_cast<uint64_t*>(pipe.producer_get_barrier(pstate));
+#else
                 if (i >= NSTAGE) mbar_wait(&sh->empty[s], ((i / NSTAGE) + 1) & 1);
+#endif
 #if defined(B1T_EPROXY) || defined(B1T_EPROXY_PRO)
                 fence_proxy_async();
 #endif
+#ifndef B1T_CUTLASS
 #if defined(B1T_ETMA) && defined(B1T_ETMA_SEP)
                 mbar_arrive_tx(&sh->full[s], BYTES);
                 mbar_arrive_tx(&sh->efull[s], (uint32_t)(KD * 4));
@@ -305,8 +346,9 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 #else
                 mbar_arrive_tx(&sh->full[s], BYTES);
 #endif
-                Stage<BT>* st = &sh->st[s];
                 uint64_t* bar = &sh->full[s];
+#endif
+                Stage<BT>* st = &sh->st[s];
                 // box {64,1,1,BT,1}: dims {64,2,H,T,B} over [B,T,H,D]
                 tma5d(&qmap, st->q[0], 0, 0, h, t0, n, bar);
                 tma5d(&qmap, st->q[1], 0, 1, h, t0, n, bar);
@@ -324,6 +366,10 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 #else
                 tma3d(&emap, st->e, 0, c * H + h, n, bar);
 #endif
+#endif
+#ifdef B1T_CUTLASS
+                pipe.producer_commit(pstate, BYTES);
+                ++pstate;
 #endif
             }
         }
@@ -366,6 +412,9 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 
         const __nv_bfloat162 scale2 = __floats2bfloat162_rn(scale, scale);
 
+#ifdef B1T_CUTLASS
+        typename PipeT::PipelineState cstate;
+#endif
         for (int i = 0; i < NT; ++i) {
 #if defined(B1T_SYNC)
             __syncthreads();
@@ -375,7 +424,11 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 #endif
             const int c = NT - 1 - i;
             const int s = i % NSTAGE;
+#ifdef B1T_CUTLASS
+            pipe.consumer_wait(cstate);
+#else
             mbar_wait(&sh->full[s], (i / NSTAGE) & 1);
+#endif
 #ifdef B1T_ETMA_SEP
             mbar_wait(&sh->efull[s], (i / NSTAGE) & 1);
 #endif
@@ -558,7 +611,12 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 #if defined(B1T_EPROXY) || defined(B1T_EPROXY_CON)
             fence_proxy_async();
 #endif
+#ifdef B1T_CUTLASS
+            pipe.consumer_release(cstate);   // every consumer thread arrives (count = NW*32)
+            ++cstate;
+#else
             if (l == 0) mbar_arrive(&sh->empty[s]);   // one arrival per consumer warp
+#endif
         }
 
         // final: dh0 = S
