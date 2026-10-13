@@ -4068,7 +4068,37 @@
   配套博客 post `mega-kernel-58-mpk-sm100-primitives`（weight 59）并更新 `mega-kernel-00-index` 第 58 项。
   P143-1 新留尾巴见文档 §8（未构建/未运行；warp 不对称只记不判；CuTe `TmemAllocator`/`cute::SM100_MMA_*`
   内部未展开；三份 MMA 封装只核 PTX 串逐字相同、未做等价性证明；描述符位编码未逐位展开；`storage.cuh`
-  对齐未实例化验证）。**本轮新增增量。**
+   对齐未实例化验证）。**本轮新增增量。**
+
+### P144 TMA 版 SMEM 布局走读（`docs/58-mpk-tma-smem-layout.md`）
+
+- [x] **P144-1** 补掉 `docs/51-mpk-smem-layout.md` §6 明留的尾巴——它只走 Ampere
+  `tasks/ampere/smem_layout.cuh` 与 `common/dmem_layout.cuh`，把 Hopper/Blackwell 身体「不 include
+  `smem_layout.cuh`」讲成「走 TMA 描述符」，却漏了它们 include 的**另一份布局**
+  `tasks/hopper/smem_layout_tma.cuh`（`smem_tma`，129 行，被 10 个 Hopper/Blackwell 身体共用）。
+  见 `docs/58-mpk-tma-smem-layout.md`（MPK `f9eb70c`，**纯源码走读 + 1 个 H100 实测小实验**）。
+  三条 headline：**(A)（headline）一个模板参数 `(B,M,S)` 同时喂给三处硬件字段**——TMA tensor map 的
+  swizzle（`tma_2d.cuh:266-270`，B=3→`CU_TENSOR_MAP_SWIZZLE_128B`）、wgmma matrix descriptor 的
+  swizzle mode + LBO/SBO（`wgmma.cuh:46-91`）、布局自身的 `get_swizzled_offset`（`icol^=irow`），
+  三者必须同 B；生产硬编码 `B=M=S=3`（`task_register.cc:1194-1196`、`linear_hopper.cuh:79-81`），
+  故只走 128 B、`B=1/2`（32/64 B）是「已实现未使用」；**(B)** 与 `docs/51` 的 `smem_row` 对照：
+  后者是「软件独占解释权的行主序布局」，`smem_tma` 是「软硬共管、以硬件 swizzle 为准的**描述符型**
+  布局」（`STRIDE_ROW=INNER_COL_`、外列维块间拼接、3D/2D/1D 访问），错配后果是**静默错**；
+  **(C)（headline）H100/sm90a 实测**（新 `src/tma_smem_layout.cu` + `harness/tma_smem_layout.sh` +
+  `harness/tma_smem_layout.out.txt`，固定 device 3）：用真实 `cp.async.bulk.tensor.2d` 载入
+  128B-swizzle tile、再用逐字复制的 `smem_tma<3,3,3>` 读回，A1–A4（boxRow 8/16/32/64）、E1（非零
+  tile 偏移）**`max|Δ|=0`**；负对照 B1（128B + 恒等布局）、D1（NONE + `<3,3,3>`）各错 448/512，
+  证 B 必须匹配；**F 组测出关键坑**——TMA swizzle 按 **SMEM 绝对地址位**算（`fp8_group_gemm_sm100.cuh:606-612`
+  源码注释原话「non-zero bits in positions [7:9]」），基址须对齐 1024 B（8 行原子），`mod1024=128`
+  即整体平移一行（F2 `max|Δ|≠0`）、`mod1024=0`（F1/F4）才对——这正是生产代码 `linear_hopper.cuh:88`
+  「`(ptr+1023)/1024*1024`」与每 stage 偏移 1024 上取整、`mla_prefill_tp8_sm100.cuh:223-229` 注释
+  「dynamic SMEM starts after ~7 KB of static shared (TaskDesc buffers), leaving the extern shared
+  base only 128-aligned」的机制。判据只贡献 **C3**（device body 内生产者/消费者 SMEM 交接契约）；
+  对 megakernel 的负面含义：**多加/改一个 task 可能改动态 SMEM 基址、静默破坏邻居 TMA swizzle**，
+  故生产每个 TMA task 各自兜底上取整（去中心化 SMEM 地址 ABI，预算代价每 task ≤~1 KB）。
+  配套博客 post `mega-kernel-59-mpk-tma-smem-layout`（weight 60）并更新 `mega-kernel-00-index` 第 59 项。
+  P144-1 新留尾巴见文档 §8（只测 B=3/128B 与单 box；10 消费者只核 2 处；未跑 MPK 本体；
+  `tma_2d/3d/4d` wrapper 语义未逐行；对齐坑对生产路径的实证留待可编译 SM100 时）。**本轮新增增量。**
 
 ## 每轮增量流程（autopilot）
 
@@ -4416,10 +4446,41 @@
   block-scaled MMA 指令有**三份封装**（`kernel::sm100` / `mirage::blackwell::linear_fp8_sm100::sm100`
   / `cute::` 模板），`linear_fp8_1d2d_sm100.cuh:132/134` 一次用两份。读 SM100 task 时别假设
   `tcgen05_*`/`make_*_desc` 来自同一实现，先看它的 `namespace` 与 `#include`。
+- **TMA/UMMA 128B swizzle 的 SMEM 目的基址须对齐 1024 B，否则静默错位**（P144-1/`docs/58` §5）：
+  `smem_tma`/UMMA 的 128 B swizzle 是硬件按 **SMEM 绝对地址位**算的——它把「`[7:9]` 位（8 行原子内
+  行号）XOR 进 `[4:6]` 位（16 B 块号）」，而软件布局（`smem_tma::get_swizzled_offset`、CUTLASS
+  `Swizzle<3,4,3>`）按 **tile 内局部行**算 `icol^=irow`。二者只在基址 `mod 1024 == 0` 时一致；
+  `mod 1024 == 128` 时硬件把绝对行号当 `local_row+1`，XOR 模式整体平移一行（P144-1 在目标卡 H100 上
+  用真实 TMA 实测：`mod1024=0` `max|Δ|=0`、`=128` 错位一行、`=256` 错位两行；源码注释见
+  `fp8_group_gemm_sm100.cuh:606-612`「non-zero bits in positions [7:9]」）。**动态 `extern __shared__`
+  的基址取决于它前面的静态 SMEM（如常驻 kernel 的 `TaskDesc` 缓冲，快照里约 7 KB，注释见
+  `mla_prefill_tp8_sm100.cuh:223-229`）**，故 MPK 生产每个 TMA task 都自己
+  `(ptr+1023)/1024*1024` 上取整（`linear_hopper.cuh:88` + 每 stage 偏移 1024 上取整、
+  `linear_fp8_sm100.cuh:146-149` 用 `%1024==0` 静态断言）。**含义**：常驻 megakernel 里加/改一个 task
+  可能改动态 SMEM 基址、**静默**破坏别的 TMA task 的 swizzle——写/移植 TMA task 时基址必须自己对齐，
+  别指望邻居或框架。这是 `docs/51`「布局类型即 SMEM 的 ABI」的**地址侧**补充。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P143-1 完成（1/1）**。兑现阶段「下一步候选」第三条残留——`docs/22` §3.2 只给摘要、
+- 当前进度：**P144-1 完成（1/1）**。补掉 `docs/51-mpk-smem-layout.md` §6 明留的尾巴——把
+  `tasks/hopper/smem_layout_tma.cuh`（`smem_tma`，129 行，被 10 个 Hopper/Blackwell 身体共用）逐行打开，
+  并**在目标卡 H100/sm90a 上用真实 TMA 实测**它与硬件 128 B swizzle 的一致性与其**1024 B 基址对齐契约**。
+  见 `docs/58-mpk-tma-smem-layout.md`（MPK `f9eb70c`；纯源码走读 + 1 个新实验）。三条 headline：
+  **(A)** 一个模板参数 `(B,M,S)` 同时喂给 TMA tensor map swizzle（`tma_2d.cuh:266-270`）、wgmma 描述符
+  swizzle mode+LBO/SBO（`wgmma.cuh:46-91`）、布局自身 `get_swizzled_offset` 三处，必须同 B；生产只走
+  `B=M=S=3`（128 B）。**(B)** 与 `docs/51` 的 `smem_row` 对照：`smem_tma` 是「软硬共管、以硬件 swizzle
+  为准的描述符型布局」，错配是**静默错**。**(C)**（headline）H100 实测（`src/tma_smem_layout.cu` +
+  `harness/tma_smem_layout.out.txt`）：A/E 组 `max|Δ|=0`、B/D 负对照错位 448/512、**F 组测出基址
+  必须对齐 1024 B**（`mod1024=128` 平移一行），与生产 `linear_hopper.cuh:88` `+1023)/1024*1024` 及
+  `fp8_group_gemm_sm100.cuh:606-612`/`mla_prefill_tp8_sm100.cuh:223-229` 源码注释互相印证。判据只 C3。
+  配套博客 post `mega-kernel-59-mpk-tma-smem-layout`（weight 60）并更新 `mega-kernel-00-index` 第 59 项。
+  P144-1 新留尾巴见文档 §8。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计的完整
+  追述；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或 SM100 专属布局（TMEM 列布局、UTCCP
+  重排细节）逐行。**TMA 版 SMEM 布局层（`smem_tma`）已由 P144-1/`docs/58` 补掉**；SM100 共享原语层
+  已由 P143-1/`docs/57` 补掉；采样链两段式已补完（P142-1/`docs/56`）；路由三兄弟全部补完
+  （P140-1/P141-1）。
+- 此前：**P143-1 完成（1/1）**。兑现阶段「下一步候选」第三条残留——`docs/22` §3.2 只给摘要、
   `docs/38` 只走 `tasks/common/*` 的缺口：把 `tasks/blackwell/` 那层「SM100 共享原语」当作一层逐行打开，
   重点兑现 ROADMAP 原话「**tcgen05 commit / TMEM 分配的运行期契约**」。见 `docs/57-mpk-sm100-primitives.md`
   （MPK `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机不可运行）。四条 headline：
