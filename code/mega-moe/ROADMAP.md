@@ -3706,6 +3706,36 @@
       在仓库缺失；`idx==11` 依赖 NCU CSV 列布局（改动会静默变 None）。
       配套博客 `content/posts/mega-moe-128-quick-plot-pm`（索引页新增第 128 篇）。
 
+### P119 增量（opt-in，补齐 P124 只一句话带过的 DeepEP CMake 调试构建链）
+
+- [x] **P119-1** **DeepEP 的 CMake 调试构建链**（`CMakeLists.txt` / `csrc/CMakeLists.txt` /
+      `csrc/kernels/CMakeLists.txt` / `csrc/kernels/{comm,driver}/CMakeLists.txt` /
+      `csrc/indexing/main.cu` / `setup.py:54-61` / `.gitignore`）与 **DeepGEMM 对偶**。
+      第 124 篇（P114-1）拆「构建 / 打包 / 安装期地基」时只一句话带过「`CMakeLists.txt` 首行自称
+      `only for debugging`、不参与 `pip install`」，第 78 篇又顺带提过 DeepGEMM 的 `csrc/indexing/main.cu`
+      与 CMake；但 DeepEP 的 CMake 调试链本身从没被单独读过。**一套模板两个产物**：`setup.py`
+      （`CUDAExtension`，只编三个 host TU）与 CMake。→ `docs/129-deepep-cmake-debug-build.md`
+      （真实行号核对）：顶层 `CMakeLists.txt:1` 自述、`:6-13` 诊断 flag（`-DENABLE_FAST_DEBUG`
+      全仓无 `#ifdef` 消费者、`--register-usage-level=10,--warn-on-local-memory-usage`、`CUDA_SEPARABLE_
+      COMPILATION`、`-lineinfo`）、`:25-27` 的 `if (NOT NCCL_ROOT_DIR)` **判 CMake 变量**（传环境变量无效，
+      必须 `-DNCCL_ROOT_DIR=`）、`:34-36` include/link、`:39/42/43/46` 两个产物目标 + 索引 TU；
+      目标图三层：`csrc/CMakeLists.txt:1` → `csrc/kernels/CMakeLists.txt:1-14` 的 `add_deep_ep_library`
+      工厂（`POSITION_INDEPENDENT_CODE ON`）+ `comm/driver` 各一行 + **`RUNTIME_CUDA_LIBRARIES`
+      `CACHE INTERNAL` 缓存变量**（顶层 `:43` 消费）；`csrc/indexing/main.cu`（34 行）是全仓唯一 `.cu`，
+      一次 include 全部 `impls/**/*.cuh` 只为 IDE 索引。`cmake-build-*` 命名约定一体两面（`.gitignore:12`
+      + `setup.py:60` 的 `shutil.ignore_patterns`）。**H100(sm90) 真机**（`harness/exp_deepep_cmake_build.{sh,py,
+      out.txt}`，纯构建 / 文件解析、架构无关）：configure **rc=0**；`runtime_driver`/`runtime_comm`/`_C`
+      三目标全 OK（`libruntime_driver.a` **32794 B**、`libruntime_comm.a` **627820 B**、
+      `_C.cpython-312-x86_64-linux-gnu.so` **1178816 B**、`nm -D` 见 `PyInit__C`）；默认 `all` 因
+      `deep_ep_indexing_cuda` **rc=2** 失败——上游真实编译缺口 `bucket/reduce_scatter/rdma.cuh:619/623`
+      （`longlong4_t`→`const float4`，`dst_ptr` 在 `:548` 按 `longlong4_t` 推进、`:563` 的 `values[k]` 是
+      `longlong4_t`、累加却走 `:590` 的 `reinterpret_cast<float2*>`）；nvcc 诊断 flag **只作用于索引 TU**、
+      三个 host `.cpp` 由 g++ 编（真机抓两条命令行坐实）。**DeepGEMM 对偶**（`CMakeLists.txt` sha256[:16]
+      `8f05c0443af4daf5`）：同款 flag / `_C` / 索引 TU，但**无 NCCL、无 runtime 静态库**（device kernel
+      全走 JIT）。**与本机「阻塞」的关系**：`context.cpp` 编译通过 → 问题**不在构建**、而在运行期
+      加载哪份 soname（第 86/117 篇）。配套博客 `content/posts/mega-moe-129-deepep-cmake-debug-build`
+      （索引页新增第 129 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3731,8 +3761,15 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P118 各增量完成（P15-1…P41-1、P42-1…P118-1）。**
-  本轮 P118-1：新建 `docs/128-quick-plot-pm.md`
+- 当前进度：**P0~P14 全部完成；P15~P119 各增量完成（P15-1…P41-1、P42-1…P119-1）。**
+  本轮 P119-1：新建 `docs/129-deepep-cmake-debug-build.md`
+  （+`harness/exp_deepep_cmake_build.{sh,py,out.txt}`）——补齐 P124 只一句话带过的 **DeepEP CMake 调试
+  构建链**：一套模板两个产物（`setup.py` 只编三个 host TU vs CMake 的 `_C` + 两个 runtime 静态库 +
+  索引 TU）、`RUNTIME_CUDA_LIBRARIES` 的 `CACHE INTERNAL` 解耦、nvcc 诊断 flag 只作用于 `csrc/indexing/
+  main.cu`（三个 host `.cpp` 走 g++）、`cmake-build-*` 双向 ignore。H100(sm90) 真机：configure rc=0、
+  三目标全 OK（`_C.so` 1178816 B、两个 `.a` 32794/627820 B），默认 `all` 因索引 TU **rc=2** 失败
+  （上游 `rdma.cuh:619/623` 真实编译缺口）。DeepGEMM 对偶无 NCCL / 无 runtime 静态库。索引页新增第 129 篇。
+  上一轮 P118-1：新建 `docs/128-quick-plot-pm.md`
   （+`harness/exp_quick_plot_pm.{sh,py,out.txt}`）——补齐 P78/P88 只一句话带过的 profiling
   「最后一公里」：`scripts/quick_plot_pm.py`（448 行纯 host/Python）把 `.ncu-rep` 变成按物理域
   分组的 PM-sampling 时间序列面板，与第 55 篇的内核内 `%clock64` 探针互补（一个 warp 级时间线、
@@ -5041,17 +5078,21 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P118 已完成（最新 **P118-1 NCU PM-sampling 离线绘图工具 `scripts/quick_plot_pm.py`**：
+- **下一步**：P0~P119 已完成（最新 **P119-1 DeepEP 的 CMake 调试构建链**：
+  一套模板两个产物——`setup.py`（只编三个 host TU）vs `CMakeLists.txt`（`_C` 扩展 + `runtime_comm`/
+  `runtime_driver` 两个 host 静态库 + `csrc/indexing/main.cu` 索引 TU）；`RUNTIME_CUDA_LIBRARIES` 的
+  `CACHE INTERNAL` 解耦、`-DNCCL_ROOT_DIR` 判 CMake 变量、nvcc 诊断 flag 只作用于索引 TU（host `.cpp`
+  走 g++）、`cmake-build-*` 双向 ignore；H100(sm90) 真机 configure rc=0、三目标全 OK
+  （`_C.so` 1178816 B / `.a` 32794、627820 B），默认 `all` 因索引 TU **rc=2** 失败（上游
+  `rdma.cuh:619/623` 真实编译缺口）；DeepGEMM 对偶无 NCCL / 无 runtime 静态库；索引页新增第 129 篇。
+  可继续（均为增量、非承诺）：
+  P96/P97 的轻微漂移清单关键路径定点复核、或两库 `csrc/utils/` 其余小工具（DeepEP `system.hpp`/
+  `event.hpp`）的剩余角落。详见上）。
+  上一轮 P118-1：P0~P118 已完成（最新 **P118-1 NCU PM-sampling 离线绘图工具 `scripts/quick_plot_pm.py`**：
   448 行纯 host/Python，把 `.ncu-rep` 变成按物理域分组的 PM-sampling 时间序列面板；与第 55 篇内核内
   `%clock64` 探针互补；五结构 + 45 条 curated（三种 metric 名形态、跨代双候选）+ host 管线三约定
   （`idx==11`/固定三行/`len>1` 闸门）；H100(sm90) 真机 `ncu --chip gh100` **73 PASS / 0 FAIL**，
-  resolved 34 / missing 11；索引页新增第 128 篇。
-  可继续（均为增量、非承诺）：
-  `DeepEP/build.sh`+`develop.sh` 之外的 `cmake-build-*` 调试链、P96/P97 的轻微漂移清单关键路径
-  定点复核、或两库 `csrc/utils/` 其余小工具（DeepEP `system.hpp`/`event.hpp`）的剩余角落。详见上）。
-  上一轮 P117-1：P0~P117 已完成（最新 **P117-1 Mega Gate 路由的反向**：`sqrt(softplus)` 打分、
-  带 bias 排名 / 不带 bias 出权重、归一化 Jacobian 与分段导数；H100 真机手写反向 vs torch autograd
-  ~2e-16；索引页新增第 127 篇）。详见上。
+  resolved 34 / missing 11；索引页新增第 128 篇）。详见上。
   上一轮 P115-1：P0~P115 已完成（最新 **P115-1 DeepGEMM 的 Python 类型桩生成器 `scripts/generate_pyi.py`**：
   890 行纯 stdlib，把 `csrc/**` 里的 62 条 `m.def` + C++ 签名变成 `_C.pyi`；`BracketTracker` 四括号
   语义、类型/默认值映射、三处真实边界（`m.attr` 10 个别名无 stub、`std::variant` 过宽正则、
