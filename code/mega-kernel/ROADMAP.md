@@ -3514,7 +3514,8 @@
 
 - [x] **P128-1** 补掉 `docs/41`（P127-1）**§6 明留的两条尾巴**——「`mtp_float_scatter` 的 device
   身体（`mtp_token_ops.cuh`）未逐行」与「`target_verify_*` 如何消费 `prob_extract` 的输出（拒绝采样
-  比较 `P_target > u·P_draft`）只按注释转述」（`docs/39` §9 也把它列为三条未走读之一）；
+  比较 `P_target > u·P_draft`）只按注释转述」（`docs/39` §4/§5 只给 `target_verify_*` 与
+  `mtp_token_ops` 的逐段摘要、未串起消费链）；
   也即 `ROADMAP`「下一步候选」第二条。见 `docs/42-mpk-mtp-verify-chain.md`（快照
   `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`–`docs/41` 同快照；**纯源码走读
   （资料分析），本轮无新实验**；整条链只登记 SM100 路径、特性上下文本机不具备）。三条 headline：
