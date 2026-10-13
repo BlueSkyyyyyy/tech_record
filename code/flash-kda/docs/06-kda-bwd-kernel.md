@@ -142,10 +142,12 @@ kernel 体：`chunk_bwd.py:133-310`。grid `(NT, B*HV)`，每 program 一个 chu
 - 求逆的伴随：`b_dA = tl.dot(b_dA, b_A); b_dA = tl.dot(b_A, b_dA)`（`302-303`）再取负
   （`304`）——这就是式 (7.5) 的 $\bar L=-P^\top\bar P\,P^\top$（对称写法，$P$ 缩略见下）。
 
-> 精度注释：FLA 在 `302-303` 用的是 `b_A.to(b_A.dtype)`（bf16）做的两次 `tl.dot`，
-> 而 `chunk_intra.py:597` 有一条作者注释
+> 精度注释：FLA 在 `302-303` 用 `b_A.to(b_A.dtype)` 做的两次 `tl.dot`——**`b_A.dtype` 就是 $P$ 被
+> 存成的 dtype**（那个 `.to` 是恒等 no-op；生产时 FLA 前向把 `Akk` 开成 `k.dtype`=bf16，
+> `chunk_intra.py:819`）。另一侧 `chunk_intra.py:597` 有一条作者注释
 > `# (SY 09/17) important to not use bf16 here to have a good precision.`
-> ——说明 L 的伴随对精度敏感，目标卡 CUDA 版应保持 fp32（或 tf32）累加。
+> ——那条针对的是**块内衰减链**，不是这两条求逆伴随 GEMM。$P$ 降 bf16 的实际代价已由 §6.11
+> 实测为 ≤1.3e-4，可忽略。
 
 ### 3.4 `chunk_kda_bwd_kernel_intra`——块内 A 的反向（式 7.6、7.8）
 
@@ -271,10 +273,11 @@ $\sigma(\beta)$ 与 $\alpha=2^{g}$、$g^{\text{cum}}$（后向也需要 $\beta$ 
   （前向 K2 已经验证有衰减 regime 下 bf16 状态存储对输出无可测量损失，`03` §18；
   反向的 $\bar S$ 与状态同阶，可用同一结论，**待验证**：需实测 bf16 $\bar S$ 对
   $dk,d\beta$ 的误差）。
-- **$P$ 的精度**：式 (7.5) 的 $\bar L=-P^\top\bar P\,P^\top$ 对 $P$ 敏感。FLA 在这里用了一次
-  bf16 `tl.dot` 并留了「不要用 bf16」的注释（§3.3）。目标卡应保持 **fp32/tf32** 累加，$P$ 本身
-  已在 K1 以 bf16 落盘（`kINV` 512 B），可考虑随 workspace 增存一份 fp32 $P$（每 tile 多 1 KB）
-  以换取精度。
+- **$P$ 的精度**：式 (7.5) 的 $\bar L=-P^\top\bar P\,P^\top$ 对 $P$ 敏感。FLA 在 `302-303` 的两次
+  `tl.dot` 精度由**上游把 $P$ 存成什么 dtype**决定（那个 `.to(b_A.dtype)` 是 no-op；生产时 FLA
+  `Akk` 本就是 bf16，见 §6.11 Part A）。**已由 §6.11（P6-9）实测关闭**：目标卡 K1 的 bf16 `kINV`
+  足够——$P$ 降 bf16 对六项梯度只加 **≤1.3e-4**（比 bf16 操作数底噪低 2–3 个数量级），**无须增存 fp32 $P$**。
+  真正要保 fp32/tf32 累加的是**块内衰减链**那一侧（`chunk_intra.py:597` 的注释）。
 - **不复算 GEMM**：与 FLA 默认「重算 `w,u,qg,kg,v_new,h`」不同，目标卡方案直接吃 K1 workspace，
   反向的额外开销只剩状态伴随 + 块内 GEMM；这正是 K1「把重活落盘」设计的回报。
 
@@ -286,7 +289,7 @@ $\sigma(\beta)$ 与 $\alpha=2^{g}$、$g^{\text{cum}}$（后向也需要 $\beta$ 
 | 前向中间量 | 默认**重算** | K1 workspace **已落盘**，直接复用 |
 | 状态伴随 | `dhu`，V 维分块、Triton | B1，head 并行、CUTLASS+TMA，镜像 K2 |
 | 块内 A 反向 | `wy_dqkg` + `intra` 两个 kernel | B2+B3，`CHUNK=16` 下可合并 |
-| 求逆伴随 | 用保存的 bf16 `Akk` | 用 workspace 的 bf16 `kINV`（建议增存 fp32 版） |
+| 求逆伴随 | 用保存的 bf16 `Akk` | 用 workspace 的 bf16 `kINV`（§6.11 实测：bf16 够用，**无须** fp32 副本） |
 | 精度敏感点 | `chunk_intra.py:597` 注释禁 bf16 | 保持 fp32/tf32 |
 
 ## 6. P6-2：最小可运行反向 kernel——B1 状态伴随实测
@@ -852,6 +855,55 @@ dq 3.42e-3   dk 2.98e-3   dv 6.34e-3   dbeta 5.97e-3   dg 7.05e-3   dh0 6.42e-3
    重建时把 `v/β/g` 尾部 pad 到 `NT·CHUNK`（pad 置零使行惰性）、结果再切回 `T`。
    与前面「last 有效 token 取 $E^{\text{tot}}$」（§6.5）配齐后，非整除 T 与整除 T 同精度。
 
+### 6.11 P6-9：$P$ 的存储精度消融——bf16 `kINV` 够用，无须增存 fp32（关闭 §5.3 待验证）
+
+§5.3 留了最后一条精度**待验证**：式 (7.5) 的 $\bar L=-P^\top\bar P\,P^\top$（`chunk_bwd.py:302-303`）
+对 $P$ 敏感，而目标卡 K1 workspace 把 $P$（=`kINV`，即 FLA 的 `Akk`）按 **bf16** 落盘
+（512 B/tile，`utils.cuh:70-76`），§5.3 猜测「可考虑随 workspace 增存一份 fp32 $P$（每 tile 多 1 KB）
+以换取精度」。本轮用 `harness/check_bwd_p_dtype.py`（`harness/check_bwd_p_dtype.out.txt`）
+在 H100 上把这条**做掉**：受控地只动「反向 B2 读到的 $P$ 的存储值」，量它到底值不值这 1 KB。
+
+**Part A（dtype 审计，先钉死「存的是什么」）**：FLA 前向 `chunk_kda_fwd_intra` 把 `Akk` 开成
+`k.dtype`（`chunk_intra.py:817-819`：`Aqk = torch.empty(..., dtype=k.dtype)`、`Akk = torch.zeros(..., dtype=k.dtype)`）。
+实测：喂 **fp32** 操作数 → `Aqk/Akk/w/v_new/h` 全 fp32；喂 **bf16**（生产路径）→ 全 bf16。
+即 **FLA 生产时 $P$ 本来就是 bf16 落盘的**，与目标卡 K1 的 bf16 `kINV` 一模一样。
+> 顺带更正 §3.3 的一处措辞：那里写「FLA 在 `302-303` 用的是 `b_A.to(b_A.dtype)`（bf16）」——
+> 这个 `.to(b_A.dtype)` 其实是**恒等 no-op**（转成自己），FLA 并没有「强制 bf16」；$P$ 的精度
+> 完全由**上游把它存成什么 dtype**决定。真正的 `# important to not use bf16` 警告在
+> `chunk_intra.py:597`，指的是**块内衰减链**那一侧，不是这两条求逆伴随 GEMM。
+> 因此「增存 fp32 $P$」是对 FLA 的**改进**，而不是修 FLA 的 bug。
+
+**Part B（孤立解析）**：取真实前向的 fp32 $P$（单位下三角），随机严格下三角 $\bar P$，比
+$-P^\top\bar P\,P^\top$ 在 $P$=fp32 vs $P$=bf16($P$).fp32 下的差：$P$ 自身量化 `max_rel=2.1e-4`，
+伴随量 `max_rel=4.9e-4`。即**该公式把 $P$ 的 bf16 量化放大不到 3×**，不存在量级放大。
+
+**Part C（孤立 B2）**：只在 B2 输入里把 `A` 换成 `bf16(P).fp32`（其余操作数保持 fp32，使伴随
+`tl.dot` 仍走 fp32/tf32，隔离出**纯存储量化**这一轴），六项输出：
+
+| | `dq` | `dk` | `dv` | `db` | `dg` | `dA` |
+|---|---|---|---|---|---|---|
+| `D_max_rel` | **0** | 4.9e-6 | 4.7e-5 | 6.5e-5 | 2.0e-6 | 4.9e-4 |
+
+`dq` 逐位不变（B2 的 `dq=do@S_in` 不含 $P$），$P$ 只在求逆伴随处进链，故误差全落在
+`dA`–`db` 一侧且 **≤5e-4**。（注：真 bf16 MMA 路径还会把伴随的另一个点乘操作数量化，那是
+§6.6 Part C 已量的「全 bf16 操作数底噪」，与 $P$ 无关。）
+
+**Part D（整链，$P$-归因增量）**：把 dAv→B1→B2→B3→反向 cumsum 的链跑两遍（$P$=fp32 vs $P$=bf16
+存储值），与 `torch.autograd` 比。四组 case（T=256/512/1024 + 非整除 T=250，H=2/4/8，含非整除）实测：
+
+| 口径 | `dq` | `dk` | `dv` | `dg` | `dbeta` | `dh0` |
+|---|---|---|---|---|---|---|
+| 链($P$ fp32) vs autograd 最坏 | 0 | 1.5e-5 | 3.9e-4 | 1.1e-5 | 1.1e-4 | 5.1e-6 |
+| 链($P$ bf16) vs autograd 最坏 | 0 | 4.4e-5 | 3.9e-4 | 1.5e-5 | 1.1e-4 | 5.1e-6 |
+| **$P$-归因增量（两链之差）** | **0** | **4.4e-5** | **1.3e-4** | **1.5e-5** | **1.0e-4** | **0** |
+
+**结论（关闭 §5.3 待验证，给出目标卡设计输入）**：把 $P$ 从 fp32 降到 bf16 存储，六项反向梯度
+的**归因增量 ≤ ~1.3e-4**，比 bf16 操作数底噪（`dk/dg` 3e-2~5e-2，§6.6 Part C）低 **2–3 个数量级**，
+甚至低于链本身对 autograd 的残差（~1e-4~4e-4，tf32/tf32 链）。**故目标卡 CUDA 反向无须为 $P$ 增存
+fp32 副本**——直接复用 K1 已落盘的 bf16 `kINV` 即可，省下每 tile 1 KB、且与 FLA 生产行为一致。
+§5.3 的「可考虑增存 fp32」与 §5.4 对照表里的「建议增存 fp32 版」据此**撤回**；若将来要收紧 `dk`，
+该投入应优先花在**衰减链的操作数精度**（§3.3 的 `not bf16` 注释所指）而非 $P$ 的存储。
+
 ## 7. 小结与下一步
 
 - FLA `chunk_kda` 反向的 5 个 Triton kernel 与 `05` §7 的分块反向**逐式对应**：`dAv`=输出支路、
@@ -896,6 +948,12 @@ dq 3.42e-3   dk 2.98e-3   dv 6.34e-3   dbeta 5.97e-3   dg 7.05e-3   dh0 6.42e-3
   **4.5e-3~8.9e-3**，Part B 七个操作数对 `kda_ref` 独立重算 **1.3e-4~8.1e-3**，Part C 六项梯度对
   `torch.autograd` 最坏 **6.4e-3**（六组含非整除 T / g=0 / B=2）。至此「复用 K1 workspace」不再
   只是点对点核验（§6.8 Part E），而是**端到端驱动了一条完整反向**。四个集成坑见 §6.10.4。
+
+- §6.11（P6-9）关闭 §5.3 最后一条精度待验证（$P$ 的存储精度）：FLA 前向 `Akk` 开成 `k.dtype`
+  （`chunk_intra.py:819`），**生产时 $P$ 本就是 bf16**，与目标卡 K1 的 bf16 `kINV` 一致；受控消融
+  （`harness/check_bwd_p_dtype.py`）实测 $P$ 降 bf16 对六项梯度的**归因增量 ≤1.3e-4**（`dq`/`dh0`
+  为 0），比 bf16 操作数底噪低 2–3 个数量级。**结论：无须为 $P$ 增存 fp32 副本**，撤回 §5.3/§5.4 的
+  「增存 fp32」建议；并更正 §3.3 把 `.to(b_A.dtype)` 误读成「强制 bf16」。
 
 下一步：
 

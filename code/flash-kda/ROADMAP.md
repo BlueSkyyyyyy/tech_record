@@ -113,6 +113,17 @@
       操作数 vs `kda_ref` 独立重算）1.3e-4~8.1e-3；Part C（六项梯度 vs autograd）最坏 6.4e-3
       （6 组含非整除 T、$g=0$、$B=2$）。四个集成坑：字段展平须按 `(NT,CHUNK,H)` 重排（错则 qg/kg rel≈1）、
       `INV` 即 $P$ 不需转置、golden 须吃激活操作数、非整除 T 按 K1 补零尾块。
+- [x] **P6-9** 关闭 §5.3 最后一条精度待验证（$P$/`Akk` 的存储精度）：
+      新增 `harness/check_bwd_p_dtype.py`（`harness/check_bwd_p_dtype.out.txt`）+ `docs/06` §6.11。
+      **Part A**（dtype 审计）：FLA 前向 `Akk` 开成 `k.dtype`（`chunk_intra.py:817-819`）——fp32 入
+      →fp32、bf16 入→bf16，**生产时 $P$ 本就 bf16**，与目标卡 K1 的 bf16 `kINV` 一致；并更正 §3.3
+      把 `302-303` 的 `b_A.to(b_A.dtype)`（恒等 no-op）误读成「强制 bf16」（`not bf16` 注释在
+      `chunk_intra.py:597`，指块内衰减链而非求逆伴随）。**Part B**（孤立解析）：$-P^\top\bar P P^\top$
+      对 bf16($P$) 放大不到 3×（$P$ 量化 2.1e-4 → 伴随量 4.9e-4）。**Part C**（孤立 B2）：只换
+      `A=bf16(P).fp32`，六项 `dq` 逐位 0、`dk 4.9e-6/dv 4.7e-5/db 6.5e-5/dg 2.0e-6/dA 4.9e-4`。
+      **Part D**（整链，四组含非整除 T=250）：$P$ 降 bf16 的**归因增量** `dq/dh0=0`、其余
+      **≤1.3e-4**，比 bf16 操作数底噪（§6.6 Part C 的 3e-2~5e-2）低 2–3 个数量级。
+      **结论**：**无须为 $P$ 增存 fp32 副本**（撤回 §5.3/§5.4「增存 fp32 版」建议），直接用 bf16 `kINV`。
 
 ### P7 性能与剖析（`docs/07-perf.md`）
 
@@ -727,8 +738,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-41 补测**。
-  - P7-41（本轮）：**兑现 §24.5/§36「换 CUTLASS `PipelineTmaAsync`」＝空杠杆**——给 `b1_tma_probe.cu`
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-41 补测**。
+  - P6-9（本轮）：**关闭 §5.3 最后一条精度待验证（$P$/`Akk` 的存储精度）**——受控消融「反向 B2 读到的
+    $P$ 存 fp32 vs bf16」。新增 `harness/check_bwd_p_dtype.py`（`harness/check_bwd_p_dtype.out.txt`）+ `docs/06` §6.11。
+    **Part A**（dtype 审计）：FLA 前向 `Akk` 开成 `k.dtype`（`chunk_intra.py:817-819`），fp32 入→fp32、bf16 入→bf16，
+    **生产时 $P$ 本就是 bf16**（与目标卡 K1 的 bf16 `kINV` 一致）；并更正 `docs/06` §3.3 把 `302-303` 的
+    `b_A.to(b_A.dtype)`（恒等 no-op）误读成「强制 bf16」——`not bf16` 注释在 `chunk_intra.py:597`，指块内衰减链。
+    **Part B**：$-P^\top\bar P P^\top$ 对 bf16($P$) 放大不到 3×（$P$ 量化 2.1e-4 → 伴随量 4.9e-4）。
+    **Part C**（孤立 B2，只换 `A=bf16(P).fp32`）：`dq` 逐位 0、`dk 4.9e-6/dv 4.7e-5/db 6.5e-5/dg 2.0e-6/dA 4.9e-4`。
+    **Part D**（整链四组含非整除 T=250）：$P$ 降 bf16 的**归因增量** `dq/dh0=0`、其余 **≤1.3e-4**，比 bf16
+    操作数底噪（§6.6 Part C 的 3e-2~5e-2）低 2–3 个数量级。**结论**：**无须为 $P$ 增存 fp32 副本**（撤回
+    §5.3/§5.4「增存 fp32 版」建议），目标卡直接用 bf16 `kINV`。至此前向 K1 workspace 的**字段精度**全部有据可依。
+  - P7-41（上轮）：**兑现 §24.5/§36「换 CUTLASS `PipelineTmaAsync`」＝空杠杆**——给 `b1_tma_probe.cu`
     加 `-DB1T_CUTLASS`，**只**换 pipeline 管理（`Shared` 用 `PipelineTmaAsync<NSTAGE>::SharedStorage`
     `:243-244`；`make_producer_start_state`+`producer_acquire/get_barrier/commit` `:318-371`；
     `consumer_wait/release` `:415-428/614-615`），TMA/swizzle/`mma.sync`/TMA store/两侧 fence 一字未改。
@@ -1288,7 +1309,7 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-41 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-41 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
   - **P7-41（`docs/07` §44）关闭 §24.5/§36 的「换 CUTLASS `PipelineTmaAsync`」——空杠杆**：`-DB1T_CUTLASS`
     只换 pipeline 管理，`cut`≡`base`/`cut2`≡`hnd` **逐位相同**、`cut2/hnd` **0.985–1.003**（零性能）、
     `ncu` 逐指标重合（`wait` 1.42→1.38 纹丝不动）。**手写 mbarrier 已到该结构上限**；§24.5 选项 (b)「直接
