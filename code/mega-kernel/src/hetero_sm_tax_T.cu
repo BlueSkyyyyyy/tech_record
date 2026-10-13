@@ -748,6 +748,73 @@ static void robust() {
   printf("\n########## §84 robust 完成 ##########\n");
 }
 
+// ============================================================================
+// P97-1（§85）：补掉 P96-1（§84）§84.4 明留的尾巴——
+//   「bootstrap CI 基于同一进程内 S=30 单次实验，**不含跨进程 / 跨 device 的系统差**」。
+//   本模式 `xproc <S> <seed>` 复用 §84 的 7 个配置，但每 round 内用 **Fisher-Yates 打乱访问顺序**
+//   做 S 次单采样，并把**原始样本**逐行打印（`RAW <c> <T> <s0> ... <s_{S-1}>`），由外部脚本跨
+//   进程 / 跨 device 汇总——「换一个进程、换一块卡，+4.3% 的 T 趋势还在不在」是同一进程内 30 次
+//   CI 回答不了的问题（进程启动态 / 时钟 / 卡个体差都是新的方差源）。
+// ============================================================================
+static unsigned g_rob_rng;
+static unsigned rob_rand() { g_rob_rng = g_rob_rng * 1664525u + 1013904223u; return g_rob_rng; }
+
+static void xproc(int S, unsigned seed) {
+  CK(cudaDeviceGetAttribute(&g_numSm, cudaDevAttrMultiProcessorCount, 0));
+  int dev = 0; CK(cudaGetDevice(&dev));
+  cudaDeviceProp prop; CK(cudaGetDeviceProperties(&prop, dev));
+  const char* cvd = getenv("CUDA_VISIBLE_DEVICES");
+  if (S > ROB_S) S = ROB_S;
+  if (S < 2) S = 2;
+  printf("META numSM=%d S=%d seed=%u cvd=%s name=\"%s\"\n",
+         g_numSm, S, seed, cvd ? cvd : "?", prop.name);
+  fill_all();
+
+  RobCfg cfgs[ROB_NC] = {
+      {"mixed scalar+l2res", {0, 0, 1, 1}, 128, -1, 8, 32},
+      {"mixed scalar+l2res", {0, 0, 1, 1}, 256, -1, 8, 32},
+      {"mixed scalar+l2res", {0, 0, 1, 1}, 512, -1, 8, 32},
+      {"l2res16M solo",      {0, 0, 0, 1}, 128,  3, 8, 32},
+      {"l2res16M solo",      {0, 0, 0, 1}, 512,  3, 8, 32},
+      {"scalar4B solo",      {0, 0, 1, 0}, 128,  2, 8, 32},
+      {"scalar4B solo",      {0, 0, 1, 0}, 512,  2, 8, 32},
+  };
+  int grid[ROB_NC], occ[ROB_NC];
+  for (int c = 0; c < ROB_NC; ++c)
+    grid[c] = setup_config(cfgs[c].seq, cfgs[c].T, cfgs[c].U, cfgs[c].R, cfgs[c].solo, &occ[c]);
+  printf("RES");
+  for (int c = 0; c < ROB_NC; ++c) printf(" %d/%d/%d", cfgs[c].T, occ[c], occ[c] * cfgs[c].T);
+  printf("\n");
+
+  static double samp[ROB_NC][ROB_S];
+  for (int c = 0; c < ROB_NC; ++c) {
+    setup_config(cfgs[c].seq, cfgs[c].T, cfgs[c].U, cfgs[c].R, cfgs[c].solo, nullptr);
+    for (int w = 0; w < 3; ++w) (void)sample_once(grid[c]);
+  }
+  g_rob_rng = seed ? seed : 1u;
+  for (int s = 0; s < S; ++s) {
+    int order[ROB_NC];
+    for (int i = 0; i < ROB_NC; ++i) order[i] = i;
+    for (int i = ROB_NC - 1; i > 0; --i) {
+      int j = (int)(rob_rand() % (unsigned)(i + 1));
+      int t = order[i]; order[i] = order[j]; order[j] = t;
+    }
+    for (int k = 0; k < ROB_NC; ++k) {
+      int c = order[k];
+      setup_config(cfgs[c].seq, cfgs[c].T, cfgs[c].U, cfgs[c].R, cfgs[c].solo, nullptr);
+      samp[c][s] = sample_once(grid[c]);
+    }
+  }
+  for (int c = 0; c < ROB_NC; ++c) {
+    printf("RAW %d %d", c, cfgs[c].T);
+    for (int s = 0; s < S; ++s) printf(" %.6f", samp[c][s]);
+    printf("\n");
+  }
+  for (int c = 0; c < ROB_NC; ++c)
+    printf("MED %d %d %.6f\n", c, cfgs[c].T, median_of(samp[c], S));
+  printf("DONE\n");
+}
+
 static void fill_all() {
   long long tot = TOT_U4 * SPARSE_STRIDE + TOT_U4 + L2N4 + 1024;
   ensure(tot, MAXGRID);
@@ -940,6 +1007,12 @@ int main(int argc, char** argv) {
   CK(cudaFree(0));
   if (argc >= 2 && !strcmp(argv[1], "bench")) { bench(); return 0; }
   if (argc >= 2 && !strcmp(argv[1], "robust")) { robust(); return 0; }
+  if (argc >= 2 && !strcmp(argv[1], "xproc")) {
+    int S = (argc >= 3) ? atoi(argv[2]) : ROB_S;
+    unsigned seed = (argc >= 4) ? (unsigned)strtoul(argv[3], nullptr, 10) : 1u;
+    xproc(S, seed);
+    return 0;
+  }
   if (argc >= 2 && !strcmp(argv[1], "run")) {
     if (argc < 7) { printf("usage: run <U> <R> <T> <map> <r0,r1,r2,r3>\n"); return 1; }
     g_U = atoi(argv[2]);
@@ -962,6 +1035,6 @@ int main(int argc, char** argv) {
            r.unsupported ? "UNSUP" : "OK", r.ms, r.gbs);
     return 0;
   }
-  printf("usage: hetero_sm_tax_T {bench|robust|run <U> <R> <T> <map> <r0,r1,r2,r3>}\n");
+  printf("usage: hetero_sm_tax_T {bench|robust|xproc <S> <seed>|run <U> <R> <T> <map> <r0,r1,r2,r3>}\n");
   return 1;
 }
