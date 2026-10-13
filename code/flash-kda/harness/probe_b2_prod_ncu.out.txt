@@ -1,0 +1,76 @@
+== prebuild (outside ncu) ==
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(632): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(273): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(632): warning #177-D: variable "gpart1" was declared but never referenced
+      float gpart1 = 0.f;
+            ^
+
+Remark: The warnings can be suppressed with "-diag-suppress <warning-number>"
+
+~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu(273): warning #177-D: variable "QKGP" was declared but never referenced
+  constexpr int QKGP = KD + (0 ? 4 : 0);
+                ^
+
+  built prod_tma
+
+################################################################################
+# b2prod_launch  shape=b8t2048h8
+################################################################################
+b2prod_launch ok  shape=b8t2048h8 reps=6
+[2837379] python3.12@127.0.0.1
+  b2mma_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, int, int, int, int) (128, 64, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Gbyte         1.62
+    dram__bytes_write.sum                                                             Mbyte       485.31
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        45.35
+    gpu__time_duration.sum                                                               ms         1.39
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                    28311552
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                        79364096
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector     28180480
+    launch__occupancy_limit_shared_mem                                                block            1
+    launch__registers_per_thread                                            register/thread          128
+    lts__t_bytes.sum                                                                  Gbyte         3.57
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        55.81
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         3.07
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        23.93
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        12.50
+    ----------------------------------------------------------------------- --------------- ------------
+
+
+################################################################################
+# b2prod_launch  shape=b2t1024h8
+################################################################################
+b2prod_launch ok  shape=b2t1024h8 reps=6
+[2837515] python3.12@127.0.0.1
+  b2mma_kernel(CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, const float *, float *, float *, float *, float *, const float *, const float *, float *, float *, float *, const float *, const float *, const float *, float *, float *, float *, float, float *, float *, const float *, float *, int, int, int, int) (64, 16, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------------------------------- --------------- ------------
+    Metric Name                                                                 Metric Unit Metric Value
+    ----------------------------------------------------------------------- --------------- ------------
+    dram__bytes_read.sum                                                              Mbyte       202.96
+    dram__bytes_write.sum                                                             Mbyte        53.84
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                    %        42.10
+    gpu__time_duration.sum                                                               us       181.95
+    l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum                                     3538944
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum                                         9920512
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum                                   sector      3522560
+    launch__occupancy_limit_shared_mem                                                block            1
+    launch__registers_per_thread                                            register/thread          128
+    lts__t_bytes.sum                                                                  Mbyte       447.64
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                     %        53.23
+    sm__pipe_tensor_op_hmma_cycles_active.avg.pct_of_peak_sustained_elapsed               %         2.89
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                      %        22.52
+    sm__warps_active.avg.pct_of_peak_sustained_active                                     %        12.50
+    ----------------------------------------------------------------------- --------------- ------------
+

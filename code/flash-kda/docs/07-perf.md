@@ -6420,3 +6420,112 @@ tf32 底噪逐值一致**，证明换 store 指令不动语义。
   store** 都应走 64-bit（乃至更宽）向量化。
 - **边界**：`[BT,BT]` 的 `dA`/`dApre` 未向量化（小张量 + thread-per-entry 布局）；`dgk`/`db_out` 非成对形态
   仍标量；仅覆盖 `K=V=128`、`BT=16`、fp32。至此 §51.6 的设计输入在 B2 全核（含四段非 GEMM）落地。
+
+## 63. 「K2 形状 CUDA B2」六段合成**单一生产 launch**：逐位无损、一次 launch 摊掉两份重复的 GEMM 核（−47~53%）（P7-60）
+
+P7-52…P7-59 把 B2 的六段非 GEMM（输出支路 `dv2/dvb`、`dkgb=A@(-dw)`、`dA` 的 `dApre` 与
+`-A^T diag(β) A^T` sandwich、写入门 `db`、门控链 `dq/dk/dg`）**逐段**搬进了 K2 形状 CUDA 核
+（`harness/b2_mma_probe.cu`），但每一段都是**独立的编译变体 + 独立 launcher**（`b2out_launch` /
+`b2dkgb_launch` / `b2da_launch` / `b2sand_launch` / `b2db_launch` / `b2gate_launch`）——上一轮的
+「下一步」把这条留作**唯一剩余的真结构项**。事实上要把六项梯度全部产出，老设计至少要跑 **3 次** b2 核
+（`db` = GEMM+OUT+DKGB+DB、`sand` = GEMM+DA+SAND、`gate` = GEMM+DKGB+GATE），每次各自重做一遍**同一个**
+GEMM 核还有各自的一次 launch。本节给出**单一生产 launch** `b2prod_launch`（`-DB2M_PROD`），并证明
+合并**逐位无损**、且把重复的 GEMM 核从 3 份摊成 1 份。
+
+### 63.1 设计：六段旗标取并集 + `beta` 只声明一次，段体一字未动
+
+- `-DB2M_PROD`（`b2_mma_probe.cu:129-142`）在**所有段旗标定义之前**把 `B2M_OUT/DKGB/DA/SAND/DB/GATE`
+  六个全部 `#define` 为 1；各段原有的 `#ifndef`/`#error` 依赖检查因此全部通过。
+- 六段的**代码体一行未动**：它们的累加器（`accq/acck/accw`、`acc2`、`acc3`、`dbpart/dkpart`、
+  `dgv/dqgv/dkgv`）、smem 缓冲（`skg`、`swall/dapart/da16`、`dbrow/dbv`、`sA/sbeta/daB`、`sdgkt`）与输出
+  （`dv2/dvb`、`dkgb`、`dApre/dA`、`db`、`dqg/dkg/dg`）**两两不相交**，所以并集天然无冲突。
+- 唯一需要的共享改动：原先 `beta` 在 `B2M_OUT`、`B2M_GATE`、`B2M_SAND` 三处各声明一次（单独编译时各出现
+  一次、合法），合并后变成**同名重复参数**。改成**只声明一次**——`beta` 在各段自己的位置按
+  `#if B2M_GATE && !B2M_OUT` / `#if B2M_SAND && !B2M_OUT && !B2M_GATE` 让位给 `B2M_OUT` 处的那一份
+  （`b2_mma_probe.cu:588-591/595-597/610-614`）。这样**既有的六个隔离 launcher 签名全部不变**，只有 `prod`
+  看到并集后的参数顺序。
+- 新增 `b2prod_launch`（`b2_mma_probe.cu`，`#if B2M_PROD`）：按宏展开后的 `b2mma_kernel` 签名给出联合参数
+  表，含 TMA 七张张量图（`dom/vnm/dvm/hm/dhm/dwm/vvm`）。隔离 launcher 在 `prod` 下用 `&& !B2M_PROD`
+  关掉，避免与并集签名冲突。
+
+### 63.2 Part A — 正确性：`prod` 的**每一个**输出与对应隔离 build **逐位相同（`max_abs=0`）**
+
+四组 shape（`B8 T2048 H8` / `B2 T1024 H8` / `T512 H4` / `T250 H3` 非整除），`prod`（一次 launch）对比
+隔离 build：`dv2/dvb/dkgb/db` vs `db` build、`dApre/dA` vs `sand` build、`dqg/dkg/dg` vs `gate` build、
+`dw/dgk` vs `core` build；另有 `prod_tma`（`-DB2M_PROD -DB2M_TMA`）vs `prod`（cp.async）。
+
+| 字段 | 对照 | 四组最坏 `max_abs` |
+|---|---|---|
+| `dv2`/`dvb`/`dkgb`/`db` | `prod` vs `db` | **0 / 0 / 0 / 0** |
+| `dApre`/`dA` | `prod` vs `sand` | **0 / 0** |
+| `dqg`/`dkg`/`dg` | `prod` vs `gate` | **0 / 0 / 0** |
+| `dw`/`dgk` | `prod` vs `core` | **0 / 0** |
+| `dv2`/`dqg`/`dA` | `prod_tma` vs `prod` | **0 / 0 / 0** |
+
+即**合并逐位无损**（含非整除 `T=250`；TMA 与 cp.async 两布局也逐位一致）。这与「段体一行未动」自洽：合并
+只改了参数/旗标组合，未碰任何 mma、归约或 store 的算术与顺序。
+
+### 63.3 Part B — 资源：`prod` 约 2× 寄存器但**零 spill**，smem 133.8 KB（1 block/SM）
+
+`nvcc -Xptxas -v` + `b2mma_smem_bytes()`：
+
+| build | regs | spill | smem(B) |
+|---|---|---|---|
+| `core` | 70 | 0 | 87 552 |
+| `db` | 80 | 0 | 113 664 |
+| `sand` | 80 | 0 | 119 936 |
+| `gate` | 74 | 0 | 92 672 |
+| **`prod`** | **140** | **0** | **133 760** |
+| `prod_tma` | 128 | 0 | 123 008 |
+
+六段并集把寄存器从单段的 70–80 抬到 140（各段累加器同时保活），但**没有溢出**——这是关键：P7-45/§48
+曾证「大操作数常驻寄存器 → spill/发射饥饿」是融合核头寸的来源，而本轮六段并集**仍在 255 上限之内**。
+`smem` 133.8 KB × `ncu` 的 `launch__occupancy_limit_shared_mem=1` ⇒ **1 block/SM（12.5% occupancy）**，
+与 GEMM 核基座一致。
+
+### 63.4 Part C — 计时：一次 `prod` launch vs 老设计的 3 次 launch，**0.47–0.53×**
+
+CUPTI `dev`（`profile_dev`，每次计时跑 15 次取 `/rep`，空闲卡 GPU1）：
+
+| shape | `prod`（1 次 launch） | `db`+`sand`+`gate`（3 次 launch） | `prod/old` |
+|---|---|---|---|
+| `B8 T2048 H8` | 1288.2 µs（15 个 b2 核） | 2450.4 µs（45 个 b2 核） | **0.526×** |
+| `B2 T1024 H8` | 169.7 µs | 342.2 µs | **0.496×** |
+| `T512 H4` | 20.1 µs | 42.2 µs | **0.477×** |
+| `T250 H3`（非整除） | 18.4 µs | 39.4 µs | **0.467×** |
+
+**机制**：老设计 3 次 launch 各自**重做一遍同一个 GEMM 核**（每次 15 个 b2 核 × 3 = 45），`prod` 只做一次
+（15 个）。省下的正好是 **2 份 GEMM 核 + 2 次 launch**，与 0.47–0.53×（≈ −47~53%）一致。小 shape
+（`T512/T250`）与大 shape 的比值接近，说明该收益是**结构性**的（核复用），非带宽/尺度相关。
+
+### 63.5 `ncu` — 合并后仍**非 DRAM-bound**，是标量/发射受限（tensor 3%、occ 12.5%、DRAM 45%）
+
+`harness/probe_b2_prod_ncu.sh`（`harness/ncu_b2_prod_ncu.out.txt`，`prod_tma`，空闲卡 GPU1）：
+
+| 指标 | `B8 T2048 H8` | `B2 T1024 H8` |
+|---|---|---|
+| `gpu__time_duration` | 1.39 ms | 181.95 µs |
+| DRAM 读 / 写 | 1.62 GB / 485 MB | 203 MB / 54 MB |
+| `dram` / `lts` SOL | 45.4% / 55.8% | 42.1% / 53.2% |
+| `sm` SOL / `tensor` | 23.9% / **3.07%** | 22.5% / **2.89%** |
+| `warps_active` | 12.50% | 12.50% |
+| regs / occ-limit-smem | 128 / 1 | 128 / 1 |
+
+合并后的核**不再是 isolated GEMM 核那种 84.6% DRAM bound**（§49）：六段非 GEMM 基本是**标量/片元式
+访存 + `exp2f`**，把 DRAM SOL 压到 45%、tensor 仍是 3%。也就是说 `prod` 的定位与 P7-57/58 的「B2 全核
+DRAM/L2 双 bound、但含大量标量段」一致——**Part C 的 ~2× 是核复用/launch 摊薄的直接结果，不是换了瓶颈
+regime**。合并把六个隔离核的「每人一次 GEMM 核」收敛成一次，本身就是把 P7-46（GEMM 核 0.93× Triton、
+贴 DRAM 地板）的成果摊销到全部六段。
+
+### 63.6 结论 / 对目标卡的设计输入
+
+- **六段合成单一生产 launch 成立**：`b2prod_launch` 一次 launch 产出 B2 全部六项梯度 + raw `dw/dgk`，
+  与六个隔离 build **逐位相同**（Part A，含非整除 T、两种 stage 布局），**零 spill**（Part B），
+  相对老设计 3 次 launch **0.47–0.53×**（Part C）。公开的 §55.6/§56.6/§57.6/§58.6/§59.6/§60.5 一直点名的
+  「各段仍分 launcher」这条**结构项关闭**。
+- **设计输入**：目标卡 CUDA B2 的**生产形态就是这一个核**——GEMM 核做基座、六段在同一 `(NT, B·H)` grid
+  内以各自的 warp 分片/寄存器累加器追加，`beta` 等共享操作数只入参一次；无需为每段单独起 launch。
+- **边界 / 下一步**：本轮只验证「合并 == 隔离」与 launch 摊薄，未改变各段内部实现；`prod` 仍 1 block/SM
+  （smem 133.8 KB 钉住）、且六段的标量/片元访存仍是主要 headroom（tensor 3%）。若继续，剩下的真结构项是
+  §49.7 早已点名的**同 CTA 内交接**（`dw` 不落盘而是就地喂 `dkgb`/`dA`，`dv2`/`v` 不落盘喂 `db`）——
+  本节把「六段共存于一个核」这个前提做实了，同 CTA 交接才具备落脚点。

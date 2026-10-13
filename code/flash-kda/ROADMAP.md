@@ -720,6 +720,24 @@
       **不必**为 `q/k/g` 单设 smem staging；`q` 保持直读 global 更划算；若合流须不增 smem 峰值且不掉占用率
       ——但本轮已证即便做到仍 +8.7%，故**不作为优化项**。**方法学**：把「ncu 计数里的散读」当成本前，须用
       「换算子只改取数来源、occupancy 不变」的受控对拍验证它是否在关键路径上。
+- [x] **P7-60** 兑现 §62.6 留的**唯一剩余真结构项**（「六段合成单一生产 launch」，此前六段各是一个独立
+      编译变体 + 独立 launcher）：给 `b2_mma_probe.cu` 加 `-DB2M_PROD`，在段旗标定义前把
+      `B2M_OUT/DKGB/DA/SAND/DB/GATE` 六旗标全部置 1，新增 `b2prod_launch`（一次 launch 产出 B2 全部六项
+      梯度 + raw `dw/dgk`）。**六段代码体一行未动**——它们的累加器/smem/输出两两不相交；唯一共享改动是
+      `beta` 由三处声明改为一处（`#if B2M_GATE && !B2M_OUT` / `#if B2M_SAND && !B2M_OUT && !B2M_GATE`
+      让位，`:588-591/595-597/610-614`），故**既有六个隔离 launcher 签名全部不变**。新增
+      `harness/check_bwd_b2_prod.py`（`check_bwd_b2_prod.out.txt`，空闲卡）+ `harness/ncu_b2_prod_driver.py` /
+      `harness/probe_b2_prod_ncu.sh`（`probe_b2_prod_ncu.out.txt`）+ `docs/07` §63。**Part A**：四组 shape
+      （含非整除 `T=250`）`prod` 的**每个**输出 vs 对应隔离 build（`dv2/dvb/dkgb/db` vs `db`、
+      `dApre/dA` vs `sand`、`dqg/dkg/dg` vs `gate`、`dw/dgk` vs `core`）**逐位相同（`max_abs=0`）**，
+      `prod_tma` vs `prod` 也逐位。**Part B**：`prod` regs 70–80→**140 零 spill**、smem **133.8 KB**
+      （1 block/SM，occ 12.5%）。**Part C（关键）**：一次 `prod` launch vs 老设计 3 次 launch
+      （`db`+`sand`+`gate`，各重做一遍同一 GEMM 核）**0.467–0.526×**（`B8T2048H8` 2450→1288µs；b2 核
+      45→15），省下的正是 **2 份 GEMM 核 + 2 次 launch**。**Part D**：`prod` 门控 `dqg` vs torch **逐位**、
+      `dkg/dg` ~1e-6（fp32 序）、`dv2` ~1.2e-4（tf32 底噪）。**`ncu`**：合并后 DRAM SOL 45%、tensor 3%、
+      occ 12.5%——**非 DRAM-bound、是标量/发射受限**，坐实 ~2× 来自核复用而非换瓶颈 regime。
+      **边界**：只验证「合并==隔离」与 launch 摊薄，未改段内实现；下一步＝§49.7 的同 CTA 交接（`dw`/`dv2`
+      不落盘就地喂下游段），本节把「六段共存一核」这一前提做实。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1096,11 +1114,28 @@
   ncu 计数当成本前，须用「换算子**只改取数来源**、occupancy 不变」的受控对拍确认它在关键路径上。另本核
   加常驻 `[BT,KD]` tile 直接把 dyn smem 顶过 occupancy 阈值（非 TMA 92.7→117.3 KB，**2→1 block/SM**）
   ——小核「往 smem 搬东西」的第一代价是**峰值 smem 顶掉占用率**，先算 `smem/block × blocks ≤ 227KB`。
+- **把多个「各自独立编译、彼此不组合」的段合成一个核时，最先撞的是共享入参的重复声明**（P7-60，§63.1）：
+  `b2_mma_probe.cu` 的 `beta` 原在 `B2M_OUT`/`B2M_GATE`/`B2M_SAND` 三处各声明一次（单独编译各出现一次、
+  合法），并集后成同名重复参数直接编译失败。改法是让后两处**在已被前一处声明时让位**
+  （`#if B2M_GATE && !B2M_OUT` 等），从而**既有隔离 launcher 签名一字不变**、只有并集 build 看到新顺序。
+  另：`b2prod_launch` 的参数表必须严格按宏展开后的 kernel 签名排（含 TMA 七张图与 `scale` 夹在中间），
+  ctypes `argtypes` 的 `c_float` 位置数错会在第 N 个实参报 `wrong type`。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-59 补测**。
-  - P7-59（本轮）：**收口 §51.6「向量化 store 一律做」在 B2 非 GEMM 四段上留下的边界**（P7-52/53/56/57
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-60 补测**。
+  - P7-60（本轮）：**兑现 §62.6 唯一剩余真结构项——六段合成单一生产 launch**（`-DB2M_PROD`）。在段旗标
+    定义前把六个旗标全置 1、新增 `b2prod_launch`，六段**代码体一行未动**（累加器/smem/输出两两不相交），
+    唯一共享改动是 `beta` 由三处声明改一处（既有隔离 launcher 签名不变）。新增
+    `harness/check_bwd_b2_prod.py`（`check_bwd_b2_prod.out.txt`）+ `ncu_b2_prod_driver.py` /
+    `probe_b2_prod_ncu.sh`（`probe_b2_prod_ncu.out.txt`）+ `docs/07` §63。**Part A**：四组 shape（含非整除
+    `T=250`）`prod` 每个输出 vs 对应隔离 build **逐位相同（`max_abs=0`）**、`prod_tma` vs `prod` 逐位。
+    **Part B**：`prod` regs 140 **零 spill**、smem 133.8 KB（1 block/SM）。**Part C（关键）**：一次 `prod`
+    launch vs 老设计 3 次 launch **0.467–0.526×**（`B8T2048H8` 2450→1288µs；b2 核 45→15，省下 2 份 GEMM 核
+    +2 次 launch）。**Part D**：门控 `dqg` vs torch 逐位、`dkg/dg`~1e-6（fp32 序）、`dv2`~1.2e-4（tf32）。
+    **`ncu`**：合并后 DRAM SOL 45%、tensor 3%、occ 12.5%——非 DRAM-bound、标量/发射受限，证 ~2× 来自核复用。
+    **下一步**：§49.7 的同 CTA 交接（`dw`/`dv2` 不落盘就地喂下游段）——本节把「六段共存一核」前提做实。
+  - P7-59：**收口 §51.6「向量化 store 一律做」在 B2 非 GEMM 四段上留下的边界**（P7-52/53/56/57
     每轮边界都写「本段 store 未接 `-DB2M_VECST`」）。给 `b2_mma_probe.cu` 加 `st2()` 成对 store 助手
     （`:96`：`B2M_VECST` 下一条 `STG.E.64`、否则两条标量），落到 `dv2/dvb`（`:934-940`）、`dkgb`
     （`:952-953`）、门控 `dqg/dkg`（改先写 `dqgv/dkgv[2][4]`，循环后成对存 `:1011-1014`）与 `dg`
@@ -1111,9 +1146,9 @@
     **0.835–0.919×**、大 shape `B8T2048H8` 0.983–0.990×、`db` 段大 shape 也 **0.940×**。**机制**：`db` build
     SASS `STG.E` **50→2**、`STG.E.64` 0→**24**。见 `docs/07` §62。**边界**：`dA`/`dApre` 未向量化（小张量 +
     thread-per-entry）；仅 `K=V=128/BT=16/fp32`。**下一步＝维护/收尾**：§49.7–§60.5 的六段已全进 CUDA、合流
-    已证伪（P7-58）、四段 store 已向量化（本轮），K2 形状 CUDA B2 的廉价/半廉价项全部关闭；若继续，唯一
-    剩余的真结构项仍是 §55.6/§56.6 已点名的「六段**合成单一生产 launch**（OUT+SAND+DB+GATE 组合，目前各段
-    仍分 launcher）」与「B3 intra 折进 K2 形状」（须先合并 kernel 签名、处理寄存器/smem 峰值）。
+    已证伪（P7-58）、四段 store 已向量化（P7-59），K2 形状 CUDA B2 的廉价/半廉价项全部关闭。当时点名的
+    唯一剩余真结构项「六段**合成单一生产 launch**」已由 **P7-60** 关闭（`-DB2M_PROD`，逐位无损、0.47–0.53×）；
+    另一条「B3 intra 折进 K2 形状」仍待（须先合并 kernel 签名、处理寄存器/smem 峰值）。
     结论＝证伪（净亏）**（`docs/07` §61）。给 `b2_mma_probe.cu` 加 `-DB2M_QKG`（需 `B2M_GATE`；诊断
     `-DB2M_QKGP` 把 staging 行距 `KD`→`KD+4` 消固定列 row-aliasing 冲突）：chunk 开头一次合流 `[BT,KD]`
     staging 读 `q/k/g`（`:643-654`，与 `kg` 同构），门控改读 `sh->sq/skb/sgb[rowrel][col]`（`:960-976`，

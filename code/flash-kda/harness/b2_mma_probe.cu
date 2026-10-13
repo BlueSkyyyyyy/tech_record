@@ -126,6 +126,26 @@ DEV void st2(float* p, float a, float b) {
 #else
 #define B2M_TMA_ON 0
 #endif
+// P7-60: `-DB2M_PROD` compiles the *production* combination of all six non-GEMM segments in a
+// single kernel/launch (see the note further down for the rationale).  It forces the six
+// segment flags on, and must be defined before the per-segment `#ifndef` defaults below.
+#ifndef B2M_PROD
+#define B2M_PROD 0
+#endif
+#if B2M_PROD
+#undef  B2M_OUT
+#undef  B2M_DKGB
+#undef  B2M_DA
+#undef  B2M_SAND
+#undef  B2M_DB
+#undef  B2M_GATE
+#define B2M_OUT  1
+#define B2M_DKGB 1
+#define B2M_DA   1
+#define B2M_SAND 1
+#define B2M_DB   1
+#define B2M_GATE 1
+#endif
 // P7-52: the *first non-GEMM segment* of B2 in CUDA -- the output branch
 // (`i_k==0`):   dvb[o_A,v] = sum_{o_t} A[o_A,o_t] * dv[o_t,v]   (== A @ dv)
 //               dv2[o_A,v] = beta[o_A] * dvb[o_A,v]             (the complete B2 output `dv2`)
@@ -224,9 +244,13 @@ DEV void st2(float* p, float a, float b) {
 #if B2M_GATE && !B2M_DKGB
 #error "B2M_GATE requires B2M_DKGB"
 #endif
-#if B2M_GATE && (B2M_OUT || B2M_SAND)
-#error "B2M_GATE is standalone (B2M_DKGB only; no B2M_OUT / B2M_SAND)"
-#endif
+// P7-60: `-DB2M_PROD` allows the *production* combination of all six non-GEMM segments
+// (OUT + DKGB + DA + SAND + DB + GATE) in **one** kernel/launch, instead of the
+// segment-per-launcher builds the earlier rounds used for isolated verification.  The segment
+// code bodies are untouched (their arithmetic, smem buffers and accumulators never overlap --
+// each segment owns its own outputs), so the only shared-code changes are (a) allowing the flag
+// combination and (b) declaring the shared `beta` operand exactly once.  `B2M_PROD` itself is
+// defined/enabled up top (it forces the six flags); this note only records the intent.
 // P7-58: coalesce the gate's raw operands `q`/`k`/`g` into smem once per chunk (like `kg`),
 // instead of the fragment-address global reads of P7-57 (§60.4: 9.2x global-load sectors).
 // The gate then reads `q`/`k`/`g` from the shared buffers (fully coalesced staging load, one
@@ -568,7 +592,7 @@ b2mma_kernel(
 #if B2M_DKGB
              float* __restrict__ dkgb,
 #endif
-#if B2M_GATE
+#if B2M_GATE && !B2M_OUT
              const float* __restrict__ beta,
 #endif
 #if B2M_GATE
@@ -584,7 +608,10 @@ b2mma_kernel(
              float* __restrict__ dApre,
 #endif
 #if B2M_SAND
-             const float* __restrict__ A4s, const float* __restrict__ beta,
+             const float* __restrict__ A4s,
+#if !B2M_OUT && !B2M_GATE
+             const float* __restrict__ beta,
+#endif
              float* __restrict__ dAout,
 #endif
              int B, int T, int H, int NT) {
@@ -1410,7 +1437,7 @@ extern "C" int b2da_launch(const void* v, const void* vn, const void* h, const v
 }
 #endif  // B2M_DA && !B2M_SAND
 
-#if B2M_SAND
+#if B2M_SAND && !B2M_PROD
 // P7-55 dedicated launcher (`b2sand_launch`): compiled with `-DB2M_DA -DB2M_SAND`
 // (plus the usual stage options).  Outputs both `dApre` (P7-54) and the final `dA`.
 static int b2sand_launch_impl(const void* v, const void* vn, const void* h, const void* dh,
@@ -1461,10 +1488,10 @@ extern "C" int b2sand_launch(const void* v, const void* vn, const void* h, const
     return b2sand_launch_impl(v, vn, h, dh, dov, dvv, k, g, A4, beta,
                               dq, dk, dw, dgk, dApre, dA, B, T, H, NT, stream);
 }
-#endif  // B2M_SAND
+#endif  // B2M_SAND && !B2M_PROD
 
 
-#if B2M_DB
+#if B2M_DB && !B2M_PROD
 // P7-56 dedicated launcher (`b2db_launch`): compiled with `-DB2M_OUT -DB2M_DKGB -DB2M_DB`
 // (plus the usual stage options).  Emits `dvb` (P7-52), `dkgb` (P7-53) and the complete `db`.
 static int b2db_launch_impl(const void* v, const void* vn, const void* h, const void* dh,
@@ -1522,7 +1549,91 @@ extern "C" int b2db_launch(const void* v, const void* vn, const void* h, const v
     return b2db_launch_impl(v, vn, h, dh, dov, dvv, dwin, k, g, A4, beta,
                             dq, dk, dw, dgk, dkgb, dv2, dvb, db_out, B, T, H, NT, stream);
 }
-#endif  // B2M_DB
+#endif  // B2M_DB && !B2M_PROD
+
+
+#if B2M_PROD
+// P7-60: the **single production launch** -- all six non-GEMM segments plus the GEMM core in
+// one kernel invocation.  Argument order is the exact union of the per-segment kernel tails
+// (macro-expanded `b2mma_kernel` signature): maps (dwm, vvm included) / v,vn,h,dh,do,dv /
+// k,g / dwin / dq,dk,dw_out,dgk / A4,beta / dv2,dvb / dkgb / q,k,g,dqg,dkg,dg,scale /
+// db_out / dApre / A4s,dAout.  The raw `dq/dk` stores are suppressed by the GATE segment
+// (production form), so those pointers are scratch.
+static int b2prod_launch_impl(const void* v, const void* vn, const void* h, const void* dh,
+                              const void* dov, const void* dvv,
+                              const void* k, const void* g,
+                              const void* dwin,
+                              void* dq, void* dk, void* dw_out, void* dgk,
+                              const void* A4, const void* beta,
+                              void* dv2, void* dvb,
+                              void* dkgb,
+                              const void* qptr, const void* kraw, const void* graw,
+                              void* dqg, void* dkg, void* dg, float scale,
+                              void* db_out,
+                              void* dApre,
+                              const void* A4s, void* dAout,
+                              int B, int T, int H, int NT, void* stream) {
+    dim3 grid(NT, B * H);
+    int smem = (int)sizeof(Shared);
+    static int configured = 0;
+    if (!configured) {
+        if (cudaFuncSetAttribute(b2mma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 smem) != cudaSuccess)
+            return -3;
+        configured = 1;
+    }
+#if B2M_TMA_ON
+    CUtensorMap dom, vnm, dvm, hm, dhm, dwm, vvm;
+    make_map_dov(&dom, (void*)dov,  H, T, B);
+    make_map_dov(&vnm, (void*)vn,   H, T, B);
+    make_map_dov(&dvm, (void*)dvv,  H, T, B);
+    make_map_dov(&dwm, (void*)dwin, H, T, B);
+    make_map_dov(&vvm, (void*)v,    H, T, B);
+    make_map_hdh(&hm,  (void*)h,  H, NT, B);
+    make_map_hdh(&dhm, (void*)dh, H, NT, B);
+    b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
+        dom, vnm, dvm, hm, dhm, dwm, vvm,
+        (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
+        (const float*)dov, (const float*)dvv, (const float*)k, (const float*)g,
+        (const float*)dwin,
+        (float*)dq, (float*)dk, (float*)dw_out, (float*)dgk,
+        (const float*)A4, (const float*)beta, (float*)dv2, (float*)dvb,
+        (float*)dkgb,
+        (const float*)qptr, (const float*)kraw, (const float*)graw,
+        (float*)dqg, (float*)dkg, (float*)dg, scale,
+        (float*)db_out, (float*)dApre, (const float*)A4s, (float*)dAout,
+        B, T, H, NT);
+#else
+    b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
+        (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
+        (const float*)dov, (const float*)dvv, (const float*)k, (const float*)g,
+        (const float*)dwin,
+        (float*)dq, (float*)dk, (float*)dw_out, (float*)dgk,
+        (const float*)A4, (const float*)beta, (float*)dv2, (float*)dvb,
+        (float*)dkgb,
+        (const float*)qptr, (const float*)kraw, (const float*)graw,
+        (float*)dqg, (float*)dkg, (float*)dg, scale,
+        (float*)db_out, (float*)dApre, (const float*)A4s, (float*)dAout,
+        B, T, H, NT);
+#endif
+    return (int)cudaGetLastError();
+}
+
+extern "C" int b2prod_launch(const void* v, const void* vn, const void* h, const void* dh,
+                             const void* dov, const void* dvv,
+                             const void* k, const void* g, const void* dwin,
+                             void* dq, void* dk, void* dw_out, void* dgk,
+                             const void* A4, const void* beta, void* dv2, void* dvb,
+                             void* dkgb, const void* qptr, const void* kraw, const void* graw,
+                             void* dqg, void* dkg, void* dg, float scale,
+                             void* db_out, void* dApre, const void* A4s, void* dAout,
+                             int B, int T, int H, int NT, void* stream) {
+    return b2prod_launch_impl(v, vn, h, dh, dov, dvv, k, g, dwin,
+                              dq, dk, dw_out, dgk, A4, beta, dv2, dvb,
+                              dkgb, qptr, kraw, graw, dqg, dkg, dg, scale,
+                              db_out, dApre, A4s, dAout, B, T, H, NT, stream);
+}
+#endif  // B2M_PROD
 
 
 extern "C" int b2mma_smem_bytes() { return (int)sizeof(Shared); }
