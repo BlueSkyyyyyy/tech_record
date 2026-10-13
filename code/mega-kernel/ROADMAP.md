@@ -3960,6 +3960,32 @@
   - 另把「`extern __shared__` 同名符号须在整个 megakernel TU 内一致」补进「已知坑」。
     **本轮新增增量。**
 
+### P141 路由 task 源码走读（`docs/55-mpk-routers.md`）
+
+- [x] **P141-1** 兑现阶段「下一步候选」第一条残留——`docs/37` §2 只给摘要的**路由三兄弟**里
+      除 Inkling（已由 P140-1/`docs/54` 补）之外的**两支**：`topk_sigmoid_sm100`（DeepSeek-V3
+      group-aware）与 `glm_moe_router_sm100`（GLM-4.x n_group=1）。见 `docs/55-mpk-routers.md`
+      （快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
+      **(A)（headline）`glm_moe_router_sm100.cuh` 是全仓唯一「`_sm100` 后缀却被 Hopper `task_header`
+      共享」的 arch-agnostic 标量身体**——无 TMA/UMMA/mma/SMEM，只有逐行标量循环 + 两处 `__syncthreads`，
+      故同时被 `blackwell/task_header.cuh:33` 与 `hopper/task_header.cuh:28` include，后者带显式注释
+      *"arch-agnostic scalar kernel (GLM-4.x router), shared with the sm100 build"*（`:27`）；原因是
+      GLM-4.6 走 `cc≥90`（`docs/45`），戳破「`_sm100` = SM100 专属」的命名惯例。
+      **(B)** 两条路由把「选择策略/归一化口径/共享专家/幂约束」全部折平在 device task 内部、对外只暴露
+      **统一 ABI**（`weights/indices/active` 三件，与 Inkling router 同），故下游 `moe_w13/silu_mul/
+      moe_w2/mul_sum_add` 管线零改动：`topk_sigmoid` 是 group-aware 向量化（warp 一行、`VPT=8`、
+      `__shfl_*` 组 top-2 归约、选组后组内 top-K、取回**未加 bias** 原始分作权重），硬约束专家数须
+      2 的幂（`static_assert`）；`glm_moe_router` 因 GLM **160 非 2 幂**退化成一线程一行标量，共享专家
+      折成 expert `NUM_ROUTED` 槽（权重恒 1.0）。
+      **(C)（headline）两条路由六层接线全通且都有生产 builder 调用**（`glm4_moe/builder.py:305`、
+      `deepseek_v3/builder.py:905/1501`），无 `docs/49`/`docs/50` 的「已实现未接线」问题；GLM 还多一层
+      **HF 参考端到端 builder 测试**（`test_glm4_moe_builder_testmode.py` 跑 4 层 GLM-4.6 与
+      `Glm4MoeForCausalLM` 比 lm-head logits）——与 `docs/53` DFlash 的「影子实现」形成对照。
+      判据只贡献 C3 的「MoE 路由段范围与 ABI 契约」。配套博客 post `mega-kernel-56-mpk-routers`
+      （weight 57）并更新 `mega-kernel-00-index` 第 56 项。
+      P141-1 新留尾巴见文档 §8（未构建；`finished`/专家切片接口预留未追；单测口径只声明未跑；
+      `WARPS_PER_CTA` 悬空模板参数只记不判；模型侧常量未核）。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4284,7 +4310,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P140-1 完成（1/1）**。兑现阶段「下一步候选」第一条的残留——`docs/35` §9 明留的
+- 当前进度：**P141-1 完成（1/1）**。兑现阶段「下一步候选」第一条残留——`docs/37` §2 只给摘要的
+  **路由三兄弟**里除 Inkling（已由 P140-1/`docs/54` 补）之外的**两支**：`topk_sigmoid_sm100` 与
+  `glm_moe_router_sm100`。见 `docs/55-mpk-routers.md`（MPK `f9eb70c`，**纯源码走读、无新实验**）。
+  三条 headline：**(A)（headline）`glm_moe_router_sm100.cuh` 是全仓唯一「`_sm100` 后缀却被 Hopper
+  `task_header` 共享」的 arch-agnostic 标量身体**（无 TMA/UMMA/mma/SMEM，`hopper/task_header.cuh:27-28`
+  显式注释「shared with the sm100 build」，因 GLM-4.6 走 `cc≥90`，`docs/45`），戳破「`_sm100` = SM100
+  专属」；(B) 两条路由把「选择策略/归一化口径/共享专家/幂约束」全部折平在 device task 内部、对外只暴露
+  统一 ABI（GLM 共享专家折成 expert 160、权重恒 1.0），下游 MoE 管线零改动——`topk_sigmoid` 是
+  group-aware 向量化（warp 一行、`VPT=8`、`shfl` 组 top-2 归约，硬约束专家数须 2 的幂），
+  `glm_moe_router` 因 GLM 160 非 2 幂退化成一线程一行标量；**(C)（headline）** 两条路由六层接线全通且
+  都有生产 builder 调用（`glm4_moe/builder.py:305`、`deepseek_v3/builder.py:905/1501`），无
+  `docs/49`/`docs/50` 的「已实现未接线」问题，GLM 还多一层 HF 参考端到端 builder 测试
+  （`test_glm4_moe_builder_testmode.py`）。判据只贡献 C3。配套博客 post `mega-kernel-56-mpk-routers`
+  （weight 57）并更新 `mega-kernel-00-index` 第 56 项。P141-1 新留尾巴见文档 §8（未构建、`finished`/
+  专家切片接口预留未追、单测口径只声明未跑、`WARPS_PER_CTA` 悬空模板参数只记不判、模型侧常量未核）。
+- 下一步候选：可继续走「`docs/35` §9 遗留的其它未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE
+  draft attention 设计的完整追述；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或
+  `docs/37` §3 采样链剩下的两段式 partial/reduce 身体（`argmax_sm100`/`sampling_sm100`）逐行。
+  **路由三兄弟已全部补完**（Inkling 由 P140-1/`docs/54`、sigmoid+GLM 由 P141-1/`docs/55`）。
+- 此前：**P140-1 完成（1/1）**。兑现阶段「下一步候选」第一条的残留——`docs/35` §9 明留的
   「注意力之外的 SM100 task 家族（`dflash_*`/`inkling_*`/…）未逐行」里的**第二支**，把 Inkling
   （Thinking Machines）三个 device 身体从 `docs/37` §5.3 的摘要推进到逐行。见 `docs/54-mpk-inkling-family.md`
   （MPK `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机不可执行）。三条 headline：
