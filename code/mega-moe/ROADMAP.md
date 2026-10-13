@@ -1624,6 +1624,32 @@
       + 填充殿后 + 槽位指针逆置换自洽；cached 不变；`channel_linked_list` 逆置换；expand 跨接收顺序
       规范化顺序逐位一致。配套博客 `content/posts/mega-moe-62-deepep-deterministic-sort`（索引页新增第 62 篇）。
 
+### P53 增量（opt-in，补齐 DeepEP dispatch/combine/bucket 每次运行都调用的同步地基）
+
+- [x] **P53-1** **DeepEP 的多 rank 屏障与 symmetric-memory 句柄层**
+      （`deep_ep/include/deep_ep/comm/barrier.cuh`、`comm/handle.cuh`、
+      `layout/common/barrier.cuh`、`impls/comm/barrier.cuh`、`common/compiled.cuh`；
+      host `csrc/comm/barrier.hpp`、`csrc/kernels/comm/barrier.hpp`、`csrc/kernels/comm/context.cpp`、
+      `deep_ep/comm/{barrier,handle}.py`；用法 `csrc/buffers/ep.hpp:93-106`）。第 7 篇讲 dispatch/combine
+      数据流、第 43 篇 EPLB、第 48/51/52 篇三个 epilogue，但每个 kernel **开始与结束**都调的
+      `comm::barrier` 从没单独拆过——它是把整个 EP 通信组拉到同一同步点的地基。**三层**：① 对称窗口
+      句柄 `NCCLGin`（`handle.cuh:11-255`）——`ncclCommWindowRegister` 的窗口 + `world/lsa/rail` 三域，
+      `get_sym_ptr`（`:64-92`）把「本 rank offset」翻译成「目标 rank 同 offset」（对称 = 布局一致、同
+      offset 即同逻辑位置），`red_add_rel`（`:96-120`）演示「能 NVLink 就不走 RDMA」的双路径统一；
+      ② 屏障协议（`barrier.cuh`）——`BarrierSignals`（计数 + 双相位槽、64B 对齐）、NVLink 腿
+      `nvlink_barrier_wo_local_sync`（`:88-131`）的**免复位**（计数器低 2 位选相位/符号 + 每轮对双槽
+      `+1/-1`，四调用一循环、两槽自动回 0，$2^{64}$ 计数 ~57 万年溢出）、`timeout_while`（`:30-54`）
+      看门狗、`get_qp_mode`（`:56-86`）的 SM↔QP 确定映射；③ 两级域编排 `gpu_barrier`（`:196-252`）——
+      先 flush TMA store → grid sync → SM0 走 scaleup(NVLink)、其余 SM 并行走 scaleout(RDMA)。
+      host `context.cpp` 的域分解（`:174-183`，**仅 hybrid 且 scaleup 域==NVLink 域时 `is_scaleup_nvlink`**）
+      与 `ginSignalCount=num_ranks+4`（`:140`）解释状态预算。`barrier_impl`（`impls/comm/barrier.cuh:11-40`）
+      顺序/并行两模式 + host `cooperative=true`。**NVLink 腿逐行抽取 + 对称指针桩在 H100 跑真实设备代码**
+      （`src/deepep_comm_barrier.cu` + `harness/exp_deepep_comm_barrier.{sh,py,out.txt}`）：2~128 rank ×
+      8 次调用 counter/双相位槽 vs 四相位模型**逐字段 0 不符**、奇数次非零残值坐实 ±1、SM gating
+      （sms=2/4 仅 SM0）、`get_qp_mode` 5 组逐字段、`BarrierSignals` 64B——**设备 19 PASS / Python 17 PASS /
+      0 FAIL**；scaleout RDMA 腿与并行混合编排为 NCCL GIN 专属，仅源码分析。配套博客
+      `content/posts/mega-moe-63-deepep-comm-barrier`（索引页新增第 63 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1648,8 +1674,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P52 各增量完成（P15-1…P41-1、P42-1…P52-1）。**
-  本轮 P52-1：新建 `docs/62-deepep-deterministic-sort.md`（+`harness/exp_deepep_deterministic_sort.{py,sh,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P53 各增量完成（P15-1…P41-1、P42-1…P53-1）。**
+  本轮 P53-1：新建 `docs/63-deepep-comm-barrier.md`（+`src/deepep_comm_barrier.cu`、
+  `harness/exp_deepep_comm_barrier.{sh,py,out.txt}`）——补上 DeepEP 里每个 dispatch/combine/bucket
+  kernel **开始与结束**都调用、却从没单独拆过的 **`comm::barrier` 同步地基**。三层：① **对称窗口句柄
+  `NCCLGin`**（`handle.cuh:11-255`）——`get_sym_ptr`（`:64-92`）把「本 rank offset」翻译成「目标 rank
+  同 offset」（对称 = 布局一致），`red_add_rel`（`:96-120`）统一「能 NVLink 就不走 RDMA」；② **屏障协议**
+  （`barrier.cuh`）——`BarrierSignals` 计数 + 双相位槽，NVLink 腿 `nvlink_barrier_wo_local_sync`
+  （`:88-131`）用「计数器低 2 位选相位/符号 + 对双槽 ±1」实现**免复位**（四调用一循环、两槽自动回 0）、
+  `timeout_while`（`:30-54`）看门狗、`get_qp_mode`（`:56-86`）的 SM↔QP 确定映射；③ **两级域编排
+  `gpu_barrier`**（`:196-252`）——先 flush TMA store → grid sync → SM0 scaleup(NVLink)、其余 SM 并行
+  scaleout(RDMA)。host `context.cpp` 域分解（`:174-183`，仅 hybrid 且 scaleup 域==NVLink 域时
+  `is_scaleup_nvlink`）与 `ginSignalCount=num_ranks+4`（`:140`）解释状态预算。**H100 真机**：NVLink 腿逐行
+  抽取 + 对称指针桩多 block 模拟 2~128 rank × 8 次调用（counter/双相位槽与四相位模型**逐字段 0 不符**，
+  奇数次非零残值坐实 ±1）+ SM gating + `get_qp_mode` 5 组 + `BarrierSignals` 64B——**设备 19 PASS /
+  Python 17 PASS / 0 FAIL**；scaleout RDMA 腿与并行混合编排为 NCCL GIN 专属，仅分析。配套博客
+  `content/posts/mega-moe-63-deepep-comm-barrier`（索引页新增第 63 篇）。
+  上一轮 P52-1：新建 `docs/62-deepep-deterministic-sort.md`（+`harness/exp_deepep_deterministic_sort.{py,sh,out.txt}`）
   ——补上 DeepEP dispatch 的**「确定性」侧**：dispatch 的槽位由对称缓冲里的 `atomicAdd` 计数器分配
   （`dispatch.cuh:341`），同一批 token 多次运行的物理行序可变；`EPBuffer(deterministic=True)` 时
   dispatch 结束即挂 `EPHandle.deterministic_sort`（`ep.py:734-743`）把顺序规范化回**源 token 全局索引序**，
@@ -2200,7 +2241,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P52 已完成（新增 **P52-1 DeepEP 的确定性 dispatch 排序 `EPHandle.deterministic_sort`**：
+- **下一步**：P0~P53 已完成（新增 **P53-1 DeepEP 的多 rank 屏障与 symmetric-memory 句柄层**：
+  每个 dispatch/combine/bucket kernel 起止都调的 `comm::barrier`——`NCCLGin` 对称窗口句柄
+  （`get_sym_ptr` 同 offset 翻译）、`gpu_barrier` 两级域编排（scaleup NVLink + scaleout RDMA）、
+  `nvlink_barrier_wo_local_sync` 的**免复位双相位协议**、`get_qp_mode` 的 SM↔QP 映射、
+  `ginSignalCount=num_ranks+4` 状态预算；NVLink 腿逐行抽取 + 对称指针桩在 H100 跑真实设备代码
+  设备 19 PASS / Python 17 PASS / 0 FAIL；scaleout RDMA 腿与并行混合编排仅分析；见上）。
+  上一轮 P52-1：**DeepEP 的确定性 dispatch 排序 `EPHandle.deterministic_sort`**：
   dispatch 槽位由 `atomicAdd` 分配、行序不确定，`deterministic=True` 时改排回源 token 索引序
   （非 expand 全局排序；expand `expert*1e10+src` 双键稳定排序）；纯 host/Python、架构无关，
   H100 上 `ast` 逐行抽取真实源码运行 **7 PASS/0 FAIL**；见上）。
@@ -2332,11 +2379,13 @@
   ② **einsum 家族 FP8 投影（P11 已开）**：`bhr,hdr->bhd` 已做；`bhd,hdr->bhr` / `bhd,bhr->hdr`
   是 arch10 专属（仅分析）。可再补 `fp8_einsum` 的 FP8 输出对（SM100 `Kernel1D1D`）精读；
    ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
-   并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）。**DeepEP 的设备端公共层
-   已由 P49-1 补齐**（`common/ptx.cuh` 等，H100 真机 41 PASS）；**与运行期无关的「确定性 dispatch 排序」
-   已由 P52-1 补齐**（`EPHandle.deterministic_sort`，纯 host/Python，H100 抽取真实源码 7 PASS）；DeepEP
-   侧余下的运行期空档（bucket 集合通信 `all_gather/all_reduce/reduce_scatter`、`pp_send_recv`、`engram`）
-   都要 NCCL 设备 API，待环境。
+    并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）。**DeepEP 的设备端公共层
+    已由 P49-1 补齐**（`common/ptx.cuh` 等，H100 真机 41 PASS）；**与运行期无关的「确定性 dispatch 排序」
+    已由 P52-1 补齐**（`EPHandle.deterministic_sort`，纯 host/Python，H100 抽取真实源码 7 PASS）；
+    **多 rank 屏障与 symmetric-memory 句柄层已由 P53-1 补齐**（`comm/{barrier,handle}.cuh`，NVLink 腿
+    逐行抽取 + 对称指针桩 H100 真机 19 PASS）。DeepEP
+    侧余下的运行期空档（bucket 集合通信 `all_gather/all_reduce/reduce_scatter`、`pp_send_recv`、`engram`）
+    都要 NCCL 设备 API，待环境。
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
     shared expert 分支的更深精读；端到端需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。

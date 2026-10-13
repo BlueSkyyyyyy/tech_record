@@ -2474,3 +2474,141 @@ fp32）。受控实验（`probe_b2b3_hdh_bf16.py`）：
      的结构上。
 - **本轮性质**：这是一次**纯剖析 + 免费旋钮收口**的增量——给出了 B2/B3 的硬件 bound 与继续优化的
   方向，没有做结构性重写（那需要新 kernel，属下一轮）。B3 `num_warps=2` 可直接并入部署配置。
+
+## 27. B3 `intra` 的结构性重写：把对角块 MMA 化（P7-24）
+
+§26.6 给目标卡 CUDA 反向支路的第 (2) 条是「B3 要消掉逐元素外积比重（把对角/次对角块也走
+`tl.dot`）」。本轮就做这一条，并把它从孤立 kernel 落进真实组装链。
+
+### 27.1 为什么在部署粒度下 B3 *只有* 对角块
+
+B3 的 grid 是 `(NK*NC, NT, B*H)`，其中 `NC = ceil(BT/BC)`（`check_bwd_intra_kernel.py:386`，
+FLA 同构 `chunk_intra.py:395-423`）。链里部署的是 `BT=BC=CHUNK=16`，于是 **`NC=1`**、`i_i = i_kc % NC ≡ 0`：
+
+- Part A（`if i_i > 0`，`check_bwd_intra_kernel.py:272`）**永不进入**；
+- Part C（`if i_i < NC_eff - 1`，`:329`）**永不进入**。
+
+也就是说，部署粒度下 B3 每个 program 执行的**全部**计算是 Parts B/D 那两个
+`for j in range(bc)` 的逐 `j` 外积循环——而 baseline 里**所有 `tl.dot` 都在 Parts A/C**。这正好
+解释了 §26.4 的 `tensor 0.05%`：TensorCore 一次也没被用到。（BT=64 时 `NC=4`，Parts A/C 才参与。）
+
+### 27.2 恒等式：对角块就是两个 `tl.dot`
+
+Part B（`dq2`，chunk_intra.py:534-546 的非 SAFE_GATE 版）对 query 行 `a`、通道 `l`：
+
+```
+dq2[a,l] = Σ_{j≤a} dAqk[a,j] · k[j,l] · 2^{g[a,l]-g[j,l]}
+         = 2^{g[a,l]} · Σ_j  Mq[a,j] · ( k[j,l] · 2^{-g[j,l]} )        Mq = (a≥j) ⊙ dAqk
+```
+
+把门控指数 **移出收缩**（符号拆开，代数上严格相等）：一次 `[BC,BC]@[BC,BK]` 的 `tl.dot` 就顶掉
+整个 `j` 循环。Part D（`dkt`，`:639-655`）同理：
+
+```
+dkt[a,l] = Σ_{j≥a} dAqk[j,a] · q[j,l] · 2^{g[j,l]-g[a,l]}
+         = 2^{-g[a,l]} · Σ_j  Sq[a,j] · ( q[j,l] · 2^{g[j,l]} )      Sq = (a≤j) ⊙ dAqkᵀ
+```
+
+**数值上是稳的**：对 `j≤a`，被移出的 `2^{-g[j]}` 在 `j=a` 处与前置因子 `2^{g[a]}` 精确相消
+（`g` 单调降到行内），故中间和中最大的项正好等于最终项，无灾难性放大——实测（§27.3）落在 tf32 底噪。
+
+**这不是新发明**：FLA 的 `SAFE_GATE=True` 分支**早已**这么做——Part B 见 `chunk_intra.py:520-526`
+（`b_dq2 += tl.dot(b_dAqk_diag_qk, b_k_exp_diag_qk) * exp_b_g_diag_qk`），Part D 见 `:620-637`
+（`b_dkt += tl.dot(b_dAqk_diag_kk, b_q_exp) * exp_neg_b_g_diag_kk`）。而默认路径
+`safe_gate=False`（`chunk.py:47`）走的是我们继承的逐元素循环。所以本轮的实质是：**把 FLA
+safe-gate 分支已验证过的对角 MMA 恒等式，移植到默认的逐元素路径上**，并量清它的收益与内容。
+
+实现见 `harness/check_bwd_b3_mma.py::build_intra_mma`（Parts A/C 一字未改，只换 Parts B/D）。
+
+### 27.3 Part A：孤立 kernel 正确性——落 tf32 底噪（含非整除 T、BT=16）
+
+`check_bwd_b3_mma_correctness.out.txt`，8 组 case（`BT=64/16`、`T=64…1024`、非整除 `T=250/513`、
+`g=0`）：MMA 对角版 vs 逐元素 baseline / vs FLA 的 `dq/dk/db/dg` **四项最坏 `max_rel`**：
+
+| 对比 | `dq` | `dk` | `db` | `dg` |
+|---|---|---|---|---|
+| MMA vs baseline | 1.14e-3 | 9.83e-4 | 1.02e-3 | 1.04e-3 |
+| MMA vs FLA | 1.14e-3 | 9.83e-4 | 1.02e-3 | 1.04e-3 |
+
+全在 §26 记录的 tf32 底噪（~1e-3）上——换累积序（外积 FMA → `tl.dot` tf32）带来的差异，与
+Parts A/C 本就走 `tl.dot` 是同一量级，**没有引入新误差来源**。
+
+**踩坑（值得记）**：第一版把对角 `dAqk`/`dAkk` 平铺的**列**下标写成绝对 token `i_ti+o_i`，而
+`dAqk` 的最后一维其实是 **chunk-内局部** key 下标（`i_i*BC+o_i`，见 baseline `:283-284` /
+FLA `:515`）。指纹很有欺骗性：**只有 `i_t=0`（即 `T≤BT` 的单 chunk，如 `T=64 K=32`）正确，
+其余 case 全错到 O(1)**——因为 `i_t=0 ⟹ i_ti = i_i*BC`，两种写法恰好相等。改成
+`i_i*BC+o_i` 后所有 case 归位（本 harness 专门留了 `T=64 H=1 K=32 BT=64` 这一行来卡这个退化）。
+
+### 27.4 Part B：孤立 kernel 计时——快 **1.5–2.0×**
+
+`check_bwd_b3_mma_timing.out.txt`（CUPTI `dev` 与 event-pair `wall`，均值）：
+
+| case | BT | nw | base dev | mma dev | dev 比 | wall 比 |
+|---|---|---|---|---|---|---|
+| T512 H4 | 64 | 2/4 | 22.1 / 22.3 | 11.9 / 12.0 | **0.54×** | 1.00× |
+| B2 T2048 H8 | 64 | 2 / 4 | 262.4 / 263.8 | 134.3 / 167.3 | 0.51× / 0.63× | 0.53× / 0.64× |
+| T512 H4 | 16 | 2 / 4 | 16.6 / 18.9 | 9.5 / 9.6 | 0.57× / 0.51× | ~1.0× |
+| B2 T2048 H8 | 16 | 2 / 4 | 142.4 / 169.4 | 91.0 / 94.5 | 0.64× / 0.56× | 0.66× / 0.58× |
+| B8 T2048 H8 | 16 | 2 / 4 | 522.3 / 631.6 | 348.4 / 365.1 | 0.67× / 0.58× | 0.67× / 0.58× |
+
+`dev` 一律快 **1.5–2.0×**；小 shape 的 `wall` 打平（host 派发 60 µs 盖过 kernel）。与 §26 一致，
+`nw=4` 与 `nw=2` 各有胜负（`nw=2` 在 B8 大 shape 更好），MMA 版把 B3 从「FMA/L1-bound」侧挪开。
+
+### 27.5 Part C：落进真实组装链——梯度不变、链降 ~10%
+
+`check_bwd_b3_mma_chain.out.txt`，把 §25 的 `tl.range` 流水 B1（`NS=3`）链里的 B3 换成 MMA 版，
+6 组 case（含非整除 `T=250/513`、`g=0`、`B=2`）：
+
+- **vs FLA autograd 的六项最坏 `max_rel`**：`dq 3.42e-3 / dk 3.02e-3 / dv 6.80e-3 / dbeta 6.01e-3 /
+  dg 7.05e-3 / dh0 8.27e-3`——**与 §25.2、§26.3 记录的 baseline 链逐值相同**（MMA 后没有退化）。
+- **本次重写自身的增量**（MMA 链 vs baseline 链）：`dq 1.42e-3 / dk 1.09e-3 / dv 0 / dbeta 3.0e-5 /
+  dg 6.08e-3`（`dg` 最坏在 `g=0`，与 §27.3 同源）。
+- **链级 `dev`**（CUPTI，µs；FLA 对照）：
+
+| case | FLA dev | base dev | MMA dev | MMA/base |
+|---|---|---|---|---|
+| T512 H4 | 204.4 | 97.9 | 89.0 | **0.91×** |
+| B2 T1024 H8 | 662.1 | 339.4 | 298.0 | **0.88×** |
+| B8 T2048 H8 | 4145.0 | 2216.4 | 1956.7 | **0.88×** |
+| T250 H3 非整除 | 141.4 | 68.7 | 61.7 | 0.90× |
+
+整链降 **9–12%**（B3 占链 ~26%、kernel 快 ~2×，乘积吻合）。小 shape `wall` 基本不动（host-bound）。
+
+### 27.6 Part D：`ncu` 复核——TensorCore 起来了，但 kernel 转成 L2/访存 bound
+
+`probe_b3_mma_ncu.out.txt`，`B8 T2048 H8 BT=16`（部署粒度）：
+
+| 指标 | baseline（逐元素） | MMA 对角 | 变化 |
+|---|---|---|---|
+| **Duration** | 526.98 µs | 256.86 µs | **0.49×** |
+| `tensor` pipe % | 0.05% | 2.61% | **×52** |
+| `fma` pipe % | 38.79% | 10.11% | 0.26× |
+| Compute (SM) % | 82.24% | 26.91% | 0.33× |
+| L1/TEX % | 70.86% | 46.45% | 0.66× |
+| L2 % | 42.96% | 74.20% | ×1.73 |
+| DRAM % | 28.07% | 57.43% | ×2.05 |
+| Memory throughput | 941 GB/s | 1.92 TB/s | ×2.04 |
+| Registers/thread | 64 | 64 | = |
+| Achieved occupancy | 49.01% | 48.82% | = |
+| `stall long_sb` | 3.22 | 16.71 | ×5.2 |
+
+读法：`tensor` 从 **0.05%→2.61%（×52）**、`fma` 从 38.8%→10.1%、SM 从 82%→27%——**工作确实从 FMA/LSU
+搬到了 TensorCore**，Duration 随之 **0.49×**。但 kernel 随即**转成访存/L2 bound**（L2 43%→74%、
+DRAM 28%→57%）：注意 DRAM%翻倍而 Duration 减半，二者相乘＝**总字节不变**（Mem throughput 941 GB/s→1.92 TB/s），
+并非多读了数据，而是同样的字节在更短时间内搬完。代价是 L1 命中率 62.6%→20.0%、`long_sb` 3.22→16.71
+——对角平铺 `[BC,BC]` 的加载模式比原来逐列取 L1 局部性差。`nw=2` 下同表趋势一致（Duration 547.9→260.3）。
+
+### 27.7 结论与下一步
+
+- **§26.6 第 (2) 条兑现**：B3 对角 MMA 化后孤立 kernel 快 **1.5–2.0×**、整链 `dev` 降 **9–12%**、
+  六项梯度与 FLA 的误差**逐值不变**（仍落 bf16/tf32 底噪）。且证明了 §27.2 的恒等式：默认路径只要
+  套上 FLA `SAFE_GATE` 分支早已在用的对角 `tl.dot` 就够，无需新数学。
+- **但 B3 并未「修好」**：TensorCore 起来了却只到 2.6%，kernel 现在是 **L2/访存 bound**。B3 的下一个
+  杠杆不再是 MMA，而是**减少对角平铺的重复读**（`dAqk/dAkk` 每 `i_k` 重读一份、`k/g` 每 `i_k` 重读）
+  或提升其 L1 局部性。
+- **链级瓶颈仍在 B2**（§26：B8T2048H8 上 B2+B3 曾占 66.6%；本轮砍掉 B3 一半后 B2 更突出）。下一步
+  是按 §26.6 第 (1) 条做 **B2 的结构性重写**（减 DRAM 流量/寄存器：`h/dh` bf16、去按 `i_k` 重复读、
+  拆 tile 降寄存器提占用），维持 BT=16 块链。
+- **产物**：`harness/check_bwd_b3_mma.py`（`..._correctness/…_timing/…_chain.out.txt`）+
+  `harness/ncu_b3_mma_driver.py` / `harness/probe_b3_mma_ncu.sh`（`..._b3_mma_ncu.out.txt`）。B3 这版
+  可直接并入部署配置（`nw=2` 在大 shape 更好）。

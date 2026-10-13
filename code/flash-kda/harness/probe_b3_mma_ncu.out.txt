@@ -1,0 +1,612 @@
+GPU: NVIDIA H100 80GB HBM3
+ncu: Version 2026.1.1.0 (build 37634170) (public-release)
+torch: 2.12.0a0+0291f960b6.nv26.04.48445190
+
+################################################################################
+# B3 intra BASELINE bf16 @BT=16 nw=4
+#   which=base B=8 T=2048 H=8 bt=16 nw=4  kernel=_intra_kernel
+################################################################################
+[2294390] python3.12@127.0.0.1
+  _intra_kernel (4, 128, 64)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %        28.07
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        70.86
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        42.96
+    sm__inst_executed_pipe_tensor.sum                                                inst       131072
+    sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active                         %        38.79
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %         0.05
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        82.24
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.75
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         3.22
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.47
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         0.57
+    ------------------------------------------------------------------------- ----------- ------------
+
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.97
+    Elapsed Cycles                cycle      1040773
+    Memory Throughput                 %        70.86
+    DRAM Throughput                   %        28.07
+    Duration                         us       526.98
+    L1/TEX Cache Throughput           %        71.48
+    L2 Cache Throughput               %        42.96
+    SM Active Cycles              cycle   1030399.77
+    Compute (SM) Throughput           %        82.24
+    ----------------------- ----------- ------------
+
+    INF   This workload is utilizing greater than 80.0% of the available compute or memory performance of this device.  
+          To further improve performance, work will likely need to be shifted from the most utilized to another unit.   
+          Start by analyzing workloads in the Compute Workload Analysis section.                                        
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %         1.38
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Gbyte/s       940.99
+    Mem Busy                                          %        70.86
+    Max Bandwidth                                     %        40.07
+    L1/TEX Hit Rate                                   %        62.62
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector      6294984
+    L2 Hit Rate                                       %        64.46
+    Mem Pipes Busy                                    %        31.71
+    --------------------------------------- ----------- ------------
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        82.94
+    Issued Warp Per Scheduler                        0.83
+    No Eligible                            %        17.06
+    Active Warps Per Scheduler          warp         7.84
+    Eligible Warps Per Scheduler        warp         2.71
+    ---------------------------- ----------- ------------
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle         9.45
+    Warp Cycles Per Executed Instruction           cycle         9.45
+    Avg. Active Threads Per Warp                                31.99
+    Avg. Not Predicated Off Threads Per Warp                    31.94
+    ---------------------------------------- ----------- ------------
+
+    WRN   The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could 
+          enable the rule to provide more guidance.                                                                     
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   128
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                  32768
+    Registers Per Thread             register/thread              64
+    Shared Memory Configuration Size           Kbyte           65.54
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block            2.05
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread         4194304
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                               31.03
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            8
+    Block Limit Shared Mem                block           21
+    Block Limit Warps                     block           16
+    Theoretical Active Warps per SM        warp           32
+    Theoretical Occupancy                     %           50
+    Achieved Occupancy                        %        49.01
+    Achieved Active Warps Per SM           warp        31.37
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 50%                                                                                       
+          The 8.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (50.0%) is limited by the number of required      
+          registers.                                                                                                    
+
+
+################################################################################
+# B3 intra MMA      bf16 @BT=16 nw=4
+#   which=mma B=8 T=2048 H=8 bt=16 nw=4  kernel=_intra_kernel_mma
+################################################################################
+[2294814] python3.12@127.0.0.1
+  _intra_kernel_mma (4, 128, 64)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %        57.43
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        46.45
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        74.20
+    sm__inst_executed_pipe_tensor.sum                                                inst      1048576
+    sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active                         %        10.11
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %         2.61
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        26.91
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         6.57
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst        16.71
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         1.37
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.29
+    ------------------------------------------------------------------------- ----------- ------------
+
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.80
+    Elapsed Cycles                cycle       464289
+    Memory Throughput                 %        57.43
+    DRAM Throughput                   %        57.43
+    Duration                         us       256.86
+    L1/TEX Cache Throughput           %        47.15
+    L2 Cache Throughput               %        74.20
+    SM Active Cycles              cycle    456766.41
+    Compute (SM) Throughput           %        26.91
+    ----------------------- ----------- ------------
+
+    OPT   This workload exhibits low compute throughput and memory bandwidth utilization relative to the peak           
+          performance of this device. Achieved compute throughput and/or memory bandwidth below 60.0% of peak           
+          typically indicate latency issues. Look at Scheduler Statistics and Warp State Statistics for potential       
+          reasons.                                                                                                      
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %         1.45
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Tbyte/s         1.92
+    Mem Busy                                          %        46.45
+    Max Bandwidth                                     %        57.43
+    L1/TEX Hit Rate                                   %        20.01
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector      6294790
+    L2 Hit Rate                                       %        52.32
+    Mem Pipes Busy                                    %        22.01
+    --------------------------------------- ----------- ------------
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        27.26
+    Issued Warp Per Scheduler                        0.27
+    No Eligible                            %        72.74
+    Active Warps Per Scheduler          warp         7.80
+    Eligible Warps Per Scheduler        warp         0.40
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 42.57%                                                                                    
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 3.7 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 7.80 active warps per scheduler, but only an average of 0.40 warps were eligible per cycle. Eligible       
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+          warp. Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.      
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle        28.62
+    Warp Cycles Per Executed Instruction           cycle        28.63
+    Avg. Active Threads Per Warp                                31.94
+    Avg. Not Predicated Off Threads Per Warp                    31.56
+    ---------------------------------------- ----------- ------------
+
+    WRN   The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could 
+          enable the rule to provide more guidance.                                                                     
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 42.57%                                                                                          
+          On average, each warp of this workload spends 16.7 cycles being stalled waiting for a scoreboard dependency   
+          on a L1TEX (local, global, surface, texture) operation. Find the instruction producing the data being waited  
+          upon to identify the culprit. To reduce the number of cycles waiting on L1TEX data accesses verify the        
+          memory access patterns are optimal for the target architecture, attempt to increase cache hit rates by        
+          increasing data locality (coalescing), or by changing the cache configuration. Consider moving frequently     
+          used data to shared memory. This stall type represents about 58.4% of the total average of 28.6 cycles        
+          between issuing two instructions.                                                                             
+    ----- --------------------------------------------------------------------------------------------------------------
+    INF   Check the Warp Stall Sampling (All Samples) table for the top stall locations in your source based on         
+          sampling data. The Profiling Guide                                                                            
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference) provides more details    
+          on each stall reason.                                                                                         
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                   128
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                  32768
+    Registers Per Thread             register/thread              64
+    Shared Memory Configuration Size           Kbyte           65.54
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block            3.07
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread         4194304
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                               31.03
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            8
+    Block Limit Shared Mem                block           16
+    Block Limit Warps                     block           16
+    Theoretical Active Warps per SM        warp           32
+    Theoretical Occupancy                     %           50
+    Achieved Occupancy                        %        48.82
+    Achieved Active Warps Per SM           warp        31.24
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 42.57%                                                                                          
+          The 8.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (50.0%) is limited by the number of required      
+          registers.                                                                                                    
+
+
+################################################################################
+# B3 intra BASELINE bf16 @BT=16 nw=2
+#   which=base B=8 T=2048 H=8 bt=16 nw=2  kernel=_intra_kernel
+################################################################################
+[2295021] python3.12@127.0.0.1
+  _intra_kernel (4, 128, 64)x(64, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %        26.98
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        69.63
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        40.91
+    sm__inst_executed_pipe_tensor.sum                                                inst       196608
+    sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active                         %        31.93
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %         0.07
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        62.24
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         0.52
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst         2.41
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.36
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         0.53
+    ------------------------------------------------------------------------- ----------- ------------
+
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.98
+    Elapsed Cycles                cycle      1083964
+    Memory Throughput                 %        69.63
+    DRAM Throughput                   %        26.98
+    Duration                         us       547.94
+    L1/TEX Cache Throughput           %        70.33
+    L2 Cache Throughput               %        40.91
+    SM Active Cycles              cycle   1072184.51
+    Compute (SM) Throughput           %        62.24
+    ----------------------- ----------- ------------
+
+    INF   Compute and Memory are well-balanced: To reduce runtime, both computation and memory traffic must be reduced. 
+          Check both the Compute Workload Analysis and Memory Workload Analysis sections.                               
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %         1.44
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Gbyte/s       904.45
+    Mem Busy                                          %        69.63
+    Max Bandwidth                                     %        35.11
+    L1/TEX Hit Rate                                   %        62.88
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector      6294774
+    L2 Hit Rate                                       %        61.32
+    Mem Pipes Busy                                    %        15.93
+    --------------------------------------- ----------- ------------
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        62.95
+    Issued Warp Per Scheduler                        0.63
+    No Eligible                            %        37.05
+    Active Warps Per Scheduler          warp         3.92
+    Eligible Warps Per Scheduler        warp         1.17
+    ---------------------------- ----------- ------------
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle         6.23
+    Warp Cycles Per Executed Instruction           cycle         6.23
+    Avg. Active Threads Per Warp                                31.99
+    Avg. Not Predicated Off Threads Per Warp                    31.96
+    ---------------------------------------- ----------- ------------
+
+    WRN   The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could 
+          enable the rule to provide more guidance.                                                                     
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Local Speedup: 38.65%                                                                                    
+          On average, each warp of this workload spends 2.4 cycles being stalled waiting for a scoreboard dependency on 
+          a L1TEX (local, global, surface, texture) operation. Find the instruction producing the data being waited     
+          upon to identify the culprit. To reduce the number of cycles waiting on L1TEX data accesses verify the        
+          memory access patterns are optimal for the target architecture, attempt to increase cache hit rates by        
+          increasing data locality (coalescing), or by changing the cache configuration. Consider moving frequently     
+          used data to shared memory. This stall type represents about 38.6% of the total average of 6.2 cycles         
+          between issuing two instructions.                                                                             
+    ----- --------------------------------------------------------------------------------------------------------------
+    INF   Check the Warp Stall Sampling (All Samples) table for the top stall locations in your source based on         
+          sampling data. The Profiling Guide                                                                            
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference) provides more details    
+          on each stall reason.                                                                                         
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                    64
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                  32768
+    Registers Per Thread             register/thread             116
+    Shared Memory Configuration Size           Kbyte           65.54
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block            2.05
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread         2097152
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                               31.03
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            8
+    Block Limit Shared Mem                block           21
+    Block Limit Warps                     block           32
+    Theoretical Active Warps per SM        warp           16
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        24.47
+    Achieved Active Warps Per SM           warp        15.66
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 75%                                                                                       
+          The 4.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (25.0%) is limited by the number of required      
+          registers.                                                                                                    
+
+
+################################################################################
+# B3 intra MMA      bf16 @BT=16 nw=2
+#   which=mma B=8 T=2048 H=8 bt=16 nw=2  kernel=_intra_kernel_mma
+################################################################################
+[2295227] python3.12@127.0.0.1
+  _intra_kernel_mma (4, 128, 64)x(64, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ------------------------------------------------------------------------- ----------- ------------
+    Metric Name                                                               Metric Unit Metric Value
+    ------------------------------------------------------------------------- ----------- ------------
+    dram__throughput.avg.pct_of_peak_sustained_elapsed                                  %        56.68
+    l1tex__throughput.avg.pct_of_peak_sustained_elapsed                                 %        41.04
+    lts__throughput.avg.pct_of_peak_sustained_elapsed                                   %        73.15
+    sm__inst_executed_pipe_tensor.sum                                                inst      1048576
+    sm__pipe_fma_cycles_active.avg.pct_of_peak_sustained_active                         %         8.47
+    sm__pipe_tensor_cycles_active.avg.pct_of_peak_sustained_active                      %         2.58
+    sm__throughput.avg.pct_of_peak_sustained_elapsed                                    %        19.84
+    smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio                 inst         2.43
+    smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio         inst        12.60
+    smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio        inst         0.78
+    smsp__average_warps_issue_stalled_wait_per_issue_active.ratio                    inst         1.01
+    ------------------------------------------------------------------------- ----------- ------------
+
+    Section: GPU Speed Of Light Throughput
+    ----------------------- ----------- ------------
+    Metric Name             Metric Unit Metric Value
+    ----------------------- ----------- ------------
+    DRAM Frequency                  Ghz         2.62
+    SM Frequency                    Ghz         1.81
+    Elapsed Cycles                cycle       471170
+    Memory Throughput                 %        56.68
+    DRAM Throughput                   %        56.68
+    Duration                         us       260.26
+    L1/TEX Cache Throughput           %        41.78
+    L2 Cache Throughput               %        73.15
+    SM Active Cycles              cycle    461675.83
+    Compute (SM) Throughput           %        19.84
+    ----------------------- ----------- ------------
+
+    OPT   This workload exhibits low compute throughput and memory bandwidth utilization relative to the peak           
+          performance of this device. Achieved compute throughput and/or memory bandwidth below 60.0% of peak           
+          typically indicate latency issues. Look at Scheduler Statistics and Warp State Statistics for potential       
+          reasons.                                                                                                      
+
+    Section: Memory Workload Analysis
+    --------------------------------------- ----------- ------------
+    Metric Name                             Metric Unit Metric Value
+    --------------------------------------- ----------- ------------
+    Local Memory Spilling Requests                                 0
+    Local Memory Spilling Request Overhead            %            0
+    L2 Sector Promotion Misses                        %         1.45
+    Shared Memory Spilling Requests                                0
+    Shared Memory Spilling Request Overhead           %            0
+    Memory Throughput                           Tbyte/s         1.90
+    Mem Busy                                          %        41.04
+    Max Bandwidth                                     %        56.68
+    L1/TEX Hit Rate                                   %        39.67
+    L2 Persisting Size                            Mbyte         9.83
+    L2 Compression Success Rate                       %            0
+    L2 Compression Ratio                              %            0
+    L2 Compression Input Sectors                 sector      6291774
+    L2 Hit Rate                                       %        51.90
+    Mem Pipes Busy                                    %        12.99
+    --------------------------------------- ----------- ------------
+
+    Section: Scheduler Statistics
+    ---------------------------- ----------- ------------
+    Metric Name                  Metric Unit Metric Value
+    ---------------------------- ----------- ------------
+    One or More Eligible                   %        20.17
+    Issued Warp Per Scheduler                        0.20
+    No Eligible                            %        79.83
+    Active Warps Per Scheduler          warp         3.85
+    Eligible Warps Per Scheduler        warp         0.24
+    ---------------------------- ----------- ------------
+
+    OPT   Est. Local Speedup: 43.32%                                                                                    
+          Every scheduler is capable of issuing one instruction per cycle, but for this workload each scheduler only    
+          issues an instruction every 5.0 cycles. This might leave hardware resources underutilized and may lead to     
+          less optimal performance. Out of the maximum of 16 warps per scheduler, this workload allocates an average    
+          of 3.85 active warps per scheduler, but only an average of 0.24 warps were eligible per cycle. Eligible       
+          warps are the subset of active warps that are ready to issue their next instruction. Every cycle with no      
+          eligible warp results in no instruction being issued and the issue slot remains unused. To increase the       
+          number of eligible warps, avoid possible load imbalances due to highly different execution durations per      
+          warp. Reducing stalls indicated on the Warp State Statistics and Source Counters sections can help, too.      
+
+    Section: Warp State Statistics
+    ---------------------------------------- ----------- ------------
+    Metric Name                              Metric Unit Metric Value
+    ---------------------------------------- ----------- ------------
+    Warp Cycles Per Issued Instruction             cycle        19.10
+    Warp Cycles Per Executed Instruction           cycle        19.10
+    Avg. Active Threads Per Warp                                31.72
+    Avg. Not Predicated Off Threads Per Warp                    31.44
+    ---------------------------------------- ----------- ------------
+
+    WRN   The optional metric smsp__pcsamp_sample_count could not be found. Collecting it as an additional metric could 
+          enable the rule to provide more guidance.                                                                     
+    ----- --------------------------------------------------------------------------------------------------------------
+    OPT   Est. Speedup: 43.32%                                                                                          
+          On average, each warp of this workload spends 12.6 cycles being stalled waiting for a scoreboard dependency   
+          on a L1TEX (local, global, surface, texture) operation. Find the instruction producing the data being waited  
+          upon to identify the culprit. To reduce the number of cycles waiting on L1TEX data accesses verify the        
+          memory access patterns are optimal for the target architecture, attempt to increase cache hit rates by        
+          increasing data locality (coalescing), or by changing the cache configuration. Consider moving frequently     
+          used data to shared memory. This stall type represents about 66.0% of the total average of 19.1 cycles        
+          between issuing two instructions.                                                                             
+    ----- --------------------------------------------------------------------------------------------------------------
+    INF   Check the Warp Stall Sampling (All Samples) table for the top stall locations in your source based on         
+          sampling data. The Profiling Guide                                                                            
+          (https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#metrics-reference) provides more details    
+          on each stall reason.                                                                                         
+
+    Section: Launch Statistics
+    -------------------------------- --------------- ---------------
+    Metric Name                          Metric Unit    Metric Value
+    -------------------------------- --------------- ---------------
+    Block Size                                                    64
+    Cluster Scheduling Policy                           PolicySpread
+    Cluster Size                                                   0
+    Function Cache Configuration                     CachePreferNone
+    Grid Size                                                  32768
+    Registers Per Thread             register/thread             118
+    Shared Memory Configuration Size           Kbyte           65.54
+    Driver Shared Memory Per Block       Kbyte/block            1.02
+    Dynamic Shared Memory Per Block      Kbyte/block            3.07
+    Static Shared Memory Per Block        byte/block               0
+    # SMs                                         SM             132
+    Stack Size                                                  1024
+    Threads                                   thread         2097152
+    # TPCs                                                        66
+    Enabled TPC IDs                                              all
+    Uses Green Context                                             0
+    Waves Per SM                                               31.03
+    -------------------------------- --------------- ---------------
+
+    Section: Occupancy
+    ------------------------------- ----------- ------------
+    Metric Name                     Metric Unit Metric Value
+    ------------------------------- ----------- ------------
+    Max Active Clusters                 cluster            0
+    Max Cluster Size                      block            8
+    Overall GPU Occupancy                     %            0
+    Cluster Occupancy                         %            0
+    Block Limit Barriers                  block           32
+    Block Limit SM                        block           32
+    Block Limit Registers                 block            8
+    Block Limit Shared Mem                block           16
+    Block Limit Warps                     block           32
+    Theoretical Active Warps per SM        warp           16
+    Theoretical Occupancy                     %           25
+    Achieved Occupancy                        %        24.24
+    Achieved Active Warps Per SM           warp        15.51
+    ------------------------------- ----------- ------------
+
+    OPT   Est. Speedup: 43.32%                                                                                          
+          The 4.00 theoretical warps per scheduler this kernel can issue according to its occupancy are below the       
+          hardware maximum of 16. This kernel's theoretical occupancy (25.0%) is limited by the number of required      
+          registers.                                                                                                    
+
+
+DONE

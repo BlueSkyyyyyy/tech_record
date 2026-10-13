@@ -358,6 +358,25 @@
       **2.29 ms**（REG 201、occ 12.4%）解释 §15 的 4.8–5.5×。**Part E（结构性杠杆）**：B2 的 `h/dh`
       换 bf16 只值 **1.08–1.16×**（非量级项）且给梯度加 ~1.5–2e-3。**结论**：B2/B3 性质不同须分别
       处理（B2 减 DRAM/寄存器；B3 MMA 化），本轮为**纯剖析 + 免费旋钮收口**，结构性重写留下一步。
+- [x] **P7-24** 兑现 §26.6 第 (2) 条：**B3 `intra` 对角块 MMA 化**。关键观察——部署粒度
+      `BT=BC=CHUNK=16 ⟹ NC=1 ⟹ i_i≡0`，Parts A/C（仅有的 `tl.dot`）从不执行，B3 **全部**是对角
+      `for j` 外积循环，这正是 §26 的 `tensor 0.05%`。恒等式：把门控指数移出收缩，
+      `dq2=2^{g}⊙(Mq@(k·2^{-g}))`、`dkt=2^{-g}⊙(Sq@(q·2^{g}))`（`Mq=(a≥j)⊙dAqk`、`Sq=(a≤j)⊙dAqkᵀ`）
+      ——FLA **`SAFE_GATE=True` 分支早已这么做**（`chunk_intra.py:520-526/620-637`），默认
+      `safe_gate=False`（`chunk.py:47`）才是逐元素。新增 `harness/check_bwd_b3_mma.py`
+      （`..._correctness/…_timing/…_chain.out.txt`）+ `harness/ncu_b3_mma_driver.py` /
+      `harness/probe_b3_mma_ncu.sh`（`..._b3_mma_ncu.out.txt`）+ `docs/07` §27。**Part A**：8 组
+      case（`BT=16/64`、非整除 `T=250/513`、`g=0`）四项 vs baseline/FLA 最坏 `max_rel` 1.0e-3~1.1e-3
+      =tf32 底噪。**Part B**：孤立 kernel `dev` **0.51–0.67×**（BT=16/64、nw=2/4 均如此）。**Part C**：
+      落链后 vs FLA 六项最坏 `dq 3.42e-3…dh0 8.27e-3` **逐值同 §25.2/§26.3**；自身增量
+      `dq 1.42e-3/dk 1.09e-3/dv 0/dbeta 3.0e-5/dg 6.08e-3`；链 `dev` **0.88–0.91×**
+      （B8T2048H8 2216→1957 µs）。**Part D（ncu）**：`tensor 0.05%→2.61%（×52）`、`fma 38.8→10.1%`、
+      SM `82→27%`、Duration **527→257 µs（0.49×）**，但转成 **L2/访存 bound**（L2 43→74%、DRAM
+      28→57%、`long_sb` 3.22→16.71）；DRAM%翻倍×Duration 减半＝总字节不变（Mem 941 GB/s→1.92 TB/s）。
+      **结论**：B3 结构性重写兑现（kernel 1.5–2×、链 −10%），但 tensor 只到 2.6%——B3 下一杠杆是
+      **减对角平铺重复读/L1 局部性**而非再加 MMA；链级瓶颈转到 **B2**（下一步＝§26.6 第 (1) 条）。
+      **踩坑**：对角 `dAqk` 平铺的列是 **chunk-内局部**下标 `i_i*BC+o_i`（非绝对 `i_ti+o_i`），
+      用错指纹=`i_t=0`（T≤BT 单 chunk）对、其余全错到 O(1)。
 
 ### P8 小结 / 一页纸
 
@@ -389,8 +408,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-23 补测**。
-  - P7-23（本轮）：第一次把链级新瓶颈 **B2/B3 单独量清楚**。新增
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-24 补测**。
+  - P7-24（本轮）：兑现 §26.6 第 (2) 条——**B3 `intra` 对角块 MMA 化**。核心观察：部署粒度
+    `BT=BC=16 ⟹ NC=1 ⟹ i_i≡0`，Parts A/C（B3 里仅有的 `tl.dot`）从不执行，B3 全部是对角 `for j`
+    逐元素外积循环（=§26 的 `tensor 0.05%` 成因）。恒等式：门控指数移出收缩，`dq2=2^{g}⊙(Mq@(k·2^{-g}))`、
+    `dkt=2^{-g}⊙(Sq@(q·2^{g}))`——FLA `SAFE_GATE=True` 分支早已这么做（`chunk_intra.py:520-526/620-637`），
+    默认 `safe_gate=False` 才是逐元素。新增 `harness/check_bwd_b3_mma.py`
+    （`..._correctness/…_timing/…_chain.out.txt`）+ `harness/ncu_b3_mma_driver.py` /
+    `harness/probe_b3_mma_ncu.sh`（`..._b3_mma_ncu.out.txt`）+ `docs/07` §27。**Part A**：8 组
+    case 四项 vs baseline/FLA 最坏 1.0e-3~1.1e-3=tf32 底噪。**Part B**：孤立 kernel `dev` **0.51–0.67×**。
+    **Part C**：落链 vs FLA 六项最坏 `dq 3.42e-3…dh0 8.27e-3` **逐值同 §25.2/§26.3**（不退化）、
+    自身增量 `dq 1.42e-3/dk 1.09e-3/dv 0/dbeta 3.0e-5/dg 6.08e-3`、链 `dev` **0.88–0.91×**
+    （B8T2048H8 2216→1957 µs）。**Part D（ncu）**：`tensor 0.05%→2.61%（×52）`、`fma 38.8→10.1%`、
+    SM `82→27%`、Duration **527→257 µs（0.49×）**，但转成 **L2/访存 bound**（L2 43→74%、DRAM 28→57%、
+    `long_sb` 3.22→16.71；DRAM%×Duration 不变=总字节不变）。**结论**：B3 结构性重写兑现，但 tensor
+    只到 2.6%——B3 下一杠杆是**减对角平铺重复读/L1 局部性**；链级瓶颈转到 **B2**。见 `docs/07` §27。
+    **踩坑**：对角 `dAqk` 平铺的列是 chunk-内局部 `i_i*BC+o_i`（非绝对 `i_ti+o_i`），用错指纹=
+    `i_t=0` 对、其余全错 O(1)。
+  - P7-23（上轮）：第一次把链级新瓶颈 **B2/B3 单独量清楚**。新增
     `harness/check_bwd_b2b3_e2e.py`（`..._b2b3_e2e.out.txt`，空闲卡）+ `harness/probe_b2b3_ncu.sh` /
     `harness/ncu_b2b3_driver.py`（`..._b2b3_ncu.out.txt`）+ `harness/probe_b2b3_hdh_bf16.py`
     （`..._hdh_bf16.out.txt`）+ `harness/probe_bwd_chain_split.py`/`probe_b2b3_tiling.py`（诊断留档）

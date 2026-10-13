@@ -1,0 +1,29 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190  triton=3.6.0
+
+==============================================================================
+Part B: isolated B3 timing -- baseline vs MMA, BT=16 (deploy) and BT=64
+==============================================================================
+
+# B=1 T=512 H=4 K=128 BT=64
+  nw=2: base dev=   22.1 wall=   63.0 | mma dev=   11.9 wall=   62.8 | dev 0.54x wall 1.00x
+  nw=4: base dev=   22.3 wall=   63.0 | mma dev=   12.0 wall=   62.4 | dev 0.54x wall 0.99x
+
+# B=2 T=2048 H=8 K=128 BT=64
+  nw=2: base dev=  262.4 wall=  270.5 | mma dev=  134.3 wall=  142.1 | dev 0.51x wall 0.53x
+  nw=4: base dev=  263.8 wall=  271.6 | mma dev=  167.3 wall=  174.0 | dev 0.63x wall 0.64x
+
+# B=1 T=512 H=4 K=128 BT=16
+  nw=2: base dev=   16.6 wall=   59.3 | mma dev=    9.5 wall=   59.0 | dev 0.57x wall 0.99x
+  nw=4: base dev=   18.9 wall=   59.6 | mma dev=    9.6 wall=   58.9 | dev 0.51x wall 0.99x
+
+# B=2 T=2048 H=8 K=128 BT=16
+  nw=2: base dev=  142.4 wall=  150.6 | mma dev=   91.0 wall=   99.0 | dev 0.64x wall 0.66x
+  nw=4: base dev=  169.4 wall=  177.1 | mma dev=   94.5 wall=  102.5 | dev 0.56x wall 0.58x
+
+# B=8 T=2048 H=8 K=128 BT=16
+  nw=2: base dev=  522.3 wall=  528.7 | mma dev=  348.4 wall=  355.6 | dev 0.67x wall 0.67x
+  nw=4: base dev=  631.6 wall=  639.0 | mma dev=  365.1 wall=  371.7 | dev 0.58x wall 0.58x
+
+DONE
