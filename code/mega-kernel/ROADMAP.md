@@ -4162,6 +4162,45 @@
   P146-1 新留尾巴见文档 §9（SM100 指令本体未执行、未跑 MPK FP8 线性 task、只走 `linear_fp8_sm100.cuh`
   一支、只走 `f3fde583` 一个 CUTLASS 快照）。**本轮新增增量。**
 
+### P147 MPK Hopper CuTe 权重驻留 GEMM device 家族走读（`docs/61-mpk-cute-hopper-ws-gemm.md`）
+
+- [x] **P147-1** 补掉「`docs/07` 只一行旁注、`docs/30` §5 只从**单测 wrapper** 视角、`docs/58` 只借一行」
+  留下的缺口：把 **CUTLASS/CuTe 包装的 Hopper GEMM device 家族** `tasks/cute/hopper/`
+  （`kernel_traits`/`gemm_ws`/`gemm_ws_cooperative`/`gemm_ws_mpk`/`mma_tma_ws_mainloop`/`epilogue`，
+  6 文件 2346 行）当一层逐行打开。见 `docs/61-mpk-cute-hopper-ws-gemm.md`（MPK `f9eb70c`；
+  **纯源码走读 + 1 个 H100 真机实验**——它是 **Hopper/sm90a** 非 SM100 专属，故单测入口可真跑）。
+  三条 headline：**(A)（headline）「后端已接、前端未发」的支线**——`TASK_LINEAR_CUTLASS_HOPPER=157`
+  （含残差 158）后端六层全通（`runtime_header.h:120-121`、`task_register.cc:1754-1922` 的 JIT 生成串、
+  `graph.cc:585-595`、`tma.cuh:659/1531` 的 TMA 描述符、两份 `task_header.cuh` 无条件 `#include`、
+  `profiler_persistent.py:157-158`），但 **MPK 前端 `persistent_kernel.py:2441/2479` 两处
+  `register_task(..., "linear_cutlass_hopper")` 被注释**（平行分支改发 `linear_swapAB_hopper`）、
+  全仓无 builder 发出该名 ⇒ **唯一活入口是 standalone 单测** `tests/runtime_python/cute/hopper/gemm.cu`
+  的 `m.def("linear_mpk",...)`（`docs/60` §C 的「有实现未接线」族又一实例）。**(B)（headline）
+  三份身体只有一份活、且活的那份把 CUTLASS 流水又抄了一遍**——`gemm_ws.cuh`（CUTLASS 非协同
+  warp-specialized，`collective_mainloop.load/mma`+`epilogue.store`，被单测里**被注释**的 wrapper
+  `gemm.cu:49-58` 引用）/`gemm_ws_cooperative.cuh`（CUTLASS 协同版：`PersistentTileSchedulerSm90`
+  + CLC throttle + warpgroup `reg_dealloc/alloc`，**全仓零调用点、只被两份 task_header include**）为死；
+  `gemm_ws_mpk.cuh`（`linear_cutlass_ws_hopper`，562 行）为活，但其 TMA 取数（MPK `tma_2d`/`smem_tma`）、
+  wgmma 主循环、swapAB epilogue **全部在 kernel 体内手写**（`:264-290`/`:299-424`/`:452-552`），
+  从 `CollectiveMainloop`/`CollectiveEpilogue` **只借类型别名与常量、绝不调其 `load/mma/store` 方法**
+  （已 grep 确认）——`docs/20` §5「惯用法实现两遍」在此是**「实现三遍、第三遍抄」**。**(C)（headline）
+  目标卡 H100/sm90a 真机把 `linear_mpk` 跑通 + 钉死两处「快照自身坏了」**（新
+  `harness/mpk_cute_hopper_ws.{py,sh,out.txt}`，device 4、nvcc 13.2）：单 CTA（`grid(1)`/block 256/
+  100 KB SMEM）、`B∈{8,16}`×`O=64`×`K=4096` 全部 `allclose`（`max_rel≈2.0–2.4e-3`）、事件计时稳态
+  `~0.043 ms/次`、读带宽 `~14–15 GB/s`（单 SM 上限，**非**性能优化版、只证「一 task=一 CTA 能跑对」）；
+  **(1)** 单测 `setup.py` 的 `include_dirs` **缺 `include/mirage/persistent_kernel`**，
+  `common_header.cuh:20` 的 `runtime_header.h` **找不到头、as-shipped 编译失败**（本文**不改快照**，
+  用 `torch.utils.cpp_extension.load` 显式补 include 路径与 `-lcuda` 重建）；**(2)** 单测自带 benchmark
+  `WARMUP_RUNS=0/BENCHMARK_RUNS=1`（`gemm.cu:423-424`），自报 `0.012 ms` 与稳态差 **3.5×、不可作数**。
+  另核：`MMAKernelTraits`（`IsCooperative:119`/`AtomLayoutMNK:121-123`/`TiledMma`(wgmma)`:139-146`/
+  `SwapAB:200`）、`MainloopParamsImpl<OnHost>` 的「host 带 TMA 描述符 / device 不带」特化（`:38-88`）、
+  JIT 生成串里 `output_size`↔`batch_size` **交换**（注释 `// NOTE ... swapped here`）与一处
+  **`KSTAGES=4`（`:1764`）vs `Kstages=5`（`:1853`）静态矛盾**（只记不判）。判据贡献 **C1+C3**
+  （协同版内含 CUTLASS 自带 tile scheduler+CLC，恰是本专题「设备内调度应下沉给 worker」的**反证**）。
+  配套博客 post `mega-kernel-62-mpk-cute-hopper-ws-gemm`（weight 63）并更新 `mega-kernel-00-index` 第 62 项。
+  P147-1 新留尾巴见文档 §8（前端注释只记不判、`KSTAGES` 矛盾只记不判、实验只覆盖单测实例化的两档
+  与单 CTA、未跑生产 JIT 路径、未走完协同版 CLC/寄存器重分配的每个分支）。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4553,7 +4592,35 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P146-1 完成（1/1）**。补掉 `docs/59` §8 **点名的最直接下一步**（CUTLASS
+- 当前进度：**P147-1 完成（1/1）**。补掉「`docs/07` 只一行旁注、`docs/30` §5 只从**单测 wrapper** 视角、
+  `docs/58` 只借一行」留下的缺口——把 **CUTLASS/CuTe 包装的 Hopper GEMM device 家族**
+  `tasks/cute/hopper/`（6 文件 2346 行）当一层逐行打开，并**在目标卡 H100/sm90a 上把它的单测入口
+  `linear_mpk` 真跑通**。见 `docs/61-mpk-cute-hopper-ws-gemm.md`（MPK `f9eb70c`；纯源码走读 + 1 个
+  H100 真机实验——**Hopper/sm90a，非 SM100 专属**）。三条 headline：**(A)（headline）「后端已接、前端
+  未发」**——`TASK_LINEAR_CUTLASS_HOPPER=157`（含残差 158）后端六层全通，但 **MPK 前端
+  `persistent_kernel.py:2441/2479` 两处 `register_task(..., "linear_cutlass_hopper")` 被注释**（改发
+  `linear_swapAB_hopper`），**唯一活入口是 standalone 单测** `tests/runtime_python/cute/hopper/gemm.cu`
+  的 `linear_mpk`；**(B)（headline）三份身体只有一份活、活的那份又把 CUTLASS 流水抄了一遍**——
+  `gemm_ws.cuh`（CUTLASS 非协同）/`gemm_ws_cooperative.cuh`（CUTLASS 协同 + CLC + 寄存器重分配，
+  **零调用点**）为死，`gemm_ws_mpk.cuh`（`linear_cutlass_ws_hopper`）为活，但它从
+  `CollectiveMainloop`/`CollectiveEpilogue` **只借类型/常量、绝不调其 `load/mma/store`**，把 TMA/wgmma/
+  epilogue 全在 kernel 体内手写（`docs/20` §5「实现两遍」→**「实现三遍、第三遍抄」**）；**(C)（headline）
+  真机跑通 + 钉死两处「快照自身坏了」**——`B∈{8,16}`×`O=64`×`K=4096` 全 `allclose`、单 CTA 稳态
+  `~0.043 ms`/~14–15 GB/s（新 `harness/mpk_cute_hopper_ws.{py,sh,out.txt}`），且单测 `setup.py` **缺
+  `include/mirage/persistent_kernel` 导致 as-shipped 编译失败**（本文补 include 后重建）、其自带
+  benchmark `WARMUP_RUNS=0/BENCHMARK_RUNS=1` **自报数字不可信**。判据贡献 **C1+C3**。配套博客 post
+  `mega-kernel-62-mpk-cute-hopper-ws-gemm`（weight 63）并更新 `mega-kernel-00-index` 第 62 项。
+  P147-1 新留尾巴见文档 §8。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计
+  （注：该 kernel 名 `eagle3_draft_chain_step_attn` 快照里 `grep` 零命中，**可能不可走**，须先核 demo
+  引用是否指向别处）；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或 SM100 专属布局的其余面
+  （`mma_traits_sm100.hpp` 的 `tmem_e_frg`/`tmem_frg_ws` 稀疏元数据与 WS 布局、
+  `linear_fp8_1d2d_sm100_cute_tie` 想表达的 CuTe 解构路径、`fp8_group_gemm_sm100.cuh` 的 SF 段逐行）
+  逐行。**Hopper CuTe WS GEMM device 家族已由 P147-1/`docs/61` 补掉**（顺带补掉 `docs/30` §5 只从 wrapper
+  视角的缺口）；**CUTLASS scale-factor TMEM trait 已由 P146-1/`docs/60` 补掉**；TMEM 列布局 / UTCCP 重排
+  已由 P145-1/`docs/59` 补掉；TMA 版 SMEM 布局已由 P144-1/`docs/58` 补掉；SM100 共享原语层已由
+  P143-1/`docs/57` 补掉。
+- 此前：**P146-1 完成（1/1）**。补掉 `docs/59` §8 **点名的最直接下一步**（CUTLASS
   `mma_traits_sm100.hpp` 里 block-scaled scale-factor 的 TMEM 布局 trait），把 MPK 手工路径与 CUTLASS
   高层路径在「scale 落进 TMEM 的哪个槽、指令怎么找到它」上并置。见
   `docs/60-mpk-scale-sf-tmem-trait.md`（MPK `f9eb70c` + CUTLASS `deps/cutlass` `f3fde583`；纯源码走读 +
