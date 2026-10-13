@@ -3919,6 +3919,47 @@
   `draft_config` 未加载真实 ckpt；`M_ROWS==64` 之外哪些生产 shape 回退 ref 未穷举；未与 DeepGEMM
   SM100 路径对跑。**本轮新增增量。**
 
+### P140 Inkling task 家族源码走读（`docs/54-mpk-inkling-family.md`）
+
+- [x] **P140-1** 补掉 `docs/35` §9 明留的「**注意力之外的 SM100 task 家族**（`dflash_*`/`inkling_*`/…）
+  未逐行」这条尾巴里的第二支（继 **P139-1/`docs/53`** 的 DFlash）：把 **Inkling（Thinking Machines /
+  thinkingmachines/Inkling）** 三个 device 身体从 `docs/37` §5.3 的摘要推进到**逐行**，并核清
+  `TaskType`/`graph.cc`/`register`/前端/builder/单测**六层**接线。见 `docs/54-mpk-inkling-family.md`
+  （快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`–`docs/53` 同快照；
+  **纯源码走读（资料分析），本轮无新实验**——SM100 在目标卡 H100/sm90 不可执行）。三条 headline：
+  - **(A)** `inkling_attention` 是「**带每 (head, 相对距离) bias 的 GQA decode**」——单新 token
+    `P=ctx_len`，`s_j = tau*(dot(q_h,k_j)/HEAD_DIM + bias[h,P-j])`（`:22-31/182-196`），`tau = 1+alpha*
+    ln(max((P+1)/n_floor,1))` **只在全局层**乘整个 pre-softmax 分数（`:102-106`），相对位置 `d=P-j`
+    **不写进 key**（与 RoPE 路线根本区别）；bias 表由上游一个小 GEMM 现算；4 warp 在 key 维 stripe
+    （`:151-152`）、每 warp 每 q head 在线 softmax、V 累加按 lane（4 dims/lane）、**末尾 SMEM +
+    NamedBarrier 6 跨 warp 合并**（`:199-241`）——没有 DFlash mma 路径「warp-local 无归约」的便宜。
+  - **(B)** 三个 task 全是「**一算子一 CTA、grid 切通道/头维**」的薄身体：`inkling_sconv`
+    （94 行，深度可分离短卷积 k=4、**全 fp32**、`conv_state` **原地**滑窗、残差与最新 tap 合并成一行
+    `acc=x+w[K-1]*x+Σw[i]*s[i]`、`:59-90`；每层 4 段 sconv）；`inkling_moe_router`（168 行，**单 task
+    `(1,1,1)`**、一线程一行、`logsigmoid=-softplus(-x)`、sigmoid+bias top-6（**无 group limiting**）、
+    权重 `softmax(logsigmoid(sel++shared))*route_scale(8)*global_scale`、读后**立即把 logits 清零**
+    供 split-k gate linear 复用、Phase 2 用 `atomicAdd(active+258,1)` 紧凑化活跃专家 id（先寄存器快照
+    再写，`:150-166`））。
+  - **(C)（headline）Inkling 是本批「接线/测试最完整」的一支，且写 KV cache 复用 DFlash 的 task**：
+    与 `docs/53` §4 DFlash 两条落差（builder 引的单测目录不存在、`DFlashBuilder` 零实例化）相反，
+    Inkling 有**真实存在的单测目录** `tests/runtime_python/blackwell/sm100_inkling/`（3 个 `*_testmode.py`
+    + `pytorch_reference.py`，共 458 行），且 `InklingBuilder` 经 `models/__init__.py` 的
+    `rglob("builder.py")` 自动导入**进入注册表**（`model_registry.py:5-23`，`mpk.py:472` 取用）。
+    `_build_attention` 写 KV cache **不调用任何 `inkling_*` task**，而是 `mpk.dflash_kv_store_layer(…)`
+    （`builder.py:410-417`）——即「attention 只读、写回独立成 task」的边界**跨模型家族共享**，是
+    megakernel「薄 task 可跨模型复用」的干净实例。
+  - 另核三处家族特异折叠（bias 表由普通 `linear_layer` 现算 `:385-399`、gate `[258,H]`→pad
+    `[384,H]` 使 grid 48 每块 ≥8 行 bf16 `:497-510`、共享专家折叠成 expert 256/257 `:533-568`）
+    与一处 **dtype 口径落差（只记不判）**——`task_register.cc:422` 行内注释写 `bias (fp32)`，但前端
+    （`persistent_kernel.py:1057`）与 device（`inkling_attention_sm100.cuh:94,182-184`）两端均为 **bf16**。
+    判据只贡献 **C3 的「Inkling 段范围与融合边界」**。配套博客 post `mega-kernel-55-mpk-inkling-family`
+    （weight 56）并更新 `mega-kernel-00-index` 第 55 项。
+  - P140-1 新留尾巴（文档 §8）：未构建；三单测的 `atol/rtol` 口径只声明未跑；Inkling 模型侧常量取自
+    `config.json text_config` 未加载真实 ckpt；builder 首行 `assert world_size==1` 且 decode-only/BF16，
+    多卡/预填未在范围；`extern __shared__` 同名一致的 TU 级约束未在 SM100 实测。
+  - 另把「`extern __shared__` 同名符号须在整个 megakernel TU 内一致」补进「已知坑」。
+    **本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3968,6 +4009,13 @@
   24（`R<24` 被 ptxas 调到 24 并告警）。**每块静态 SMEM 会在小 `T` 时先于线程封顶**（§82.2：一块带
   8 KiB 归约数组的 kernel 在 `T=64` 被压到 `occ=24` 而非线程上限 32）——写「固定 `Wsm` 扫 `T`」的
   对照实验时，必须先让所有 `T` 的 SMEM 不成为约束，否则把「SMEM 封顶的占用率损失」误读成「块粒度效应」。
+- **常驻 megakernel 里 `extern __shared__` 是「全 TU 共享基址」，同名符号必须声明一致**（P140-1/`docs/54`）：
+  常驻内核把许多 task 的 `__device__` 身体编进**同一个 TU**，而 `extern __shared__` 在每次声明都指同一块
+  动态 SMEM 基址。`inkling_attention_sm100.cuh:116-118` 显式注释「`extern __shared__` 符号同名者必须在整个
+  megakernel TU 内一致」，并对齐 `mla_prefill_sm100.cuh:258` 的同名 `__align__(128)` 声明；而默认 SMEM 段
+  被各 task 以不同名字/对齐反复声明（`smem_raw`/`smem_buf`/`smem_buffer`/`smem`/`shared_memory`/`sm_raw_tp8` 等），
+  即「SMEM 布局即 ABI」（`docs/51`）在**动态 SMEM 基址层**的又一条硬约束——改一个 task 的 extern 声明
+  可能波及同 TU 其它 task，且本机不可编译 SM100 无法实测，只作静态记录（只记不判）。
 - **访存模式异质性共驻的「不可通吃」裂缝**（P84-1/§72）：把多种访存模式放进同一常驻 grid，混合吞吐
   与「各模式轮流独占整机」的时间切片期望相差 ±13%（**大体加和**），但有两处真裂缝——(a) **发射受限
   模式（`scalar4B` 型，低算术强度逐元素）与访存受限模式共驻恒低 ~13%，且与 `(T,O)` 正交**（异质性税
@@ -4236,7 +4284,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P139-1 完成（1/1）**。兑现阶段「下一步候选」第一条的残留——`docs/35` §9 明留的
+- 当前进度：**P140-1 完成（1/1）**。兑现阶段「下一步候选」第一条的残留——`docs/35` §9 明留的
+  「注意力之外的 SM100 task 家族（`dflash_*`/`inkling_*`/…）未逐行」里的**第二支**，把 Inkling
+  （Thinking Machines）三个 device 身体从 `docs/37` §5.3 的摘要推进到逐行。见 `docs/54-mpk-inkling-family.md`
+  （MPK `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机不可执行）。三条 headline：
+  **(A)** `inkling_attention` 是「带每 (head,相对距离) bias 的 GQA decode」——`s_j = tau*(dot(q,k)/D +
+  bias[h,P-j])`、`tau` 只在全局层由 log-scaling 给出、相对位置**不写进 key**、4 warp 切 key 维 + 末尾
+  SMEM/NamedBarrier 6 跨 warp 合并；**(B)** 三个 task 全是「一算子一 CTA、grid 切通道/头维」的薄身体
+  （`inkling_sconv` 深度短卷积 k=4/fp32/`conv_state` 原地滑窗；`inkling_moe_router` 单 task `(1,1,1)`/
+  logsigmoid-softmax/`atomicAdd` 紧凑化活跃专家）；**(C)（headline）** 是本批接线/测试最完整的一支，
+  且写 KV cache **复用 DFlash 的 `dflash_kv_store` task**（「attention 只读、写回独立」边界跨家族共享）。
+  另核六层接线（`TaskType` 351/352/353、`graph.cc`、`register`、前端、builder、真实单测目录）与三处家族
+  折叠 + 一处 dtype 注释落差（只记不判）。判据只贡献 C3。配套博客 post
+  `mega-kernel-55-mpk-inkling-family`（weight 56）并更新 `mega-kernel-00-index` 第 55 项。
+  P140-1 新留尾巴见文档 §8（未构建、单测口径只声明未跑、模型侧常量未核、world_size/decode-only 限制）。
+- 下一步候选：可继续走「`docs/35` §9 遗留的其它未走读相邻层」的残留——同族的
+  **`glm_moe_router_sm100`**（`docs/37` §2 有摘要、未逐行；`TaskType` 350 家族块之外、`glm4_moe` builder）
+  与 **`topk_sigmoid_sm100`** 的逐行；或 `docs/46` §6 的 FLAT-CACHE draft attention 设计的完整追述；
+  或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处。**`docs/35` §9 的 CUTLASS `collective_builder`
+  侧 QK/PV atom 已由 **P138-1/`docs/52`** 补掉**；**DFlash 家族已由 **P139-1/`docs/53`** 补掉**；
+  **Inkling 家族已由 **P140-1/`docs/54`** 补掉**。
+- 此前：**P139-1 完成（1/1）**。兑现阶段「下一步候选」第一条的残留——`docs/35` §9 明留的
   「注意力之外的 SM100 task 家族（`dflash_*`/`inkling_*`/…）未逐行」里的一支，把 Kimi-K2.6 投机解码草稿
   **DFlash 家族**三个 device 身体从 `docs/37` §5.2 的摘要推进到逐行。见 `docs/53-mpk-dflash-family.md`
   （MPK `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机不可执行）。三条 headline：
