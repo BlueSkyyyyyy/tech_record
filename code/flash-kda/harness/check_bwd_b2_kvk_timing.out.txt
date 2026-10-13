@@ -1,0 +1,29 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  shape=b8t2048h8 (BT=16, NS=2, cv-mean idle-card)
+K     V     tag              dev_us    wall_us
+  64    128   prod              603.1      602.4
+  64    128   bf16mma           481.8      483.0
+  64    128   bf16mma64         463.5      459.8
+  64    128   bf16mma_tma       532.9      532.4
+      => K=64 V=128 : bf16mma/prod=0.799  bvk64/b32=0.962  tma/bvk64=1.150
+  128   128   prod             1263.4     1260.3
+  128   128   bf16mma           798.6      799.1
+  128   128   bf16mma64        1088.3     1085.2
+  128   128   bf16mma_tma      1166.3     1161.7
+      => K=128 V=128 : bf16mma/prod=0.632  bvk64/b32=1.363  tma/bvk64=1.072
+  256   128   prod             2084.6     2085.6
+  256   128   bf16mma          2042.7     2038.6
+  256   128   bf16mma64        1918.5     1915.2
+  256   128   bf16mma_tma      2015.4     2013.6
+      => K=256 V=128 : bf16mma/prod=0.980  bvk64/b32=0.939  tma/bvk64=1.051
+  128   64    prod              938.6      936.1
+  128   64    bf16mma           579.3      579.3
+  128   64    bf16mma64         899.0      897.9
+  128   64    bf16mma_tma       573.2      572.7
+      => K=128 V=64 : bf16mma/prod=0.617  bvk64/b32=1.552  tma/bvk64=0.638
+  128   256   prod             1996.3     1992.2
+  128   256   bf16mma          1273.4     1274.0
+  128   256   bf16mma64        1537.0     1532.7
+  128   256   bf16mma_tma      2222.3     2218.1
+      => K=128 V=256 : bf16mma/prod=0.638  bvk64/b32=1.207  tma/bvk64=1.446

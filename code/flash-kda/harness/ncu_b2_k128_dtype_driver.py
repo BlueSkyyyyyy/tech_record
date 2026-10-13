@@ -23,9 +23,11 @@ BT = 16
 SCALE = 1.0 / (128 ** 0.5)
 
 # tags whose five streamed operands (`vn/do/dv/h/dh`) are bf16 on the wire
-FIVE_BF16 = {"bf16", "bf16mma", "bf16_vdw"}
-# tags whose raw `v` is bf16 on the wire
-V_BF16 = {"bf16_vdw"}
+# P7-104: extended to the `BVK=64` / TMA bf16 builds (all tags whose name starts with "bf16").
+FIVE_BF16 = {"bf16", "bf16mma", "bf16_vdw", "bf1664", "bf16mma64",
+             "bf16tma", "bf16mma_tma"}
+# tags whose raw `v` is bf16 on the wire (`BF16_VDW` non-TMA, or any bf16 **TMA** staging, §79)
+V_BF16 = {"bf16_vdw", "bf16tma", "bf16mma_tma"}
 
 
 def ptr(t):
