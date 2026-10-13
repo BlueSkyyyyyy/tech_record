@@ -1,0 +1,75 @@
+DeepEP NCCL 通信域绑定与 Python 引导层 —— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 torch-nccl (2, 29, 7) sms 132
+DeepEP 源码：93eb6eb  (installed ?)
+
+
+=== Part A: 包发现层 find_pkgs.py（真实模块，H100 真机） ===
+  find_pkgs.py sha256=5464c1a307f36b5b
+  find_nccl_root() = /usr/local/lib/python3.12/dist-packages/nvidia/nccl
+  [PASS] A1 find_nccl_root 解析出 pip nvidia/nccl 根目录  /usr/local/lib/python3.12/dist-packages/nvidia/nccl
+  get_nccl_lib_name() = libnccl.so.2   (glob: ['libnccl.so.2'])
+  [PASS] A2 get_nccl_lib_name 返回实际存在的 SONAME 文件名  libnccl.so.2
+  [PASS] A3a EP_NCCL_ROOT_DIR 优先
+  [PASS] A3b 同时存在时 EP_NCCL_ROOT_DIR 胜过 NCCL_DIR
+  [PASS] A3c 无 EP_ 前缀时回退 NCCL_DIR
+  [PASS] A4 optional=True 未找到返回 None
+  [PASS] A5 optional=False 未找到抛 AssertionError  Cannot find package: definitely_not_a_pkg_xyz
+  [PASS] A6 独立 oracle 复刻 find_pkg_root 结果一致  oracle=/usr/local/lib/python3.12/dist-packages/nvidia/nccl real=/usr/local/lib/python3.12/dist-packages/nvidia/nccl
+  [PASS] A7 find_nccl_root 带 lru_cache（第二次命中）  CacheInfo(hits=1, misses=1, maxsize=128, currsize=1)
+
+=== Part B: 运行时 NCCL 版本核对 check_nccl_so（ast 抽取真实函数体） ===
+  __init__.py sha256=5284cee7a436c8af  check_nccl_so 源自 :19-41
+  [PASS] B1 EP_SUPPRESS_NCCL_CHECK=1 直接返回
+  loaded (torch)   = /usr/lib/x86_64-linux-gnu/libnccl.so.2.29.7
+  linked (DeepEP)  = /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2
+  [PASS] B2 loaded ≠ linked（本机真实失配）  filecmp=False
+  [PASS] B3 check_nccl_so 在失配时抛 AssertionError  ...Invalid NCCL versions: /usr/lib/x86_64-linux-gnu/libnccl.so.2.29.7 (loaded) v.s. /usr/loca
+  [PASS] B4 check_nccl_so 用 shallow=False（内容级比较，非仅 stat）
+
+=== Part C: comm/handle.py —— 句柄生命周期与缓存（真实代码 + 合成 _C stub） ===
+  handle.py sha256=24f555020247b358  barrier.py sha256=706bef5123370813
+  [PASS] C1a 复用 PyTorch comm → managed=False 且 ptr 原样  comm=999 managed=False
+  [PASS] C1b 同一 group 第二次命中缓存（同一对象）
+  [PASS] C2a EP_REUSE_NCCL_COMM=0 → DeepEP 自建（managed=True）  comm=7803 created=[(b'LOCAL-UID', 8, 3, 7803)]
+  [PASS] C2b 自建路径调用 get_local_nccl_unique_id
+  [PASS] C3a force_new_comm=True 生成新的 managed 句柄（≠缓存对象）
+  [PASS] C4a managed 句柄析构触发 destroy_nccl_comm  destroyed=[555]
+  [PASS] C4b 非 managed（PyTorch 复用）句柄在清缓存后【不】destroy  destroyed=[]
+  [PASS] C5a 缓存非空  cache=1
+  [PASS] C5b destroy_all_managed_nccl_comm 清空缓存
+  [PASS] C6a 有 .context → 直接用 Context 的域大小（不走 _C）
+  [PASS] C6b 无 .context → 经 _C.get_physical_domain_size(comm)
+
+=== Part D: comm/barrier.py —— barrier 参数转发（真实代码 + stub） ===
+  [PASS] D1 barrier 从 buffer.context 取域并按序转发 4 参数  ('CTX0', True, False, False)
+  [PASS] D2 context_idx 覆盖 buffer.context
+
+=== Part E: 域分解算术（复刻 context.cpp 公式 + 独立 oracle） ===
+    ranks=  8 nvl=8 hybrid=0 -> phys=(1, 8) logical=(1, 8) oracle=(1, 8)
+    ranks=  8 nvl=8 hybrid=1 -> phys=(1, 8) logical=(1, 8) oracle=(1, 8)
+    ranks= 16 nvl=8 hybrid=1 -> phys=(2, 8) logical=(2, 8) oracle=(2, 8)
+    ranks= 16 nvl=8 hybrid=0 -> phys=(2, 8) logical=(1, 16) oracle=(1, 16)
+    ranks= 32 nvl=8 hybrid=1 -> phys=(4, 8) logical=(4, 8) oracle=(4, 8)
+    ranks= 64 nvl=8 hybrid=1 -> phys=(8, 8) logical=(8, 8) oracle=(8, 8)
+    ranks=  2 nvl=2 hybrid=1 -> phys=(1, 2) logical=(1, 2) oracle=(1, 2)
+    ranks=  1 nvl=1 hybrid=0 -> phys=(1, 1) logical=(1, 1) oracle=(1, 1)
+  [PASS] E1 physical/logical 域大小公式与独立 oracle 逐配置一致
+  [PASS] E2 EP8 单节点 hybrid/非 hybrid 的 logical 均退化到 (1,8)
+  [PASS] E3 EP16 双节点 hybrid=(2,8) / 非 hybrid=(1,16)
+  [PASS] E4 ginSignalCount = num_ranks + 2*2
+  [PASS] E5 get_sym_ptr 的 offset = ptr - workspace 与 dst rank 无关
+
+=== Part F: NCCL 版本探测（loaded 系统库 vs linked pip 库） ===
+  system  /usr/lib/x86_64-linux-gnu/libnccl.so.2.29.7 -> 2.29.7
+  pip     /usr/local/lib/python3.12/dist-packages/nvidia/nccl/lib/libnccl.so.2 -> 2.32.3
+  [PASS] F1 loaded(system) 为 2.29.x  2.29.7
+  [PASS] F2 linked(pip) 为 2.32.x  2.32.3
+  [PASS] F3 两者版本不同 → 触发 check_nccl_so 失配  2.29.7 vs 2.32.3
+  [PASS] F4 pip 版本 >= 2.31（走 useRuntimeVersion 分支，仍被 check_nccl_so 先拦）
+  setup.py 会把 EP_NCCL_ROOT_DIR/NCCL 根目录链接进 `_C`（SONAME -l:libnccl.so.2）
+
+=== 汇总 ===
+  PASS=35  FAIL=0  TOTAL=35
+
+exit code: 0

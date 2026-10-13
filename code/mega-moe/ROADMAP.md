@@ -2353,6 +2353,45 @@
       `tests/ep/test_ep.py` sha256 `7346d98a17bce91e…`。配套博客
       `content/posts/mega-moe-85-deepep-ep-test-oracle`（索引页新增第 85 篇）。
 
+### P76 增量（opt-in，补齐 DeepEP 一直缺席的「NCCL 通信域绑定 + Python 引导层」）
+
+- [x] **P76-1** **DeepEP 的 NCCL 通信域绑定与 Python 引导层**
+      （`deep_ep/__init__.py`；`deep_ep/utils/find_pkgs.py`；`deep_ep/comm/{__init__,handle,barrier}.py`；
+      `csrc/python_api.cpp`；`csrc/comm/{handle,barrier,stream}.hpp`；`csrc/kernels/comm/{api.hpp,context.cpp,barrier.hpp}`；
+      `setup.py`；`common/compiled.cuh`）。前面第 7/48/51/53/58/61/63/65/71/73/75 篇的 DeepEP 篇目
+      **全部从一个已存在的通信组/对称窗口讲起**，但「怎么把 PyTorch 的 NCCL 通信组变成一块可对称
+      寻址的窗口」这层地基从没被单独拆过——也正是本机**运行期阻塞的确切落点**。**纯 host / Python，
+      H100(sm90) 真机实测**（`import deep_ep` 触发 `check_nccl_so` 失败，故用 stub + ast 抽取真实
+      函数体）。→ `docs/86-deepep-nccl-comm-binding.md`（真实行号核对）：
+      **引导协议** `__init__.py:8-16/19-41/44-51/54-56`（persistent_envs → `check_nccl_so` →
+      `init_jit` → 之后才 import `_C` 消费者）；**包发现** `find_pkgs.py`：`find_pkg_root:9-55`
+      （env 短路 `:22-25` → `sys.path` 优先级 `:27-28` → `nvidia-{name}` 匹配 `:30-33` → lib 目录上跳
+      `:40-50`）、`find_nccl_root` 带 `lru_cache` `:58-69`、`get_nccl_lib_name` SONAME `:72-77`
+      （pip wheel 只发 `libnccl.so.2`，故链接用 `-l:libnccl.so.2`）；**运行时核对** `check_nccl_so:19-41`
+      三闸门（抑制开关 `:24-25`、`/proc/self/maps` 重复加载 `:27-32`、`filecmp(...,shallow=False)`
+      **二进制级**比较 `:33-41`——为何不比版本号字符串）；**编译期链接** `setup.py:14-20/63-74/81-83/90-93`
+      （persistent_envs 固化、NCCL include+lib+`-l:`+rpath、`_C` 仅三个 host 源文件）；**绑定面**
+      `python_api.cpp:19-51` + `comm/handle.hpp:8-30`（Context 类 / barrier lambda / 裸 NCCL 原语）；
+      **`Context` 构造** `context.cpp:75-224`：入参断言 `:94-98`（2 MiB 对齐）、**版本闸门** `:101-106/156-162`
+      （`NCCL_VERSION_CODE>=2.31` → `useRuntimeVersion`，否则断言编译期==运行时）、GIN 需求 `:115-155`
+      （GDAKI `:130-134`、`ginSignalCount=num_ranks+4 :140`、连接类型 `:141-146`、SL 三级 `:148-154`）、
+      **两域拆分** `:166-183`（`ncclTeamLsa`、混合进制 rank、`is_scaleup_nvlink`）、对称内存+window
+      `:185-223`（`ncclCommWindowRegister:199`、`ncclGetLsaDevicePointer:200`、RDMA storage windows
+      `:207-223`）；`get_sym_ptr:226-232`（offset=ptr−workspace 对称翻译）、`finalize:244-266`（逆序
+      释放、用后 `not finalized` 断言 `:235/:240`）。**Python comm 层** `comm/handle.py`：
+      `NCCLCommHandle:12-38`（managed 语义、`__del__`）、`get_nccl_comm_handle:44-77`（缓存 `:57-60`
+      / 复用 PyTorch `_comm_ptr` `:62-66` / 自建 `:68-77`、`force_new_comm` 键 `time_ns`）、域大小包装
+      `:80-95`；`comm/barrier.py:4-11` + C++ `comm/barrier.hpp:9-42`（`with_cpu_sync` vs `wait_comm_stream`
+      前后对齐）+ `launch_barrier` `csrc/kernels/comm/barrier.hpp:17-54`。H100 实测
+      `harness/exp_deepep_nccl_binding.py` + `.sh`/`.out.txt`（真实模块 + 合成 `_C` stub + ast 抽取
+      `check_nccl_so`）**35 PASS / 0 FAIL**：真实 `find_nccl_root`=`.../nvidia/nccl`、lib=`libnccl.so.2`、
+      env 优先级、lru_cache、独立 oracle 一致；**真实失配** loaded 系统 `2.29.7` vs linked pip `2.32.3`
+      → `check_nccl_so` 抛 `Invalid NCCL versions`；句柄复用 managed=False / 自建 managed=True / 析构
+      销毁语义、缓存清理；域算术 8 配置 vs oracle、`ginSignalCount=num_ranks+4`、对称偏移不变；版本闸门
+      `>=2.31` 走 `useRuntimeVersion` 但仍被 Python 闸门先拦。**结论**：阻塞=两个闸门（Python 二进制
+      核对 + C++ 设备 API 版本）都要求 `_C` 与 PyTorch 共用同一份 ≥2.31 的 NCCL。配套博客
+      `content/posts/mega-moe-86-deepep-nccl-comm-binding`（索引页新增第 86 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2377,8 +2416,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P75 各增量完成（P15-1…P41-1、P42-1…P75-1）。**
-  本轮 P75-1：新建 `docs/85-deepep-ep-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P76 各增量完成（P15-1…P41-1、P42-1…P76-1）。**
+  本轮 P76-1：新建 `docs/86-deepep-nccl-comm-binding.md`
+  （+`harness/exp_deepep_nccl_binding.{py,sh,out.txt}`）——补上 DeepEP 一直缺席的
+  **「NCCL 通信域绑定 + Python 引导层」**：`import deep_ep` 的引导协议（persistent_envs →
+  `check_nccl_so` → `init_jit` → 之后才 import `_C` 消费者）、包发现 `find_pkgs.py`
+  （env 短路 / `sys.path` 优先级 / SONAME `get_nccl_lib_name`）、**运行时三闸门** `check_nccl_so`
+  （抑制开关 / `/proc/self/maps` 重复加载 / `filecmp(shallow=False)` 二进制级）、编译期链接
+  `setup.py`（persistent_envs、`-l:libnccl.so.2`+rpath、`_C` 仅三个 host 源）、`_C` 绑定面、
+  **`Context` 构造**（2 MiB 对齐断言 / `NCCL_VERSION_CODE>=2.31` 版本闸门 / GIN GDAKI 需求 /
+  `npTeamLsa` 两域拆分 / 对称 window 注册 / RDMA storage windows）、`get_sym_ptr` 对称翻译、
+  `finalize` 逆序释放，以及 Python `comm` 层（`NCCLCommHandle` managed 语义、comm 句柄缓存与
+  PyTorch `_comm_ptr` 复用、barrier 包装）。**纯 host / Python，H100(sm90) 真机 35 PASS / 0 FAIL**：
+  真实失配 loaded 系统 NCCL **2.29.7** vs linked pip **2.32.3** → `check_nccl_so` 抛
+  `Invalid NCCL versions`；把本机「运行期阻塞」钉到确切行号（两个闸门都要求 `_C` 与 PyTorch
+  共用同一份 ≥2.31 的 NCCL）。索引页新增第 86 篇。
+  上一轮 P75-1：新建 `docs/85-deepep-ep-test-oracle.md`
   （+`harness/exp_deepep_ep_test.{py,sh,out.txt}`）——补上 DeepEP 侧一直缺席的
   **「验收测试即正确性规范」** `tests/ep/test_ep.py`（616 行）。它是 dispatch/combine「算什么对」的
   可执行定义，也是第 7/11/48/51/52/61/63/71/83 篇反复引用的判据出处。**端到端 buffer 路径依赖
@@ -3248,7 +3301,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P75 已完成（最新 **P75-1 DeepEP 的 EP dispatch/combine 端到端验收测试即正确性规范**：
+- **下一步**：P0~P76 已完成（最新 **P76-1 DeepEP 的 NCCL 通信域绑定与 Python 引导层**：
+  `deep_ep/__init__.py` / `find_pkgs.py` / `comm/{handle,barrier}.py` / `csrc/kernels/comm/context.cpp`
+  / `setup.py`——引导协议、三闸门 `check_nccl_so`、`Context` 构造（版本闸门/GIN/两域拆分/对称
+  window）、`get_sym_ptr`/`finalize`、Python comm 层；纯 host/Python，H100 真机 **35 PASS / 0 FAIL**，
+  把本机「运行期阻塞」钉到行号（loaded 系统 NCCL 2.29.7 vs linked pip 2.32.3）；详见上）。
+  上一轮 P75-1：**DeepEP 的 EP dispatch/combine 端到端验收测试即正确性规范**：
   `tests/ep/test_ep.py`（616 行）——模式矩阵 `enumerate_ep_modes`（六维，实测 72/36/36/18）、五种
   dispatch + 两种 combine、逐位判据（`torch.equal` + 排序后比 ref + 权重按 `-1` 屏蔽）、`fold_expanded`
   不变量、handle 两套 psum 恒等式、`get_unique_and_valid_dst_count` 去重计数、`EPHandle` 字段契约；
