@@ -33,5 +33,6 @@ categories: ["算子开发"]
 13. [MegaKernel 的 SM 资源分配与异构 task 共驻成本手册]({{< relref "mega-kernel-13-coresidency" >}}) —— 把 P83–P97 的异构共驻微基准收口成 SM 资源/成本决策表
 14. [MegaKernel 端到端骨架与 worker 数据面能力手册]({{< relref "mega-kernel-14-endtoend-dataplane" >}}) —— 把 P71–P82 的端到端骨架与数据面旋钮收口成能力/成本决策表
 15. [MPK 前端与算子层走读：从 mirage 图 API 到 task_configs / bGraph]({{< relref "mega-kernel-15-mpk-frontend" >}}) —— 补齐运行层/device/依赖分析器三篇的上游：手工构图的 task API
+16. [MPK 自动路径源码走读：Mirage superoptimizer 与 thread-block 级生成]({{< relref "mega-kernel-16-mpk-superoptimizer" >}}) —— 论文 §4.1/§4.2 的「自动分解 + thread-block 超优化」在 `src/search`/`src/transpiler` 的落点
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

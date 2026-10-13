@@ -2656,7 +2656,42 @@
       决定 C3 的**范围**（每 `customized()` 一个算子），C1/C2/C4/C5 由运行层保证；§7 局限（纯走读未构建、
       未逐行走 95 个 task、模型 builder/多卡切分未深挖、自动 superoptimizer 路径未覆盖）。**纯源码走读
       （资料分析），本轮无新实验。** 配套博客 post `mega-kernel-15-mpk-frontend`（weight 16）并更新
-      `mega-kernel-00-index` 目录第 15 项。
+       `mega-kernel-00-index` 目录第 15 项。
+
+### P101 自动超优化路径源码走读（`docs/15-mpk-superoptimizer.md`）
+
+- [x] **P101-1** 补掉 `docs/14`（P100-1）**§7 明留的尾巴**——「**未覆盖自动（superoptimizer）路径**：
+  本文只说明 `mpk` 前端不走它；Mirage 主分支的超优化器如何从高层算子搜出 threadblock 实现
+  （`src/search/`、`src/transpiler/`）未在本文范围」。把论文 §4.1「operator decomposition」与 §4.2
+  「task implementation generation（thread-block 级 superoptimization）」在源码里**逐段走通**。
+  见 `docs/15-mpk-superoptimizer.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与
+  `docs/06`/`07`/`08`/`14` 同快照；纯源码走读、无新实验）。九节：
+  §0 自动路径 vs `docs/14` 生产前端的对照表（`KNGraph.superoptimize()` `kernel.py:543` vs 手工
+  `*_layer()`；两条路共用下游依赖分析 + 运行层，都汇到同一 `KNCustomizedOp`）；§1 入口五段链路
+  （缓存 `graph_dataset.find` `kernel.py:559-571` → `search()` `core.pyx:1314` → `cython_search`
+  `search_c.cc:21` → `KernelGraphGenerator` `search.cc:20`/`generate_kernel_graphs` `search.cc:394`
+  → `from_json`/`KNGraph` → compile+profile 选优 `kernel.py:596-692`；`*_to_explore` 参数透传
+  `search_c.h:20-31`/`search_c.cc:47-79`）；§2 搜索空间（`GeneratorConfig` 默认值 `config.cc:6-66`：
+  `max_num_threadblock_graph_op=9`/`kernel_graph_op=5`/`threadblock_graphs=1`、`knop/tbop` 候选、
+  `frange={4,16,64}`；分区候选 `DimStrategy`：`get_grid_dim_cand` `dim_strategy.cc:30-148` 卡
+  `[32, MAX_NUM_THREADBLOCKS_PER_KERNEL=4096]` `config.h:31`、`get_input_map_cand`/`get_output_map_cand`/
+  `get_forloop_*`；「最小化 device→SMEM 加载」由 ⑤ 实测代替代价模型）；§3 搜索算法
+  `generate_next_operator`（`search.cc:129-392`）三层 case——K1/K2/K3（K3 建 bGraph 并降入
+  `LV_THREADBLOCK`，即分区发生点）+ B1/B2（tile 内算子、封装 `KNCustomizedOp`），三横切剪枝
+  `check_abstract_expr`/`check_range`/`check_order`（`search.cc:82-102,504-519`）、OpenMP 并行阈值
+  `multithread_threshold_depth=5`（`search.cc:27,140-152`）；§4 验证（`ProbabilisticVerifier` 指纹
+  `probabilistic_verifier.cc:8-60` vs `FormalVerifier`、`OutputMatch` `output_match.h`、
+  `verify`/`save_results` `search.cc:521-567`；**只查功能等价不查性能**）；§5 生成
+  （`kernel.py:606-692` 扫 `pipeline_stages∈{2,3,4}×num_warp_groups∈{2,3,4}` + profile 选优，
+  `max_smem_size` 检查 `kernel.py:440-443`；`generate_cuda_program` `core.pyx:1398` →
+  `transpile()` `transpile.cc:792` → `Transpiler::generate_code` `transpiler.h:127-134` 的 resolve/
+  schedule/codegen 串；`transpile_kn_custom_op` `transpiler_tb.cc:253`、`get_threadblock_schedule`
+  `sched_tb_graph.cc:144`/`TBSched` `sched_tb_graph.h:44-52`）；§6 与论文 §4.1/§4.2 逐条对照表
+  （快照论文行 462-468/1132-1142/1835-1836）；§7 回填 `docs/07` §0「superoptimizer vs 手写并存」与
+  `docs/08`（只认 `KN_CUSTOMIZED_OP` → 两条路下游等价）；§8 判据映射（只贡献 C3 范围，同 `docs/14`）；
+  §9 局限（纯走读；`abstract_expr`/`range_propagation`/`symbolic_graph` 未逐行；transpiler 只给管线；
+  未复现 benchmark 数；多 GPU/NVSHMEM 未展开）。**纯源码走读（资料分析），本轮无新实验。**
+  配套博客 post `mega-kernel-16-mpk-superoptimizer`（weight 17）并更新 `mega-kernel-00-index` 第 16 项。
 
 ## 每轮增量流程（autopilot）
 
@@ -2801,7 +2836,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P100-1 完成（1/1）**。补齐 `docs/06`/`docs/07`/`docs/08` 三篇**共同的上游空白**——
+- 当前进度：**P101-1 完成（1/1）**。补掉 `docs/14`（P100-1）**§7 明留的尾巴**——「未覆盖自动
+  （superoptimizer）路径」。见 `docs/15-mpk-superoptimizer.md`（快照 `f9eb70c`，纯源码走读无新实验）：
+  把论文 §4.1「operator decomposition」与 §4.2「thread-block 级 superoptimization」在源码里逐段走通——
+  `KNGraph.superoptimize()`（`kernel.py:543`）→ `cython_search`（`search_c.cc:21`）→
+  `KernelGraphGenerator::generate_next_operator`（`search.cc:129-392`，K1/K2/K3 + B1/B2 三层 DFS、
+  三横切剪枝）→ `ProbabilisticVerifier` 指纹验证 → `transpile()`（`transpile.cc:792`，resolve/
+  schedule/codegen 串）→ `kernel.py:606-692` 扫 `pipeline_stages × num_warp_groups` + profile 选优。
+  §6 与论文 §4.1/§4.2 逐条对照；§7 回填 `docs/07` §0「superoptimizer vs 手写并存」并指出 `mpk` 生产
+  前端**不调** `superoptimize`（`models/`/`mpk/` 无命中，只有 `tests/`/`demo/`/`benchmark/` 调），
+  与论文「自动分解」形成明确工程落差；§8 判据映射（只定 C3 的范围）。配套博客 post
+  `mega-kernel-16-mpk-superoptimizer`（weight 17）、更新 `mega-kernel-00-index` 第 16 项。
+- 此前：**P100-1 完成（1/1）**。补齐 `docs/06`/`docs/07`/`docs/08` 三篇**共同的上游空白**——
   「一张算子图是谁、怎么建出来的」。见 `docs/14-mpk-frontend.md`（快照 `f9eb70c`，纯源码走读无新实验）：
   MPK 线上前端不是「高层算子自动分解」的编译器，而是一套**手工作者 task API**——每个 `*_layer()` 建一张
   bGraph（`customized()`）+ 一条 `task_config`（`register_task()`），95 个手工分支登记 95 个 TaskType；
