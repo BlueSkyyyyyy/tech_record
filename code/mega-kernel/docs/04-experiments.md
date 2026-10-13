@@ -9740,3 +9740,160 @@ prologue 翻倍**。§C 把 `chunk` 钉死在 4 后，`G=1040` 的 full 从 §B 
 - **未与 DeepGEMM SM100 路径对跑**（SM100 专属，本机不具备）。
 - **踩坑**：`prepare_data` 首次调用时 `g_dref` 未分配（`ensure()` 在 `run()` 内才跑），
   `cudaMemset(g_dref,...)` 报 `invalid argument`——改为在 `prepare_data` 内惰性分配 `g_dref` 后恢复。
+
+## 65. worker 侧取 task 载体第三种：`cp.async` 加进 §64 的复杂度阶梯（P77-1）
+
+补掉 `docs/04` **§64.9 明留的尾巴**：「载体是寄存器读（plain）/ TMA（tma），**未含 `cp.async`**
+（§42 的第三种载体）；`TMA vs plain` 的 +0.3 µs/block 只对本形态成立」。
+
+§64 在**同一二进制、同一占用率**下扫 worker 环数 `G`，把 §62 的「`G` 越大越慢」钉到 **worker 侧每
+block 一笔固定 prologue**（plain ≈ +0.35 µs/block、TMA ≈ +0.69 µs/block，TMA 额外 ≈ +0.3 µs/block）。
+但那条阶梯只有 **plain 寄存器读** 与 **TMA bulk**两种载体，**缺 MPK worker 的\「原生\」载体**：16 B
+`cp.async` 单缓冲进 SMEM（快照 `persistent_kernel.cuh:1063-1078` 的 `cp_async_wait<0>`；
+`load_smem` = `cp.async.ca.shared.global.L2::128B`，`tasks/common/copy_sm80.cuh:44-57`）。§42 在
+「`K`×SMEM 预算」平面已对跑过 cp.async 与 TMA bulk（K≤32 反超 1.06–1.23×、K=128 被反超），本节把
+**cp.async 加进 §64 的 worker 侧复杂度阶梯**，回答：**cp.async 的每 block prologue 是否低于 TMA？**
+
+源码 `src/worker_carrier_cpasync.cu`、脚本 `harness/worker_carrier_cpasync.sh`、原始输出
+`harness/worker_carrier_cpasync.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+`DW=88`=352 B/task、`K=32`、`D=2`、`PS=8`、占用率固定 `T=256,MINB=8,U=4`（8 blk/SM，= §64 配置）、
+`NB=2048`、`MD=65536`=1 MiB/batch、min-of-3）。
+
+### 65.1 机制：六档梯队 + 唯一变量
+
+骨架与 §64 **逐字一致**（producer 写 per-worker 环：`gen_word` 生成 352 B/task、`fence +
+st.release head`、worker 回 `atom.add.release tail`），worker 侧用 `wmode` 逐层加回机制，**新增两档**
+cp.async：
+
+- `wmode 0 = plain`：worker 直接 `ld` 读环到寄存器 + 折叠（无 SMEM）；
+- `wmode 1 = tma`：worker TMA bulk 取 task 进 SMEM（硬件 mbarrier，`D` 深环）；
+- `wmode 2 = tma+data`：再加 HBM 数据面（`__ldcs` 流式读 `MD` 个 `uint4`）= §64 full；
+- `wmode 3 = data`：无 producer/无环/无 TMA，worker 只做数据面（占用率参照）；
+- `wmode 4 = cpasync`：worker **16 B `cp.async` 单缓冲**取 task 进 SMEM（快照原生载体）；【本节新增】
+- `wmode 5 = cpasync+data`：cp.async + HBM 数据面。                                    【本节新增】
+
+占用率固定（`T=256,MINB=8,U=4`，`numRegs=32` ⇒ **8 blk/SM**，§65.6），故 `G`/载体是唯一变量。
+注意 cp.async 单缓冲的 SMEM 足迹（`K·DW·4`=11264 B）**小于** TMA 深环（`D·K·DW·4`+mbarrier=22608 B），
+但 `MINB=8` 对两者都封在 8 blk/SM，故载体比较不受占用率混淆。
+
+### 65.2 §A 正确性：六档梯队逐位对 host 参考
+
+`G=100`、`NB=512`、`MD=8192` 下六档 `sink` 逐位命中 host 参考（`desc` / `desc+data` / `data`）：
+
+| 档 | plain | tma | tma+data | data-only | cpasync | cpasync+d |
+|----|-------|-----|----------|-----------|---------|-----------|
+| sink 判定 | OK | OK | OK | OK | OK | OK |
+| ms | 0.2224 | 0.2223 | 0.2374 | 0.0547 | 0.2204 | 0.2308 |
+
+即 **16 B `cp.async` 单缓冲取 task + SMEM 折叠 + HBM 数据面 + 有界环**都不动数值（沿用 §64 校验口径）。
+
+### 65.3 §B headline：固定 `NB=2048`，扫 `G`，三载体对比
+
+| `G` | chunk | data-only | plain+d | tma+d | cpasync+d | ca/plain | tma/plain |
+|-----|-------|-----------|---------|-------|-----------|----------|-----------|
+| 100 | 21 | 1650.0 | 1543.2 | 1529.0 | 1563.4 | 1.013 | 0.991 |
+| 132 | 16 | 2063.3 | 1911.9 | 1852.5 | 1924.4 | 1.007 | 0.969 |
+| 264 | 8 | 2962.9 | 2579.0 | 2350.3 | 2586.1 | 1.003 | 0.911 |
+| 528 | 4 | 3082.9 | 2606.0 | 2197.3 | 2614.1 | 1.003 | 0.843 |
+| 1040 | 2 | 3132.4 | 2223.3 | 1808.3 | 2201.7 | 0.990 | 0.813 |
+
+（单位 taskGB/s；`PS=8`。）
+
+- **cp.async ≡ plain，逐点吻合**（`ca/plain` 0.99–1.01）；而 **TMA 随 `G` 增大明显掉队**（`G=1040`
+  时只有 plain 的 **0.813×**、cp.async 的 **0.82×**）。§64 的「`G` 依赖 = 每 block prologue」在
+  cp.async 载体上**几乎消失**——因为 cp.async 的 setup 比 TMA 轻。
+- `plain`/`tma`/`cpasync` 在 `MD=0`（无数据面）时**逐点相等**（都被 `PS=8` producer ~31 GB/s 钉住），
+  载体差异**只在有数据面的快路径上可见**（§B 与 §64 同现象）。
+- `data-only` 随 `G` 单调升到 3132 GB/s（HBM3 峰值 3.35 TB/s 的 93%），无 `G` 依赖。
+
+### 65.4 §C headline：固定 `chunk=4`，三载体每 block prologue
+
+把每环批数钉在 `chunk=4`（`NB=4·G`），把 `wmode != 3` 的整 kernel 时间折算成**每 block** overhead
+`(full − data)/G`（µs/block）：
+
+| `G` | plain+d | tma+d | cpasync+d | data | plain/blk | tma/blk | ca/blk | tma−plain | ca−plain |
+|-----|---------|-------|-----------|------|-----------|---------|--------|-----------|----------|
+| 100 | 0.2960 | 0.3252 | 0.2918 | 0.2534 | 0.426 | 0.718 | 0.384 | **+0.292** | −0.042 |
+| 132 | 0.3194 | 0.3592 | 0.3166 | 0.2676 | 0.392 | 0.694 | 0.371 | **+0.302** | −0.021 |
+| 264 | 0.4541 | 0.5382 | 0.4531 | 0.3748 | 0.300 | 0.619 | 0.297 | **+0.319** | −0.004 |
+| 528 | 0.8530 | 1.0225 | 0.8509 | 0.7142 | 0.263 | 0.584 | 0.259 | **+0.321** | −0.004 |
+| 1040 | 1.9071 | 2.1652 | 1.9120 | 1.3652 | 0.521 | 0.769 | 0.526 | **+0.248** | +0.005 |
+
+- **复现 §64 的 TMA prologue**：`tma−plain` 恒 **+0.25…+0.32 µs/block**（§64 报 +0.3）。
+- **headline**：`cp.async−plain` 恒 **−0.04…+0.005 µs/block**（≈ 0）——**cp.async 的每 block prologue
+  与 plain 寄存器读同档**，**不付 TMA 那笔 +0.3 µs**。
+- 结论：**TMA 的每 block prologue 是 TMA 专属的**（`mbarrier.init ×D` + `arrive.expect_tx` + 首次
+  `cp.async.bulk` 发射 + `mbar_wait` 自旋），**不是「用 SMEM 取 task」固有的**；换成 16 B `cp.async`
+  载体（`commit_group`/`wait_group 0` + `__syncthreads`）后，这笔 prologue 基本消失。
+
+### 65.5 §D 固定 `G=264`：扫数据面 `MD`，三载体
+
+| `MD` | 0 | 8192 | 32768 | 65536 | 131072 |
+|------|---|------|-------|-------|--------|
+| plain (taskGB/s) | 0 | 355.1 | 1390.2 | 2575.0 | 2791.6 |
+| tma (taskGB/s) | 0 | 350.4 | 1335.6 | 2342.6 | 2654.0 |
+| cpasync (taskGB/s) | 0 | 352.7 | 1390.6 | 2582.8 | 2795.7 |
+
+- `MD=0` 时三载体**完全相同**（都 producer 钉住）。
+- 数据面一上来，**cp.async 逐点 ≈ plain**（`MD=65536`：2582.8 vs 2575.0；`MD=131072`：2795.7 vs
+  2791.6），**TMA 掉 ~5–9%**（`MD=131072`：2654.0 = plain 的 0.951×）——**TMA 代价只在快路径上可见**
+  （与 §64 §D 一致），cp.async 无此代价。
+
+### 65.6 §E 占用率/寄存器
+
+`numRegs=32`、`localB=0`：TMA 路径 SMEM=22608 B/block、cp.async 路径 SMEM=11328 B/block，
+`T=256,MINB=8` 对两者都 → **8 blk/SM**；`T=512,MINB=4` → 4；`T=1024,MINB=2` → 2。故 §B–§D 的载体
+比较不受占用率混淆。
+
+### 65.7 §F 固定 `G=132`、扫 `chunk`：prologue vs 单缓冲缝
+
+`NB=chunk·G` 固定每 worker 批数、扫 `chunk`（1→32）：
+
+| chunk | data | plain+d | tma+d | cpasync+d |
+|-------|------|---------|-------|-----------|
+| 1 | 1975.1 | 1207.5 | 1213.6 | 1211.3 |
+| 2 | 2036.0 | 1523.6 | 1227.6 | 1545.6 |
+| 4 | 2070.8 | 1741.1 | 1545.7 | 1749.6 |
+| 8 | 2098.8 | 1878.1 | 1766.4 | 1902.1 |
+| 16 | 2118.1 | 1950.9 | 1891.9 | 1960.9 |
+| 32 | 2120.4 | 1951.6 | 1944.9 | 1972.5 |
+
+（单位 taskGB/s。）
+
+- `chunk=1` 时三载体**相等**（只有一批、prologue 被摊到 1 批且数据面大，TMA 的 mbarrier setup 也被
+  单批的 `wait` 掩盖）。
+- `chunk≥2` 起 **cp.async 逐点 ≥ plain ≥ TMA**：cp.async 不因单缓冲而落后（它的 `wait_group 0` 串行
+  缝被 `wait_ready`/数据面重叠掉），而 TMA 一直慢 ~5–12%。
+- 三载体随 `chunk` 增大**都向 data-only 收敛**（每 block prologue 被更多批摊薄）——复现 §64 的
+  「大 `chunk` 是对每 block 成本的直接对冲」。
+
+### 65.8 与 MPK / §42 / §64 的对应，结论与判据
+
+- **补 §64.9 尾巴**：把 `cp.async`（§42 的第三种载体）加回 §64 阶梯后，**TMA 的 +0.3 µs/block
+  prologue 被证明为 TMA 专属**；cp.async 载体的每 block prologue ≈ plain 寄存器读（−0.04…+0.005
+  µs/block）。**§64 的「TMA 把 prologue 翻倍」不是 SMEM 取 task 的通性，而是 TMA 硬件 mbarrier 的
+  setup 成本**。
+- **解释 MPK 的载体选择**：MPK worker 取 task 用 **16 B `cp.async` 单缓冲**（`persistent_kernel.cuh:
+  1063-1078`）而非 TMA bulk。本节给这条选择以「每 block prologue」侧的理由：**常驻 worker 每 SM 付
+  一次 fetch 的 setup，cp.async 的 setup 比 TMA 轻 ~0.3 µs/block**；TMA 的价值不在取 task 的 setup，
+  而在 §39「成本与描述符大小无关」、§42「零寄存器预取」、§61/§62「省寄存器抬占用率」——那些是**载入
+  task 单体 tile** 的场景，不是**取 task 描述符**的场景。
+- **与 §42 一致**：§42 在「`K`×SMEM 预算」平面对跑得出「K≤32 cp.async 反超、K=128 被反超」；本节
+  在 `K=32` 口径下把 cp.async 放进**端到端 worker 阶梯**，得到同样的排序（cp.async ≥ plain > TMA），
+  从「取 task 的每 block 成本」侧再确认。
+- **数值安全**：六档梯度 `sink` 逐位对 host 参考（§65.2 全 `OK`）。
+- **判据**：骨架 **C1–C4**（单 kernel、常驻、多算子范围、设备内协调），worker 仍**静态序列取 task**、
+  producer 固定角色但 worker 非固定角色，**仍差 C5**（C5 由 §9 覆盖）。立场是给 §64 的「worker 侧
+  每 block prologue」补上**载体维度**的第三点。
+
+### 65.9 局限与踩到的坑
+
+- **合成描述符**（`gen_word`，352 B/task）与**合成数据面**（`data_word`），非真实 MPK task / GEMM tile。
+- **cp.async 是单缓冲**（快照形态），未做 `D` 深环预取（§42 的 cp.async 深环已量「预取增益全在
+  D=1→2」）；本节的载体比较是「单缓冲 cp.async vs 双缓冲 TMA」——**cp.async 并未因单缓冲而落后的原因
+  是它的 `wait_group 0` 缝被 `wait_ready`/数据面重叠掉**，这不是「单缓冲免费」的一般结论。
+- **`co-residency` 未严格**：`grid=PS+G` 在 `G=1040` 时 `1048 ≤ 1056`（8 blk/SM），基本共驻；更大
+  `G` 靠守门狗兜死锁，本节所有点均 `OK` 无 `ABORT`。
+- **未与 DeepGEMM SM100 路径对跑**（SM100 专属，本机不具备）。
+- **踩坑**：`extern __shared__` 对 cp.async 需 **16 B 对齐**，本版显式 `__align__(16)`；SMEM 请求按
+  `wmode` 分档（TMA=22608 B、cp.async=11328 B、plain=64 B），与 §64 单档请求不同。

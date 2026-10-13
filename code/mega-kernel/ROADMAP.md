@@ -1950,6 +1950,40 @@
   判据 C1–C4、仍差 C5（与 §47–§63 同档）。**本轮新增实验**；P76-1 新留尾巴（§64.9）：合成描述符/
   数据面、载体未含 `cp.async`、co-residency 未严格、未与 DeepGEMM SM100 对跑。
 
+### P77 实验扩展 56：worker 侧取 task 载体第三种——`cp.async`（`docs/04-experiments.md` §65）
+
+- [x] **P77-1** 补掉 P76-1（§64）§64.9 明留的尾巴「载体是寄存器读（plain）/ TMA，**未含 `cp.async`**
+      （§42 的第三种载体）；`TMA vs plain` 的 +0.3 µs/block 只对本形态成立」：把 MPK worker 的
+      **原生**取 task 载体（16 B `cp.async` 单缓冲进 SMEM，快照 `persistent_kernel.cuh:1063-1078` 的
+      `cp_async_wait<0>`；`load_smem`=`cp.async.ca.shared.global.L2::128B`，`tasks/common/copy_sm80.cuh:44-57`）
+      加进 §64 的 worker 侧复杂度阶梯，在**同一骨架、同一占用率**（`T=256,MINB=8,U=4`=8 blk/SM）下与
+      plain / TMA 对跑，回答「**cp.async 的每 block prologue 是否低于 TMA**」。见
+      `docs/04-experiments.md` **§65**，源码 `src/worker_carrier_cpasync.cu`、脚本
+      `harness/worker_carrier_cpasync.sh`、原始输出 `harness/worker_carrier_cpasync.out.txt`（目标卡
+      H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B/task、`K=32`、`D=2`、`PS=8`、
+      `NB=2048`、`MD=65536`=1 MiB/batch、min-of-3）。新增 `wmode 4=cpasync` / `wmode 5=cpasync+d`；
+      六档阶梯。核心结论：
+      - **§A/§B/§D/§F 六档 `sink` 逐位对 host 参考**（全 `OK`）——16 B `cp.async` 单缓冲取 task +
+        SMEM 折叠 + HBM 数据面 + 有界环都不动数值。
+      - **§B（headline 一）cp.async ≡ plain、TMA 随 `G` 掉队**：固定 `NB=2048` 扫 `G`，`ca/plain`
+        **0.99–1.01×**；`tma/plain` 从 `G=132` 的 0.969 掉到 `G=1040` 的 **0.813×**。`MD=0` 时三载体
+        逐点相等（都 producer 钉住）。
+      - **§C（headline 二）TMA 的 +0.3 µs/block prologue 是 TMA 专属**：固定 `chunk=4`、折成每
+        block `(full−data)/G`——`tma−plain` 恒 **+0.25…+0.32 µs/block**（复现 §64），而
+        `cp.async−plain` 恒 **−0.04…+0.005 µs/block（≈0）**。即 **cp.async 的每 block prologue 与
+        plain 寄存器读同档、不付 TMA 那笔**——TMA 的 setup（`mbarrier.init ×D`+`arrive.expect_tx`+
+        首次 `cp.async.bulk`+`mbar_wait`）**不是「用 SMEM 取 task」的通性**。
+      - **§D** 固定 `G=264` 扫 `MD`：`MD≥32768` 起 cp.async ≈ plain（`MD=131072`：2795.7 vs 2791.6）、
+        TMA 掉 ~5–9%（2654.0）——载体差异只在有数据面的快路径上可见。
+      - **§F** 固定 `G=132` 扫 `chunk`：`chunk=1` 三载体相等；`chunk≥2` 起 cp.async ≥ plain > TMA，
+        且都随 `chunk` 增大向 `data-only` 收敛。
+      含义：**解释 MPK 为何用 16 B `cp.async` 而非 TMA bulk 取 task**——常驻 worker 每 SM 付一次
+      fetch setup，cp.async 的 setup 比 TMA 轻 ~0.3 µs/block；TMA 的价值在载入 task 单体 tile
+      （§39/§42/§61/§62），不在取 task 描述符。与 §42「K≤32 cp.async 反超」在同一 `K=32` 口径下
+      吻合。判据 C1–C4、仍差 C5（与 §47–§64 同档）。**本轮新增实验**；P77-1 新留尾巴（§65.9）：
+      合成描述符/数据面、cp.async 为单缓冲（深环预取未在本阶梯内测）、co-residency 未严格、
+      未与 DeepGEMM SM100 对跑。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1971,10 +2005,29 @@
 - 容器 workdir 是 `code/kernel-opt`，`docker exec` 跑脚本要用**绝对路径**。
 - `cp.async.wait_group N` 的 `N` 必须是**立即数**：写 cp.async 深环（软件流水）时环深 `D` 得模板化
   （见 P53-1/§42.7），且尾批要 `wait_group 0` 兜底否则漏等（§40.8 的 drain 坑）。
+- 16 B `cp.async` 的 SMEM 目的地址须 **16 B 对齐**：`extern __shared__` 显式 `__align__(16)`
+  （见 P77-1/§65.9）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P76-1 完成（1/1）**。补掉 §63.9 明留的尾巴「consumer 是 plain-load，不能直接证明
+- 当前进度：**P77-1 完成（1/1）**。补掉 §64.9 明留的尾巴「载体是寄存器读（plain）/ TMA，
+  **未含 `cp.async`**（§42 的第三种载体）」：把 MPK worker 的**原生**取 task 载体（16 B `cp.async`
+  单缓冲进 SMEM，快照 `persistent_kernel.cuh:1063-1078` 的 `cp_async_wait<0>`）加进 §64 的 worker 侧
+  复杂度阶梯，在同一骨架、同一占用率（`T=256,MINB=8,U=4`=8 blk/SM）下与 plain / TMA 对跑。见
+  `docs/04-experiments.md` **§65**，源码 `src/worker_carrier_cpasync.cu`、脚本
+  `harness/worker_carrier_cpasync.sh`、原始输出 `harness/worker_carrier_cpasync.out.txt`
+  （目标卡 H100/sm90a、固定空闲 device 3、nvcc 13.2、`DW=88`=352 B、`K=32`、`D=2`、`PS=8`、
+  `NB=2048`、`MD=65536`=1 MiB/batch、min-of-3；新增 `wmode 4=cpasync` / `5=cpasync+d`）。核心结论：
+  (1) **六档 `sink` 逐位对 host 参考**（全 `OK`）；
+  (2) **§B `cp.async ≡ plain`、TMA 随 `G` 掉队**：固定 `NB=2048` 扫 `G`，`ca/plain` **0.99–1.01×**；
+  `tma/plain` 从 `G=132` 的 0.969 掉到 `G=1040` 的 **0.813×**；
+  (3) **§C（headline）TMA 的每 block prologue 是 TMA 专属**：固定 `chunk=4` 折成 `(full−data)/G`，
+  `tma−plain` 恒 **+0.25…+0.32 µs/block**（复现 §64），而 `cp.async−plain` 恒 **−0.04…+0.005 µs/block
+  （≈0）**——**cp.async 的 prologue 与 plain 寄存器读同档、不付 TMA 那笔**；
+  (4) **§D/§F** 载体差异只在有数据面的快路径上可见，cp.async 逐点 ≈ plain、TMA 掉 5–12%。
+  含义：解释 MPK 为何用 16 B `cp.async` 而非 TMA bulk 取 task（setup 轻 ~0.3 µs/block；TMA 的价值在
+  载入 task 单体 tile）。判据 C1–C4、仍差 C5。**本专题此前 P0–P76 全完成，本轮为其新增的实验增量。**
+- 此前：**P76-1 完成（1/1）**。补掉 §63.9 明留的尾巴「consumer 是 plain-load，不能直接证明
   §62 的 `G` 依赖来自 TMA 路径——需把 TMA+折叠+数据面按 §62 加回」：把 §62 骨架里的 **worker 侧**
   放上一条**复杂度阶梯**（`wmode` 0=plain 寄存器读环 / 1=+TMA 进 SMEM / 2=+HBM 数据面 / 3=仅数据面），
   **同一二进制、同一占用率**（`T=256,MINB=8,U=4`=8 blk/SM）下扫 worker 环数 `G`。见
