@@ -3986,6 +3986,39 @@
       P141-1 新留尾巴见文档 §8（未构建；`finished`/专家切片接口预留未追；单测口径只声明未跑；
       `WARPS_PER_CTA` 悬空模板参数只记不判；模型侧常量未核）。**本轮新增增量。**
 
+### P142 采样链两段式 device 身体走读（`docs/56-mpk-sampling.md`）
+
+- [x] **P142-1** 兑现阶段「下一步候选」第一条残留——`docs/37` §3 只给摘要、`docs/42` 只覆盖
+      `softmax_gather`/`prob_scatter`/`prob_extract` 的**中间缺口**：把「**一个 task = 一个 CTA** 的
+      partial + reduce 两段式采样」逐行打开（也就是 ROADMAP 原话「`docs/37` §3 采样链剩下的两段式
+      partial/reduce 身体（`argmax_sm100`/`sampling_sm100`）逐行」）。见 `docs/56-mpk-sampling.md`
+      （MPK `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
+      **(A)（headline）采样链是「两段式」的第二次出现，且两段间只传「每 chunk 的极值 + 归一化配平量」**
+      ——`argmax`（`argmax_sm100.cuh`）与 `sampling`（`sampling_sm100.cuh`）共用同一骨架（partial 每 task
+      在本 chunk 上做块级归约、reduce 单 task 合并）；区别是 sampling partial **额外带下 `chunk_max` +
+      `sum_exp`**（`:152-163` 注释、写 slot `TOPK_MAX`/`TOPK_MAX+1` `:237-241`），reduce 据此**不重读 logits**
+      重建**精确**全词表 softmax 归一化（`:336-360`）——对上 `docs/04` §17「每融合一个算子省一趟 HBM 往返」；
+      两者几何是 `grid_dim=(num_workers,1,1)`（partial，一个词表 chunk 一个 worker、`CHUNK=vocab/num_workers`，
+      Qwen3 128 worker ⇒ 1200 floats，`sampling_sm100.cuh:179`）+ `(1,1,1)`（reduce），`block_dim=128`，
+      `NUM_THREADS=128`（`worker_config.h:18`）；
+      **(B) `TASK_SAMPLING_SM100=265` 被两个 device 身体、三个 op 名共用**——旧版 `sampling_sm100`
+      （`tasks/common/sampling.cuh:162` 的 common 库整体一遍 Gumbel，`task_register.cc:2543`）与新版
+      `sampling_reduce_sm100`（`:2663`）都 `register_task_variant(265,…)`，只有 partial 是独立号 279；
+      **`TaskType` 号不能反推唯一 device 身体**（对上 `docs/24`/`docs/29`）；且 `258/259` 的 partial/reduce
+      枚举值与名称顺序**相反**（`runtime_header.h:145-146`）；
+      **(C)（headline）`_sm100` 后缀不代表 SM100 专属**——两条身体是纯标量（无 TMA/UMMA/mma/TMEM），
+      前端 `argmax_partial_layer` 对 `cc==100 or 90` **都**登记 `"argmax_partial_sm100"`
+      （`persistent_kernel.py:2627`），只有 reduce 对 `cc==100` 才走 sm100、否则回 Ampere `argmax_reduce`
+      （`:2650`），即 Hopper 上走「sm100 partial + Ampere reduce」混合对，而二者 `(chunk_index,relative_index)`
+      打包/解包语义与 `tasks/ampere/argmax.cuh:116-163` **逐行一致**（数值自洽）；与 `docs/55` §0(A)
+      （`glm_moe_router_sm100` 被 Hopper 共享）、`docs/46`（`rotary_embedding_sm100` 死代码）同族。
+      另逐行核了块级归约 helper（argmax 版「结果只留 thread 0」+ 命名屏障 6 vs sampling 版「结果广播 +
+      两次命名屏障」+ 命名屏障 7）、`argmax` 的 `(chunk<<32|relative)` 打包、sampling 的 top-k/top-p 弹出 +
+      Gumbel-Max（噪声 key 到 **token id** 保确定性）、以及旧版 CUB `BlockReduce::Sum` 当 argmax 的废弃实现。
+      判据只贡献 C3。配套博客 post `mega-kernel-57-mpk-sampling`（weight 58）并更新 `mega-kernel-00-index`
+      第 57 项。P142-1 新留尾巴见文档 §8（未构建未对跑；`258/259` 反序只记不判；命名屏障 6/7 口径张力；
+      `MPK_MAX_NUM_BATCHED_*` 实际取值由构建配置给；CUB BlockReduce 内部未展开）。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -4307,10 +4340,41 @@
   （`producer_arv_cnt=1` ⇒ 单 leader）。另：`/tmp` 里几份 MPK checkout 的 `deps/cutlass` **submodule 未
   checkout（空目录）**，CUTLASS 侧走读须用带完整 deps 的 checkout（钉死 commit `f3fde583`，`git submodule
   status` 可核）。
+- **`_sm100` 后缀不等于「仅 SM100 可编译/可执行」，判定须看指令集内容而非文件名**（P142-1/`docs/56`
+  汇总 `docs/46`/`docs/54`/`docs/55`）：`glm_moe_router_sm100`（Hopper `task_header` 显式共享）、
+  `argmax_sm100`/`sampling_sm100`（纯标量、无 TMA/UMMA/mma/TMEM）都是 arch-agnostic；前端
+  `argmax_partial_layer` 对 `cc==100 or 90` **都**登记 `"argmax_partial_sm100"`（`persistent_kernel.py:2627`），
+  `sampling_*_layer` 完全不判 cc。读 MPK 的 `tasks/blackwell/` 目录时，先按是否含 SM100 专属指令判断能否在
+  目标卡执行，别按 `_sm100` 后缀。
+- **同一个 `TaskType` 号可对应多个 op 名/device 符号，不能反推唯一身体**（P142-1/`docs/56` 的实例）：
+  `TASK_SAMPLING_SM100=265` 同时是旧版 `sampling_sm100`（`tasks/common/sampling.cuh:162` 的 common 库 Gumbel）
+  与新版 `sampling_reduce_sm100`（`sampling_sm100.cuh:276`）的号，只有 `sampling_partial_sm100` 是独立号 279；
+  且 **`TASK_ARGMAX_REDUCE_SM100=258`、`TASK_ARGMAX_PARTIAL_SM100=259` 的名称顺序与号相反**
+  （`runtime_header.h:145-146`）。读 `TaskType` 表要按 `register_task_variant` 的实际参数而非号值猜身体。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P141-1 完成（1/1）**。兑现阶段「下一步候选」第一条残留——`docs/37` §2 只给摘要的
+- 当前进度：**P142-1 完成（1/1）**。兑现阶段「下一步候选」第一条残留——`docs/37` §3 只给摘要、
+  `docs/42` 只覆盖 `softmax_gather`/`prob_scatter`/`prob_extract` 的中间缺口：把「一个 task = 一个 CTA」
+  的 partial + reduce 两段式采样逐行打开。见 `docs/56-mpk-sampling.md`（MPK `f9eb70c`，**纯源码走读、
+  无新实验**）。三条 headline：**(A)（headline）采样链两段间只传「每 chunk 极值 + 归一化配平量」**——
+  `argmax` 与 `sampling` 共用同一骨架（partial 每 task 本 chunk 块级归约、reduce 单 task 合并），sampling
+  partial 额外带下 `chunk_max`+`sum_exp`（写 slot `TOPK_MAX`/`TOPK_MAX+1`）让 reduce **不重读 logits** 重建
+  **精确**全词表 softmax 归一化；几何 `grid=(num_workers,1,1)` partial（一词表 chunk 一 worker，
+  `CHUNK=vocab/num_workers`）+ `(1,1,1)` reduce，`NUM_THREADS=128`；**(B)** `TASK_SAMPLING_SM100=265`
+  被旧版 common `sampling_from_logits_kernel` 与新版 `sampling_reduce_sm100` 两个身体共用（partial 才是
+  独立号 279），且 `258/259` 的 partial/reduce 枚举值与名称顺序**相反**——`TaskType` 号不能反推唯一身体；
+  **(C)（headline）`_sm100` 后缀不代表 SM100 专属**——纯标量身体，`argmax_partial_layer` 对 `cc==100 or 90`
+  **都**登记 `argmax_partial_sm100`，只有 reduce 对 `cc==100` 才走 sm100（否则回 Ampere），二者打包/解包
+  语义与 `tasks/ampere/argmax.cuh` 逐行一致（Hopper 上走「sm100 partial + Ampere reduce」混合对），
+  与 `docs/55` §0(A)/`docs/46` 同族。判据只贡献 C3。配套博客 post `mega-kernel-57-mpk-sampling`（weight 58）
+  并更新 `mega-kernel-00-index` 第 57 项。P142-1 新留尾巴见文档 §8（未构建未对跑、`258/259` 反序只记不判、
+  命名屏障 6/7 口径张力、`MPK_MAX_NUM_BATCHED_*` 取值由构建配置给、CUB BlockReduce 内部未展开）。
+- 下一步候选：可继续走「`docs/35` §9 遗留的其它未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE
+  draft attention 设计的完整追述；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或
+  `docs/22`/`docs/38` 里仍未逐行的 SM100 原语（如 tcgen05 commit/TMEM 分配的运行期契约）。
+  **采样链两段式已补完**（P142-1/`docs/56`）；路由三兄弟全部补完（P140-1/P141-1）。
+- 此前：**P141-1 完成（1/1）**。兑现阶段「下一步候选」第一条残留——`docs/37` §2 只给摘要的
   **路由三兄弟**里除 Inkling（已由 P140-1/`docs/54` 补）之外的**两支**：`topk_sigmoid_sm100` 与
   `glm_moe_router_sm100`。见 `docs/55-mpk-routers.md`（MPK `f9eb70c`，**纯源码走读、无新实验**）。
   三条 headline：**(A)（headline）`glm_moe_router_sm100.cuh` 是全仓唯一「`_sm100` 后缀却被 Hopper
@@ -4327,7 +4391,8 @@
   专家切片接口预留未追、单测口径只声明未跑、`WARPS_PER_CTA` 悬空模板参数只记不判、模型侧常量未核）。
 - 下一步候选：可继续走「`docs/35` §9 遗留的其它未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE
   draft attention 设计的完整追述；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或
-  `docs/37` §3 采样链剩下的两段式 partial/reduce 身体（`argmax_sm100`/`sampling_sm100`）逐行。
+  `docs/37` §3 采样链剩下的两段式 partial/reduce 身体（`argmax_sm100`/`sampling_sm100`）逐行
+  ——**已由 P142-1/`docs/56` 补掉**。
   **路由三兄弟已全部补完**（Inkling 由 P140-1/`docs/54`、sigmoid+GLM 由 P141-1/`docs/55`）。
 - 此前：**P140-1 完成（1/1）**。兑现阶段「下一步候选」第一条的残留——`docs/35` §9 明留的
   「注意力之外的 SM100 task 家族（`dflash_*`/`inkling_*`/…）未逐行」里的**第二支**，把 Inkling
