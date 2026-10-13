@@ -1232,6 +1232,21 @@
        **收口**；默认部署 `K=V=128` 零行为差异。见 `docs/07` §91。**边界**：只 base core（六段
        `nt<2`/`BW=16` 未通用，`K≠128` 直接 `#error`）、`K∈{64,128,256}`（`K=192` 的 `BW=24` 非 2 幂
        被拒）、bf16/`BF16MMA`×K≠128 未测。
+- [x] **P7-89** 关闭 §91.8（P7-88）点名的最后一条 base-core 边界——**`-DB2M_BF16`/`-DB2M_BF16MMA`
+       × `K≠128`**。`K` 只以 `h/dh` 行数出现、不进收缩，bf16 staging 行距 `OPS=BVK+8`
+       （`b2_mma_probe.cu:480`）本就 K-clean，故只需实测确认。**`b2_mma_probe.cu` 一行未改**。
+       新增 `harness/check_bwd_b2_k128_bf16.py`（`check_bwd_b2_k128_bf16.out.txt`，空闲卡）。
+       **Part A**：`K∈{64,128,256}`@`V=128` + 交叉 `(64,256)/(256,64)`，`bf16` build 吃 bf16 操作数
+       vs `fp32` build 吃 `bf16.float()`（部署 drop-in）**`max_abs` 全 0.000e+00**（四 field 全
+       `(K,V)`），vs `torch(bf16)` 1.3e-7–8.6e-7；`bf16mma`（原生 `m16n8k16`）drop-in 只差累加序
+       （`dq/dk/dw` 7.2e-7–1.5e-5、`dgk` 0）。**Part B**：大 shape bf16/fp32 **0.70–0.82×**、方向不随
+       `K`/`V` 变；小 shape 轻度 1.07–1.21× 为小 grid 噪声（诚实标注）。**Part C**：smem 只随 `K`
+       变、与 `V` 无关（bf16 对 `KD` 两块 `h/dh` 精确减半，`K=128` 85.5→47.5KB）；regs fp32 52→bf16
+       38→bf16mma 39→tma 56、全零 spill。**Part D**：`bf16mma_tma`（bf16 128B atom 强绑 `BVK=64`）
+       vs `bf16mma` cp.async 的 `dq/dk/dw` **逐位 0**、`dgk` ~1e-6（fp32 归约序）。**结论**：base
+       GEMM core 的 `K`×`V`×dtype/staging 三维收口；默认 `K=V=128` 零差异、部署仍 §45 的 `cf`。
+       见 `docs/07` §92。**边界**：只 base core（六段仍 `KD==128`）、`BF16_VDW`×K≠128 未测、`K=192`
+       被拒。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1738,8 +1753,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-88 补测 + P8-3**。
-  - P7-88（本轮）：**关闭 §90.5（P7-87）明确 defer 的最后一条 K≠V 边界——`K≠128` lane 布局重写
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-89 补测 + P8-3**。
+  - P7-89（本轮）：**关闭 §91.8（P7-88）点名的最后一条 base-core 边界——`-DB2M_BF16`/`-DB2M_BF16MMA`
+    × `K≠128`**。`K` 只以 `h/dh` 行数（输出 N）出现、不进收缩，bf16 staging 行距 `OPS=BVK+8`
+    （`b2_mma_probe.cu:480`）本就 K-clean，mma n-tile 数已由 P7-88 参数化为 `NBW=BW/8`；故这条
+    交叉理论上只是 staging 问题，本轮实测确认。**`b2_mma_probe.cu` 一行未改**。新增
+    `harness/check_bwd_b2_k128_bf16.py`（`check_bwd_b2_k128_bf16.out.txt`，空闲卡）。**Part A**：
+    `K∈{64,128,256}`@`V=128` + 交叉 `(64,256)/(256,64)`，4 shape，`bf16` build 吃 bf16 操作数 vs
+    `fp32` build 吃 `bf16.float()`（部署 drop-in）**`dq/dk/dw/dgk` `max_abs` 全 0.000e+00**；vs
+    `torch(bf16)` 1.3e-7–8.6e-7（比 fp32 核 tf32 截断 3e-4 紧三个数量级）。`bf16mma`（原生
+    `m16n8k16`，`BVK%16==0`）drop-in 只差 fp32 累加分组（`dq/dk/dw` 7.2e-7–1.5e-5、`dgk` 0）。
+    **Part B**：大 shape（B8T2048H8/B2T1024H8）bf16/fp32 **0.70–0.82×**、方向不随 `K`/`V` 变，
+    `bf16mma` 与 `bf16` 基本重合（大 shape 已 L2/DRAM bound）；小 shape（T512H4@K=64、
+    T250H3@K=256）1.07–1.21× 属小 grid 噪声（诚实标注）。**Part C**：smem 只随 `K` 变、与 `V`
+    无关（`h/dh` 是 `[KD][OPS]`），bf16 对两块 `h/dh` 精确减半（`K=128` 85.5→47.5KB）；regs
+    fp32 52→bf16 38→bf16mma 39→bf16mma_tma 56、全零 spill。**Part D**：`bf16mma_tma`（bf16 128B
+    atom=64 元素 **强绑 `BVK∈{64,128}`**，默认 `BVK=32` 触发 `static_assert :448`）vs `bf16mma`
+    cp.async 的 `dq/dk/dw` **逐位 0.000e+00**、`dgk` ~1e-6（fp32 归约序，非 TMA 特有）。**结论**：
+    base GEMM core 的 `K`×`V`×dtype/staging 三维收口；默认 `K=V=128` 零差异、部署仍 §45 的 `cf`。
+    见 `docs/07` §92。
+  - P7-88（上轮）：**关闭 §90.5（P7-87）明确 defer 的最后一条 K≠V 边界——`K≠128` lane 布局重写
     （只对 base GEMM core）**。`K` 只以 `h/dh` 行数（= 输出 N）出现、不进收缩，故通用化两处「按输出列
     分片」的布局：(1) mma `n=8` tile 数写死的 `2` → `NBW=BW/8`（`b2_mma_probe.cu:498`；`:992/994`、
     `:1138`、`:1171`、`:1349`）；(2) `dgk` 列归约 → 对 `BW` 通用（lane `l` 拥有列 `c=l%BW`、V 按子类
