@@ -1747,6 +1747,24 @@
        见 `docs/07` §105。
 
 
+- [x] **P7-103** 关闭 §105.7（P7-102）明确留下的**最后一条边界**——`bf16mma_tma`（`BVK=64`）在 `K≠V`
+       生产核上的**外部数值锚定**（P7-102 只声明未运行 `BF16_MMA_TMA`；§81 只在 `K=V=128` 锚定过）。
+       新增 `harness/check_bwd_b2_kv_anchor3.py`（`harness/check_bwd_b2_kv_anchor3.out.txt`，空闲卡）；
+       **`b2_mma_probe.cu` 一行未改**。三个 build 只差两旋钮：`bf16mma`（BVK=32/cp.async）、`bf16mma_bvk64`
+       （BVK=64/cp.async）、`bf16mma_tma`（BVK=64/TMA）。**Part A**：`K,V∈{(64,256),(256,64),(64,128),
+       (128,64),(128,128)}`×3 case×11 项——`bf16mma_tma ≡ bf16mma_bvk64` **逐位 0**（TMA 只换搬运引擎，
+       在原生 bf16 mma + `K≠V` 上再钉死 §81）；`bvk64 vs bf16mma` 只差 fp32 归约分组（`dgk≤1.9e-6`、`dg 9.5e-7`、
+       其余逐位）。**外部锚点**（纯 torch，同批 bf16 值）：`dqg 5.681e-7 / dA 3.183e-7 / dkg 2.660e-5`、
+       `dg 2.119e-5 / db 9.004e-5`——与 §105.3 bf16 组**逐值一致**。**Part B**：`BVK=64` 抬 smem ~40%、
+       TMA 比同 `BVK` 省 ~10%、spill 全 0（`bf16mma@(64,128)` 的 24 B 被 bvk64/tma 消掉）。**Part C（计时，
+       `K=V=128`）**：大 shape `BVK=64` 慢 **1.27–1.37×**、再叠 TMA 慢 **1.07×**（小 shape 才略快）——与
+       §81.4「同旋钮在六段核反号变慢」同构，**`bf16mma_tma` 不是性能杠杆、只是数值正确**。**新踩坑（关键）**：
+       `-DB2M_BF16` 下 raw `v` 的线格式随 staging 引擎分叉（非 TMA=fp32、TMA=bf16，§78/§79），对拍**必须**
+       按 build 喂对应线格式，否则得到 NaN（`db/dApre/dA`）或 `max_rel≈1.2` 的**入参错配假象**、与 kernel
+       正确性无关。见 `docs/07` §106、`docs/08-summary.md`。**下一步（可选）**：专题维持维护态——§45 的
+       `cf` 仍是目标卡反向默认；`bf16mma_tma` 的 `ncu` 未做，或 `K/V` 非 2 的幂（约束外、不可测）。
+
+
 ### P8 小结 / 一页纸
 
 - [x] **P8-1** `docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总
@@ -2057,8 +2075,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-102 补测 + P8-3…P8-8**。
-  - P7-102 + P8-8（本轮）：**关闭 §104.5（P7-101）的「`cp.async` 未叠 `TMA`/`BF16MMA`」边界，并把 K=256
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-103 补测 + P8-3…P8-8**。
+  - P7-103（本轮）：**关闭 §105.7（P7-102）的最后一条边界——`bf16mma_tma`（`BVK=64`）在 `K≠V` 生产核上的
+    外部数值锚定**（P7-102 声明了 `BF16_MMA_TMA` 却从未运行；§81 只在 `K=V=128` 锚定过）。新增
+    `harness/check_bwd_b2_kv_anchor3.py`（`harness/check_bwd_b2_kv_anchor3.out.txt`，空闲卡）；
+    **`b2_mma_probe.cu` 一行未改**。**Part A**：三 build（`bf16mma` BVK32/cp.async、`bf16mma_bvk64`
+    BVK64/cp.async、`bf16mma_tma` BVK64/TMA）× `K,V` 五档 × 3 case × 11 项——**`bf16mma_tma ≡ bf16mma_bvk64`
+    逐位 0**（TMA 只换搬运引擎，在原生 bf16 mma + `K≠V` 上再钉死 §81）；`bvk64 vs bf16mma` 只差 fp32 分组
+    （`dgk≤1.9e-6`、`dg 9.5e-7`）；**外部锚点**（纯 torch，同批 bf16 值）`dqg 5.681e-7 / dA 3.183e-7 /
+    dkg 2.660e-5 / dg 2.119e-5 / db 9.004e-5` 与 §105.3 bf16 组**逐值一致**。**Part C**：大 shape `BVK=64`
+    慢 1.27–1.37×、再叠 TMA 慢 1.07×——`bf16mma_tma` 非性能杠杆、只是数值正确（同 §81.4）。**新踩坑**：
+    `-DB2M_BF16` 下 raw `v` 线格式随 staging 分叉（非 TMA=fp32、TMA=bf16），对拍须按 build 喂对应线格式，
+    否则得到 NaN/`max_rel≈1.2` 的入参错配假象。见 `docs/07` §106、`docs/08-summary.md`。**下一步（可选）**：
+    专题维持维护态——§45 的 `cf` 仍是目标卡反向默认；`bf16mma_tma` 的 `ncu` 未做，或 `K/V` 非 2 的幂
+    （约束外、不可测）。
+  - P7-102 + P8-8（上轮）：**关闭 §104.5（P7-101）的「`cp.async` 未叠 `TMA`/`BF16MMA`」边界，并把 K=256
     `INTRA` 折叠（唯一可行形态＝bf16 staging）首次接到外部参考**；并把一页纸从 §100–§104 扩到 §100–§105。
     新增 `harness/check_bwd_b2_kv_anchor2.py`（`harness/check_bwd_b2_kv_anchor2.out.txt`，空闲卡，~279 s）；
     **`b2_mma_probe.cu` 一行未改**。**Part A（staging drop-in）**：生产六段核在 `K≠V` 五档 × 3 case 上——
@@ -3575,7 +3606,7 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-102 补测（+ P8-2…P8-8 一页纸补全）**，进入收尾/维护。
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-103 补测（+ P8-2…P8-8 一页纸补全）**，进入收尾/维护。
   **P7-102 + P8-8（最新）**：关闭 §104.5（P7-101）的「`cp.async` 未叠 `TMA`/`BF16MMA`」边界——生产六段核在
   `K≠V` 上 `TMA`/`BF16` staging **逐位**、`BF16MMA` 只改累加序；`bf16`/`bf16mma` 对纯 torch `7e-7~9e-5`；
   K=256 `INTRA` 折叠（唯一可行＝bf16 staging）首次外部锚定 `wy_dqkg_torch+intra_torch` 落 `1.6e-4~4.7e-4`；
