@@ -5036,7 +5036,40 @@
     MPK 去中心化 task 图不吃 cluster 放置）。
   判据不变（cluster C1+C2+C3、细化 C4、**非 C5**）；`maxerr=0.00000` 逐档。**本轮新增实验**；
   新留尾巴（§101.7）：时间线取单次记录 launch（机器争用 ±1%）、只测 H100 一个拓扑/一个 kernel
-  `L=2/KB=8/mode0`、因果系驻留曲线推断（未 nsys 逐 SM/GPC 坐实）、`%globaltimer` 解析 ~32 ns。
+   `L=2/KB=8/mode0`、因果系驻留曲线推断（未 nsys 逐 SM/GPC 坐实）、`%globaltimer` 解析 ~32 ns。
+
+### P177 实验扩展 78：cluster 形状（1D/2D/3D）对放置墙的敏感性（`docs/04-experiments.md` §102）
+
+- [x] **P177-1** 补「下一步候选」两条——「**2D/3D cluster × …**」与「**`C` 放置墙的 SM 数/形状
+  敏感性**」。§100/§101 把 cluster 放置墙（`grid > cap` 时的吞吐断崖 / 近空载尾波）钉死，但**只用
+  1D cluster**（`clusterDim=(C,1,1)`）。本节问：**固定每 cluster 块数 `C`、把 cluster 形状在各因子
+  分解间变化（1D/2D/3D），墙与 multicast deliver 会不会变？** 见 `docs/04-experiments.md` **§102**，
+  **复用**既有源码 `src/multicast_occupancy.cu`（§93 `mcast_body` 不变，本节**新增形状版 kernel
+  `mcast_geo`**（`mcast_body` 逐字 + 线性块号由 `blockIdx.(x,y,z)` 合成）+ **只读子命令 `Y`**
+  （形状→`cudaOccupancyMaxActiveClusters`）、**加测子命令 `G`**（该形状 + 3D grid 跑广播 + 计时 +
+  `maxerr`））、脚本 `harness/cluster_shape.sh`、原始输出 `harness/cluster_shape.out.txt`
+  （目标卡 H100/sm90a、**DEV 自动选最闲 device（落 device 6）**、nvcc 13.2、`KB=8`/`L=2`/`R=300`）。
+  核心结论：
+  - **§A（headline 之一）API 只认 `C`**：同一 `C` 的所有因子分解返回**逐位相同**的
+    `maxActiveClusters`——`C=4` 的 `(4,1,1)/(2,2,1)/(1,2,2)` 都 `248`、`C=8` 的
+    `(8,1,1)/(4,2,1)/(2,4,1)/(2,2,2)` 都 `124`、`C=6` 四个形状都 `163`、`C=16` 四个形状都 `58`；
+    顺带补 `cap_blocks(C=6)=978`。
+  - **§B deliver 形状无关**：固定 `tot=cap=992`，`C=4` 五形状 `505.6–506.5 µs`、`C=8` 四形状
+    `490.7–491.8 µs`（spread `<0.3%`）；换 `grid` 长宽比（`(992,1,1)→(496,2,1)→(248,2,2)`）不变。
+  - **§C（headline）墙只认 `C`**：`C=4` 两形状都在 `996`（`+1` cluster）崩塌、比值都 `1.233–1.234`；
+    `C=8` 三形状都在 `1000`（`+1`）崩塌、比值 `1.274–1.278`。**多 1 个 cluster 即触发断崖，与形状
+    无关**（推广 §101.7 的「`+1` cluster = `+23%`」到任意形状）。
+  - **§D multicast 成立且同速**：`.multicast::cluster`（`mode1`）在 2D/3D cluster 下可用、正确
+    （`maxerr=0`）、形状无关（`~10.9 TB/s`，`vs mode0` `~1.10–1.13×`）；`mask` 语义不依赖维度。
+  - **§E 大 `C`**：`C=16`（cap=928）三形状（含 `(2,2,4)`）仍逐档重合，`+1` cluster（944）比值
+    `1.443–1.445`（**`+1.7%` 工作量 = `+44.5%` span**，比 `C=4` 更陡，对上 §101.5）。
+  - **§F `C=2` 对照**：无墙区形状同样无关。
+  - **工程结论**：**cluster 形状在放置/吞吐上没有取舍**——可纯粹按语义选（2D/3D 便于二维 tile
+    分工/推理），避开墙的唯一旋钮是**每 cluster 块数 `C`**（越小越好，`C=2` 无墙，对上 DeepGEMM
+    最小 `cluster_dim`）。**收敛**「下一步候选」两条：2D/3D cluster 不改 §100/§101 的墙结论。
+  判据不变（cluster C1+C2+C3、细化 C4、**非 C5**）；`maxerr=0.00000` 逐档。**本轮新增实验**；
+  新留尾巴（§102.9）：只测 H100/sm90a 一个拓扑、只测 `KB=8/L=2/R=300/padKB=0` 一个 load-path
+  kernel、形状→墙面只用 `+1 cluster` 二分、未穷举全部因子分解、未对 2D/3D 重做逐块时间线。
 
 ## 每轮增量流程（autopilot）
 
@@ -5604,10 +5637,53 @@
 - **ncu achieved occupancy 在同机争用下有 ~±5% run-to-run 抖动**（P175-1/§100）：同一 `C=4, grid=1056`
   配置 §99 报 41.88%、§100 报 44.52%（同 4 warp/块 → 6.70 vs 7.12 块/SM）。故 achieved **只采信同族
   相对排序与方向**，绝对值按 ±5% 记，不能拿两轮孤立数字对比。
+- **2D/3D cluster 要求 grid 逐维整除 cluster 形状**（P177-1/§102）：用 `cudaLaunchKernelExC`/
+  `cudaOccupancyMaxActiveClusters` 配 `clusterDim=(cx,cy,cz)`（任一维 >1）时，`gridDim` 必须
+  `Gx%cx==0 && Gy%cy==0 && Gz%cz==0`，否则直接报 `a kernel launch error has occurred due to cluster
+  misconfiguration`（`cudaOccupancyMaxActiveClusters` 也会错——即使只是想读占用率，也要给一个逐维
+  整除的 grid，例如 `(cx*m, cy, cz)`）。故 2D/3D cluster 必须搭 2D/3D grid；且**放置墙只认每 cluster
+  块数 `C=cx·cy·cz`、不认形状**（§102：同 `C` 各形状 `maxActiveClusters`/deliver/墙面逐位一致）。
+  另：常驻/multicast kernel 用 `blockIdx.x` 写回时，换 2D/3D grid 会撞号，须改线性块号
+  `bx + by·gridDim.x + bz·gridDim.x·gridDim.y`。
+- **PTX `cp.async.bulk` 的 S2S 形式只有线性（`shared::cta.shared::cluster`），没有 S2S 的 `.tensor`
+  形式**（P177-1 核实，证据 `harness/tensor_s2s_ptx_probe.{cu,out.txt}`：ptxas 对
+  `cp.async.bulk.tensor.2d.shared::cluster.shared::cta` 报 `State space incorrect`）：`cp.async.bulk.tensor*`
+  只支持 `.global` 源（global→shared 或 multicast）。故「S2S 非连续/tensor 搬运」在 PTX 层不存在，
+  只能用多笔线性 `cp.async.bulk`（各自 `expect_tx`）模拟，或走 global 中转。写 §97/§98 的
+  `mtex`/`mtex2` 时若要搬二维块，须拆成行/列线性段。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P176-1 完成（1/1）**。补掉 §100.8(5) 明留的尾巴「尾波机制是吞吐差的推断解释
+- 当前进度：**P177-1 完成（1/1）**。补「下一步候选」两条——「**2D/3D cluster × …**」与
+  「**`C` 放置墙的 SM 数/形状敏感性**」：§100/§101 的 cluster 放置墙**只用 1D cluster**
+  （`clusterDim=(C,1,1)`），本节把 **cluster 形状**（固定 `C`，在各因子分解间变 1D/2D/3D）
+  作为唯一变量。见 `docs/04-experiments.md` **§102**，**复用** `src/multicast_occupancy.cu`
+  （§93 `mcast_body` 不变，**新增形状版 kernel `mcast_geo`**（逐字 + 线性块号由 `blockIdx.(x,y,z)`
+  合成）+ **只读子命令 `Y`**（形状→`cudaOccupancyMaxActiveClusters`）+ **加测子命令 `G`**）、
+  脚本 `harness/cluster_shape.sh`、原始输出 `harness/cluster_shape.out.txt`
+  （目标卡 H100/sm90a、DEV 落 device 6、nvcc 13.2、`KB=8/L=2/R=300`）。核心结论：
+  **(1) API 只认 `C`**——同一 `C` 的所有形状返回逐位相同 `maxActiveClusters`（`C=4`→248、
+  `C=8`→124、`C=6`→163、`C=16`→58；补 `cap_blocks(C=6)=978`）；**(2) deliver 形状无关**——
+  `tot=cap=992` 上 `C=4` 五形状 `505.6–506.5 µs`、`C=8` 四形状 `490.7–491.8 µs`（spread `<0.3%`），
+  换 `grid` 长宽比也不变；**(3)（headline）墙只认 `C`**——`C=4` 两形状都在 `996`（`+1` cluster）
+  崩塌、比值都 `1.233–1.234`，`C=8` 三形状都在 `1000`（`+1`）崩塌、比值 `1.274–1.278`，
+  **多 1 个 cluster 即断崖、与形状无关**；**(4) multicast 在 2D/3D 成立且同速**（`~10.9 TB/s`、
+  `vs mode0 ~1.10–1.13×`、`mask` 语义不依赖维度）；**(5) `C=16` 三形状（含 `(2,2,4)`）仍逐档
+  重合**，`+1` cluster（944）比值 `1.443–1.445`（`+1.7%` 工作量 = `+44.5%` span，比 `C=4` 更陡）；
+  **(6) `C=2` 无墙区形状亦无关**。**工程结论：cluster 形状在放置/吞吐上无取舍**，可纯按语义选
+  （2D/3D 便于二维 tile 分工），避墙唯一旋钮是**每 cluster 块数 `C`**（越小越好）。判据不变
+  （cluster C1+C2+C3、细化 C4、**非 C5**），`maxerr=0.00000` 逐档。新留尾巴见 §102.9。
+  **本轮新增实验。**
+- 下一步候选：实验侧**未叠加的组合**（`docs/04` 微基准到 §102）——如 **S2S bulk 的 tensor/2D
+  非连续搬运**（核实：PTX `cp.async.bulk` **只有 S2S 线性形式**，`cp.async.bulk.tensor` 仅
+  `.global` 源，故「S2S tensor」不存在——可作静态结论记录）、**S2S bulk 的 2D/3D 多笔线性搬运**
+  （用多笔 `cp.async.bulk.shared::cluster` 模拟非连续）、**multicast × 2SM（`cta_group::2`，需
+  SM100）**、**cluster × 端到端骨架**（把 §62/§74 的骨架放进 cluster）、**nsys 逐 SM/GPC 坐实
+  §101/§102 的尾波调度因果**（目前仅由驻留曲/吞吐推断）、或 **DSM 交换路径（§86–§98）的形状
+  敏感性**（本节只测 load-path）。也可回到源码走读主线（`docs/35` §9 余的「`bf16` 之外 SM100
+  task 家族未逐一走读」）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft attention（已核零命中、
+  **不可走读**，仅供静态落差记录）。
+- 此前：**P176-1 完成（1/1）**。补掉 §100.8(5) 明留的尾巴「尾波机制是吞吐差的推断解释
   （未做逐波时间线/逐 SM 占用）」，把 §100 的「放置悬崖」升级为**逐块时间线**直接证据。见
   `docs/04-experiments.md` **§101**，**复用** `src/multicast_occupancy.cu`（`mcast_body` 不变，
   **新增时间线探针 `mcast_tl`** + 只读子命令 `T`）、脚本

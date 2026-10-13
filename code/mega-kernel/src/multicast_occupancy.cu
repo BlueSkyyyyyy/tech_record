@@ -230,6 +230,52 @@ __global__ void mcast_tl(const __grid_constant__ CUtensorMap tmap, float* __rest
   }
 }
 
+// ---------------- 2D/3D cluster 形状版本（P177-1 §102） ----------------
+// 语义与 mcast_body 逐字相同，唯一变量 = **cluster 形状**（launch 时给 (cx,cy,cz)，
+// 2D/3D 形状要求 2D/3D grid）。故线性块号由 blockIdx.(x,y,z) 合成，正确性写回 out[lin]。
+__global__ void mcast_geo(const __grid_constant__ CUtensorMap tmap, float* __restrict__ out,
+                          int R, int box1, int L, int mode) {
+  extern __shared__ __align__(128) unsigned char smem_raw[];
+  float* buf = reinterpret_cast<float*>(smem_raw);
+  __shared__ __align__(8) uint64_t mbar;
+
+  cg::cluster_group cl = cg::this_cluster();
+  int C = cl.num_blocks();
+  int rank = cl.block_rank();
+  int chunk = 256 * box1;
+  uint32_t chunk_bytes = (uint32_t)chunk * 4u;
+  unsigned lin = blockIdx.x + blockIdx.y * gridDim.x
+               + blockIdx.z * gridDim.x * gridDim.y;
+
+  if (threadIdx.x == 0) { mbar_init(&mbar, 1); mbar_init_fence(); }
+  cl.sync();
+
+  uint16_t mask = (uint16_t)((1u << C) - 1u);
+  float acc = 0.f;
+  uint32_t phase = 0;
+  for (int r = 0; r < R; r++) {
+    if (threadIdx.x == 0) {
+      mbar_expect_tx(&mbar, chunk_bytes * (uint32_t)L);
+      if (mode == 1) {
+        if (rank == 0)
+          for (int j = 0; j < L; j++)
+            tma_load_mcast_2d(&tmap, smem_u32(buf + (size_t)j * chunk), &mbar, mask,
+                              0, (r * L + j) * box1);
+      } else {
+        for (int j = 0; j < L; j++)
+          tma_load_2d(&tmap, smem_u32(buf + (size_t)j * chunk), &mbar, 0,
+                      (r * L + j) * box1);
+      }
+    }
+    mbar_wait(&mbar, phase);
+    phase ^= 1u;
+    acc += buf[threadIdx.x];
+    acc += buf[threadIdx.x + TH];
+    cl.sync();
+  }
+  if (threadIdx.x == 0) out[lin] = acc;
+}
+
 static void* pick_kernel(int maxr) {
   switch (maxr) {
     case 0:  return (void*)mcast_nat;
@@ -254,6 +300,23 @@ static cudaError_t launch_cluster(int C, dim3 grid, dim3 block, size_t smem,
   cudaLaunchAttribute at[1];
   at[0].id = cudaLaunchAttributeClusterDimension;
   at[0].val.clusterDim.x = C; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+  cfg.attrs = at; cfg.numAttrs = 1;
+  return cudaLaunchKernelExC(&cfg, kern, args);
+}
+
+// P177-1（§102）：可指定 3D cluster 形状的 launch（cluster 形状 = 唯一变量）。
+static cudaError_t launch_cluster_geo(dim3 clu, dim3 grid, dim3 block, size_t smem,
+                                      void* kern, void** args) {
+  cudaFuncSetAttribute((const void*)kern,
+                       cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+  if (smem >= 48 * 1024)
+    cudaFuncSetAttribute((const void*)kern,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = grid; cfg.blockDim = block; cfg.dynamicSmemBytes = smem; cfg.stream = 0;
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension;
+  at[0].val.clusterDim.x = clu.x; at[0].val.clusterDim.y = clu.y; at[0].val.clusterDim.z = clu.z;
   cfg.attrs = at; cfg.numAttrs = 1;
   return cudaLaunchKernelExC(&cfg, kern, args);
 }
@@ -329,8 +392,132 @@ static double run_bcast(int C, int grid, int KB, int R, int mode, int L, int pad
   return ms;
 }
 
+// P177-1（§102）：cluster 形状扫描——单配置运行 §93 的 multicast 广播（形状 = 唯一变量）。
+// 报 deliver 吞吐 + occ（blocks/SM API）+ maxActiveClusters（cluster 感知 API，cap 块数）。
+static int run_geo(int cx, int cy, int cz, int Gx, int Gy, int Gz,
+                   int KB, int R, int mode, int L, int padKB) {
+  int C = cx * cy * cz;
+  long total = (long)Gx * Gy * Gz;
+  if (C < 1 || (Gx % cx) || (Gy % cy) || (Gz % cz)) {
+    printf("G clu=(%d,%d,%d) grid=(%d,%d,%d) | SKIP(divisibility)\n", cx, cy, cz, Gx, Gy, Gz);
+    return 3;
+  }
+  int box1 = KB * 1024 / 4 / 256;
+  int chunk = 256 * box1;
+  if (L < 1) L = 1;
+  long ntot = 256L * (long)box1 * (long)R * L;
+  float *src, *out;
+  CE(cudaMalloc(&src, ntot * 4));
+  CE(cudaMalloc(&out, (size_t)total * sizeof(float)));
+  {
+    float* h = (float*)malloc(ntot * 4);
+    for (long i = 0; i < ntot; i++) h[i] = (float)((i % 251) - 125) * 1e-3f;
+    CE(cudaMemcpy(src, h, ntot * 4, cudaMemcpyHostToDevice));
+    free(h);
+  }
+  CUtensorMap tmap = make_tmap_2d(src, 256, ntot / 256, 256, box1);
+  size_t smem = (size_t)L * chunk * 4 + (size_t)padKB * 1024;
+  void* kern = (void*)mcast_geo;
+  cudaFuncSetAttribute((const void*)kern,
+                       cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+  if (smem >= 48 * 1024)
+    cudaFuncSetAttribute((const void*)kern,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+  cudaFuncAttributes fa; cudaFuncGetAttributes(&fa, (const void*)kern);
+  int occ = 0;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, (const void*)kern, TH, smem);
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(Gx, Gy, Gz); cfg.blockDim = dim3(TH);
+  cfg.dynamicSmemBytes = smem; cfg.stream = 0;
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension;
+  at[0].val.clusterDim.x = cx; at[0].val.clusterDim.y = cy; at[0].val.clusterDim.z = cz;
+  cfg.attrs = at; cfg.numAttrs = 1;
+  int nclu = -1;
+  cudaError_t ce = cudaOccupancyMaxActiveClusters(&nclu, (const void*)kern, &cfg);
+
+  void* args[] = {(void*)&tmap, (void*)&out, (void*)&R, (void*)&box1, (void*)&L, (void*)&mode};
+  int nsm = num_sm();
+  printf("G clu=(%d,%d,%d) C=%2d grid=(%d,%d,%d) tot=%4ld KB=%d L=%d pad=%dKB mode=%d | "
+         "regs=%d occ=%d maxActiveClusters=%d(%s) cap_blocks=%d | ",
+         cx, cy, cz, C, Gx, Gy, Gz, total, KB, L, padKB, mode,
+         fa.numRegs, occ, nclu, ce == cudaSuccess ? "ok" : cudaGetErrorString(ce),
+         nclu > 0 ? nclu * C : -1);
+  cudaError_t e = launch_cluster_geo(dim3(cx, cy, cz), dim3(Gx, Gy, Gz), dim3(TH),
+                                     smem, kern, args);
+  if (e != cudaSuccess) { printf("LAUNCH FAIL %s\n", cudaGetErrorString(e));
+    cudaFree(src); cudaFree(out); return 2; }
+  CE(cudaDeviceSynchronize());
+  cudaEvent_t e0, e1; cudaEventCreate(&e0); cudaEventCreate(&e1);
+  cudaEventRecord(e0);
+  int it = 20;
+  for (int i = 0; i < it; i++) {
+    e = launch_cluster_geo(dim3(cx, cy, cz), dim3(Gx, Gy, Gz), dim3(TH), smem, kern, args);
+    if (e != cudaSuccess) { printf("iter FAIL %s\n", cudaGetErrorString(e)); break; }
+  }
+  CE(cudaDeviceSynchronize());
+  cudaEventRecord(e1); cudaEventSynchronize(e1);
+  float ms; cudaEventElapsedTime(&ms, e0, e1); ms /= it;
+  double err = 0;
+  {
+    float* o = (float*)malloc((size_t)total * sizeof(float));
+    CE(cudaMemcpy(o, out, (size_t)total * sizeof(float), cudaMemcpyDeviceToHost));
+    for (long g = 0; g < total; g++) {
+      double exp = 0;
+      for (int r = 0; r < R; r++) {
+        long base = (long)r * L * chunk;
+        exp += (double)((base % 251) - 125) * 1e-3;
+        exp += (double)(((base + 128) % 251) - 125) * 1e-3;
+      }
+      double d = o[g] - exp; if (d < 0) d = -d; if (d > err) err = d;
+    }
+    free(o);
+  }
+  double deliv = (double)total * chunk * L * R * 4.0;
+  printf("%8.3f us | deliver %7.1f GB/s | nsm=%d avgblk/SM=%ld | maxerr %.5f\n",
+         ms * 1e3, deliv / (ms / 1e3) / 1e9, nsm, (total + nsm - 1) / nsm, err);
+  cudaEventDestroy(e0); cudaEventDestroy(e1);
+  cudaFree(src); cudaFree(out);
+  return 0;
+}
+
+// 只读探针：给定 cluster 形状求 maxActiveClusters / cap_blocks（不 launch、不要数据）。
+static int shape_probe(int cx, int cy, int cz, int KB, int L, int padKB) {
+  int C = cx * cy * cz;
+  int box1 = KB * 1024 / 4 / 256;
+  int chunk = 256 * box1;
+  if (L < 1) L = 1;
+  size_t smem = (size_t)L * chunk * 4 + (size_t)padKB * 1024;
+  void* kern = (void*)mcast_geo;
+  cudaFuncSetAttribute((const void*)kern,
+                       cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+  if (smem >= 48 * 1024)
+    cudaFuncSetAttribute((const void*)kern,
+                         cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+  int occ = 0;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, (const void*)kern, TH, smem);
+  int m = 4096 / C; if (m < 1) m = 1;   // grid 必须逐维整除 cluster 形状；取足够大使 API 不被 grid 截断
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(cx * m, cy, cz); cfg.blockDim = dim3(TH);
+  cfg.dynamicSmemBytes = smem; cfg.stream = 0;
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension;
+  at[0].val.clusterDim.x = cx; at[0].val.clusterDim.y = cy; at[0].val.clusterDim.z = cz;
+  cfg.attrs = at; cfg.numAttrs = 1;
+  int nclu = -1;
+  cudaError_t ce = cudaOccupancyMaxActiveClusters(&nclu, (const void*)kern, &cfg);
+  int nsm = num_sm();
+  printf("Y clu=(%d,%d,%d) C=%2d KB=%d L=%d pad=%dKB | occ(blocksAPI)=%d "
+         "maxActiveClusters=%d(%s) cap_blocks=%d cap_SM=%s\n",
+         cx, cy, cz, C, KB, L, padKB, occ, nclu,
+         ce == cudaSuccess ? "ok" : cudaGetErrorString(ce),
+         nclu > 0 ? nclu * C : -1,
+         nclu > 0 ? (nclu * C >= nsm ? ">=nsm" : "<nsm") : "-");
+  return 0;
+}
+
 int main(int argc, char** argv) {
-  if (argc < 2) { printf("usage: multicast_occupancy <O|B> ...\n"); return 1; }
+  if (argc < 2) { printf("usage: multicast_occupancy <O|B|P|T|G|Y> ...\n"); return 1; }
   CK(cuInit(0));
   const char* cmd = argv[1];
 
@@ -534,6 +721,18 @@ int main(int argc, char** argv) {
     printf("  sm_used=%d/%d | max_blocks_per_SM=%d | late_start(>20%%span)=%d/%d (%.1f%%)\n",
            used, nsm, max_per_sm, late, grid, 100.0 * late / grid);
     cudaFree(src); cudaFree(out); cudaFree(rec);
+  } else if (!strcmp(cmd, "G")) {
+    // P177-1（§102）：cluster 形状扫描（单配置）。G <cx> <cy> <cz> <Gx> <Gy> <Gz> <KB> <R> <mode> <L> <padKB>
+    int cx = atoi(argv[2]), cy = atoi(argv[3]), cz = atoi(argv[4]);
+    int Gx = atoi(argv[5]), Gy = atoi(argv[6]), Gz = atoi(argv[7]);
+    int KB = atoi(argv[8]), R = atoi(argv[9]), mode = atoi(argv[10]),
+        L = atoi(argv[11]), padKB = atoi(argv[12]);
+    return run_geo(cx, cy, cz, Gx, Gy, Gz, KB, R, mode, L, padKB);
+  } else if (!strcmp(cmd, "Y")) {
+    // P177-1（§102）：只读形状探针。Y <cx> <cy> <cz> <KB> <L> <padKB>
+    int cx = atoi(argv[2]), cy = atoi(argv[3]), cz = atoi(argv[4]);
+    int KB = atoi(argv[5]), L = atoi(argv[6]), padKB = atoi(argv[7]);
+    return shape_probe(cx, cy, cz, KB, L, padKB);
   } else { printf("unknown cmd %s\n", cmd); return 1; }
   return 0;
 }

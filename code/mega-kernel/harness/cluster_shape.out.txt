@@ -1,0 +1,127 @@
+########## §102 cluster 形状（1D/2D/3D）敏感性（P177-1） ##########
+# DEV=6  nvcc -O3 -arch=sm_90a  (CUDA 13.2)
+# Y = 形状→cluster 感知占用率 API 只读读数；G = 该形状跑 §93 广播（KB=8 L=2 mode 可变）
+# 形状记法 clu=(cx,cy,cz)，C=cx·cy·cz；grid=(Gx,Gy,Gz)，总块数 tot=Gx·Gy·Gz
+
+===== 编译（复用 src/multicast_occupancy.cu，新增形状版 kernel mcast_geo + 只读子命令 Y + 加测子命令 G） =====
+ok: /tmp/mcast_shape
+# numSM=132
+
+===== §A（headline）API 读数：同一 C 的各种形状，maxActiveClusters 是否只由 C 决定？ =====
+#   C=2 : (2,1,1) | C=4 : (4,1,1),(2,2,1),(1,2,2) | C=8 : (8,1,1),(4,2,1),(2,4,1),(2,2,2)
+$ Y 2 1 1 8 2 0
+Y clu=(2,1,1) C= 2 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=528(ok) cap_blocks=1056 cap_SM=>=nsm
+$ Y 4 1 1 8 2 0
+Y clu=(4,1,1) C= 4 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=248(ok) cap_blocks=992 cap_SM=>=nsm
+$ Y 2 2 1 8 2 0
+Y clu=(2,2,1) C= 4 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=248(ok) cap_blocks=992 cap_SM=>=nsm
+$ Y 1 2 2 8 2 0
+Y clu=(1,2,2) C= 4 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=248(ok) cap_blocks=992 cap_SM=>=nsm
+$ Y 8 1 1 8 2 0
+Y clu=(8,1,1) C= 8 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=124(ok) cap_blocks=992 cap_SM=>=nsm
+$ Y 4 2 1 8 2 0
+Y clu=(4,2,1) C= 8 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=124(ok) cap_blocks=992 cap_SM=>=nsm
+$ Y 2 4 1 8 2 0
+Y clu=(2,4,1) C= 8 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=124(ok) cap_blocks=992 cap_SM=>=nsm
+$ Y 2 2 2 8 2 0
+Y clu=(2,2,2) C= 8 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=124(ok) cap_blocks=992 cap_SM=>=nsm
+#   C=6 : (6,1,1),(2,3,1),(3,2,1),(1,2,3) | C=16 : (16,1,1),(4,4,1),(2,8,1),(2,2,4)
+$ Y 6 1 1 8 2 0
+Y clu=(6,1,1) C= 6 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=163(ok) cap_blocks=978 cap_SM=>=nsm
+$ Y 2 3 1 8 2 0
+Y clu=(2,3,1) C= 6 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=163(ok) cap_blocks=978 cap_SM=>=nsm
+$ Y 3 2 1 8 2 0
+Y clu=(3,2,1) C= 6 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=163(ok) cap_blocks=978 cap_SM=>=nsm
+$ Y 1 2 3 8 2 0
+Y clu=(1,2,3) C= 6 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=163(ok) cap_blocks=978 cap_SM=>=nsm
+$ Y 16 1 1 8 2 0
+Y clu=(16,1,1) C=16 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=58(ok) cap_blocks=928 cap_SM=>=nsm
+$ Y 4 4 1 8 2 0
+Y clu=(4,4,1) C=16 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=58(ok) cap_blocks=928 cap_SM=>=nsm
+$ Y 2 8 1 8 2 0
+Y clu=(2,8,1) C=16 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=58(ok) cap_blocks=928 cap_SM=>=nsm
+$ Y 2 2 4 8 2 0
+Y clu=(2,2,4) C=16 KB=8 L=2 pad=0KB | occ(blocksAPI)=13 maxActiveClusters=58(ok) cap_blocks=928 cap_SM=>=nsm
+
+===== §B deliver 吞吐：固定 tot=cap=992 扫形状（C=4 / C=8），mode0 =====
+#   cap_blocks(C=4)=992, cap_blocks(C=8)=992 —— 所有形状都在 cap 上
+$ G 4 1 1 992 1 1 8 300 0 2 0
+G clu=(4,1,1) C= 4 grid=(992,1,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  506.203 us | deliver  9632.3 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 1 62 16 1 8 300 0 2 0
+G clu=(2,2,1) C= 4 grid=(62,16,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  506.261 us | deliver  9631.2 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 1 124 8 1 8 300 0 2 0
+G clu=(2,2,1) C= 4 grid=(124,8,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  506.528 us | deliver  9626.1 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 1 496 2 1 8 300 0 2 0
+G clu=(2,2,1) C= 4 grid=(496,2,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  505.648 us | deliver  9642.8 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 1 2 2 248 2 2 8 300 0 2 0
+G clu=(1,2,2) C= 4 grid=(248,2,2) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  506.354 us | deliver  9629.4 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 8 1 1 992 1 1 8 300 0 2 0
+G clu=(8,1,1) C= 8 grid=(992,1,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  490.650 us | deliver  9937.6 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 4 2 1 124 8 1 8 300 0 2 0
+G clu=(4,2,1) C= 8 grid=(124,8,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  490.942 us | deliver  9931.7 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 4 1 124 8 1 8 300 0 2 0
+G clu=(2,4,1) C= 8 grid=(124,8,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  491.286 us | deliver  9924.7 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 2 62 8 2 8 300 0 2 0
+G clu=(2,2,2) C= 8 grid=(62,8,2) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  491.765 us | deliver  9915.1 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+
+===== §C（headline）放置墙：cap（=992）vs cap+1 cluster（=996 / 1000），扫形状 =====
+#   C=4 : (4,1,1) vs (2,2,1) | C=8 : (8,1,1),(4,2,1),(2,2,2)
+#   ——若形状不影响墙，则同 C 的每个形状都应在同一处从 ~992 块崩塌
+# C=4 cap:
+$ G 4 1 1 992 1 1 8 300 0 2 0
+G clu=(4,1,1) C= 4 grid=(992,1,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  506.122 us | deliver  9633.8 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 1 62 16 1 8 300 0 2 0
+G clu=(2,2,1) C= 4 grid=(62,16,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  506.274 us | deliver  9630.9 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+# C=4 +1 cluster (996 = 249 cluster):
+$ G 4 1 1 996 1 1 8 300 0 2 0
+G clu=(4,1,1) C= 4 grid=(996,1,1) tot= 996 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  624.566 us | deliver  7838.3 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 1 498 2 1 8 300 0 2 0
+G clu=(2,2,1) C= 4 grid=(498,2,1) tot= 996 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  623.998 us | deliver  7845.4 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+# C=8 cap:
+$ G 8 1 1 992 1 1 8 300 0 2 0
+G clu=(8,1,1) C= 8 grid=(992,1,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  490.920 us | deliver  9932.1 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 4 2 1 124 8 1 8 300 0 2 0
+G clu=(4,2,1) C= 8 grid=(124,8,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  491.363 us | deliver  9923.2 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 2 62 8 2 8 300 0 2 0
+G clu=(2,2,2) C= 8 grid=(62,8,2) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  491.214 us | deliver  9926.2 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+# C=8 +1 cluster (1000 = 125 cluster):
+$ G 8 1 1 1000 1 1 8 300 0 2 0
+G clu=(8,1,1) C= 8 grid=(1000,1,1) tot=1000 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  627.429 us | deliver  7833.9 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 4 2 1 500 2 1 8 300 0 2 0
+G clu=(4,2,1) C= 8 grid=(500,2,1) tot=1000 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  626.246 us | deliver  7848.7 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 2 50 10 2 8 300 0 2 0
+G clu=(2,2,2) C= 8 grid=(50,10,2) tot=1000 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  626.902 us | deliver  7840.5 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+
+===== §D multicast（mode1，仅 rank0 发 .multicast::cluster）在 2D/3D 形状下是否成立、是否同速 =====
+$ G 4 1 1 992 1 1 8 300 1 2 0
+G clu=(4,1,1) C= 4 grid=(992,1,1) tot= 992 KB=8 L=2 pad=0KB mode=1 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  448.843 us | deliver 10863.2 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 1 62 16 1 8 300 1 2 0
+G clu=(2,2,1) C= 4 grid=(62,16,1) tot= 992 KB=8 L=2 pad=0KB mode=1 | regs=12 occ=13 maxActiveClusters=248(ok) cap_blocks=992 |  447.840 us | deliver 10887.5 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 8 1 1 992 1 1 8 300 1 2 0
+G clu=(8,1,1) C= 8 grid=(992,1,1) tot= 992 KB=8 L=2 pad=0KB mode=1 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  447.158 us | deliver 10904.1 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 2 62 8 2 8 300 1 2 0
+G clu=(2,2,2) C= 8 grid=(62,8,2) tot= 992 KB=8 L=2 pad=0KB mode=1 | regs=12 occ=13 maxActiveClusters=124(ok) cap_blocks=992 |  446.966 us | deliver 10908.8 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+
+===== §E C=16 形状族：cap=928 vs +1 cluster=944（大 C 既更早触墙，形状是否仍是无关变量） =====
+$ G 16 1 1 928 1 1 8 300 0 2 0
+G clu=(16,1,1) C=16 grid=(928,1,1) tot= 928 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=58(ok) cap_blocks=928 |  488.910 us | deliver  9329.5 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 4 4 1 116 8 1 8 300 0 2 0
+G clu=(4,4,1) C=16 grid=(116,8,1) tot= 928 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=58(ok) cap_blocks=928 |  489.091 us | deliver  9326.1 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 4 116 2 4 8 300 0 2 0
+G clu=(2,2,4) C=16 grid=(116,2,4) tot= 928 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=58(ok) cap_blocks=928 |  488.888 us | deliver  9330.0 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 16 1 1 944 1 1 8 300 0 2 0
+G clu=(16,1,1) C=16 grid=(944,1,1) tot= 944 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=58(ok) cap_blocks=928 |  706.216 us | deliver  6570.2 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 4 4 1 236 4 1 8 300 0 2 0
+G clu=(4,4,1) C=16 grid=(236,4,1) tot= 944 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=58(ok) cap_blocks=928 |  705.902 us | deliver  6573.1 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 2 4 118 2 4 8 300 0 2 0
+G clu=(2,2,4) C=16 grid=(118,2,4) tot= 944 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=58(ok) cap_blocks=928 |  706.621 us | deliver  6566.4 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+
+===== §F C=2 对照（cap=1056，grid≤cap 内无墙）：1D (2,1,1) / 2D (1,2,1) 形状 =====
+$ G 2 1 1 1056 1 1 8 300 0 2 0
+G clu=(2,1,1) C= 2 grid=(1056,1,1) tot=1056 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=528(ok) cap_blocks=1056 |  568.115 us | deliver  9136.3 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 1 2 1 528 2 1 8 300 0 2 0
+G clu=(1,2,1) C= 2 grid=(528,2,1) tot=1056 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=528(ok) cap_blocks=1056 |  567.064 us | deliver  9153.2 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+$ G 2 1 1 992 1 1 8 300 0 2 0
+G clu=(2,1,1) C= 2 grid=(992,1,1) tot= 992 KB=8 L=2 pad=0KB mode=0 | regs=12 occ=13 maxActiveClusters=528(ok) cap_blocks=1056 |  548.563 us | deliver  8888.5 GB/s | nsm=132 avgblk/SM=8 | maxerr 0.00000
+
+########## 完 ##########
