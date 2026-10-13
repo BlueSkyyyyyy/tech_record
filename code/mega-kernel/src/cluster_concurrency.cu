@@ -43,7 +43,12 @@ namespace cg = cooperative_groups;
     }                                                                                \
   } while (0)
 
-static const int TH = 256;
+// P167-1（§92）：把每 block 线程数 `TH` 提升为**编译期可覆盖**的宏（`-DTH=...`），
+// 以便扫「每 warp 一次 arrive」（`mbarw`）形态对每 block warp 数 `NW=TH/32` 的依赖
+// （§91.8 明留的尾巴：`mbarw`/`mbarw0` 只在 T=256/NW=8 上测过）。默认仍是 256。
+#ifndef TH
+#define TH 256
+#endif
 
 template <typename K, typename... Args>
 static cudaError_t launch_cluster(int C, dim3 grid, dim3 block, size_t smem,

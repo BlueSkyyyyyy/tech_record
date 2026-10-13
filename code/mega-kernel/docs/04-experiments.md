@@ -13814,3 +13814,154 @@ block** 一次 arrive，`count=1` + `__syncthreads` 包裹）之间，还有一�
   `float`、非真实 task tile；计时取 min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对
   排序**；racecheck 的单配置结论（含 `mbarb` 被标红）未用 `--tool memcheck`/`synccheck` 复核；未做
   ncu 归因（「16 条 cluster fence 主导」是「资源同档 + 单变量去 fence」的对照推断）。
+
+## 92. cluster 跨 SM 交换：把「每 warp 一次 arrive」的 warp 数 `NW` 当独立旋钮——显式 cluster fence 是**每 round ~1 µs 的固定项**，与 fence 条数（`NW×2`）无关（P167-1）
+
+本节补掉 §91.8 明留的尾巴——`mbarw`/`mbarw0`（**每 warp 一次 arrive**）当时**只在 `T=256`（`NW=8`）
+上测过，未扫 `NW`**。§91.3 把 `mbarw` 相对 `mbar`（每线程 arrive、零 fence）的劣势归因到「每 round 每
+block 有 `NW×2=16` 条 **cluster 作用域 fence**（`mbarb` 只有 2 条）」——即一个「**fence 条数 ∝ `NW`**」
+的成本模型。本节把每 block 线程数 `T`（从而 `NW=T/32`）变成独立旋钮，直接检验这个模型，并顺带量清
+「每 warp 形式」到底依赖 `T` 的哪一面。
+
+源码复用 `src/cluster_concurrency.cu`，**唯一改动是把 `TH` 从 `static const int` 提升为编译期可覆盖
+的宏**（`#ifndef TH` / `#define TH 256`，`:49-51`），逐 `T` 编译一份二进制（`-DTH=64/128/256/512/1024`），
+其余（拓扑/数据量/环形槽/载体语义）与 §89–§91 逐字相同；`mbarw` 定义仍在 `:512-559`、`mbarw0` 在
+`:575-621`，`pick`/path 8/9 不变（`:678-686`、`:738-739`）。脚本 `harness/cluster_nw_sweep.sh`，原始输出
+`harness/cluster_nw_sweep.out.txt`（目标卡 H100 / sm90a、**固定空闲 device 6**、nvcc 13.2、每配置独立
+进程以规避 sticky context；计时 min-of-20 报 `ok/20`，可行性探针报 `ok/N` 且对未跑满者**重试至多 3 次**）。
+
+被测量载体与 §89–§91 相同（每 block 有 `snd`/`rcv` 两块 SMEM；每 block 每 round 移动
+`SEG = TH·U` 个 `float` 的远端字节）：
+
+```
+  载体    arrive 粒度 / 会合                       每 round 每 block 跨 SM arrive   每 round cluster fence
+  mbar    每线程 (count=TH)，零会合                              2·TH                         0
+  mbarw   每 warp (count=NW=TH/32) + __syncwarp                  2·NW                      2·NW
+  mbarw0  同 mbarw，去掉 lane0 显式 fence                         2·NW                         0
+  mbarb   每 block (count=1) + __syncthreads                       2                           2
+  ring1   ——（单次 cluster.sync/round）                            0                           0
+```
+
+### 92.1 §A 资源表：`mbarw`/`mbarw0` 在每个 `T` 上与 `mbar`/`mbarb` 逐档同占用率
+
+`sb=32KB`，`run A` 逐 `T`（完整表见 `.out.txt` §A）。取 `U=8` 一档（`localB=0` 全程）：
+
+```
+  T / NW      mbar(regs/occ)  mbarb      mbarw0     mbarw      ring1
+  64  / 2     26 / 5          25 / 5     28 / 5     30 / 5     32 / 3
+  128 / 4     26 / 4          25 / 4     28 / 4     30 / 4     32 / 3
+  256 / 8     26 / 3          25 / 3     28 / 3     30 / 3     32 / 3
+  512 / 16    26 / 3          25 / 3     28 / 3     30 / 3     32 / 3
+  1024/ 32    26 / 2          25 / 2     28 / 2     30 / 2     32 / 2   （T=1024 占用率被 2048/T 封到 2）
+```
+
+`mbarw`/`mbarw0` 的 `occ` 与 `mbar`/`mbarb` **在每个 `T` 上逐档相同**（U=1 时四者都 occ=6，
+T=512 起降到 4）、寄存器只比 `mbar` 多 2–4（多出的 `lane`/`NW` 与 warp 分支）、`localB=0`（无 spill）。
+故后面的吞吐差**只能归因 arrive/会合/fence 的粒度**（资源同档），与 §91.1 结论一致、且**跨 `T` 稳定**。
+
+### 92.2 §B 稳定性：五载体在 `T=64…1024`、`grid=2…1056` 全部 `1/1`（重复 `3/3`）
+
+`C=2, U=8`，单发探针扫 `grid=2/16/132/264/528/1056`：`mbarw`（探针 `T`）/`mbarw0`（探针 `J`）在
+**所有 5 个 `T` × 6 个 `grid`** 上 `1/1 ok`，`grid=264/528` 重复 `3/3 ok`；`mbar`/`mbarb`/`ring1` 同样
+全过（`.out.txt` §B）。⇒ 与 §91.2 一致——**「每 warp 一次 arrive」的可行性、稳定性与 `T`/`NW` 无关**，
+没有引入 §88 `ring`（纯 `volatile` 握手）那类 `unspecified launch failure`。
+
+### 92.3 §C（headline 一）固定每线程 ILP `U=8` 扫 `T`：吞吐随 `NW` 单调上涨，且**相对 fence 代价随 `NW` 缩小**
+
+`C=2, grid=264`，min-of-20，五载体逐 `T`（`.out.txt` §C，单位 GB/s 远端）：
+
+```
+  T / NW    mbarw(V)   mbarw0(U)  mbar(B)   mbarb(Q)   ring1(M)   mbarw0/mbarw   mbarw/mbar
+  64  / 2    199.3      308.5      353.6     210.3      521.4        1.55×          0.56×
+  128 / 4    373.3      574.6      725.2     425.2     1092.8        1.54×          0.51×
+  256 / 8    645.4      943.6     1090.1     827.0     1608.5        1.46×          0.59×
+  512 / 16  1142.6     1576.3     1806.0    1393.9     2485.1        1.38×          0.63×
+  1024/ 32  1526.6     1883.9     2528.0    2183.4     3110.7        1.23×          0.60×
+```
+
+- **固定 `U` 时，`SEG=TH·U=32·NW` 随 `T` 增大**（每 round 每 block 的字节数上涨），故所有载体的**绝对
+  吞吐随 `T` 上涨**（`mbarw` 199→1527 GB/s，NW 2→32 涨 7.7×，未随 `T` 线性，因 T=1024 占用率降到 2）。
+- **排序 `mbar > mbarw0 > mbarb > mbarw` 在每个 `T` 上成立**（与 §91.3 的 `T=256` 表逐点同序）。
+- 关键：**显式 fence 的相对代价 `mbarw0/mbarw` 从 1.55×（NW=2）降到 1.23×（NW=32）**——**fence 条数涨
+  16×，相对代价反而缩小**。这正是「`fence 条数 ∝ NW` 模型」的第一处反证。
+
+`C=8` 同序（`.out.txt` §C）：`mbarw0/mbarw` 从 1.51×（NW=2）降到 1.27×（NW=32），排序与趋势不变。
+
+### 92.4 §D（headline 二）固定每 round 字节数 `SEG=TH·U=2048`（同时固定环深 `S=4`）：相对 fence 代价**几乎恒定**
+
+为把「每 round 字节数」这个混淆量钉死，配 `(T,U)` 使 `SEG` 恒为 2048（`(128,16)/(256,8)/(512,4)/(1024,2)`；
+`sb=32KB` 下 `tiles=4`、`S=4` 全程相同）。`C=2, grid=264`，min-of-20：
+
+```
+  T / NW    U     mbarw(V)   mbarw0(U)  mbar(B)   mbarb(Q)   ring1(M)   mbarw0/mbarw   mbarw/mbar
+  128 / 4   16     703.1      1015.6     1198.5     789.6     1759.0        1.44×          0.59×
+  256 / 8    8     646.4       939.3     1090.3     830.5     1615.8        1.45×          0.59×
+  512 / 16   4     635.6       915.2     1089.5     799.2     1723.9        1.44×          0.58×
+  1024/ 32   2     529.1       730.5      972.7     797.5     1502.4        1.38×          0.54×
+```
+
+- 固定每 round 字节数后，**所有载体绝对吞吐随 `T` 缓降**（`mbar` 1199→973、`ring1` 1759→1502），因
+  `U=SEG/T` 变小、每线程 ILP 与每 warp 有用字节同步缩小；**`mbarb` 几乎不降**（790→798，其 arrive 数
+  与 `T` 无关）。
+- 关键：**`mbarw0/mbarw`（= 显式 fence 的相对代价）几乎恒定在 ~1.44×**（NW 4→32，fence 条数 8→64，
+  涨 8× 而代价不变），`mbarw/mbar` 也稳定在 ~0.58×。这是「`fence 条数 ∝ NW` 模型」的第二处、且更干净
+  的反证——**在固定每 round 字节数下，fence 的代价与 fence 条数无关**。
+
+### 92.5 §E（机制）显式 cluster fence = **每 round `~1 µs` 的固定项**，与 `NW` 和每 round 字节数都无关
+
+把 §C（固定 `U`）与 §D（固定 `SEG`）里 `mbarw` 与 `mbarw0` 的**每 round 时间差**（`ns/lap`，= 墙钟/`rounds`
+= 每 round 关键路径）列出来（`.out.txt` §C/§D）：
+
+```
+  固定 U=8：      T/NW     64/2   128/4   256/8   512/16  1024/32
+    mbarw-mbarw0  (ns/round) 960    1014    1059     1042     1074    GB/s 差 = 1.55→1.23×
+  固定 SEG=2048： T/NW    128/4   256/8   512/16  1024/32
+    mbarw-mbarw0  (ns/round) 946    1044    1040     1127            GB/s 差 = 1.44→1.38×
+```
+
+**两种控制下，`mbarw` 减 `mbarw0` 的每 round 时间差都稳定在 ~0.95–1.13 µs**（跨 `NW=2…32`、跨
+`SEG`）。这就是机制本身：`mbarw` 与 `mbarw0` 的唯一差别是 lane0 在两次远端 arrive 前的
+`fence.acq_rel.cluster`（每 warp 每 round 两条，坐在**该 warp 自己的 release 关键路径**上）。在延迟受限的
+跨 SM ping-pong 里，**每 round 关键路径被加长一个近似常数**——`NW` 再大，其它 warp 的 fence 与本 warp
+的 fence 并行、**不进入本 warp 的关键路径**；于是「总 fence 条数 = `NW×2`」根本不是成本量。这解释了
+两处观察：
+
+- **固定 `SEG`（每 round 字节数恒定）**⇒ 每 round 时间 = 基础 + ~1 µs，相对代价 = `~1µs / round_time`
+  恒定（~1.44×）；
+- **固定 `U`（`SEG=32·NW` 随 `T` 增大）**⇒ 每 round 字节数随 `NW` 增大、固定 ~1 µs 被摊薄，相对代价随
+  `NW` **缩小**（1.55×→1.23×）。
+
+`§E` 同配置连跑 6 次（`.out.txt` §E）：`mbarw` 与 `mbarw0` 在每个 `T` 上都是**干净单峰**（如 `T=256`
+`mbarw` 645.9–648.3、`mbarw0` 928.8–946.7 GB/s；`T=1024` `mbarw` 1521.5–1531.8、`mbarw0` 1889.6–1893.4），
+无 §90.4 那种双模态 ⇒ 这条 ~1 µs 差是**确定性**的、可归因到 fence，不是调度噪声。
+
+### 92.6 §F 正确性压力
+
+`.out.txt` §F（逐 `T`，探针 `reps=8`）：`mbarw(T)`/`mbarw0(J)`/`mbar(P)`/`mbarb(Y)` 在 `C=2/4`、
+`grid=132/264/528`、`U=1/4/8/16` 的组合上**全部 `8/8 ok`**（未跑满者重试后仍全过）；`T=1024, U=16`
+因 `SEG=16384 > sb=8192` 属**非法配置**、脚本按 §C 同款 `SEG>sb` 规则跳过（6 条 `skip`），非失败。
+计时项全程 `maxerr 0 bad 0`，各 mbarrier 载体输出与解析参考逐位一致。
+
+### 92.7 结论、判据与局限
+
+- **结论一（肯定性）**：把 `T`（`NW`）当独立旋钮后，「每 warp 一次 arrive」的 `mbarw`/`mbarw0` 在
+  `T=64…1024`、`grid≤1056` 上**可行、稳定、逐位正确**，资源与 `mbar`/`mbarb` **逐档同占用率**、无 spill。
+- **结论二（headline，修正 §91.3）**：**显式 cluster fence 的代价是一条「每 round ~1 µs」的固定项，
+  与 fence 条数（`NW×2`）无关，只与「每 round 字节数」有关**——固定 `SEG` 时相对代价恒定（~1.44×），
+  固定 `U` 时随 `SEG` 增大而缩小（1.55×→1.23×）。故 §91.3 的「`mbarw` 慢在 `NW×2=16` 条 cluster fence」
+  应精确化为「**慢在坐在每 warp release 关键路径上的 2 条 fence**，其条数不随 `NW` 叠加」。最优档仍是
+  两端：`mbar`（每线程 arrive、零 fence、零会合）与 `ring1`（每 round 一次 `cluster.sync`）。
+- **结论三（`T` 的依赖）**：**「每 warp 形式」本身与 `T`/`NW` 没有一阶依赖**——排序
+  `mbar > mbarw0 > mbarb > mbarw` 在 5 个 `T` × 两种控制下**逐点成立**；`T` 只通过 `SEG=TH·U`（每 round
+  字节数）与占用率进入结果。
+- **对 MPK / 生产案例的印证**：与 §91.7 同向——MPK ring barrier / event queue、DeepGEMM symmetric-memory
+  ring barrier 都用「每步一个硬件同步点 + 环形槽降频 + 批量搬运」，既不用「每 warp 一次 arrive」的中间
+  粒度，也用不着为 fence 条数担心：**真正的成本量是「每步同步在关键路径上加的固定时间」，故设计目标是
+  「把同步频率降到最低、每步只留一个便宜同步点」**（`docs/12` §4–§7、`docs/17` §3）。
+- **判据（C1–C5，`docs/00` §3）**：五载体均单常驻 kernel、设备侧推进、`cluster.sync`/`mbarrier` 细化
+  **C4**；**仍不是 C5**（无固定角色 worker/scheduler 动态派发，与 §18–§23/§86–§91 同档）。
+- **局限（诚实标注）**：只测 H100/sm90a（DSM 的真正家是 SM100 2SM，本机不可执行）；`TH` 现为编译期宏、
+  每个 `T` 一份二进制（未做单二进制运行期 `T`）；搬运的是合成 `float`、非真实 task tile；计时取
+  min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；共享机器上开发期长跑曾出现
+  `U=16` 探针瞬时 `0/N`（重跑即复现正常），已用「至多 3 次重试」处理并如实记录；未做 ncu 归因
+  （「每 round ~1 µs 固定项」是「资源同档 + 单变量去 fence + 扫 `NW`/`SEG`」的对照推断）。

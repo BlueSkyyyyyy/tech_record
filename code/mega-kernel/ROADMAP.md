@@ -4788,6 +4788,27 @@
       `NW`（每 warp 形式对 `T` 的依赖未测）、racecheck 单配置未用 memcheck/synccheck 复核、未做 ncu
       归因（「fence 主导」系同档资源+单变量对照推断）、合成 `float`。
 
+### P167 实验扩展 68：cluster 跨 SM 交换的「每 warp」形态扫 warp 数 `NW`（`docs/04-experiments.md` §92）
+
+- [x] **P167-1** 补掉 P166-1（§91）**§91.8 明留的尾巴**——「`mbarw`/`mbarw0` 只在 `T=256`（`NW=8`）
+   上测，**未扫 `NW`**（每 warp 形式对 `T` 的依赖未测）」，并借此检验 §91.3 的「`mbarw` 慢在
+   `NW×2=16` 条 cluster fence」成本模型。把每 block 线程数 `T`（⇒ `NW=T/32`）变成独立旋钮：源码
+   `src/cluster_concurrency.cu` **仅把 `TH` 从 `static const int` 提升为编译期宏**（`#ifndef TH` /
+   `#define TH 256`，`:49-51`），逐 `T` 编译一份二进制（`-DTH=64/128/256/512/1024`），其余（拓扑/数据量/
+   环形槽/载体语义）与 §89–§91 逐字相同。见 `docs/04-experiments.md` **§92**，脚本
+   `harness/cluster_nw_sweep.sh`、原始输出 `harness/cluster_nw_sweep.out.txt`（目标卡 H100/sm90a、
+   **固定空闲 device 6**、nvcc 13.2、每配置独立进程、min-of-20 报 `ok/20`、探针报 `ok/N` 且至多重试 3 次）。
+   两种控制（§C 固定每线程 ILP `U=8` 扫 `T`；§D 固定每 round 字节数 `SEG=TH·U=2048`、环深 `S=4` 配
+   `(T,U)`）。核心结论：**(1)** `mbarw`/`mbarw0` 在 `T=64…1024`、`grid≤1056` 上**可行、稳定、逐位正确**，
+   资源与 `mbar`/`mbarb` **逐档同占用率**、无 spill；**(2)（headline，修正 §91.3）显式 cluster fence 是
+   每 round `~1 µs` 的固定项，与 fence 条数（`NW×2`）无关**——`mbarw−mbarw0` 的每 round 时间差在两种
+   控制、`NW=2…32` 上都稳定在 **~0.95–1.13 µs**（固定 `SEG` 时相对代价恒定 ~1.44×；固定 `U` 时随
+   `SEG=32·NW` 增大被摊薄、从 1.55× 缩到 1.23×）⇒「总 fence 条数 = `NW×2`」不是成本量，真正的成本量是
+   **坐在每 warp release 关键路径上的 2 条 fence**；**(3)** 排序 `mbar > mbarw0 > mbarb > mbarw` 在 5 个
+   `T` × 两种控制下**逐点成立**，「每 warp 形式」与 `NW` 无一阶依赖。判据：五载体单常驻 kernel +
+   `cluster.sync`/`mbarrier` 细化 **C4**、**仍非 C5**。**本轮新增实验**；P167-1 新留尾巴（§92.7）：只测
+   H100/sm90a、`TH` 编译期宏非运行期单二进制、合成 `float`、未做 ncu 归因。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -5277,12 +5298,41 @@
   就**用每线程 arrive（`mbar`）**，不要停在「每 warp 一次 arrive」这档。另：**`compute-sanitizer
   --tool racecheck` 只放行「每读线程自身参与同步」的形态**（`mbar`/`ring1` = 0 hazards），把
   「单等待者 + 本地屏障 + 远端 mbarrier」形态（`mbarb`/`mbarw`/`mbarw0`）**一律标红**——**连 §90 已
-  确认数值正确、稳定到 `grid=1056` 的 `mbarb` 也被标红**，故它对这类模式是**建模盲区、不能当判据**，
-  须配数值/重复压力交叉验证。
+   确认数值正确、稳定到 `grid=1056` 的 `mbarb` 也被标红**，故它对这类模式是**建模盲区、不能当判据**，
+   须配数值/重复压力交叉验证。
+  **（P167-1/§92 修正上面的归因）** 上面「`mbarw` 慢在 `NW×2=16` 条 cluster fence / 条数比 arrive
+   更贵」的说法**不准确**：扫 `NW`（`-DTH=64…1024`）+ 固定 `SEG` 两种控制后，`mbarw` 减 `mbarw0` 的
+   每 round 时间差在 `NW=2…32` 上稳定在 **~0.95–1.13 µs**（固定 `SEG=2048` 时相对代价恒定 ~1.44×；
+   固定 `U=8` 时随 `SEG=32·NW` 增大被摊薄、从 1.55× 缩到 1.23×）。即**显式 fence 是「每 round
+   ~1 µs 的固定项」，与 fence 条数 `NW×2` 无关**——真正的成本量是**坐在每 warp release 关键路径上的
+   2 条 fence**（其它 warp 的 fence 并行、不进本 warp 关键路径）。故「每 warp 形式」结论不变（用
+   `mbar` 每线程 arrive 最省），但**不要用「fence 条数」估算其代价**，要用「每 round 同步项数 × 固定
+   延迟 / 每 round 字节数」。
+- **`cluster_concurrency.cu` 的 `probe` 分支不检查 `SEG>sb`**（P167-1/§92）：`run` 分支有
+  `SEG>sb → SKIP` 保护，但 `probe` 分支没有；`T=1024,U=16` 时 `SEG=16384 > sb=8192` 会**静默跑非法
+  配置**并报 `0/N ok`（看似「不稳定」，实为无效配置）。扫参数时须按 `TH·U ≤ sb` 过滤。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P166-1 完成（1/1）**。补掉 P165-1（§90）**§90.6 明留的尾巴**——「`mbarb` 的『每
+- 当前进度：**P167-1 完成（1/1）**。补掉 P166-1（§91）**§91.8 明留的尾巴**——「`mbarw`/`mbarw0`
+  只在 `T=256`（`NW=8`）上测，**未扫 `NW`**」，并借此检验 §91.3 的「`mbarw` 慢在 `NW×2=16` 条 cluster
+  fence」成本模型。源码 `src/cluster_concurrency.cu` **仅把 `TH` 提升为编译期宏**（`:49-51`），逐 `T`
+  （`-DTH=64/128/256/512/1024`）编译；见 `docs/04-experiments.md` **§92**，脚本
+  `harness/cluster_nw_sweep.sh`、原始输出 `harness/cluster_nw_sweep.out.txt`（目标卡 H100/sm90a、
+  固定空闲 device 6、nvcc 13.2、每配置独立进程、min-of-20、探针至多重试 3 次）。三条 headline：
+  **(1)** `mbarw`/`mbarw0` 在 `T=64…1024`、`grid≤1056` 全稳、逐位正确、资源与 `mbar`/`mbarb` 逐档同
+  占用率；**(2)（修正 §91.3）** 显式 cluster fence = **每 round `~1 µs` 固定项、与 fence 条数 `NW×2`
+  无关**——`mbarw−mbarw0` 的每 round 时间差在两种控制、`NW=2…32` 上都 ~0.95–1.13 µs（固定 `SEG` 相对
+  代价恒定 ~1.44×、固定 `U` 随 `SEG=32·NW` 摊薄 1.55×→1.23×）；**(3)** 排序
+  `mbar > mbarw0 > mbarb > mbarw` 在 5 个 `T` × 两种控制下逐点成立，「每 warp 形式」与 `NW` 无一阶
+  依赖。判据 C1–C4、仍非 C5。**本轮新增实验**。
+- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §92）——如 **`__maxnreg__` × TMA
+  multicast**（§19 的 multicast 尚未与占用率叠加）、**cluster × 端到端骨架**（把 §62/§74 的骨架放进
+  cluster）、**用 `expect_tx`（TMA 事务计数）做每槽 done**（§89 §F 未测、§90/§91/§92 仍未测）、或
+  **把 `T`/`NW` 做成运行期单二进制**（§92 目前是编译期宏，可省去多份二进制）；也可回到源码走读主线
+  （`docs/35` §9 余的「`bf16` 之外 SM100 task 家族未逐一走读」）。**其余旧候选**：`docs/46` §6 的
+  FLAT-CACHE draft attention（已核零命中、**不可走读**，仅供静态落差记录）。
+- 此前：**P166-1 完成（1/1）**。补掉 P165-1（§90）**§90.6 明留的尾巴**——「`mbarb` 的『每
   block 一次 arrive』用 `__syncthreads` 会合，未测『**每 warp 一次 arrive**』中间形态」。见
   `docs/04-experiments.md` **§91**，源码复用 `src/cluster_concurrency.cu`（**新增载体 `mbarw`
   `:507-559` 与诊断变体 `mbarw0` `:570-621`**，不改既有语义；新 path 8/9）、脚本
