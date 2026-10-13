@@ -169,6 +169,21 @@ DEV void st2(float* p, float a, float b) {
 #ifndef B2M_DKGB
 #define B2M_DKGB 0
 #endif
+// P7-61: `-DB2M_HDW` -- keep the GEMM core's `dw` **in-kernel** and feed the DKGB segment
+// directly (same-CTA handoff) instead of (a) re-storing the core's own `dw` to global and
+// (b) re-staging it back from global as DKGB's B-operand.  Requires `B2M_DKGB`.  This is the
+// §49.7 / §63.6 "同 CTA 交接" item: `dw` never leaves the CTA.  Correctness is **bit-identical**
+// because the handed-off value IS the core's `accw` -- the very value the global path stored
+// and read back (the harness always feeds `db`/`gate`/`prod` with `core.dw`).  The DKGB mma
+// therefore moves *post-loop* (the `dw` k-columns are only complete once all V-tiles are
+// accumulated), reading a per-warp `swall` mirror of `accw`.  `ov_out`/`dw` staging/dw output
+// store are all skipped, so the dw round-trip (~134 MB on `B8T2048H8`) disappears.
+#ifndef B2M_HDW
+#define B2M_HDW 0
+#endif
+#if B2M_HDW && !B2M_DKGB
+#error "B2M_HDW requires B2M_DKGB"
+#endif
 // P7-54: the *third non-GEMM segment* of B2 in CUDA -- the two GEMM contributions to `dA`
 // (the per-chunk within-chunk attention-matrix adjoint) *before* the final
 // `-A^T diag(beta) A^T` sandwich (which is the remaining step):
@@ -298,7 +313,7 @@ struct alignas(128) Stage {
 #if B2M_VV_KG_ON
     float vv [NAT][BT][32];   // raw v [t, v]  (base dA / `db` operand)
 #endif
-#if B2M_DKGB
+#if B2M_DKGB && !B2M_HDW
     float dwm[NAT][BT][32];   // dw [t, k]  (P7-53: B-operand of `A @ -dw`, k-tiled)
 #endif
 #else
@@ -310,7 +325,7 @@ struct alignas(128) Stage {
 #if B2M_VV_KG_ON
     float vv [BT][BVP];   // raw v [t, v]
 #endif
-#if B2M_DKGB
+#if B2M_DKGB && !B2M_HDW
     float dwm[BT][BVP];   // dw [t, k]
 #endif
 #endif
@@ -325,10 +340,13 @@ struct alignas(128) Shared {
     // by the `B2M_DA` base dA and the `B2M_DB` `sum_k dkgb*kg` term.
     float skg[BT][KD];
 #endif
-#if B2M_DA
-    // the per-warp `dw` mirror `swall[NW][BT][BW]`, the 8 per-warp partials `dapart`, and
-    // the reduced tile `da16`.
+#if B2M_DA || B2M_HDW
+    // the per-warp `dw` mirror `swall[NW][BT][BW]` (shared by P7-54 `dw@kg^T` and the P7-61
+    // same-CTA handoff feeding DKGB).
     float swall[NW][BT][BW];
+#endif
+#if B2M_DA
+    // the 8 per-warp `dApre` partials `dapart` and the reduced tile `da16`.
     float dapart[NW][BT][BT];
     float da16[BT][BT];
 #endif
@@ -471,7 +489,7 @@ DEV void prefetch(Stage* st, const float* __restrict__ v, const float* __restric
   #endif
         }
 #endif
-#if B2M_DKGB
+#if B2M_DKGB && !B2M_HDW
         // dw [BT, BVK] (token rows; k-tiled).  Same [B,T,H,K] layout as do/vn/dv, KD==VD.
         float* pn = &st->dwm[row][cg * 4];
         if (t < T) {
@@ -516,7 +534,7 @@ DEV void issue_tma(Stage* st, const CUtensorMap* dom, const CUtensorMap* vnm,
 #if B2M_VV_KG_ON
                                     + 1
 #endif
-#if B2M_DKGB
+#if B2M_DKGB && !B2M_HDW
                                     + 1
 #endif
                                    ) * BT + 2 * KD) * BVK * 4));
@@ -531,7 +549,7 @@ DEV void issue_tma(Stage* st, const CUtensorMap* dom, const CUtensorMap* vnm,
 #endif
         tma5d_load(hm,  &st->h  [a][0][0], va, 0, hh, c, n, bar);
         tma5d_load(dhm, &st->dh [a][0][0], va, 0, hh, c, n, bar);
-#if B2M_DKGB
+#if B2M_DKGB && !B2M_HDW
         tma4d_load(dwm, &st->dwm[a][0][0], va, t0, hh, n, bar);
 #endif
     }
@@ -826,7 +844,7 @@ b2mma_kernel(
             }
         }
 #endif
-#if B2M_DKGB
+#if B2M_DKGB && !B2M_HDW
         // ---- second non-GEMM segment (P7-53): dkgb = A @ (-dw), contraction over o_t ----
         // Structurally identical to the output branch above (A-operand index remap, no
         // transpose), except the B-operand is the freshly-staged `dw` tile (k-tiled, warp
@@ -904,13 +922,17 @@ b2mma_kernel(
             *reinterpret_cast<float2*>(&dq[o0]) = make_float2(accq[nt][0], accq[nt][1]);
             *reinterpret_cast<float2*>(&dk[o0]) = make_float2(acck[nt][0], acck[nt][1]);
   #endif
+  #if !B2M_HDW
             *reinterpret_cast<float2*>(&dw_out[o0]) = make_float2(accw[nt][0], accw[nt][1]);
+  #endif
 #else
   #if !B2M_GATE
             dq[o0] = accq[nt][0]; dq[o0 + 1] = accq[nt][1];
             dk[o0] = acck[nt][0]; dk[o0 + 1] = acck[nt][1];
   #endif
+  #if !B2M_HDW
             dw_out[o0] = accw[nt][0]; dw_out[o0 + 1] = accw[nt][1];
+  #endif
 #endif
         }
         if (tr1 < T) {
@@ -919,13 +941,17 @@ b2mma_kernel(
             *reinterpret_cast<float2*>(&dq[o1]) = make_float2(accq[nt][2], accq[nt][3]);
             *reinterpret_cast<float2*>(&dk[o1]) = make_float2(acck[nt][2], acck[nt][3]);
   #endif
+  #if !B2M_HDW
             *reinterpret_cast<float2*>(&dw_out[o1]) = make_float2(accw[nt][2], accw[nt][3]);
+  #endif
 #else
   #if !B2M_GATE
             dq[o1] = accq[nt][2]; dq[o1 + 1] = accq[nt][3];
             dk[o1] = acck[nt][2]; dk[o1 + 1] = acck[nt][3];
   #endif
+  #if !B2M_HDW
             dw_out[o1] = accw[nt][2]; dw_out[o1 + 1] = accw[nt][3];
+  #endif
 #endif
         }
     }
@@ -965,6 +991,41 @@ b2mma_kernel(
             const float bt1 = beta[((int64_t)(n * T + tr1) * H + hh)];
             st2(&dvb[o1], acc2[nt][2], acc2[nt][3]);
             st2(&dv2[o1], bt1 * acc2[nt][2], bt1 * acc2[nt][3]);
+        }
+    }
+#endif
+#if B2M_DKGB && B2M_HDW
+    // ---- P7-61 same-CTA handoff: run `dkgb = A @ (-dw)` **post-loop** off the in-kernel
+    // `dw` (=accw, complete only after all V-tiles) instead of a global round-trip.  Mirror
+    // this warp's `dw` fragment into `swall` exactly as the P7-54 `dw@kg^T` path does, then
+    // contract over o_t (warp `w` owns k columns [w*BW,w*BW+BW), i.e. its own `swall` slice).
+    {
+        #pragma unroll
+        for (int nt = 0; nt < 2; ++nt) {
+            const int col = nt * 8 + 2 * t;
+            sh->swall[warp][g][col]         = accw[nt][0];
+            sh->swall[warp][g][col + 1]     = accw[nt][1];
+            sh->swall[warp][g + 8][col]     = accw[nt][2];
+            sh->swall[warp][g + 8][col + 1] = accw[nt][3];
+        }
+        __syncwarp();
+        #pragma unroll
+        for (int kk = 0; kk < BT / 8; ++kk) {
+            const int kc = kk * 8;
+            const int ot0 = kc + t, ot1 = kc + t + 4;
+            const float a00 = (i_t * BT + ot0) < T ? A4[a_base + (int64_t)ot0 * (H * BT) + g]     : 0.f;
+            const float a10 = (i_t * BT + ot0) < T ? A4[a_base + (int64_t)ot0 * (H * BT) + g + 8] : 0.f;
+            const float a01 = (i_t * BT + ot1) < T ? A4[a_base + (int64_t)ot1 * (H * BT) + g]     : 0.f;
+            const float a11 = (i_t * BT + ot1) < T ? A4[a_base + (int64_t)ot1 * (H * BT) + g + 8] : 0.f;
+            const uint32_t af[4] = {to_tf32(a00), to_tf32(a10), to_tf32(a01), to_tf32(a11)};
+            #pragma unroll
+            for (int nt = 0; nt < 2; ++nt) {
+                const int lc = nt * 8 + g;   // local k column within this warp's slice
+                uint32_t bf[2];
+                bf[0] = to_tf32(-sh->swall[warp][ot0][lc]);
+                bf[1] = to_tf32(-sh->swall[warp][ot1][lc]);
+                mma8(acc3[nt], af, bf, acc3[nt]);
+            }
         }
     }
 #endif

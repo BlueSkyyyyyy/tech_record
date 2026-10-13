@@ -738,6 +738,26 @@
       occ 12.5%——**非 DRAM-bound、是标量/发射受限**，坐实 ~2× 来自核复用而非换瓶颈 regime。
       **边界**：只验证「合并==隔离」与 launch 摊薄，未改段内实现；下一步＝§49.7 的同 CTA 交接（`dw`/`dv2`
       不落盘就地喂下游段），本节把「六段共存一核」这一前提做实。
+- [x] **P7-61** 兑现 §49.7/§63.6 的**最后一条真结构项**——**同 CTA `dw` 交接**（此前 DKGB 段消费的是
+      同一个核里 GEMM 基座刚写进全局的 `dw`，即 `dw = dv@h^T` 的全局往返）：给 `b2_mma_probe.cu` 加
+      `-DB2M_HDW`（需 `B2M_DKGB`），把核心的 `accw` 留在核内、镜像进 `swall`，DKGB 的 mma 改**在
+      it-loop 之后**从该镜像读（`accw` 只有所有 V-tile 累加完才完整，故必须后移）；`Stage::dwm` /
+      `prefetch` cp16 / TMA `dwm` 张量图 / 核心 `dw_out` store 全部条件关掉。新增
+      `harness/check_bwd_b2_hdw.py`（`check_bwd_b2_hdw.out.txt`，空闲卡）+ `harness/probe_b2_hdw_ncu.sh`
+      / 复用 `ncu_b2_prod_driver.py`（`probe_b2_hdw_ncu.out.txt`）+ `docs/07` §64。**Part A**：四组 shape
+      （含非整除 `T=250`）`prod_hdw` 十项输出 vs `prod` **逐位相同（`max_abs=0`）**、`prod_hdw_tma` vs
+      `prod_hdw` 逐位；**Part A2**：喂**全零 `dw`** 结果**逐位不变**——`dw` 输入证实未被读（交接自证）。
+      **Part B**：regs 140→**110** 零 spill、smem 133.8→**129.2 KB**（TMA 123.0→118.9）。**Part C/D**：
+      CUPTI `dev`/`wall` 大 shape **略慢 +2.8%/+4%**（`B8T2048H8` 1324 vs 1288µs）、小 shape 噪声内——**wash**；
+      **Part E（关键）**：隔离的「核心+DKGB」里交接**稳定快 7–9%**（`B8` 570→522µs）。**机制**：`dw` 往返
+      在 `prod` 里被 GEMM 流水**藏住**（原 DKGB 段在 stage 内与后续 stage 重叠），交接后移成**串行尾巴**，
+      故省字节换不来时间；隔离段里 staging 无从隐藏，交接净赚。**`ncu`**：字节确实降（DRAM −126 MB、
+      L2 −0.33 GB、bank conflict 不增、occ/tensor 不动），但 ncu `Duration` 给 **−7%** 与 CUPTI/wall **反向**
+      （同 §63.5 窗口不同源，ncu 清 L2 使那 60 MB `dw` 读变成真 DRAM 读）。**结论**：`dw` 从生产 ABI 消失
+      （不预算/不传参/不落盘），是**内存足迹优化、非速度杠杆**；六段齐全的生产核里 quintessentially wash，
+      DKGB 主导段里 7–9%。**判据（新）**：省字节前先问「这笔访存是否本就被流水藏住」。`dv2`/`v` 喂 `db`
+      与 `dApre` 入 sandwich 早已是核内（P7-55/P7-56），故本轮只动 `dw`；至此 B2 六段的中间量**要么本就
+      核内、要么可核内**，K2 形状 CUDA 化在**结构上闭合**。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1120,11 +1140,34 @@
   （`#if B2M_GATE && !B2M_OUT` 等），从而**既有隔离 launcher 签名一字不变**、只有并集 build 看到新顺序。
   另：`b2prod_launch` 的参数表必须严格按宏展开后的 kernel 签名排（含 TMA 七张图与 `scale` 夹在中间），
   ctypes `argtypes` 的 `c_float` 位置数错会在第 N 个实参报 `wrong type`。
+- **「省字节」的第二个前提：这笔访存是否本就被流水藏住**（P7-61，§64.4/§64.6）：六段 `prod` 里 GEMM
+  基座算出的 `dw` 走「写全局→DKGB 段读回」，同 CTA 交接（`-DB2M_HDW`）删掉这趟往返（DRAM −126 MB、
+  L2 −0.33 GB）却**端到端略慢（CUPTI/wall +2.8%/+4%）**——因为原 DKGB 段在 stage 内与后续 stage 的
+  GEMM/TMA **重叠**、那趟往返被藏住，交接迫使 DKGB 后移成**串行尾巴**丢掉了重叠；隔离的「核心+DKGB」
+  里 staging 无从隐藏，交接才净赚 **7–9%**。故「省字节」除要看是否落最紧 pipe（§51.6）外，还要看该
+  访存是否在关键路径上——**同一改动在隔离段与整核里可以反号**。另：此类改动 ncu `Duration` 与
+  CUPTI/wall 可**反向**（ncu 清 L2 使被藏的读变成真 DRAM 读，同 §63.5/§25.5），口径仍取 CUPTI/wall。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-60 补测**。
-  - P7-60（本轮）：**兑现 §62.6 唯一剩余真结构项——六段合成单一生产 launch**（`-DB2M_PROD`）。在段旗标
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-61 补测**。
+  - P7-61（本轮）：**兑现 §49.7/§63.6 最后一条真结构项——同 CTA `dw` 交接**（`-DB2M_HDW`）。给
+    `b2_mma_probe.cu` 加 `-DB2M_HDW`（需 `B2M_DKGB`）：核心的 `dw`（`accw`）留在核内、镜像进 `swall`，
+    DKGB 的 mma 改在 it-loop 之后从镜像读（`accw` 须全部 V-tile 累加完才完整，故后移）；`Stage::dwm` /
+    `prefetch` cp16 / TMA `dwm` 图 / 核心 `dw_out` store 条件关掉，`swall` 分配由 `B2M_DA` 扩到
+    `B2M_DA||B2M_HDW`。新增 `harness/check_bwd_b2_hdw.py`（`check_bwd_b2_hdw.out.txt`，空闲卡）+
+    `harness/probe_b2_hdw_ncu.sh`（`probe_b2_hdw_ncu.out.txt`）+ `docs/07` §64。**Part A**：四组 shape
+    （含非整除 `T=250`）`prod_hdw` 十项输出 vs `prod` **逐位相同（`max_abs=0`）**、TMA 布局亦逐位；
+    **Part A2**：喂**全零 `dw`** 结果**逐位不变**（`dw` 输入证实未被读）。**Part B**：regs 140→110
+    零 spill、smem 133.8→129.2 KB（TMA 123.0→118.9）。**Part C/D**：CUPTI `dev`/`wall` 大 shape 略慢
+    **+2.8%/+4%**、小 shape 噪声内（wash）；**Part E（关键）**：隔离「核心+DKGB」里交接 **快 7–9%**
+    （B8 570→522µs）。**机制**：`dw` 往返在 `prod` 里被 GEMM 流水藏住、后移 DKGB 丢 stage 内重叠；隔离
+    段里 staging 无从隐藏故净赚。**`ncu`**：DRAM −126 MB / L2 −0.33 GB、bank conflict/occ/tensor 不动；
+    ncu `Duration` −7% 与 CUPTI/wall 反向（窗口不同源，同 §63.5）。**结论**：`dw` 从生产 ABI 消失
+    （不预算/不传参/不落盘），是**内存足迹优化、非速度杠杆**；判据＝「省字节前先问这笔访存是否本就被
+    流水藏住」。`dv2`/`v` 喂 `db`、`dApre` 入 sandwich 早已核内；至此 B2 六段中间量要么本就核内、要么
+    可核内，K2 形状 CUDA 化**结构上闭合**。
+  - P7-60（上轮）：**兑现 §62.6 唯一剩余真结构项——六段合成单一生产 launch**（`-DB2M_PROD`）。在段旗标
     定义前把六个旗标全置 1、新增 `b2prod_launch`，六段**代码体一行未动**（累加器/smem/输出两两不相交），
     唯一共享改动是 `beta` 由三处声明改一处（既有隔离 launcher 签名不变）。新增
     `harness/check_bwd_b2_prod.py`（`check_bwd_b2_prod.out.txt`）+ `ncu_b2_prod_driver.py` /
@@ -1134,7 +1177,8 @@
     launch vs 老设计 3 次 launch **0.467–0.526×**（`B8T2048H8` 2450→1288µs；b2 核 45→15，省下 2 份 GEMM 核
     +2 次 launch）。**Part D**：门控 `dqg` vs torch 逐位、`dkg/dg`~1e-6（fp32 序）、`dv2`~1.2e-4（tf32）。
     **`ncu`**：合并后 DRAM SOL 45%、tensor 3%、occ 12.5%——非 DRAM-bound、标量/发射受限，证 ~2× 来自核复用。
-    **下一步**：§49.7 的同 CTA 交接（`dw`/`dv2` 不落盘就地喂下游段）——本节把「六段共存一核」前提做实。
+    **该下一步（§49.7 同 CTA 交接 `dw`）已由 P7-61 收口**（逐位无损、`dw` 从 ABI 消失；六段生产核里 wash、
+    隔离段里 7–9%）。
   - P7-59：**收口 §51.6「向量化 store 一律做」在 B2 非 GEMM 四段上留下的边界**（P7-52/53/56/57
     每轮边界都写「本段 store 未接 `-DB2M_VECST`」）。给 `b2_mma_probe.cu` 加 `st2()` 成对 store 助手
     （`:96`：`B2M_VECST` 下一条 `STG.E.64`、否则两条标量），落到 `dv2/dvb`（`:934-940`）、`dkgb`
@@ -1949,7 +1993,11 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-57 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-61 补测**，进入收尾/维护。
+  **P7-61 已收口 §49.7/§63.6 的最后一条真结构项（同 CTA `dw` 交接）**：`prod_hdw` 十项输出 vs `prod`
+  逐位相同、`dw` 从生产 ABI 消失、隔离段快 7–9% 但六段生产核里 wash；B2 六段的中间量至此**要么本就核内、
+  要么可核内**，K2 形状 CUDA 化在**结构上闭合**（剩余头寸＝tensor 3% 的标量/发射受限，不在中间量搬运上）。
+  后续可选（有明确需求时再做）：
   - **P7-57（`docs/07` §60）补非 GEMM 段第六刀——门控链（最终 `dq/dk/dg`）落进 CUDA**：给
     `b2_mma_probe.cu` 加 `-DB2M_GATE`（需 `-DB2M_DKGB`；诊断 `-DB2M_NODG`；+ `b2gate_launch`）。门控标定全在
     寄存器，唯一归约 `Σ_t kdk` 是 **warp 内 `shfl_xor` over groupID**，`g==0` lane 写 `sdgkt[KD]`、`last` 行读回；

@@ -1,0 +1,163 @@
+
+############ B2H_MODE=a
+==============================================================================
+Part A: prod_hdw (same-CTA dw handoff) vs prod (global dw round-trip)
+==============================================================================
+
+# B8 T2048 H8
+    prod_hdw.dv2 vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dvb vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dkgb vs prod            max_abs=0.000e+00  [OK ]
+    prod_hdw.db vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dApre vs prod           max_abs=0.000e+00  [OK ]
+    prod_hdw.dA vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dqg vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dkg vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dg vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dgk vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dv2 vs prod_hdw     max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dA vs prod_hdw      max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dqg vs prod_hdw     max_abs=0.000e+00  [OK ]
+
+# B2 T1024 H8
+    prod_hdw.dv2 vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dvb vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dkgb vs prod            max_abs=0.000e+00  [OK ]
+    prod_hdw.db vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dApre vs prod           max_abs=0.000e+00  [OK ]
+    prod_hdw.dA vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dqg vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dkg vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dg vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dgk vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dv2 vs prod_hdw     max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dA vs prod_hdw      max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dqg vs prod_hdw     max_abs=0.000e+00  [OK ]
+
+# T512 H4
+    prod_hdw.dv2 vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dvb vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dkgb vs prod            max_abs=0.000e+00  [OK ]
+    prod_hdw.db vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dApre vs prod           max_abs=0.000e+00  [OK ]
+    prod_hdw.dA vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dqg vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dkg vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dg vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dgk vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dv2 vs prod_hdw     max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dA vs prod_hdw      max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dqg vs prod_hdw     max_abs=0.000e+00  [OK ]
+
+# T250 H3 (non-div)
+    prod_hdw.dv2 vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dvb vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dkgb vs prod            max_abs=0.000e+00  [OK ]
+    prod_hdw.db vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dApre vs prod           max_abs=0.000e+00  [OK ]
+    prod_hdw.dA vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dqg vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dkg vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw.dg vs prod              max_abs=0.000e+00  [OK ]
+    prod_hdw.dgk vs prod             max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dv2 vs prod_hdw     max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dA vs prod_hdw      max_abs=0.000e+00  [OK ]
+    prod_hdw_tma.dqg vs prod_hdw     max_abs=0.000e+00  [OK ]
+
+  worst over all tables: max_abs=0.000e+00  [BIT-IDENTICAL]
+
+############ B2H_MODE=a2
+==============================================================================
+Part A2: handoff proof -- prod_hdw input `dw` is genuinely unused
+==============================================================================
+
+# B8 T2048 H8
+    prod_hdw(dw=0).dv2 vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dvb vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dkgb vs (dw=core) max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).db vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dApre vs (dw=core) max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dA vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dqg vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dkg vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dg vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dgk vs (dw=core)  max_abs=0.000e+00  [OK ]
+
+# B2 T1024 H8
+    prod_hdw(dw=0).dv2 vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dvb vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dkgb vs (dw=core) max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).db vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dApre vs (dw=core) max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dA vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dqg vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dkg vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dg vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dgk vs (dw=core)  max_abs=0.000e+00  [OK ]
+
+# T512 H4
+    prod_hdw(dw=0).dv2 vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dvb vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dkgb vs (dw=core) max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).db vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dApre vs (dw=core) max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dA vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dqg vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dkg vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dg vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dgk vs (dw=core)  max_abs=0.000e+00  [OK ]
+
+# T250 H3 (non-div)
+    prod_hdw(dw=0).dv2 vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dvb vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dkgb vs (dw=core) max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).db vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dApre vs (dw=core) max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dA vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dqg vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dkg vs (dw=core)  max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dg vs (dw=core)   max_abs=0.000e+00  [OK ]
+    prod_hdw(dw=0).dgk vs (dw=core)  max_abs=0.000e+00  [OK ]
+
+  worst: max_abs=0.000e+00  [dw IGNORED (handoff)]
+
+############ B2H_MODE=b
+==============================================================================
+Part B: resources (registers / spill / smem)
+==============================================================================
+  build              regs   spill      smem
+  prod                140       0    133760
+  prod_hdw            110       0    129152
+  prod_tma            128       0    123008
+  prod_hdw_tma        128       0    118912
+
+############ B2H_MODE=c
+==============================================================================
+Part C: timing -- one prod_hdw launch vs one prod launch (both single-launch)
+==============================================================================
+  B8 T2048 H8          prod_hdw=  1325.7us   prod=  1281.9us   hdw/prod=1.034x
+  B2 T1024 H8          prod_hdw=   174.6us   prod=   169.9us   hdw/prod=1.028x
+  T512 H4              prod_hdw=    19.2us   prod=    20.3us   hdw/prod=0.948x
+  T250 H3 (non-div)    prod_hdw=    18.7us   prod=    18.6us   hdw/prod=1.002x
+
+############ B2H_MODE=d
+==============================================================================
+Part D: wall -- event-pair wall of prod_hdw vs prod (second timing口径)
+==============================================================================
+  B8 T2048 H8          prod_hdw=  1320.8us   prod=  1268.3us   hdw/prod=1.041x
+  B2 T1024 H8          prod_hdw=   177.0us   prod=   173.0us   hdw/prod=1.023x
+  T512 H4              prod_hdw=    60.1us   prod=    59.7us   hdw/prod=1.007x
+  T250 H3 (non-div)    prod_hdw=    60.1us   prod=    60.1us   hdw/prod=1.001x
+
+############ B2H_MODE=e
+==============================================================================
+Part E: isolated DKGB -- in-loop (global dw) vs post-loop handoff (in-kernel dw)
+==============================================================================
+    dkgb_hdw.dkgb vs dkgb            max_abs=0.000e+00  [OK ]
+    B8 T2048 H8          dkgb=   570.1us  dkgb_hdw=   521.6us  hdw/base=0.915x
+    dkgb_hdw.dkgb vs dkgb            max_abs=0.000e+00  [OK ]
+    B2 T1024 H8          dkgb=    77.6us  dkgb_hdw=    72.9us  hdw/base=0.939x
+    dkgb_hdw.dkgb vs dkgb            max_abs=0.000e+00  [OK ]
+    T512 H4              dkgb=    10.8us  dkgb_hdw=     9.8us  hdw/base=0.906x
+    dkgb_hdw.dkgb vs dkgb            max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div)    dkgb=     9.9us  dkgb_hdw=     9.2us  hdw/base=0.936x

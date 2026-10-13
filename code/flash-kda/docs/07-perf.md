@@ -6529,3 +6529,127 @@ regime**。合并把六个隔离核的「每人一次 GEMM 核」收敛成一次
   （smem 133.8 KB 钉住）、且六段的标量/片元访存仍是主要 headroom（tensor 3%）。若继续，剩下的真结构项是
   §49.7 早已点名的**同 CTA 内交接**（`dw` 不落盘而是就地喂 `dkgb`/`dA`，`dv2`/`v` 不落盘喂 `db`）——
   本节把「六段共存于一个核」这个前提做实了，同 CTA 交接才具备落脚点。
+
+## 64. 「K2 形状 CUDA B2」的 **同 CTA `dw` 交接**（`-DB2M_HDW`）：逐位无损、`dw` 中间量从 ABI 消失；隔离段快 7–9%，但六段生产核里是 wash（P7-61）
+
+§49.7 与 §63.6 把「同 CTA 内交接」点名为 B2 六段合成后的**最后一条真结构项**：六段已共存于一个核
+（P7-60），但 DKGB 段仍然消费一个**全局** `dw`（`dkgb = A @ (-dw)`，`chunk_bwd.py:305`），而这个 `dw`
+恰恰是**同一个核**里 GEMM 基座刚算出来的 `accw`（`dw = dv @ h^T`）——即核心把 `dw` 写全局、
+DKGB 段再从全局（经 `cp.async`/TMA）搬回来。本轮加 `-DB2M_HDW` 把这趟往返**彻底删掉**：核心的 `dw`
+（`accw`）留在寄存器、镜像进 `swall`，DKGB 的 mma 改**在 it-loop 之后**从该镜像读。`dw` 因此从生产
+ABI 里消失（不再需要调用方预算 `dw`、也不再落盘）。
+
+### 64.1 设计：DKGB 的 mma 后移 + 读 `accw` 的 smem 镜像，`dw` 的 staging / 输出 store 全部删掉
+
+- **为什么必须后移**：DKGB 的收缩维是 chunk 行 `o_t`，其 B 操作数是**完整**的 `dw[o_t, k]`（对所有
+  V 列求和）。但 `accw` 是沿 V 逐 stage 累加的（`b2_mma_probe.cu:760-771` 的 `for kk` 在 `for it`
+  内），只有在**所有** V-tile 累加完之后才完整。原 DKGB 段（`b2_mma_probe.cu:847-875`）之所以能在
+  某个 stage 内跑，是因为它读的是**预先算好、按 V-tile stage**的全局 `dw`（每个 stage 都有全部
+  token 行、只覆盖那一段 k 列）。交接后这个前提没了，DKGB 只能后移。
+- **镜像**：后移的 DKGB 段（`b2_mma_probe.cu:997-1030`）先把本 warp 的 `accw` 片段（行 `g/g+8`、
+  列 `nt*8+2t/2t+1`）写进 `swall[NW][BT][BW]`，`__syncwarp()` 后按 `-sh->swall[warp][o_t][lc]`
+  （`lc = nt*8+g`，warp `w` 的 k 列恰好是其 own `swall` slice）喂 mma——**与 P7-54 的 `dw@kg^T`
+  用的是同一份镜像**（`swall` 的分配由 `B2M_DA` 扩到 `B2M_DA || B2M_HDW`，`b2_mma_probe.cu:343-346`）。
+- **删除的三处**：`Stage::dwm` 成员、`prefetch` 的 cp16 staging、TMA 的 `dwm` 张量图（含
+  `expect_tx` 字节数）与核心的 `dw_out` 全局 store，全部按 `B2M_DKGB && !B2M_HDW` / `!B2M_HDW`
+  条件关掉（`b2_mma_probe.cu:316/328/492/537/552/925/933/944/952`）。算术一字未改——只是把
+  「写全局再读回」换成「写 smem 再读回」。
+- **逐位无损是构造性的**：交接传的 `accw` **就是**原路径写进 `dw_out`、再被读回的同一个值（评测
+  里 `db`/`gate`/`prod` 一直吃 `core.dw`），所以 DKGB 的 mma 操作数与累加序完全不变。
+
+### 64.2 Part A — 正确性：`prod_hdw` 的每个输出与 `prod` **逐位相同**；且传进去的 `dw` 真的没被用
+
+`harness/check_bwd_b2_hdw.py`（`harness/check_bwd_b2_hdw.out.txt`）。四组 shape（`B8 T2048 H8` /
+`B2 T1024 H8` / `T512 H4` / `T250 H3` 非整除）：
+
+| 字段 | 对照 | 四组最坏 `max_abs` |
+|---|---|---|
+| `dv2/dvb/dkgb/db/dApre/dA/dqg/dkg/dg/dgk` | `prod_hdw` vs `prod` | **0（全部）** |
+| `dv2/dA/dqg` | `prod_hdw_tma` vs `prod_hdw` | **0** |
+
+**Part A2（交接的自证）**：把 `prod_hdw` 的 `dw` 输入换成**全零**，十个输出与喂真实 `dw` 时
+**逐位相同（`max_abs=0`）**——`dw` 输入在交接下**完全未被读取**，从侧面证明 DKGB 用的确实是核内
+`accw` 而非任何外部/全局 `dw`。这是本轮最强的「交接成立」证据。
+
+### 64.3 Part B — 资源：寄存器 140→110、smem 133.8→129.2 KB（零 spill）
+
+`nvcc -Xptxas -v` + `b2mma_smem_bytes()`：
+
+| build | regs | spill | smem(B) |
+|---|---|---|---|
+| `prod` | 140 | 0 | 133 760 |
+| **`prod_hdw`** | **110** | **0** | **129 152** |
+| `prod_tma` | 128 | 0 | 123 008 |
+| **`prod_hdw_tma`** | 128 | 0 | **118 912** |
+
+删掉 `dwm` 每-stage 缓冲（`NAT*BT*32*4` 或 `BT*BVP*4`）省下 ~4.1–4.6 KB smem，寄存器也降
+（DKGB 后移使 stage 内不再同时保活 `dwm` 指针/地址）。但占用率**不变**——仍是 **1 block/SM**
+（smem 128 KB 量级仍远超阈值）。
+
+### 64.4 Part C/D — 计时：**隔离段快 7–9%，六段生产核里却是 wash**
+
+CUPTI `dev`（`profile_dev`，每次 15 次取 `/rep`，空闲卡 GPU1）与 event-pair `wall`：
+
+| shape | CUPTI `prod_hdw` | CUPTI `prod` | `hdw/prod` | `wall hdw/prod` |
+|---|---|---|---|---|
+| `B8 T2048 H8` | 1324.0 µs | 1288.4 µs | **1.028×** | 1.043× |
+| `B2 T1024 H8` | 175.6 µs | 171.1 µs | **1.026×** | 1.027× |
+| `T512 H4` | 20.2 µs | 20.4 µs | 0.991× | 1.014× |
+| `T250 H3`（非整除） | 18.5 µs | 18.5 µs | 1.002× | 1.004× |
+
+即大 shape 上交接**略慢 ~2.8%（CUPTI）/ ~4%（wall）**，小 shape 在噪声内。**但把 DKGB 单独拿出来**
+（GEMM 基座 + DKGB 段，`Part E`）交接反而**稳定快 7–9%**：
+
+| shape | `dkgb`（in-loop，全局 `dw`） | `dkgb_hdw`（post-loop，核内交接） | `hdw/base` |
+|---|---|---|---|
+| `B8 T2048 H8` | 570.5 µs | 521.6 µs | **0.914×** |
+| `B2 T1024 H8` | 77.9 µs | 72.7 µs | **0.933×** |
+| `T512 H4` | 10.8 µs | 9.8 µs | **0.905×** |
+| `T250 H3` | 10.0 µs | 9.3 µs | **0.928×** |
+
+**机制解释（两个数一致可解）**：交接**本身**是真的省——它删掉了 `dw` 的全局 store + staging 读
+（在隔离的「核心+DKGB」里，staging 的开销没有别的东西可隐藏，故净赚 7–9%）。但在**六段齐全**的
+`prod` 里，原 DKGB 段是**在 stage 内、与后续 stage 的 GEMM/TMA 流水重叠**的（它只需那一 stage 的
+k 列，而其余 stage 还在跑），交接迫使 DKGB 后移成**串行尾巴**、再也无法重叠；而这趟全局往返在
+`prod` 里本就**被 GEMM 流水藏住**了——于是「省下的字节」换不来时间，「丢掉的 overlap」却要还。
+**结论：`dw` 的全局往返在隔离段里是实打实的一笔税，在完整六段生产核里不是**。
+
+### 64.5 `ncu` — 字节确实降了（DRAM −126 MB / L2 −0.33 GB），但 ncu `Duration` 与 CUPTI/wall **反向**
+
+`harness/probe_b2_hdw_ncu.sh`（`harness/probe_b2_hdw_ncu.out.txt`，`prod_tma` vs `prod_hdw_tma`，
+空闲卡 GPU1）：
+
+| 指标 | `prod_tma` B8 | `prod_hdw_tma` B8 | `prod_tma` B2 | `prod_hdw_tma` B2 |
+|---|---|---|---|---|
+| DRAM 读 | 1.62 GB | **1.56 GB** | 202.9 MB | **194.5 MB** |
+| DRAM 写 | 485.4 MB | **419.3 MB** | 54.0 MB | **46.5 MB** |
+| `lts` 字节 | 3.57 GB | **3.24 GB** | 447 MB | **407 MB** |
+| `gpu__time_duration` | 1.38 ms | **1.29 ms** | 180.6 µs | **171.1 µs** |
+| bank conflict / regs / occ-smem | 28.31 M / 128 / 1 | **28.31 M** / 128 / 1 | 3.54 M / 128 / 1 | **3.54 M** / 128 / 1 |
+| tensor % | 3.07% | 3.28% | 2.90% | 3.05% |
+
+- **字节账干净**：删掉的正是 `dw` 的输入 staging 读（~60 MB）+ `dw_out` 输出 store（~66 MB）≈
+  **126 MB DRAM**，L2 少 **~0.33 GB**；bank conflict **完全不增**（交接只换取数来源）、occupancy /
+  tensor 不动。`hdw` 仍非 DRAM-bound（DRAM ≤46% SOL、tensor ~3%），是标量/发射受限，与 §63.5 同。
+- **口径冲突（诚实）**：ncu 自报 `Duration` 给 `prod_hdw` **更快（−7%）**，而 CUPTI `dev`/`wall`
+  给的是**略慢（+2.8%/+4%）**——与 §25.5/§63.5 记录的「ncu `Duration` 与 CUPTI/wall 窗口不同源」
+  一致（ncu 每次 replay 前清 L2，使那 60 MB `dw` 读变成真 DRAM 读，于是字节节省「兑现」成时间；
+  背靠背的 CUPTI/wall 里它被流水藏住，只见串行尾巴）。**部署口径仍取 CUPTI/wall**：交接 = wash。
+
+### 64.6 结论 / 对目标卡的设计输入
+
+- **同 CTA `dw` 交接成立且逐位无损**：`prod_hdw` 的十个输出与 `prod` **逐位相同**（含非整除 T、
+  两种 stage 布局），喂全零 `dw` 结果不变（`dw` 输入证实未被读）。§49.7 / §63.6 点名的最后一条结构项
+  **收口**。
+- **收益定性**：交接把 `dw` 从生产 ABI 删除（**不再需要预算/传参 `dw`、不落盘**），寄存器 140→110、
+  smem −4.6 KB、DRAM −126 MB / L2 −0.33 GB、bank conflict 不增——**是内存足迹优化，不是速度杠杆**。
+  隔离的「核心+DKGB」里净赚 **7–9%**，但在六段齐全的 `prod` 里**是 wash（大 shape +2.8%）**：
+  `dw` 往返本就与 GEMM 流水重叠，而后移 DKGB 丢掉了 stage 内重叠。
+- **设计输入**：目标卡 CUDA B2 的生产形态若**六段齐全**，`dw` 就地交接**可做可不做**（省中间量、
+  不亏时间，利于显存/ABI）；若某实现里 DKGB 是**主导段**（或 GEMM 较浅、staging 不被隐藏），交接是
+  **实打实的 7–9%**。判据＝「省下的 staging/store 是否本就被 GEMM 流水藏住」——这是继 §51.6「省字节
+  要落最紧 pipe」之后对「省字节」的又一条前提检查：**还要看这笔访存是否在关键路径上**。
+- **边界**：`dv2`/`v` 喂 `db` 的那半（`dbv` 镜像）在 P7-56 时就已是核内寄存器/smem（无全局往返），
+  故本轮只动了 `dw` 一项；`dApre`/`dA` 在 P7-55 起也不落盘即入 sandwich。至此六段的中间量**要么本就
+  核内、要么可核内**，且六段能一次 launch 产出（P7-60）——B2 的 K2 形状 CUDA 化在**结构上闭合**，
+  剩余头寸（tensor 3%、标量/发射受限）不在这些中间量的搬运上。

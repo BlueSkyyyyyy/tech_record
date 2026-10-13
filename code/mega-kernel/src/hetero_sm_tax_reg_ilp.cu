@@ -1,0 +1,771 @@
+// ============================================================================
+// P93-1 (§81)：补掉 P92-1（§80）§80.7 明留的尾巴——
+//   「`U ≤ 8` 且 `__maxnreg__(32)` 固定（**放宽寄存器预算后的 `U∈{16,…}` 未测**——§68/§69/§81
+//     已知寄存器预算与 ILP 耦合）」+「`U×Wsm` 替代性只用 `coal+scalar` 一个混合」。
+//
+// 背景（接 §71–§80）：
+//   §80 证实「发射受限 × 访存受限」的共驻税（`coal+scalar` 的 `meas/E`）随**每 SM 在飞 load
+//   量 `Wsm·U`** 收回，`Wsm`（每 SM warp 数）与 `U`（每线程 ILP）是替代品。但 §80 把 `U`
+//   限制在 `≤8` 且 `__maxnreg__(32)` 固定——`U=8` 在 32-reg 内恰用满（0 spill）。**寄存器预算一旦
+//   成为硬约束，`U` 就不自由**：提高 `U` 需要更多寄存器（每在飞 `uint4` 占 4 reg），而寄存器越多
+//   → 每 SM 可达线程/块越少（占用率 ↓）。故「ILP 收回税」与「寄存器预算 → 占用率」是**耦合**的，
+//   §80 未把二者解耦。
+//
+// 本节把**寄存器预算 `R`（`__maxnreg__(R)`）**与**每线程 ILP `U`** 都当独立旋钮，做 `U×R` 二维：
+//   内核模板化在 `<U,R>` 上，每个 (U,R) 用 **occupancy API 实测**每 SM 可达块数 `occ`，再令
+//   `O=occ`、`grid=numSM·occ`（**保证 bind 全图常驻、不丢 work**——避免 P89-1/§77 的丢 work 陷阱）。
+//   于是每个 (U,R) 同时报：`numRegs`（自然/被限）、spill、`occ`、`Wsm=occ·T`、单模式与混合吞吐。
+//
+//   Q1 **ILP 天花板**：在**寄存器充足**（无 spill）下把 `U` 推到 16/32，共驻税是否继续收回、
+//      还是饱和？即「每 SM 在飞 load 量」是否真能无限替代 warp 数。
+//   Q2 **登记簿预算 vs ILP 解耦**：固定 `U` 扫 `R`，把「占用率损失」与「spill 损失」分开；
+//      固定 `Wsm` 跨 `(U,R)` 比，问「高 ILP/低占用」能否替代「低 ILP/高占用」。
+//   Q3 **第二个混合**：把 `U×Wsm` 替代性从 `coal+scalar` 推广到 `scalar+l2res`（发射受限 ×
+//      L2 延迟受限），看「每 SM 在飞 load」是否仍是统一的机制量。
+//
+// 仍完全复用 §72–§80 的四访存模式 / 逻辑字节 / XOR 参考 / 误差扩散 `assign[]` / SM 分配 / per-SM
+//   原子子段游标。载体固定寄存器读 + `__maxnreg__(R)`（模板参数）。
+//
+// 用法：./hetero_sm_tax_reg_ilp bench
+//       ./hetero_sm_tax_reg_ilp run <U> <R> <map> <r0,r1,r2,r3>   # map 0=inter,1=bind
+// 目标卡 H100 / sm90a。安全：脚本带 timeout；纯读微基准，无环协议 / 无死锁。
+// ============================================================================
+
+#include <cstdio>
+#include <cstdlib>
+#include <cstdint>
+#include <cstring>
+#include <cuda_runtime.h>
+
+#define CK(x)                                                                        \
+  do {                                                                               \
+    cudaError_t _e = (x);                                                            \
+    if (_e != cudaSuccess) {                                                         \
+      printf("CUDA ERROR %s:%d: %s\n", __FILE__, __LINE__, cudaGetErrorString(_e));  \
+      std::exit(1);                                                                  \
+    }                                                                                \
+  } while (0)
+
+#define MAXT 1024
+#define TOT_U4 (16777216LL)        // 逻辑总读 256 MiB（uint4 计）；所有混合份额同一逻辑字节数
+#define SPARSE_STRIDE 8            // m1：每 8 个 uint4 读 1 个 → 物理 8×（扇区 4×）
+#define L2N4 (1 << 20)             // m3：常驻 16 MiB = 1M uint4（< 50 MB L2）
+#define NPAT 4
+#define MAXGRID 8192
+#define NU 6                       // U ∈ {1,2,4,8,16,32}
+#define NR 5                       // R ∈ {32,48,64,96,128}
+
+__host__ __device__ __forceinline__ uint32_t mix32(uint32_t s, uint32_t i) {
+  uint32_t x = s * 2654435761u + i * 40503u + 0x9e3779b9u;
+  x ^= x >> 16;
+  x *= 0x7feb352du;
+  x ^= x >> 15;
+  x *= 0x846ca68bu;
+  x ^= x >> 16;
+  return x;
+}
+
+// ---- 四模式读函数（与 §71–§80 逐字一致）----
+template <int U>
+__device__ __forceinline__ unsigned long long read_coal(const uint4* __restrict__ base,
+                                                        long long BP, int tid, int T) {
+  unsigned long long acc = 0ull;
+  long long i = tid;
+  for (; i + (long long)(U - 1) * T < BP; i += (long long)T * U) {
+#pragma unroll
+    for (int u = 0; u < U; ++u) {
+      uint4 v = __ldcs(base + i + (long long)u * T);
+      acc ^= (unsigned long long)(v.x ^ v.y ^ v.z ^ v.w);
+    }
+  }
+  for (; i < BP; i += T) {
+    uint4 v = __ldcs(base + i);
+    acc ^= (unsigned long long)(v.x ^ v.y ^ v.z ^ v.w);
+  }
+  return acc;
+}
+
+template <int U>
+__device__ __forceinline__ unsigned long long read_sparse(const uint4* __restrict__ base,
+                                                          long long BP, int tid, int T) {
+  unsigned long long acc = 0ull;
+  long long i = tid;
+  for (; i + (long long)(U - 1) * T < BP; i += (long long)T * U) {
+#pragma unroll
+    for (int u = 0; u < U; ++u) {
+      uint4 v = __ldcs(base + (i + (long long)u * T) * SPARSE_STRIDE);
+      acc ^= (unsigned long long)(v.x ^ v.y ^ v.z ^ v.w);
+    }
+  }
+  for (; i < BP; i += T) {
+    uint4 v = __ldcs(base + i * SPARSE_STRIDE);
+    acc ^= (unsigned long long)(v.x ^ v.y ^ v.z ^ v.w);
+  }
+  return acc;
+}
+
+template <int U>
+__device__ __forceinline__ unsigned long long read_scalar(const uint32_t* __restrict__ base,
+                                                          long long N32, int tid, int T) {
+  unsigned long long acc = 0ull;
+  long long i = tid;
+  for (; i + (long long)(U - 1) * T < N32; i += (long long)T * U) {
+#pragma unroll
+    for (int u = 0; u < U; ++u) acc ^= (unsigned long long)__ldcs(base + i + (long long)u * T);
+  }
+  for (; i < N32; i += T) acc ^= (unsigned long long)__ldcs(base + i);
+  return acc;
+}
+
+template <int U>
+__device__ __forceinline__ unsigned long long read_l2res(const uint4* __restrict__ base,
+                                                         long long BP, long long mask,
+                                                         int tid, int T) {
+  unsigned long long acc = 0ull;
+  long long i = tid;
+  for (; i + (long long)(U - 1) * T < BP; i += (long long)T * U) {
+#pragma unroll
+    for (int u = 0; u < U; ++u) {
+      uint4 v = base[(i + (long long)u * T) & mask];
+      acc ^= (unsigned long long)(v.x ^ v.y ^ v.z ^ v.w);
+    }
+  }
+  for (; i < BP; i += T) {
+    uint4 v = base[i & mask];
+    acc ^= (unsigned long long)(v.x ^ v.y ^ v.z ^ v.w);
+  }
+  return acc;
+}
+
+template <int MAXT_>
+__device__ __forceinline__ void reduce_xor(unsigned long long part, int tid, int T,
+                                           unsigned long long* sink) {
+  __shared__ unsigned long long red[MAXT_];
+  red[tid] = part;
+  __syncthreads();
+  for (int s = T / 2; s > 0; s >>= 1) {
+    if (tid < s) red[tid] ^= red[tid + s];
+    __syncthreads();
+  }
+  if (tid == 0 && red[0]) atomicXor(sink, red[0]);
+}
+
+// ---- 统一 kernel（模板化在**每线程 ILP `U`** 与**寄存器预算 `R`** 上）----
+//   §79/§80 固定 R=32；本节把 R 也变成独立变量。O 由 host 用 occupancy API 实测后传入，
+//   且 grid=numSM*O，保证常驻、不丢 work（P89-1/§77 的坑）。
+template <int U, int R>
+__global__ void __maxnreg__(R) pat_reg(const void* __restrict__ raw, long long aux, int bind,
+                                       int O,
+                                       const int* __restrict__ assign,
+                                       const int* __restrict__ mode_of_sm,
+                                       const long long* __restrict__ bb_base,
+                                       const long long* __restrict__ bb_bp,
+                                       const long long* __restrict__ sm_base,
+                                       const long long* __restrict__ sm_bp,
+                                       int* __restrict__ sm_ctr,
+                                       unsigned int* __restrict__ blk_smid,
+                                       unsigned long long* sink) {
+  const int tid = threadIdx.x;
+  const int T = blockDim.x;
+  unsigned int smid = 0;
+  asm volatile("mov.u32 %0, %%smid;" : "=r"(smid));
+  blk_smid[blockIdx.x] = smid;
+  int pat;
+  long long base, BP;
+  if (bind) {
+    pat = mode_of_sm[smid];
+    __shared__ int s_local;
+    if (tid == 0) s_local = atomicAdd(&sm_ctr[smid], 1);
+    __syncthreads();
+    int local = s_local;
+    long long per = sm_bp[smid];
+    base = sm_base[smid] + (long long)local * per;
+    BP = (local < O) ? per : 0;
+  } else {
+    pat = assign[blockIdx.x];
+    base = bb_base[blockIdx.x];
+    BP = bb_bp[blockIdx.x];
+  }
+  unsigned long long part = 0ull;
+  switch (pat) {
+    case 0: part = read_coal<U>((const uint4*)raw + base, BP, tid, T); break;
+    case 1: part = read_sparse<U>((const uint4*)raw + base, BP, tid, T); break;
+    case 2: part = read_scalar<U>((const uint32_t*)raw + base * 4, BP * 4, tid, T); break;
+    default: part = read_l2res<U>((const uint4*)raw, BP, aux, tid, T); break;
+  }
+  reduce_xor<MAXT>(part, tid, T, sink);
+}
+
+__global__ void fill_data_kernel(uint4* d, long long tot, unsigned long long* dref) {
+  long long u = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (u >= tot) return;
+  uint4 v;
+  v.x = mix32((uint32_t)u, 0u);
+  v.y = mix32((uint32_t)u, 1u);
+  v.z = mix32((uint32_t)u, 2u);
+  v.w = mix32((uint32_t)u, 3u);
+  d[u] = v;
+  atomicXor(dref, (unsigned long long)(v.x ^ v.y ^ v.z ^ v.w));
+}
+
+// ============================================================================
+// dispatch：U ∈ {1,2,4,8,16,32} × R ∈ {32,48,64,96,128}
+// ============================================================================
+static const void* kernel_ptr(int u, int r) {
+#define CASE(U, R) if (u == U && r == R) return (const void*)&pat_reg<U, R>;
+  CASE(1, 32) CASE(1, 48) CASE(1, 64) CASE(1, 96) CASE(1, 128)
+  CASE(2, 32) CASE(2, 48) CASE(2, 64) CASE(2, 96) CASE(2, 128)
+  CASE(4, 32) CASE(4, 48) CASE(4, 64) CASE(4, 96) CASE(4, 128)
+  CASE(8, 32) CASE(8, 48) CASE(8, 64) CASE(8, 96) CASE(8, 128)
+  CASE(16, 32) CASE(16, 48) CASE(16, 64) CASE(16, 96) CASE(16, 128)
+  CASE(32, 32) CASE(32, 48) CASE(32, 64) CASE(32, 96) CASE(32, 128)
+#undef CASE
+  return nullptr;
+}
+
+// ============================================================================
+// host
+// ============================================================================
+static uint4* g_data = nullptr;
+static unsigned long long* g_sink = nullptr;
+static int* g_assign = nullptr;
+static int* g_mode_of_sm = nullptr;
+static int* g_sm_ctr = nullptr;
+static long long* g_bb_base = nullptr;
+static long long* g_bb_bp = nullptr;
+static long long* g_sm_base = nullptr;
+static long long* g_sm_bp = nullptr;
+static unsigned int* g_blk_smid = nullptr;
+static long long g_data_cap = 0;
+static int g_assign_cap = 0, g_smcap = 0, g_gridcap = 0;
+static int g_numSm = 0;
+static int g_T = 256;
+static int g_O = 1;
+static int g_U = 4;
+static int g_R = 32;
+
+static long long g_W[NPAT], g_BP[NPAT], g_basep[NPAT], g_phys[NPAT];
+static int g_nblk[NPAT];
+
+static void ensure(long long data_u4, int grid) {
+  if (data_u4 > g_data_cap) {
+    if (g_data) CK(cudaFree(g_data));
+    CK(cudaMalloc(&g_data, (size_t)data_u4 * 16));
+    g_data_cap = data_u4;
+  }
+  if (!g_sink) CK(cudaMalloc(&g_sink, 8));
+  if (!g_sm_ctr) CK(cudaMalloc(&g_sm_ctr, (size_t)4096 * sizeof(int)));
+  if (grid > g_assign_cap) {
+    if (g_assign) CK(cudaFree(g_assign));
+    CK(cudaMalloc(&g_assign, (size_t)grid * sizeof(int)));
+    g_assign_cap = grid;
+  }
+  if (g_numSm > g_smcap) {
+    if (g_mode_of_sm) CK(cudaFree(g_mode_of_sm));
+    CK(cudaMalloc(&g_mode_of_sm, (size_t)g_numSm * sizeof(int)));
+    if (g_sm_base) CK(cudaFree(g_sm_base));
+    CK(cudaMalloc(&g_sm_base, (size_t)g_numSm * sizeof(long long)));
+    if (g_sm_bp) CK(cudaFree(g_sm_bp));
+    CK(cudaMalloc(&g_sm_bp, (size_t)g_numSm * sizeof(long long)));
+    g_smcap = g_numSm;
+  }
+  if (grid > g_gridcap) {
+    if (g_blk_smid) CK(cudaFree(g_blk_smid));
+    CK(cudaMalloc(&g_blk_smid, (size_t)grid * sizeof(unsigned int)));
+    if (g_bb_base) CK(cudaFree(g_bb_base));
+    CK(cudaMalloc(&g_bb_base, (size_t)grid * sizeof(long long)));
+    if (g_bb_bp) CK(cudaFree(g_bb_bp));
+    CK(cudaMalloc(&g_bb_bp, (size_t)grid * sizeof(long long)));
+    g_gridcap = grid;
+  }
+}
+
+static int g_last_ok = 1, g_cur_bind = 0;
+
+static long long compute_layout(int O, long long* out_need) {
+  long long phys_acc = 0, need = L2N4 + 1024;
+  for (int p = 0; p < NPAT; ++p) {
+    if (!g_nblk[p] || g_W[p] <= 0) { g_BP[p] = 0; g_basep[p] = phys_acc; g_phys[p] = 0; continue; }
+    g_BP[p] = g_W[p] / g_nblk[p];
+    if (g_BP[p] < 1) g_BP[p] = 1;
+    g_basep[p] = phys_acc;
+    long long stride = (p == 1) ? SPARSE_STRIDE : 1;
+    if (p == 3) { g_phys[p] = 0; }
+    else g_phys[p] = (long long)g_nblk[p] * g_BP[p] * stride;
+    phys_acc += g_phys[p];
+    long long endp = g_basep[p] + g_phys[p];
+    if (endp > need) need = endp;
+  }
+  need += TOT_U4;
+  *out_need = need;
+  return phys_acc;
+}
+
+#define LAUNCH(U, R)                                                                          \
+  pat_reg<U, R><<<grid, g_T>>>((const void*)g_data, aux, g_cur_bind, g_O, g_assign,           \
+                               g_mode_of_sm, g_bb_base, g_bb_bp, g_sm_base, g_sm_bp,          \
+                               g_sm_ctr, g_blk_smid, g_sink)
+
+static void launch_reg(int grid) {
+  long long aux = L2N4 - 1;
+  CK(cudaMemset(g_sm_ctr, 0, (size_t)g_numSm * sizeof(int)));
+  if (g_U == 1) {
+    if (g_R == 32) LAUNCH(1, 32);
+    else if (g_R == 48) LAUNCH(1, 48);
+    else if (g_R == 64) LAUNCH(1, 64);
+    else if (g_R == 96) LAUNCH(1, 96);
+    else LAUNCH(1, 128);
+  } else if (g_U == 2) {
+    if (g_R == 32) LAUNCH(2, 32);
+    else if (g_R == 48) LAUNCH(2, 48);
+    else if (g_R == 64) LAUNCH(2, 64);
+    else if (g_R == 96) LAUNCH(2, 96);
+    else LAUNCH(2, 128);
+  } else if (g_U == 4) {
+    if (g_R == 32) LAUNCH(4, 32);
+    else if (g_R == 48) LAUNCH(4, 48);
+    else if (g_R == 64) LAUNCH(4, 64);
+    else if (g_R == 96) LAUNCH(4, 96);
+    else LAUNCH(4, 128);
+  } else if (g_U == 8) {
+    if (g_R == 32) LAUNCH(8, 32);
+    else if (g_R == 48) LAUNCH(8, 48);
+    else if (g_R == 64) LAUNCH(8, 64);
+    else if (g_R == 96) LAUNCH(8, 96);
+    else LAUNCH(8, 128);
+  } else if (g_U == 16) {
+    if (g_R == 32) LAUNCH(16, 32);
+    else if (g_R == 48) LAUNCH(16, 48);
+    else if (g_R == 64) LAUNCH(16, 64);
+    else if (g_R == 96) LAUNCH(16, 96);
+    else LAUNCH(16, 128);
+  } else {
+    if (g_R == 32) LAUNCH(32, 32);
+    else if (g_R == 48) LAUNCH(32, 48);
+    else if (g_R == 64) LAUNCH(32, 64);
+    else if (g_R == 96) LAUNCH(32, 96);
+    else LAUNCH(32, 128);
+  }
+  g_last_ok = (cudaGetLastError() == cudaSuccess);
+}
+#undef LAUNCH
+
+static void fill_assign(int grid, const int* seq) {
+  long long tot = 0;
+  for (int p = 0; p < NPAT; ++p) tot += seq[p];
+  static double acc[NPAT];
+  for (int p = 0; p < NPAT; ++p) acc[p] = 0.0;
+  int* h = (int*)malloc((size_t)grid * sizeof(int));
+  for (int b = 0; b < grid; ++b) {
+    int pick = 0; double best = -1e30;
+    for (int p = 0; p < NPAT; ++p) {
+      acc[p] += (double)seq[p] / (double)tot;
+      if (acc[p] > best) { best = acc[p]; pick = p; }
+    }
+    acc[pick] -= 1.0; h[b] = pick;
+  }
+  CK(cudaMemcpy(g_assign, h, (size_t)grid * sizeof(int), cudaMemcpyHostToDevice));
+  free(h);
+}
+
+static void fill_mode_of_sm(const int* nsm, int* h_out) {
+  int* h = (h_out ? h_out : (int*)malloc((size_t)g_numSm * sizeof(int)));
+  int rem[NPAT];
+  for (int p = 0; p < NPAT; ++p) rem[p] = nsm[p];
+  int s = 0;
+  for (int i = 0; i < g_numSm; ++i) {
+    int guard = 0;
+    while (rem[s % NPAT] == 0 && guard < NPAT) { s++; guard++; }
+    int p = s % NPAT; h[i] = p;
+    if (rem[p] > 0) rem[p]--;
+    s++;
+  }
+  if (!h_out) { CK(cudaMemcpy(g_mode_of_sm, h, (size_t)g_numSm * sizeof(int), cudaMemcpyHostToDevice)); free(h); }
+}
+
+static void setup_interleave(const int* seq, int O, int grid) {
+  g_cur_bind = 0; g_O = O;
+  fill_assign(grid, seq);
+  int* h = (int*)malloc((size_t)grid * sizeof(int));
+  CK(cudaMemcpy(h, g_assign, (size_t)grid * sizeof(int), cudaMemcpyDeviceToHost));
+  long long tot = 0;
+  for (int p = 0; p < NPAT; ++p) { tot += seq[p]; g_nblk[p] = 0; }
+  for (int b = 0; b < grid; ++b) g_nblk[h[b]]++;
+  for (int p = 0; p < NPAT; ++p)
+    g_W[p] = (tot > 0) ? (long long)((double)seq[p] / (double)tot * (double)TOT_U4) : 0;
+  long long need; compute_layout(O, &need);
+  ensure(need, grid);
+  long long rank[NPAT] = {0, 0, 0, 0};
+  long long* bbase = (long long*)malloc((size_t)grid * sizeof(long long));
+  long long* bbp = (long long*)malloc((size_t)grid * sizeof(long long));
+  for (int b = 0; b < grid; ++b) {
+    int p = h[b];
+    bbase[b] = g_basep[p] + rank[p] * g_BP[p];
+    bbp[b] = g_BP[p];
+    rank[p]++;
+  }
+  CK(cudaMemcpy(g_bb_base, bbase, (size_t)grid * sizeof(long long), cudaMemcpyHostToDevice));
+  CK(cudaMemcpy(g_bb_bp, bbp, (size_t)grid * sizeof(long long), cudaMemcpyHostToDevice));
+  free(bbase); free(bbp); free(h);
+}
+
+static void setup_bind(const int* seq, const int* nsm, int O, int grid) {
+  g_cur_bind = 1; g_O = O;
+  long long tot = 0;
+  for (int p = 0; p < NPAT; ++p) { tot += seq[p]; g_nblk[p] = nsm[p] * O; }
+  for (int p = 0; p < NPAT; ++p)
+    g_W[p] = (tot > 0) ? (long long)((double)seq[p] / (double)tot * (double)TOT_U4) : 0;
+  long long need; compute_layout(O, &need);
+  ensure(need, grid);
+  int* hmos = (int*)malloc((size_t)g_numSm * sizeof(int));
+  fill_mode_of_sm(nsm, hmos);
+  CK(cudaMemcpy(g_mode_of_sm, hmos, (size_t)g_numSm * sizeof(int), cudaMemcpyHostToDevice));
+  long long* sbase = (long long*)malloc((size_t)g_numSm * sizeof(long long));
+  long long* sbp = (long long*)malloc((size_t)g_numSm * sizeof(long long));
+  int rank[NPAT] = {0, 0, 0, 0};
+  for (int s = 0; s < g_numSm; ++s) {
+    int p = hmos[s];
+    if (g_nblk[p] > 0) {
+      sbase[s] = g_basep[p] + (long long)rank[p] * O * g_BP[p];
+      sbp[s] = g_BP[p];
+      rank[p]++;
+    } else { sbase[s] = 0; sbp[s] = 0; }
+  }
+  CK(cudaMemcpy(g_sm_base, sbase, (size_t)g_numSm * sizeof(long long), cudaMemcpyHostToDevice));
+  CK(cudaMemcpy(g_sm_bp, sbp, (size_t)g_numSm * sizeof(long long), cudaMemcpyHostToDevice));
+  free(sbase); free(sbp); free(hmos);
+}
+
+struct Res { double ms; double gbs; int unsupported; };
+
+static Res run(int grid, int reps) {
+  double best = 1e30;
+  int unsupported = 0;
+  cudaEvent_t e0, e1;
+  CK(cudaEventCreate(&e0));
+  CK(cudaEventCreate(&e1));
+  for (int r = 0; r < reps; ++r) {
+    CK(cudaMemset(g_sink, 0, 8));
+    CK(cudaEventRecord(e0));
+    launch_reg(grid);
+    if (!g_last_ok) { unsupported = 1; break; }
+    CK(cudaEventRecord(e1));
+    CK(cudaEventSynchronize(e1));
+    float ms = 0;
+    CK(cudaEventElapsedTime(&ms, e0, e1));
+    if (ms < best) best = ms;
+  }
+  CK(cudaEventDestroy(e0));
+  CK(cudaEventDestroy(e1));
+  Res res;
+  res.ms = best;
+  res.gbs = (double)TOT_U4 * 16.0 / (best * 1e-3) / 1e9;
+  res.unsupported = unsupported;
+  return res;
+}
+
+static const char* PATNAME(int p) {
+  switch (p) { case 0: return "coalesced"; case 1: return "sparse8x";
+               case 2: return "scalar4B"; case 3: return "l2res16M"; }
+  return "?";
+}
+
+static double g_bw_solo[NPAT], g_r1[NPAT];
+
+// occupancy API：给定 (U,R,T) 返回每 SM 可达块数（并含 Wsm=occ*T）
+static int occ_blocks(int U, int R, int T) {
+  const void* k = kernel_ptr(U, R);
+  if (!k) return 0;
+  int nb = 0;
+  if (cudaOccupancyMaxActiveBlocksPerMultiprocessor(&nb, k, T, 0) != cudaSuccess) return 0;
+  return nb;
+}
+
+static int regs_of(int U, int R) {
+  const void* k = kernel_ptr(U, R);
+  cudaFuncAttributes a;
+  if (!k) return -1;
+  if (cudaFuncGetAttributes(&a, k) != cudaSuccess) return -1;
+  return a.numRegs;
+}
+
+// 用实测 occ 设 O 后跑 bind solo；返回 GB/s、occ、regs、spill 由调用方另取
+static Res run_solo_occ(int pat, int T, int U, int R, int* out_O) {
+  int seq[NPAT] = {0, 0, 0, 0}; seq[pat] = 1;
+  int nsm[NPAT] = {0, 0, 0, 0}; nsm[pat] = g_numSm;
+  int occ = occ_blocks(U, R, T);
+  int O = occ > 0 ? occ : 1;
+  if (O > 16) O = 16;
+  int grid = g_numSm * O;
+  g_T = T; g_U = U; g_R = R; g_O = O;
+  if (out_O) *out_O = O;
+  setup_bind(seq, nsm, O, grid);
+  return run(grid, 3);
+}
+
+static unsigned long long ref_region(int pat, long long base, long long BP) {
+  unsigned long long r = 0;
+  if (pat == 0) {
+    for (long long i = 0; i < BP; ++i) { long long u = base + i;
+      r ^= (unsigned long long)(mix32((uint32_t)u, 0u) ^ mix32((uint32_t)u, 1u) ^
+                                mix32((uint32_t)u, 2u) ^ mix32((uint32_t)u, 3u)); }
+  } else if (pat == 1) {
+    for (long long i = 0; i < BP; ++i) { long long u = base + i * SPARSE_STRIDE;
+      r ^= (unsigned long long)(mix32((uint32_t)u, 0u) ^ mix32((uint32_t)u, 1u) ^
+                                mix32((uint32_t)u, 2u) ^ mix32((uint32_t)u, 3u)); }
+  } else if (pat == 2) {
+    long long b32 = base * 4;
+    for (long long p = 0; p < BP * 4; ++p)
+      r ^= (unsigned long long)mix32((uint32_t)((b32 + p) / 4), (uint32_t)((b32 + p) % 4));
+  } else {
+    for (long long i = 0; i < BP; ++i) { long long ph = i & (L2N4 - 1);
+      r ^= (unsigned long long)(mix32((uint32_t)ph, 0u) ^ mix32((uint32_t)ph, 1u) ^
+                                mix32((uint32_t)ph, 2u) ^ mix32((uint32_t)ph, 3u)); }
+  }
+  return r;
+}
+
+static double expected_from(const int* seq, const double* bw) {
+  long long tot = 0;
+  for (int p = 0; p < NPAT; ++p) tot += seq[p];
+  double inv = 0.0;
+  for (int p = 0; p < NPAT; ++p)
+    if (seq[p] > 0) inv += (double)seq[p] / (double)tot / bw[p];
+  return inv > 0 ? 1.0 / inv : 0.0;
+}
+static double expected_additive(const int* seq) { return expected_from(seq, g_bw_solo); }
+
+static void alloc_sm(const int* seq, int mode, int* nsm) {
+  long long tot = 0;
+  for (int p = 0; p < NPAT; ++p) tot += seq[p];
+  double w[NPAT], sum = 0;
+  for (int p = 0; p < NPAT; ++p) {
+    if (!seq[p]) { w[p] = 0; continue; }
+    double f = (double)seq[p] / (double)tot;
+    w[p] = (mode == 0) ? f : f / (g_r1[p] > 0 ? g_r1[p] : 1e-9);
+    sum += w[p];
+  }
+  int used = 0, big = 0;
+  for (int p = 0; p < NPAT; ++p) {
+    if (w[p] <= 0) { nsm[p] = 0; continue; }
+    nsm[p] = (int)(w[p] / sum * g_numSm + 0.5);
+    if (nsm[p] < 1) nsm[p] = 1;
+    used += nsm[p];
+    if (nsm[p] > nsm[big]) big = p;
+  }
+  nsm[big] += g_numSm - used;
+}
+
+// 混合：用实测 occ 设 O，bind
+static Res run_mix_occ(int T, int U, int R, const int* seq, int* out_O, int* nsm_out) {
+  int occ = occ_blocks(U, R, T);
+  int O = occ > 0 ? occ : 1;
+  if (O > 16) O = 16;
+  int grid = g_numSm * O;
+  g_T = T; g_U = U; g_R = R; g_O = O;
+  int nsm[NPAT] = {0, 0, 0, 0};
+  alloc_sm(seq, 0, nsm);
+  setup_bind(seq, nsm, O, grid);
+  if (out_O) *out_O = O;
+  if (nsm_out) for (int p = 0; p < NPAT; ++p) nsm_out[p] = nsm[p];
+  return run(grid, 3);
+}
+
+static void fill_all() {
+  long long tot = TOT_U4 * SPARSE_STRIDE + TOT_U4 + L2N4 + 1024;
+  ensure(tot, MAXGRID);
+  unsigned long long* dref = nullptr;
+  CK(cudaMalloc(&dref, 8));
+  CK(cudaMemset(dref, 0, 8));
+  fill_data_kernel<<<(int)((tot + 255) / 256), 256>>>(g_data, tot, dref);
+  CK(cudaDeviceSynchronize());
+  CK(cudaFree(dref));
+}
+
+struct Mix { const char* nm; int seq[NPAT]; };
+
+static const int ULIST[NU] = {1, 2, 4, 8, 16, 32};
+static const int RLIST[NR] = {32, 48, 64, 96, 128};
+
+static void bench() {
+  CK(cudaDeviceGetAttribute(&g_numSm, cudaDevAttrMultiProcessorCount, 0));
+  printf("########################################################################\n");
+  printf("# §81 寄存器预算 R × 每线程 ILP U：ILP 天花板与「占用率 vs 在飞 load」解耦（补 §80.7 尾巴，P93-1）\n");
+  printf("# 目标卡 H100/sm90a；numSM=%d；逻辑总读 256 MiB（uint4 计）；寄存器读 + __maxnreg__(R)\n", g_numSm);
+  printf("# 内核模板化在 <U,R>；O 由 occupancy API 实测（O=occ），grid=numSM·occ 保证全图常驻不丢 work\n");
+  printf("# U∈{1,2,4,8,16,32}  R∈{32,48,64,96,128}  T=256\n");
+  printf("########################################################################\n");
+
+  fill_all();
+
+  Mix mixes[] = {
+    {"50/50 coal+scalar",  {1, 0, 1, 0}},
+    {"50/50 scalar+l2res", {0, 0, 1, 1}},
+  };
+  int nmix = (int)(sizeof(mixes) / sizeof(mixes[0]));
+
+  // ===== §A 正确性：若干 (U,R)（含 U=16/32），interleave 小图 + bind 全图 =====
+  {
+    int NBLK = 16;
+    int seq[NPAT] = {4, 4, 4, 4};
+    printf("\n===== §A 正确性（interleave 小图 NBLK=%d；bind 全图 T256）+ U 扩到 16/32 =====\n", NBLK);
+    int pairs[][2] = {{4, 32}, {8, 64}, {16, 64}, {16, 128}, {32, 128}};
+    int npr = (int)(sizeof(pairs) / sizeof(pairs[0]));
+    // interleave U=8,R=64
+    for (int k = 0; k < npr; ++k) {
+      int U = pairs[k][0], R = pairs[k][1];
+      g_T = 256; g_U = U; g_R = R;
+      setup_interleave(seq, 1, NBLK);
+      CK(cudaMemset(g_sink, 0, 8));
+      launch_reg(NBLK);
+      if (!g_last_ok) { printf("  interleave U=%2d R=%3d: UNSUP\n", U, R); continue; }
+      CK(cudaDeviceSynchronize());
+      unsigned long long s_i = 0; CK(cudaMemcpy(&s_i, g_sink, 8, cudaMemcpyDeviceToHost));
+      int* h_ass = (int*)malloc((size_t)NBLK * sizeof(int));
+      long long* h_b = (long long*)malloc((size_t)NBLK * sizeof(long long));
+      long long* h_bp = (long long*)malloc((size_t)NBLK * sizeof(long long));
+      CK(cudaMemcpy(h_ass, g_assign, (size_t)NBLK * sizeof(int), cudaMemcpyDeviceToHost));
+      CK(cudaMemcpy(h_b, g_bb_base, (size_t)NBLK * sizeof(long long), cudaMemcpyDeviceToHost));
+      CK(cudaMemcpy(h_bp, g_bb_bp, (size_t)NBLK * sizeof(long long), cudaMemcpyDeviceToHost));
+      unsigned long long ref_i = 0;
+      for (int b = 0; b < NBLK; ++b) ref_i ^= ref_region(h_ass[b], h_b[b], h_bp[b]);
+      printf("  interleave U=%2d R=%3d: sink=%llu ref=%llu -> %s\n", U, R, s_i, ref_i,
+             s_i == ref_i ? "OK" : "WRONG");
+      free(h_ass); free(h_b); free(h_bp);
+    }
+    // bind 全图（occ-aware O）
+    for (int k = 0; k < npr; ++k) {
+      int U = pairs[k][0], R = pairs[k][1];
+      g_T = 256; g_U = U; g_R = R;
+      int nsm[NPAT] = {0, 0, 0, 0}; alloc_sm(seq, 0, nsm);
+      int occ = occ_blocks(U, R, 256); int O = occ > 0 ? occ : 1; if (O > 16) O = 16;
+      int grid = g_numSm * O;
+      setup_bind(seq, nsm, O, grid);
+      CK(cudaMemset(g_sink, 0, 8));
+      launch_reg(grid);
+      if (!g_last_ok) { printf("  bind U=%2d R=%3d: UNSUP\n", U, R); continue; }
+      CK(cudaDeviceSynchronize());
+      unsigned long long s_b = 0; CK(cudaMemcpy(&s_b, g_sink, 8, cudaMemcpyDeviceToHost));
+      unsigned long long ref_b = 0;
+      for (int p = 0; p < NPAT; ++p)
+        for (int kk = 0; kk < g_nblk[p]; ++kk)
+          ref_b ^= ref_region(p, g_basep[p] + (long long)kk * g_BP[p], g_BP[p]);
+      printf("  bind U=%2d R=%3d occ=%2d (Wsm=%4d, grid=%4d): sink=%llu ref=%llu -> %s\n",
+             U, R, occ, O * 256, grid, s_b, ref_b, s_b == ref_b ? "OK" : "WRONG");
+    }
+  }
+
+  // ===== §B 资源表： (U,R) -> numRegs / occ / Wsm =====
+  printf("\n===== §B 资源表（T=256）：numRegs 自然/被限、每 SM 可达块数 occ、Wsm=occ·T =====\n");
+  printf("  U\\R   ");
+  for (int ri = 0; ri < NR; ++ri) printf(" R=%-4d", RLIST[ri]);
+  printf("\n");
+  for (int ui = 0; ui < NU; ++ui) {
+    printf("  U=%-3d ", ULIST[ui]);
+    for (int ri = 0; ri < NR; ++ri) {
+      int rg = regs_of(ULIST[ui], RLIST[ri]);
+      int oc = occ_blocks(ULIST[ui], RLIST[ri], 256);
+      char tmp[24]; snprintf(tmp, sizeof(tmp), "%3d/%2d", rg, oc);
+      printf(" %-7s", tmp);
+    }
+    printf("   (regs/occ)\n");
+  }
+
+  // ===== §C（headline 一）固定 R=128（寄存器充足），扫 U：ILP 天花板 =====
+  //   T=256, R=128：U≤32 都无 spill（numRegs=自然需求）；但 occ 随 numRegs 下降。
+  printf("\n===== §C（headline 一，ILP 天花板）固定 R=128 扫 U∈{1,2,4,8,16,32}（T=256）=====\n");
+  printf("  %-4s %6s %4s %8s %10s %10s %10s %9s %8s\n",
+         "U", "regs", "occ", "Wsm", "coal", "scalar", "mixed", "meas/E", "taxRef");
+  int seqCS[NPAT] = {1, 0, 1, 0};
+  double Eref_C = 0;  // 固定参考：U=4,R=32 的 coal+scalar E
+  double soloC[NU][2]; int occC[NU], regsC[NU], WsmC[NU]; double mixC[NU], meC[NU], txC[NU];
+  for (int ui = 0; ui < NU; ++ui) {
+    int U = ULIST[ui], R = 128;
+    int o;
+    Res rc = run_solo_occ(0, 256, U, R, &o); g_bw_solo[0] = rc.gbs; g_r1[0] = rc.gbs / g_numSm;
+    Res rs = run_solo_occ(2, 256, U, R, &o); g_bw_solo[2] = rs.gbs; g_r1[2] = rs.gbs / g_numSm;
+    double E = expected_additive(seqCS);
+    Res rm = run_mix_occ(256, U, R, seqCS, &o, nullptr);
+    occC[ui] = o; regsC[ui] = regs_of(U, R); WsmC[ui] = o * 256;
+    soloC[ui][0] = rc.gbs; soloC[ui][1] = rs.gbs; mixC[ui] = rm.gbs; meC[ui] = rm.gbs / E;
+    if (ui == 2) Eref_C = E;
+    printf("  %-4d %6d %4d %8d %10.1f %10.1f %10.1f %9.3f %8s\n", U, regsC[ui], occC[ui], WsmC[ui],
+           rc.gbs, rs.gbs, rm.gbs, rm.gbs / E, "-");
+  }
+  for (int ui = 0; ui < NU; ++ui)
+    printf("    taxRef(U=%2d)=E_ref/mixed=%.3f  (E_ref=%u 列)\n", ULIST[ui],
+           Eref_C > 0 ? Eref_C / mixC[ui] : 0.0, (unsigned)ULIST[2]);
+
+  // ===== §D（headline 二）固定 U，扫 R：占用率损失 vs spill 损失 =====
+  printf("\n===== §D（headline 二，解耦）固定 U∈{8,16}，扫 R∈{32,48,64,96,128}（T=256）=====\n");
+  printf("  %-4s %5s %6s %4s %8s %10s %10s %10s %9s\n",
+         "U", "R", "regs", "occ", "Wsm", "coal", "scalar", "mixed", "meas/E");
+  for (int uii = 0; uii < 2; ++uii) {
+    int U = (uii == 0) ? 8 : 16;
+    for (int ri = 0; ri < NR; ++ri) {
+      int R = RLIST[ri], o;
+      Res rc = run_solo_occ(0, 256, U, R, &o); g_bw_solo[0] = rc.gbs; g_r1[0] = rc.gbs / g_numSm;
+      Res rs = run_solo_occ(2, 256, U, R, &o); g_bw_solo[2] = rs.gbs; g_r1[2] = rs.gbs / g_numSm;
+      double E = expected_additive(seqCS);
+      Res rm = run_mix_occ(256, U, R, seqCS, &o, nullptr);
+      printf("  %-4d %5d %6d %4d %8d %10.1f %10.1f %10.1f %9.3f\n", U, R, regs_of(U, R), o, o * 256,
+             rc.gbs, rs.gbs, rm.gbs, rm.gbs / E);
+    }
+    printf("\n");
+  }
+
+  // ===== §E 第二混合：scalar+l2res 的 R×U 面（Q3）=====
+  printf("\n===== §E（Q3）第二混合 scalar+l2res：R∈{32,64,128} × U∈{4,8,16,32}（T=256）=====\n");
+  int seqSL[NPAT] = {0, 0, 1, 1};
+  printf("  %-4s %5s %6s %4s %8s %10s %10s %9s\n", "U", "R", "regs", "occ", "Wsm", "l2res", "mixed", "meas/E");
+  int rsel[3] = {32, 64, 128};
+  for (int ui = 2; ui < NU; ++ui) {
+    for (int ri = 0; ri < 3; ++ri) {
+      int U = ULIST[ui], R = rsel[ri], o;
+      Res rl = run_solo_occ(3, 256, U, R, &o); g_bw_solo[3] = rl.gbs; g_r1[3] = rl.gbs / g_numSm;
+      Res rs = run_solo_occ(2, 256, U, R, &o); g_bw_solo[2] = rs.gbs; g_r1[2] = rs.gbs / g_numSm;
+      double E = expected_additive(seqSL);
+      Res rm = run_mix_occ(256, U, R, seqSL, &o, nullptr);
+      printf("  %-4d %5d %6d %4d %8d %10.1f %10.1f %9.3f\n", U, R, regs_of(U, R), o, o * 256,
+             rl.gbs, rm.gbs, rm.gbs / E);
+    }
+    printf("\n");
+  }
+
+  // ===== §F 结论 =====
+  printf("\n===== §F 结论 =====\n");
+  printf("  - §C: 固定 R=128 扫 U，看 meas/E 是否继续收回 / 在哪饱和（ILP 天花板）。\n");
+  printf("        occ/Wsm 随 U 上升的 numRegs 变化 => 区分「ILP 收益」与「占用率损失」。\n");
+  printf("  - §D: 固定 U 扫 R，低 R => spill（吞吐掉）、高 R => occ 降（Wsm 降）；\n");
+  printf("        mixed 峰值 R* 给出「每线程 ILP × 寄存器预算」的最优点。\n");
+  printf("  - §E: scalar+l2res 的 meas/E 是否同样随 U 收回 => 「每 SM 在飞 load」是否统一机制量。\n");
+  printf("\n########## §81 完成 ##########\n");
+}
+
+int main(int argc, char** argv) {
+  CK(cudaFree(0));
+  if (argc >= 2 && !strcmp(argv[1], "bench")) { bench(); return 0; }
+  if (argc >= 2 && !strcmp(argv[1], "run")) {
+    if (argc < 6) { printf("usage: run <U> <R> <map> <r0,r1,r2,r3>\n"); return 1; }
+    g_U = atoi(argv[2]);
+    g_R = atoi(argv[3]);
+    int map = atoi(argv[4]);
+    int seq[NPAT] = {0, 0, 0, 0};
+    if (sscanf(argv[5], "%d,%d,%d,%d", &seq[0], &seq[1], &seq[2], &seq[3]) < 4) return 1;
+    CK(cudaDeviceGetAttribute(&g_numSm, cudaDevAttrMultiProcessorCount, 0));
+    fill_all();
+    int occ = occ_blocks(g_U, g_R, g_T); int O = occ > 0 ? occ : 1; if (O > 16) O = 16;
+    int grid = g_numSm * O;
+    g_O = O;
+    int nsm[NPAT] = {0, 0, 0, 0};
+    if (map == 0) setup_interleave(seq, O, grid);
+    else { alloc_sm(seq, 0, nsm); setup_bind(seq, nsm, O, grid); }
+    Res r = run(grid, 3);
+    printf("  U=%d R=%d map=%d occ=%d Wsm=%d seq=%d,%d,%d,%d grid=%d -> %s ms=%.4f GB/s=%.1f\n",
+           g_U, g_R, map, O, O * 256, seq[0], seq[1], seq[2], seq[3], grid,
+           r.unsupported ? "UNSUP" : "OK", r.ms, r.gbs);
+    return 0;
+  }
+  printf("usage: hetero_sm_tax_reg_ilp {bench|run <U> <R> <map> <r0,r1,r2,r3>}\n");
+  return 1;
+}
