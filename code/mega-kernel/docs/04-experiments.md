@@ -4023,3 +4023,161 @@ OK
   在本容器 CUDA 13.2 可用；更早 CUDA 只有 driver API 版本。官方语义见 NVIDIA CUDA C Programming Guide
   的 “Green Contexts” 一节（`https://docs.nvidia.com/cuda/cuda-c-programming-guide/`）。
 - **device 3**（固定空闲），device 1 复现同量级（A1 5.612/5.613 ms、B1 0.031/0.031、D 同）。
+
+## 28. 多租户共存隔离的第二条路线：MPS（Multi-Process Service）（P39-1）
+
+> §27 用 Hopper **Green Contexts** 把整机 SM「按张数」硬分区，给共存负载确定性隔离，
+> 并明确留了「未测 **MPS**（Multi-Process Service）作为另一条隔离路线」（§27.6）。本节把它补上。
+> 关键区别是**进程边界**：§27 是同一进程内的两条流/green context；本节是**两个独立进程**——
+> 没有 MPS 时，不同进程的 kernel 在 GPU 上**不能真正并发**（由驱动在 kernel 间时分/抢占）；
+> 有了 MPS 才允许跨进程真并发，并可用 `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE` 给每个 client 设
+> 「线程容量上限」。源码 `src/mps_isolation.cu`、脚本 `harness/mps_isolation.sh`、原始输出
+> `harness/mps_isolation.out.txt`（目标卡 H100 / sm90，**固定空闲 device 3**，nvcc 13.2，
+> buf=256 MB，victim=20 趟求和，persist=40000 rounds；同一曲线在重复运行间稳定）。
+
+### 28.1 背景与问题
+
+「megakernel 独占整机」的前提（MPK §5 快照行 1168）在真实 serving 里很少成立：一卡常有多模型/
+多租户。§27 给出**进程内**的确定性解（Green Contexts SM 分区，victim 0.76× 基线、persist 无损）。
+但生产上更常见的是**多进程**共享一张卡（每个模型一个进程、每个训练任务一个进程）。这时有两条路：
+
+- **不用 MPS**：把整机交给一个进程，另一个进程的 kernel 会被驱动**时分/抢占**——语义上是「轮流独
+  占」，不是并发。
+- **用 MPS**：多个进程连到同一个 MPS server，共享一个 CUDA context，kernel 真正并发；
+  `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=P` 限制某 client 的**并发线程容量 / 可见 SM 数**（软限）。
+
+本节量三个问题：
+
+- **Q1（无 MPS）**：跨进程时，整机 persistent kernel 会不会把另一个进程的 kernel 饿死？
+- **Q2（MPS 真并发）**：MPS 默认（两 client 各 100%）下 victim 受多少干扰？
+- **Q3（软分区）**：`ACTIVE_THREAD_PERCENTAGE` 能不能当「软 SM 分区」用？它的**代价曲线**长什么样？
+
+### 28.2 方法
+
+被测体是**两个独立进程**（`src/mps_isolation.cu` 一个二进制、两种 mode）：
+
+- `persist`：整机访存为主的持久化 kernel（`rounds` 轮 grid-stride 只读求和），网格按
+  **当前进程可见的** SM 数 × 每 SM 占用率上限（8 blk/SM）铺满，结束用 CUDA event 记时长/带宽。
+- `victim`：普通 kernel（`passes` 趟 grid-stride 求和），用 CUDA event 计时（`record → launch →
+  record → 有界等待`），**计时段包含「被饿死而排队」的时间**（5 s 超时兜底）；预热 5 次、正式 7 次，
+  报 min/median。
+
+对照组：
+
+- **无 MPS**：直接两个进程、各自 `CUDA_VISIBLE_DEVICES=3`。
+- **有 MPS**：`nvidia-cuda-mps-control -d` 起 server（server 用 `CUDA_VISIBLE_DEVICES=3`，**只占
+  device 3**，pipe 用独立临时目录）；client **不设** `CUDA_VISIBLE_DEVICES`，经 pipe 连到 server
+  暴露的 device。persist 进程按 `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=P` 设 cap，victim 不设（默认 100%）。
+- 干扰场景：persist 后台跑（先 sleep 2 s 保证已在内核里）→ 跑 victim → 等 persist 自然结束读其带宽。
+
+### 28.3 原始结果
+
+```text
+=== P39-1 跨进程共存隔离：MPS vs 无 MPS（目标卡 H100 / sm90）===
+device=3  buf=256MB  victim_passes=20  persist_rounds=40000
+
+[Section A] 无 MPS：不同进程的 kernel 不能真正共驻（由驱动时分/抢占）
+  A0 victim alone (no MPS)      : VICTIM dev=NVIDIA H100 80GB HBM3 grid=1056 passes=20 min=1.779 median=1.781 ms
+  A1 persist alone (no MPS)     : PERSIST_DONE ms=3520.206 gbps=3050.2
+  A2 victim during persist      : VICTIM dev=NVIDIA H100 80GB HBM3 grid=1056 passes=20 min=1.791 median=1.792 ms
+  A2 persist (concurrent victim): PERSIST_DONE ms=3570.907 gbps=3006.9
+
+[Section B] MPS 默认：两 client 各 100%（真并发，共享占用/带宽）
+  B0 victim alone (in MPS)       : VICTIM dev=NVIDIA H100 80GB HBM3 grid=1056 passes=20 min=1.780 median=1.783 ms
+  B1 victim during persist       : VICTIM dev=NVIDIA H100 80GB HBM3 grid=1056 passes=20 min=2.565 median=2.780 ms
+  B1 persist (concurrent victim) : PERSIST_DONE ms=3539.016 gbps=3034.0
+
+[Section C] MPS 给 persistent 设 ACTIVE_THREAD_PERCENTAGE=P（线程容量上限）
+  C P=100 victim during persist : VICTIM ... min=2.488 median=2.769 ms
+  C P=100 persist rate (≈solo)  : PERSIST_DONE ms=3537.470 gbps=3035.3
+  C P=90  victim during persist : VICTIM ... min=17.641 median=17.652 ms
+  C P=90  persist rate (≈solo)  : PERSIST_DONE ms=3638.048 gbps=2951.4
+  C P=75  victim during persist : VICTIM ... min=7.088 median=7.093 ms
+  C P=75  persist rate (≈solo)  : PERSIST_DONE ms=3853.346 gbps=2786.5
+  C P=60  victim during persist : VICTIM ... min=4.987 median=4.994 ms
+  C P=60  persist rate (≈solo)  : PERSIST_DONE ms=4270.507 gbps=2514.3
+  C P=50  victim during persist : VICTIM ... min=3.576 median=3.584 ms
+  C P=50  persist rate (≈solo)  : PERSIST_DONE ms=4738.108 gbps=2266.2
+  C P=40  victim during persist : VICTIM ... min=3.240 median=3.244 ms
+  C P=40  persist rate (≈solo)  : PERSIST_DONE ms=5563.588 gbps=1929.9
+  C P=33  victim during persist : VICTIM ... min=3.050 median=3.054 ms
+  C P=33  persist rate (≈solo)  : PERSIST_DONE ms=6586.495 gbps=1630.2
+  C P=25  victim during persist : VICTIM ... min=2.900 median=2.906 ms
+  C P=25  persist rate (≈solo)  : PERSIST_DONE ms=8106.114 gbps=1324.6
+  C P=10  victim during persist : VICTIM ... min=2.582 median=2.629 ms
+  C P=10  persist rate (≈solo)  : PERSIST_DONE ms=21072.965 gbps=509.5
+```
+
+persist 进程打印的「可见 SM 数」随 cap 变化（`PERSIST dev=... SMs=... grid=...`）：
+`P=100→132 SM/grid 1056`、`90→118/944`、`75→98/784`、`60→78/624`、`50→66/528`、`40→52/416`、
+`33→42/336`、`25→32/256`、`10→13/104`。即 **`ACTIVE_THREAD_PERCENTAGE` 直接缩放了该进程可见的
+`multiProcessorCount`**。
+
+### 28.4 读法
+
+1. **无 MPS 时跨进程 kernel 不共驻，victim 不被饿死**（A）：victim 1.792 ms ≈ 基线 1.781 ms（1.006×），
+   persist 只慢 1.4%（3520→3571 ms）。设备在 kernel 间**时分/抢占**——victim 每轮拿到的是**整机
+   时间片**，所以延迟不受损；代价转嫁到 persist（上下文切换 + 被抢占）。这与 §27 进程内两条流的
+   134× 饿死**完全相反**：**同一张卡，「同进程并发」比「跨进程无 MPS」对邻居更糟**。
+2. **MPS 默认（各 100%）是真并发**（B）：victim 2.780 ms = **1.55× 基线**——两个访存 kernel 真共驻、
+   共享占用率与 HBM 带宽；persist 带宽几乎不变（3034 GB/s）。这才是「共享一张卡」的常规语义。
+3. **`ACTIVE_THREAD_PERCENTAGE` 是硬「线程容量」上限**：它把 client 可见 SM 数按 P 缩放
+   （见上表），persist 的网格随之下调。
+4. **反直觉：干扰峰值出现在「cap 略低于 100」**（C）。victim 相对基线的 slowdown 对 **P≥50** 精确
+   服从 `≈ 1/(1−P)`：
+
+   | P | victim median (ms) | slowdown | `1/(1−P)` |
+   |---|---|---|---|
+   | 100 | 2.769 | 1.55× | 时间片（不适用） |
+   | 90 | **17.652** | **9.90×** | 10.0 |
+   | 75 | 7.093 | 3.98× | 4.0 |
+   | 60 | 4.994 | 2.80× | 2.5 |
+   | 50 | 3.584 | 2.01× | 2.0 |
+   | 40 | 3.244 | 1.82× | 1.67 |
+   | 33 | 3.054 | 1.71× | 1.49 |
+   | 25 | 2.906 | 1.63× | 1.33 |
+   | 10 | 2.629 | 1.47× | 1.11 |
+
+   即：**给 persistent 留 10% 线程容量（P=90），就把 victim 饿死 ~10×，比完全不设 cap（1.55×）还糟
+   近 6 倍**；cap 越低 victim 越恢复。机理：P<100 时 MPS 做**空间化**的线程容量切分，victim 只剩
+   `(1−P)` 的容量 → 访存受限 kernel 的带宽/延迟按 `1/(1−P)` 退化；P=100 时两侧都满额，MPS 退回
+   **时间片**，反而只付 1.55×。
+5. **persist 自身的带宽随 cap 次线性**：3035→2951→2786→2514→2266→1930→1630→1325→509 GB/s
+   （P=100→10）。即「分区账」：persistent 少拿线程容量，**带宽降幅小于线程降幅**（访存早已饱和的
+   区间内，少量 SM 也能压出大部分带宽）；全在 P=10（13 SM）才崩塌。
+6. **三条隔离路线对比**：Green Contexts（§27，同进程 SM 张数硬分区）victim **0.76× 基线**、persist
+   无损、双向且**确定性**；MPS（跨进程，线程容量软限）**最坏 9.9×** 且非确定，还依赖 cap 取值；
+   无 MPS（跨进程时分）victim ≈ 基线但**不是并发**。**结论：要确定性公平隔离用 Green Contexts/
+   独占；MPS 只保证「能并发」，不保证公平**。
+
+### 28.5 与判据 / MPK / 生产案例的关系
+
+- **判据（C1–C5）**：`persist` 是单 kernel、满足 C1/C2；**MPS 是进程/驱动层的资源约束，比 Green
+  Contexts 更外一层**（它不是设备内协调、也不改 kernel），是「C4 的更粗粒度容器」。三者都不涉 C3/C5
+  ——本节谈的是 megakernel **占满整机**这一外部性，不是它内部调度。
+- **与 MPK 的关系**：MPK §5（行 1168）在**语义上**假定独占整机（worker/scheduler 固定匹配物理 SM），
+  内核无法感知「少给了几个 SM」。MPS 提供了「整机一个 context、多个 client」这一部署形态，但 §28.4.4
+  说明**它不会自动保护共存负载，最坏情况比不隔离还差**——给整机 megakernel 做 MPS 隔离时，cap 应
+  设得**明显低**（P≤25）而不是「尽量高」，否则会给邻居 ~10× 惩罚。
+- **与生产案例**：DeepGEMM mega 家族（`docs/02` §1）按整机 CTA/warpgroup 铺静态角色；真实 serving
+  一卡多模型。本节给量化结论：**「整机 megakernel + 共存进程」若无隔离，跨进程靠时分（邻延迟≈基线、
+  但非并发）；用 MPS 反而可能把邻居饿死到 ~10×（P≈90）**。与 §27 合看：**进程内共享**用 Green
+  Contexts 分区、**跨进程共享**优先独占/Green Contexts，MPS 只在「确实需要跨进程并发且已显式留足
+  (1−P) 余量」时用。
+- **三条粒度**：P29-1 的 cluster 是**片内**分区（≤16 block）、§27 的 green context 是**整机 SM 张数**
+  分区、§28 的 MPS 是**跨进程线程容量**软限——同一动机（按需局部化）的三个粒度。
+
+### 28.6 局限与踩到的坑
+
+- **victim 是合成访存 kernel**（grid-stride 求和），倍数以**量级**读；`1/(1−P)` 是 P≥50 的经验律，
+  P<50 有 ~1.4–1.6× 的固定地板（MPS 协调/带宽争用），未做 ncu 归因。
+- **persist 网格随 cap 自动缩放**（可见 `multiProcessorCount` 变了），不是「固定网格下只改线程容量」；
+  这既是 MPS 的真实行为，也意味着观测到的是「可见 SM + 线程容量」的合成效应。
+- 跨进程重叠靠 `sleep 2 s` 保证（persist 跑 3.5–21 s，远超 2 s）；victim 有 5 s 超时兜底。
+- **MPS 关键坑**：client 若设 `CUDA_VISIBLE_DEVICES` 会连不上 MPS server（报
+  `no CUDA-capable device is detected`）。正确做法是 **server** 用 `CUDA_VISIBLE_DEVICES=3` 限定，
+  **client 不设**（经 pipe 连到 server 暴露的 device 0）。MPS server 用独立 pipe/log 临时目录，
+  实验后 `echo quit | nvidia-cuda-mps-control` 清理；只影响 device 3。
+- 未测：**cap 加在 victim 侧**、多 client（>2）、MPS 的 `CUDA_MPS_PINNED_DEVICE_MEM_LIMIT`、
+  与 Green Contexts 叠加；也未测 MPS 内 cluster/`smCoscheduledAlignment` 交互（§27.6 同一条尾巴）。
+- MPS 官方语义见 NVIDIA 文档 “Multi-Process Service”（`https://docs.nvidia.com/deploy/mps/index.html`）。

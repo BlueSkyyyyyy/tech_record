@@ -863,6 +863,36 @@
   `smCoscheduledAlignment=8` 不整除，第二组必须 `cudaDevSmResourceGroupBackfill`；`smA=128` 余 4 SM
   小于最小分组而 split 失败。**本轮新增实验。**
 
+### P39 实验扩展 21：MPS 作为第二条共存隔离路线（`docs/04-experiments.md` §28）
+
+- [x] **P39-1** 补齐 `docs/04` §27.6 明确留的「**未测 MPS**（Multi-Process Service）作为另一条
+      隔离路线」尾巴，并把 §27 的**进程内**（两条流 / green context）共存推进到**跨进程**维度：
+      没有 MPS 时不同进程的 kernel **不能真正并发**（驱动时分/抢占）；MPS 才允许跨进程真并发，
+      并可用 `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=P` 给每个 client 设「线程容量 / 可见 SM 上限」。
+      见 `docs/04-experiments.md` §28，源码 `src/mps_isolation.cu`、脚本 `harness/mps_isolation.sh`、
+      原始输出 `harness/mps_isolation.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
+      buf=256 MB、victim=20 趟求和、persist=40000 rounds）。两个**独立进程**（`persist` 整机访存
+      持久化 kernel / `victim` 普通求和 kernel、CUDA event 计时含被饿死等待）对照：
+      - **无 MPS**：victim **1.792 ms ≈ 基线 1.781 ms（1.006×）**，persist 只慢 1.4%——跨进程 kernel
+        **不共驻**、由驱动时分/抢占，victim 每轮拿整机时间片，代价转嫁到 persist。**与 §27 进程内
+        两条流的 134× 饿死完全相反**（同卡「同进程并发」比「跨进程无 MPS」对邻居更糟）。
+      - **MPS 默认（各 100%，真并发）**：victim **2.780 ms = 1.55× 基线**，persist 带宽几乎不变
+        （3034 GB/s）。
+      - **`ACTIVE_THREAD_PERCENTAGE=P` 是硬线程容量上限**：它把该进程可见 `multiProcessorCount`
+        按 P 缩放（100→132、90→118、75→98、50→66、25→32、10→13 SM），persist 网格随之下调。
+      - **反直觉：干扰峰值在「cap 略低于 100」**——victim slowdown 对 **P≥50 精确服从 `≈1/(1−P)`**：
+        P=90→**9.90×**（1/0.10=10）、P=75→3.98×、P=60→2.80×、P=50→2.01×；**给 persistent 留 10%
+        容量就把 victim 饿死 ~10×，比不设 cap（1.55×）还糟 ~6 倍**；cap 越低越恢复（P=10→1.47×）。
+      - persist 自身带宽随 cap **次线性**（3035→509 GB/s，P=100→10）——「分区账」是带宽降幅 < 线程降幅。
+      - **三路线对比**：Green Contexts（§27，同进程 SM 张数硬分区）victim **0.76× 基线**、persist
+        无损、双向且**确定**；MPS（跨进程线程容量软限）**最坏 9.9×** 且非确定；无 MPS（跨进程时分）
+        victim ≈ 基线但**非并发**。**要确定性公平隔离用 Green Contexts/独占；MPS 只保证「能并发」，
+        不保证公平**——给整机 megakernel 做 MPS 隔离时 cap 应设得**明显低**（P≤25）。
+      判据：`persist` 单 kernel 满足 C1/C2；MPS 是**进程/驱动层**约束、比 Green Contexts 更外一层
+      （C4 的更粗粒度容器），均不涉 C3/C5。踩坑：**MPS client 若设 `CUDA_VISIBLE_DEVICES` 会连不上
+      server**（`no CUDA-capable device`），须 server 设 CVD、client 不设；server 用独立 pipe 目录、
+      实验后 `echo quit` 清理，仅影响 device 3。**本轮新增实验。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -885,7 +915,28 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P38-1 完成（1/1）**。把「megakernel = 单次 launch **占满整机**」这一被前面所有小节默认
+- 当前进度：**P39-1 完成（1/1）**。补齐 `docs/04` §27.6 明确留的「**未测 MPS**（Multi-Process
+  Service）作为另一条隔离路线」尾巴，把 §27 的**进程内**共存（两条流 / green context）推进到**跨进程**
+  维度：无 MPS 时不同进程的 kernel 不能真并发（驱动时分/抢占），MPS 才允许跨进程真并发并可用
+  `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE=P` 设「线程容量 / 可见 SM 上限」。`docs/04-experiments.md` 新增
+  **§28**，源码 `src/mps_isolation.cu`、脚本 `harness/mps_isolation.sh`、原始输出
+  `harness/mps_isolation.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、buf=256 MB、
+  victim=20 趟求和、persist=40000 rounds）。两个**独立进程**对照。核心结论：
+  - **无 MPS**：victim **1.792 ms ≈ 基线 1.781 ms（1.006×）**、persist 只慢 1.4%——跨进程 kernel
+    **不共驻**、驱动时分/抢占，victim 拿整机时间片；**与 §27 进程内两条流的 134× 饿死完全相反**。
+  - **MPS 默认（各 100% 真并发）**：victim **1.55× 基线**，persist 带宽几乎不变（3034 GB/s）。
+  - **`ACTIVE_THREAD_PERCENTAGE=P` 是硬线程容量上限**：按 P 缩放该进程可见 SM 数（100→132、90→118、
+    75→98、50→66、25→32、10→13）。
+  - **反直觉：干扰峰值在「cap 略低」**——victim slowdown 对 **P≥50 精确服从 `≈1/(1−P)`**：P=90→**9.90×**、
+    75→3.98×、60→2.80×、50→2.01×；**留 10% 容量就把 victim 饿死 ~10×、比不设 cap（1.55×）还糟 ~6 倍**；
+    cap 越低越恢复（P=10→1.47×）。persist 带宽随 cap **次线性**（3035→509 GB/s）。
+  - **三路线**：Green Contexts（§27）victim **0.76× 基线**、确定、双向；MPS 最坏 **9.9×**、非确定；
+    无 MPS victim≈基线但**非并发**。**要确定性隔离用 Green Contexts/独占；MPS 只保证能并发、不保证
+    公平**——给整机 megakernel 做 MPS 隔离时 cap 应设得**明显低**（P≤25）。
+  判据：`persist` C1/C2；MPS 是进程/驱动层约束（C4 的更粗容器），均不涉 C3/C5。踩坑：MPS client 设
+  `CUDA_VISIBLE_DEVICES` 会连不上 server。**本轮新增实验，全专题任务清单仍全部完成。**
+
+- 此前：**P38-1 完成（1/1）**。把「megakernel = 单次 launch **占满整机**」这一被前面所有小节默认
   接受的前提**翻到成本面**：整机持久化内核对**共存负载**（另一模型/租户）的干扰，以及 Hopper
   **Green Contexts** SM 分区能否硬隔离——补齐 MPK §5「worker/scheduler 分配固定在 launch 时、匹配物理
   SM 数」（快照行 1168）的**部署含义**，把 P10-1（占用率上限）/P14-1（占用率代价）从「单 kernel 内」
@@ -1226,7 +1277,22 @@
      的价值在「占满机器」，饱和后只剩协调开销）、~~显式构图 + CUDA Graph 的 `PROGRAMMATIC` 边~~
      （**P35-1 完成**：`docs/04` §24——programmatic 边把下游**调度点**前移到上游完成之前、但
      `cudaGridDependencySynchronize` 仍等完成、capture ≡ 显式构图、节点级 PDL 属性被驱动拒绝）。
-    **至此「下一步」剩余可选方向全部完成，全专题无遗留必做项。**
+     **至此「下一步」剩余可选方向全部完成**；随后 **P36-1/P37-1/P38-1/P39-1** 又各自补掉了
+     `docs/04` 明留的尾巴（条件节点 `cwhile`、device graph launch、Green Contexts 分区、MPS 跨进程
+     隔离），**全专题无遗留必做项**。
+- **本轮（P39-1）**：`docs/04-experiments.md` 新增 **§28**「多租户共存隔离的第二条路线：MPS」——
+  新源码 `src/mps_isolation.cu`、脚本 `harness/mps_isolation.sh`、原始输出 `harness/mps_isolation.out.txt`
+  （目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2）。补 §27.6「未测 MPS」尾巴，把共存从「进程内
+  两条流」推进到**跨进程**：`persist`（整机访存持久化）与 `victim`（求和）两个独立进程，对照
+  无 MPS / MPS 默认 100% / MPS `ACTIVE_THREAD_PERCENTAGE=P`。核心结论：(1) **无 MPS 跨进程 kernel
+  不共驻**——victim 1.006× 基线、persist 只慢 1.4%（驱动时分/抢占，与 §27 进程内 134× 饿死相反）；
+  (2) **MPS 真并发**默认 1.55×；(3) **`ACTIVE_THREAD_PERCENTAGE` 缩放可见 SM 数**（100→132…10→13）；
+  (4) **干扰峰值在 cap 略低**：P≥50 时 slowdown `≈1/(1−P)`（P=90→9.90×、75→3.98×、50→2.01×），
+  **留 10% 容量饿死 victim ~10×、比不设 cap 还糟 ~6×**；persist 带宽随 cap 次线性（3035→509 GB/s）；
+  (5) 三路线对比——Green Contexts 0.76×/确定，MPS 最坏 9.9×/非确定，无 MPS ≈基线但非并发；
+  **整机 megakernel 做 MPS 隔离时 cap 应明显低（P≤25）**。判据：`persist` C1/C2，MPS 是进程/驱动层
+  约束（C4 更粗容器），不涉 C3/C5。踩坑：MPS client 设 `CUDA_VISIBLE_DEVICES` 会连不上 server。
+  **本轮新增实验。**
 - **本轮（P25-1 续）**：续做 P25-1 的「MPK 端到端跑通」，把上轮「执行不收敛」从玄学死锁推进到
   **可复现、可归因的时序竞态**。`docs/09-mpk-build.md` 新增 **§7**（收敛性诊断），新原始输出
   `harness/mpk_converge_plain.out.txt` / `harness/mpk_converge_instrumented.out.txt` /
