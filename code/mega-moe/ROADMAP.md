@@ -2871,6 +2871,45 @@
       ——`barrier_comm_profiling` 的真实作用比 docstring「削 CPU 发射抖动」多一层「避降频」。
       配套博客 `content/posts/mega-moe-101-deepep-barrier-test-oracle`（索引页新增第 101 篇）。
 
+### P92 增量（opt-in，补齐 Mega Gate / Mega mHC 从没被单独读过的两个分段屏障调度器）
+
+- [x] **P92-1** **Mega Gate / Mega mHC 的跨 CTA 分段屏障调度器与工作区布局**
+      （`deep_gemm/include/deep_gemm/scheduler/mega_gate.cuh`（`ScoreBarrier`）/
+      `scheduler/mega_mhc.cuh`（`SplitBarrier`/`Norm`/`Mix`）；
+      `layout/mega_gate.cuh:22-24/78-108`；`layout/mega_mhc.cuh:37-41/80-120`；
+      `ptx/utils.cuh:23-27`（`%gridid`）；`ptx/ld_st.cuh:308/340/360`；
+      调用点 `impls/sm100_bf16_mega_gate.cuh:55-56/75/268-302`、
+      `impls/sm100_mega_mhc.cuh:51/173-178/323/379/583/653`、
+      `epilogue/sm100_mega_mhc.cuh:17-24/292-306`；host `csrc/apis/{mega_gate,mega_mhc}.hpp:13-38`、
+      `csrc/jit_kernels/impls/{sm100_bf16_mega_gate,sm100_mega_mhc}.hpp:23/84 与 29/146`；
+      `heuristics/mega_gate.hpp:110-111/126`）。
+      第 5 篇（Mega Gate）与第 5 篇下篇（Mega mHC）只在注释里提过「split-K 时用 `ScoreBarrier` /
+      `SplitBarrier` 跨 CTA 汇聚（`scheduler:13-39/49`）」，第 87 篇拆的 `grid_sync`/`nvlink_barrier`
+      是**跨 rank** 的同步原语——**同一 kernel 内按 token-block / m-block 分段**的这两个文件（共 96 行）
+      从没被单独读过。**除一行 `red.async` 外全架构无关，H100(sm90) 直接 include 真实头文件跑真实设备代码**。
+      → `docs/102-mega-gate-mhc-split-barrier.md`（真实行号核对）：**状态编码**「`状态 = (grid 标签)*stride
+      + (到达数)`」——gate `(g+1)*kNumMaxLogicalCtas(64)+n`、mHC `(g+1)*kNumSplitBarriers(2)*kNumMaxSplits(64)+n`；
+      **免复位**靠 `%gridid`（`ptx/utils.cuh:23-27`）每 launch 自增给出全新基数（对照第 87 篇 `grid_sync`
+      的 2³¹ 免复位），host `torch.zeros` 只在每 stream 首次分配（`apis:13-25/26-38` 的 capture 断言强制
+      CUDA Graph 前 warm-up）。**三个「为什么」**：① `wait_init` 的无符号距离（`while (ld_acq - base >= C)`）
+      **同时**拒绝「上一轮残留」（距离回绕成极大）与「本轮未 arm」，却接受本轮任意部分到达（`mega_gate.cuh:27`/
+      `mega_mhc.cuh:32` 同一注释）；② `arrive` 的 `red.async.release.gpu.global.add.u64` 是**唯一 SM100
+      专属的一行**（ptxas `sm_90a` 报 `requires .target sm_100 or higher`；真机用同语义同步 `red` 替身）；
+      ③ 状态位**进位隔离**——stride 必须严格大于最大到达数（gate `:15` 断言；mHC 用 128 > `kNumSplits`）。
+      另拆 **结构对照**（槽索引 / 128B line 防 false sharing / `SplitBarrier::get_ptr:15-18` 的
+      `kBarrierIndex*kNumMaxMBlocks + m_block_idx` 让 Norm/Mix 互不重叠）、两个 `Workspace` 几何
+      （gate 屏障数组 8 MiB / mHC 4 MiB；score scratch 与三段 partial 偏移）、**四个角色调用链**
+      （gate：worker group 内 rank0 init、其余 wait_init、每片 arrive、队首 wait；mHC：owner SM init、
+      全体任务 wait_init、每 split arrive、epilogue wait）与 deterministic 差异（gate 关 split-K 使
+      `kNumLogicalCtas==1` 直接跳过屏障 `:271/298/301`；mHC 只是把 splits 钉成 16）。H100 实测
+      `harness/exp_mega_gate_mhc_split_barrier.{sh,out.txt}` + `src/mega_gate_mhc_split_barrier.cu`
+      （真实头文件 sha256 `mega_gate.cuh 4aef186a…`/`mega_mhc.cuh bf774cfa…`）**31 PASS / 0 FAIL**：
+      `ScoreBarrier` C∈{1,4,8} 连续两次 launch 不重置仍 mismatch=0、终止态到达数字段==C；`wait_init`
+      三种预置状态（陈旧/arm/部分到达）逐一钉死（init_seen_before_return=1/0/0）；`SplitBarrier`
+      Norm/Mix × splits∈{4,16} 四组免复位通过、`get_ptr` 偏移 `off0=mb*128`/`off1=(16384+mb)*128`；
+      `Workspace` host 算术 7/7；**`arrive` 在 `sm_90a` 编不过、`sm_100a` 编得过**（S 组硬证据）。
+      配套博客 `content/posts/mega-moe-102-mega-gate-mhc-split-barrier`（索引页新增第 102 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -2896,8 +2935,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P91 各增量完成（P15-1…P41-1、P42-1…P91-1）。**
-  本轮 P91-1：新建 `docs/101-deepep-barrier-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P92 各增量完成（P15-1…P41-1、P42-1…P92-1）。**
+  本轮 P92-1：新建 `docs/102-mega-gate-mhc-split-barrier.md`
+  （+`src/mega_gate_mhc_split_barrier.cu`、`harness/exp_mega_gate_mhc_split_barrier.{sh,out.txt}`）——
+  补齐 Mega Gate / Mega mHC **从没被单独读过的两个分段屏障调度器** `scheduler/mega_gate.cuh`
+  （`ScoreBarrier`）与 `scheduler/mega_mhc.cuh`（`SplitBarrier`/`Norm`/`Mix`）及其 `Workspace` 布局。
+  状态编码 `(grid 标签)*stride + 到达数`、`%gridid` 免复位、`wait_init` 的无符号距离语义、
+  `arrive` 的 `red.async` SM100 专属、进位隔离、128B line 防 false sharing、四个角色调用链与
+  deterministic 差异。**除一行 `red.async` 外全架构无关**，H100(sm90) 直接 include 真实头文件跑真实
+  设备代码 **31 PASS / 0 FAIL**（含 `arrive` 在 `sm_90a` 编不过 / `sm_100a` 编得过）。索引页新增第 102 篇。
+  上一轮 P91-1：新建 `docs/101-deepep-barrier-test-oracle.md`
   （+`harness/exp_deepep_barrier_profiling.{py,sh,out.txt}`）——补齐 DeepEP 测试套件里**最后一份
   未覆盖的验收测试** `tests/comm/test_barrier.py` 与它暴露的**通信 kernel 精确测时方法论**。
   `test_barrier` 只测单次屏障耗时（`loop_barrier` ×1000、`bench_kineto(..., barrier_comm_profiling=True,
@@ -3947,7 +3994,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P91 已完成（最新 **P91-1 DeepEP 屏障的验收基准与「通信 kernel 精确测时」方法论**：
+- **下一步**：P0~P92 已完成（最新 **P92-1 Mega Gate / Mega mHC 的跨 CTA 分段屏障调度器与工作区布局**：
+  `scheduler/mega_gate.cuh` 的 `ScoreBarrier` + `scheduler/mega_mhc.cuh` 的 `SplitBarrier`/`Norm`/`Mix`
+  ——状态编码 `(grid 标签)*stride + 到达数`、`%gridid` 免复位、`wait_init` 无符号距离、`arrive` 的
+  `red.async` SM100 专属、进位隔离、128B line、两个 `Workspace` 几何、四个角色调用链与 deterministic
+  差异；除一行 `red.async` 外全架构无关，H100 真机 31/31 ALL PASS；详见上）。
+  上一轮 P91-1：P0~P91 已完成（**P91-1 DeepEP 屏障的验收基准与「通信 kernel 精确测时」方法论**：
   `tests/comm/test_barrier.py`（测试套件里最后一份未覆盖文件）+ `bench_kineto(barrier_comm_profiling=...)`
   路径——域 `allow_hybrid_mode` 语义、host 链路、`launch_barrier` 公式、设备 sequential/并行内核；
   设备 kernel 走 NCCL GIN 仅分析；H100 真机 Part B/C/D/E 全 PASS；**Part F 发现 profiler 测时双峰

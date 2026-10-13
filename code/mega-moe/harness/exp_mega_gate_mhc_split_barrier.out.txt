@@ -1,0 +1,78 @@
+== 真实头文件 sha256 ==
+4aef186a0bd654172b0573f24fe163666d5e882749d97aa7528d4163b7b50a4a  ~/github/DeepGEMM/deep_gemm/include/deep_gemm/scheduler/mega_gate.cuh
+bf774cfaa8ce01cd31d77463637c9e543ee6684ef82386790baffc105bae73e5  ~/github/DeepGEMM/deep_gemm/include/deep_gemm/scheduler/mega_mhc.cuh
+543ca6ee1f5c2e2bb04144232fbbab26026afcd0e12d3a547891d1a306ba25e7  ~/github/DeepGEMM/deep_gemm/include/deep_gemm/layout/mega_gate.cuh
+ca34571ab54950de16d9019d3f952df6ce091e9938f0e7e180c7d343ae9bb572  ~/github/DeepGEMM/deep_gemm/include/deep_gemm/layout/mega_mhc.cuh
+8a9d5e03afdeb20f53b1027e9f6f3a2ef45bb33152dba2b61d778684e1716412  ~/github/DeepGEMM/deep_gemm/include/deep_gemm/ptx/utils.cuh
+912e9f9a83d9c8fccebe1b9905487cb3ad3052fff84f63cff1da2834c84377ac  ~/github/DeepGEMM/deep_gemm/include/deep_gemm/ptx/ld_st.cuh
+NVIDIA H100 80GB HBM3, 9.0
+== 真实 arrive（red.async）在 sm_90a ==
+SM90_ARRIVE_COMPILE FAILED
+ptxas /tmp/tmpxft_0027a84e_00000000-6_real_arrive_probe.ptx, line 34; error   : Feature 'st.async/red.async with .global state space' requires .target sm_100 or higher
+== 真实 arrive（red.async）在 sm_100a ==
+SM100_ARRIVE_COMPILE OK
+Device sm_count=132
+
+== Part A: ScoreBarrier 全协议（免复位）==
+GATE_PROTO C=4 tb=3 zero_before=1 mismatch=0x0 arrival_field=4
+A1 ScoreBarrier C=4 x2 launches (no reset)     PASS
+GATE_PROTO C=8 tb=3 zero_before=0 mismatch=0x0 arrival_field=8
+A2 ScoreBarrier C=8 x2 launches (no reset)     PASS
+GATE_PROTO C=1 tb=3 zero_before=0 mismatch=0x0 arrival_field=1
+A3 ScoreBarrier C=1 x2 launches (no reset)     PASS
+
+== Part B: ScoreBarrier::wait_init 无符号距离 ==
+GATE_STALE mode=0 init_seen_before_return=1 (expect 1)
+B1 stale terminal rejected (wait until init)   PASS
+GATE_STALE mode=1 init_seen_before_return=0 (expect 0)
+B2 current-grid armed accepted immediately     PASS
+GATE_STALE mode=2 init_seen_before_return=0 (expect 0)
+B3 current-grid partial arrival accepted       PASS
+
+== Part C: SplitBarrier get_ptr 偏移 + 全协议 ==
+MHC_PTR off0=[0,128,256,...] off1=[2097152,2097280,2097408,...] line=128
+C1 SplitBarrier get_ptr line offsets           PASS
+MHC_PROTO idx=0 splits=4 sms=8 mb=5 mismatch=0x0 arrival_field=4
+C2 Norm(idx0) splits=4 x2 (no reset)           PASS
+MHC_PROTO idx=1 splits=4 sms=8 mb=5 mismatch=0x0 arrival_field=4
+C3 Mix (idx1) splits=4 x2 (no reset)           PASS
+MHC_PROTO idx=0 splits=16 sms=8 mb=5 mismatch=0x0 arrival_field=16
+C4 Norm(idx0) splits=16 x2 (no reset)          PASS
+MHC_PROTO idx=1 splits=16 sms=8 mb=5 mismatch=0x0 arrival_field=16
+C5 Mix (idx1) splits=16 x2 (no reset)          PASS
+
+== Part D: Workspace host 算术 ==
+D1 gate scratch bytes                          PASS
+D2 gate score_ptr offset                       PASS
+D3 mHC num_m_blocks                            PASS
+D4 mHC scratch bytes                           PASS
+D5 mHC gemm_partial offset                     PASS
+D6 mHC norm_sqr offset                         PASS
+D7 mHC x1_sqr offset                           PASS
+GATE consts BLOCK_K=64 kScoreBarrierLineBytes=128 kNumMaxLogicalCtas=64 kNumMaxTokenBlocks=65536
+MHC  consts BLOCK_M=64 kNumSplitBarriers=2 kNumMaxSplits=64 kNumMaxMBlocks=16384 line_bytes=128
+
+ALL PASS (0 FAIL)
+== 真实 arrive（red.async）在 sm_90a ==
+SM90_ARRIVE_COMPILE FAILED
+ptxas /tmp/tmpxft_0027a84e_00000000-6_real_arrive_probe.ptx, line 34; error   : Feature 'st.async/red.async with .global state space' requires .target sm_100 or higher
+== 真实 arrive（red.async）在 sm_100a ==
+SM100_ARRIVE_COMPILE OK
+
+== Python 侧判定 ==
+A) ScoreBarrier C=4  mismatch=0x0 arrival_field=4 OK
+A) ScoreBarrier C=8  mismatch=0x0 arrival_field=8 OK
+A) ScoreBarrier C=1  mismatch=0x0 arrival_field=1 OK
+B) wait_init mode=0 init_seen_before_return=1 expect=1 OK
+B) wait_init mode=1 init_seen_before_return=0 expect=0 OK
+B) wait_init mode=2 init_seen_before_return=0 expect=0 OK
+C1) get_ptr line=128  off0/line=[0, 1, 2] off1/line(-kNumMaxMBlocks)=present  OK
+C) SplitBarrier idx=0 splits=4  mismatch=0x0 arrival_field=4 OK
+C) SplitBarrier idx=1 splits=4  mismatch=0x0 arrival_field=4 OK
+C) SplitBarrier idx=0 splits=16 mismatch=0x0 arrival_field=16 OK
+C) SplitBarrier idx=1 splits=16 mismatch=0x0 arrival_field=16 OK
+S) 真实 arrive(red.async) 在 sm_90a 编不过  OK
+S) 真实 arrive(red.async) 在 sm_100a 编得过  OK
+
+PASS=31 FAIL=0
+总判定: ALL PASS
