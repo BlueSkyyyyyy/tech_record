@@ -1,0 +1,124 @@
+NVIDIA H100 80GB HBM3, 9.0
+
+==============================================================================
+Part A：test_legacy.py 顶层结构（真机 introspection）
+==============================================================================
+test_legacy.__file__ = ~/github/DeepGEMM/tests/test_legacy.py
+源文件行数 = 95
+顶层 test_ 函数 = ['test_m_grouped_gemm_contiguous_tl', 'test_k_grouped_gemm_contiguous_tl']
+__main__ 入口片段：
+  if __name__ == '__main__':
+      torch.manual_seed(0)
+      random.seed(0)
+  
+      print('Library path:')
+      print(f' > {deep_gemm.__path__}\n')
+  
+      test_m_grouped_gemm_contiguous_tl()
+      test_k_grouped_gemm_contiguous_tl()
+[PASS] A1 无 arch 门控（H100 直接全跑）: 源里出现 get_arch_major/test_filter = False
+[PASS] A2 __main__ 直调两个测试函数: funcs=['test_m_grouped_gemm_contiguous_tl', 'test_k_grouped_gemm_contiguous_tl']
+[PASS] A3 操作数来自 tests/generators（bf16 模式）: generate_m_grouped_contiguous / generate_k_grouped_contiguous
+
+==============================================================================
+Part B：枚举计数（bf16；arch9=H100）
+==============================================================================
+get_arch_major() = 9
+m-grouped contiguous bf16 配置数 = 32
+k-grouped contiguous bf16 配置数 = 7
+m-grouped 实际发射 kernel 次数 = 32 × 4 = 128
+k-grouped 实际发射 kernel 次数 = 7 × 2 = 14
+[PASS] B1 m-grouped bf16 枚举 32 配置（含 use_psum 重复轴）: 实际 32
+[PASS] B2 k-grouped bf16 (arch9) 枚举 7 配置: 实际 7
+generate_m_grouped_contiguous use_psum_layout 默认 = False
+[PASS] B3 m-grouped 枚举的 psum 轴未透传（成对重复）: 默认 False，故 32→16 唯一
+
+==============================================================================
+Part C：直接跑真实测试体（bench_kineto 打桩，形状不缩）
+==============================================================================
+Testing m-grouped contiguous Triton GEMM:
+ > Perf (num_groups=4, m=40832, n= 6144, k= 7168, layout=NT):  100 us | 35965 TFLOPS | 14394 GB/s
+ > Perf (num_groups=4, m=36096, n= 6144, k= 7168, layout=NN):  100 us | 31793 TFLOPS | 13133 GB/s
+ > Perf (num_groups=4, m=32384, n= 7168, k= 3072, layout=NT):  100 us | 14262 TFLOPS | 8394 GB/s
+ > Perf (num_groups=4, m=39936, n= 7168, k= 3072, layout=NN):  100 us | 17588 TFLOPS | 9941 GB/s
+ > Perf (num_groups=4, m=32896, n= 4096, k= 4096, layout=NT):  100 us | 11038 TFLOPS | 6732 GB/s
+ > Perf (num_groups=4, m=32768, n= 4096, k= 4096, layout=NN):  100 us | 10995 TFLOPS | 6711 GB/s
+ > Perf (num_groups=4, m=30080, n= 4096, k= 2048, layout=NT):  100 us | 5047 TFLOPS | 4367 GB/s
+ > Perf (num_groups=4, m=30336, n= 4096, k= 2048, layout=NN):  100 us | 5090 TFLOPS | 4399 GB/s
+ > Perf (num_groups=8, m=33664, n= 6144, k= 7168, layout=NT):  100 us | 29651 TFLOPS | 16009 GB/s
+ > Perf (num_groups=8, m=31872, n= 6144, k= 7168, layout=NN):  100 us | 28073 TFLOPS | 15532 GB/s
+ > Perf (num_groups=8, m=31616, n= 7168, k= 3072, layout=NT):  100 us | 13924 TFLOPS | 9998 GB/s
+ > Perf (num_groups=8, m=34560, n= 7168, k= 3072, layout=NN):  100 us | 15220 TFLOPS | 10601 GB/s
+ > Perf (num_groups=8, m=35072, n= 4096, k= 4096, layout=NT):  100 us | 11768 TFLOPS | 8431 GB/s
+ > Perf (num_groups=8, m=35712, n= 4096, k= 4096, layout=NN):  100 us | 11983 TFLOPS | 8535 GB/s
+ > Perf (num_groups=8, m=32000, n= 4096, k= 2048, layout=NT):  100 us | 5369 TFLOPS | 5274 GB/s
+ > Perf (num_groups=8, m=34560, n= 4096, k= 2048, layout=NN):  100 us | 5798 TFLOPS | 5589 GB/s
+ > Perf (num_groups=4, m=40832, n= 6144, k= 7168, layout=NT):  100 us | 35965 TFLOPS | 14394 GB/s
+ > Perf (num_groups=4, m=36096, n= 6144, k= 7168, layout=NN):  100 us | 31793 TFLOPS | 13133 GB/s
+ > Perf (num_groups=4, m=32384, n= 7168, k= 3072, layout=NT):  100 us | 14262 TFLOPS | 8394 GB/s
+ > Perf (num_groups=4, m=39936, n= 7168, k= 3072, layout=NN):  100 us | 17588 TFLOPS | 9941 GB/s
+ > Perf (num_groups=4, m=32896, n= 4096, k= 4096, layout=NT):  100 us | 11038 TFLOPS | 6732 GB/s
+ > Perf (num_groups=4, m=32768, n= 4096, k= 4096, layout=NN):  100 us | 10995 TFLOPS | 6711 GB/s
+ > Perf (num_groups=4, m=30080, n= 4096, k= 2048, layout=NT):  100 us | 5047 TFLOPS | 4367 GB/s
+ > Perf (num_groups=4, m=30336, n= 4096, k= 2048, layout=NN):  100 us | 5090 TFLOPS | 4399 GB/s
+ > Perf (num_groups=8, m=33664, n= 6144, k= 7168, layout=NT):  100 us | 29651 TFLOPS | 16009 GB/s
+ > Perf (num_groups=8, m=31872, n= 6144, k= 7168, layout=NN):  100 us | 28073 TFLOPS | 15532 GB/s
+ > Perf (num_groups=8, m=31616, n= 7168, k= 3072, layout=NT):  100 us | 13924 TFLOPS | 9998 GB/s
+ > Perf (num_groups=8, m=34560, n= 7168, k= 3072, layout=NN):  100 us | 15220 TFLOPS | 10601 GB/s
+ > Perf (num_groups=8, m=35072, n= 4096, k= 4096, layout=NT):  100 us | 11768 TFLOPS | 8431 GB/s
+ > Perf (num_groups=8, m=35712, n= 4096, k= 4096, layout=NN):  100 us | 11983 TFLOPS | 8535 GB/s
+ > Perf (num_groups=8, m=32000, n= 4096, k= 2048, layout=NT):  100 us | 5369 TFLOPS | 5274 GB/s
+ > Perf (num_groups=8, m=34560, n= 4096, k= 2048, layout=NN):  100 us | 5798 TFLOPS | 5589 GB/s
+
+Testing k-grouped contiguous Triton GEMM:
+ > Perf (num_groups=8, m=  768, n= 2048, k= 1408, layout=TN):  100 us |   44 TFLOPS |  583 GB/s
+ > Perf (num_groups=4, m= 4096, n= 7168, k=32768, layout=TN):  100 us | 19241 TFLOPS | 12080 GB/s
+ > Perf (num_groups=4, m= 7168, n= 2048, k=35968, layout=TN):  100 us | 10560 TFLOPS | 8978 GB/s
+ > Perf (num_groups=8, m= 4096, n= 7168, k=29824, layout=TN):  100 us | 17513 TFLOPS | 16114 GB/s
+ > Perf (num_groups=8, m= 7168, n= 2048, k=33152, layout=TN):  100 us | 9733 TFLOPS | 10808 GB/s
+ > Perf (num_groups=16, m= 4096, n= 7168, k=33280, layout=TN):  100 us | 19542 TFLOPS | 26288 GB/s
+ > Perf (num_groups=16, m= 7168, n= 2048, k=33024, layout=TN):  100 us | 9696 TFLOPS | 15482 GB/s
+
+[PASS] C1 真实测试体全流程无断言失败（两个函数）: 耗时 16.8s 
+  （上面两段 "Testing ..." 输出即真实测试体打印；perf 行是桩值）
+
+==============================================================================
+Part D：k-grouped 的跳过闸门语义
+==============================================================================
+arch9 真实枚举 7 条，闸门后保留 7 条（跳过 0）
+[PASS] D1 arch9 全部通过闸门（跳过=0）: 7/7
+伪造 arch10 枚举 126 条，闸门后保留 7 条（跳过 119）
+  拦截原因直方图： {'PASS': 7, 'no_acc': 7, 'no_acc+out_dtype': 7, 'k_align': 14, 'k_align+no_acc': 14, 'k_align+no_acc+out_dtype': 14, 'psum': 7, 'psum+no_acc': 7, 'psum+no_acc+out_dtype': 7, 'psum+k_align': 14, 'psum+k_align+no_acc': 14, 'psum+k_align+no_acc+out_dtype': 14}
+[PASS] D2 闸门在 arch10 确实拦下（psum/k_align/no_acc/out_dtype）: 7/126 保留
+
+==============================================================================
+Part E：test_alias 薄壳 & expand 恒等 —— 逐位复核（独立 torch oracle）
+==============================================================================
+nt vs 独立 torch oracle: calc_diff=2.990e-09, 逐位相等=False
+[PASS] E1 kernel nt == 独立 torch oracle（有效行，calc_diff<1e-3）: calc_diff=2.990e-09，逐位相等=False（bf16 累加序差异）
+[PASS] E2 alias(nn) == nt 逐位相等（薄壳）: calc_diff=0.000e+00
+[PASS] E3 expand(a_fused_m, 恒等行索引) == m_grouped 逐位: calc_diff=0.000e+00
+[PASS] E4 expand 置换行索引 == 独立 oracle（有效行，calc_diff<1e-3）: calc_diff(valid)=3.061e-09
+  expand 置换下填充行写出非零元素 = 1003520 / 639 行
+[PASS] E5 -1 填充行：m_grouped 写零 / expand 由行索引决定: m_grouped 填充行全零=True；expand 置换填充行非零=True
+
+==============================================================================
+Part F：判据利齿（calc_diff 盲区）+ 真实 perf
+==============================================================================
+  calc_diff(d*0.999, d) = 5.005e-07
+  calc_diff(d*1.0001, d) = 5.001e-09
+  calc_diff(d*1.01, d) = 4.950e-05
+[PASS] F1 calc_diff 对全局缩放几乎不变（< 1e-3 阈值）: 0.999× 缩放 calc_diff=5.005e-07 仍过阈值
+[PASS] F2 calc_diff 漏掉单行错误（全局归一化盲区）: 单行归零 calc_diff=1.502e-05 仍过阈值，但逐位不等=True
+[PASS] F2b 大块（1/8 行）归零被 calc_diff 抓住: calc_diff=6.801e-02
+[PASS] F3 逐位判据抓 1-ulp 扰动（calc_diff 抓不住）: calc_diff=0.000e+00，逐位不等=True
+
+真实 perf（bench_kineto，kernel 名子串）：
+  m-grouped (G=8, m=33792, n=7168, k=7168): 15568.0 us | 223.1 TFLOPS | 115 GB/s
+  k-grouped (G=4, m=4096, n=7168, k=33792): 37818.0 us | 52.5 TFLOPS | 33 GB/s
+[PASS] F4 真实 perf 采到非零吞吐: 见上两行
+
+==============================================================================
+总结
+==============================================================================
+PASS = 19 / 19，FAIL = 0

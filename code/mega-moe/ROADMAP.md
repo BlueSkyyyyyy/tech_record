@@ -2212,7 +2212,43 @@
       变体 `[0,132]` 被③抓；契约负样本 E1–E4（`assert_raises` 只吞 RuntimeError、`is_localized(plain.mT)` 抛
       `layout.hpp:150`、`empty` 越界抛 `runtime:36`、无 MLOPart 时 `empty(合法域)`/`localize` 抛
       `AssertionError`）；跑不了的 3 用例阻塞点全部定位到具体行。**与 GPU 架构完全无关**。配套博客
-      `content/posts/mega-moe-81-locality-domain-test-oracle`（索引页新增第 81 篇）。
+       `content/posts/mega-moe-81-locality-domain-test-oracle`（索引页新增第 81 篇）。
+
+### P72 增量（opt-in，补齐整条测试栈最后一个顶层规格文件：legacy 家族）
+
+- [x] **P72-1** **legacy Triton grouped GEMM 的验收测试即正确性规范**（`tests/test_legacy.py`；
+      `deep_gemm/legacy/{m_grouped,a_fused_m_grouped,a_fused_k_grouped,b_fused_k_grouped}_gemm.py`、
+      `tune_options.py`；`tests/generators.py:118-263/378-419/551-608`；
+      `csrc/jit_kernels/heuristics/runtime.hpp:18/53-54`）。第 29 篇（P29-1）拆了 legacy 四 kernel
+      的**实现**，但整条测试栈里**唯一还没被单独拆过的顶层规格文件** `tests/test_legacy.py`（95 行、
+      两个顶层函数、**无任何 arch 门控**、只测 bf16）一直只被顺带引用。**纯 Triton、架构无关，
+      H100 真机可跑真机实测**。→ `docs/82-legacy-test-oracle.md`（真实行号核对）：顶层结构
+      `:1-12/14/50/87-95`（无 `test_filter`）；**m-grouped** `:16` 解包 10 元组、
+      `enumerate_m_grouped_contiguous`（`generators.py:194-215`）给 32 配置（含 `get_psum_layout_usage
+      =(True,False)`，`:118-119`）×`expand(2)×test_alias(2)`=**128 次发射**，但第 9 字段
+      `use_psum_layout` 被 `_` 丢弃、generator 默认 `False`（`:381`）→ 仅 16 唯一；`test_alias`
+      `:24-27` 是**主序别名薄壳**（A 必 K-major `:25`、MN-major 时 `b=b.mT` `:26`，`nn`=`nt`+`B.mT`
+      `m_grouped_gemm.py:82-84`，两次 `.mT` 抵消）；`expand` `:28-32` 用**恒等** `m_row_indices`
+      调 `a_fused_m`（impl `:45` gather A 行、`:54` `(rows>=0)` 掩码）；`:33` 先归零 `-1` 填充行、
+      `:34-35` 判据 `calc_diff<0.001`（=`generators.py:69-74` 的 legacy 默认）。**关键分支差异**：
+      `m_grouped` 有「首行 `batch_id<0` 整块写零」早退（`m_grouped_gemm.py:36-40`），
+      `a_fused_m` **没有**——恒等行索引下靠 generator 已清零 A 填充行（`:405`）才恰为 0，
+      任意非负置换会让填充行算出非零（实测 639 行 / ~100 万非零元素）。**k-grouped** `:52-53`
+      解包 13 元组、四因子跳过闸门 `:54-56`（注释「Legacy Triton kernels do not mask per-group K
+      tails」）、`:61-70` 双 fused_operand（索引 A `a_fused_k` vs 索引 B `b_fused_k`，镜像 gather
+      `:54`/`:56`）、`k_indices=arange` 恒等 + `k_start/k_end` 用**对齐后**组 K 前缀和、数据放每组
+      物理块开头（`generators.py:567-570/576-577/585-587`）解释「不裁尾块也能对」。闸门因子表
+      （psum / k_align / no_acc / out_dtype）逐条给 kernel 侧原因（空组 `ACC` 取舍 `:43-47`/`:44-48`、
+      累积读回 D `:63-64`、`restore_value=['d_ptr']` `:10`、`tune_options.py:5-23` smem 166912）。
+      H100 实测 `harness/exp_legacy_test_oracle.{py,sh,out.txt}` **19 PASS / 0 FAIL**：
+      ① **直接 import 真实测试模块、驱动两个真实测试体**（只打桩 `bench_kineto`，形状不缩）
+      16.8s 全过；② 枚举计数（m 32 / k 7）与 `use_psum` 默认值；③ 闸门：arch9 7/7 跳过 0，
+      **伪造 arch10 枚举 126 条跳过 119**（四因子直方图齐全）；④ `nn`==`nt` **逐位**（0.0）、
+      `expand` 恒等==`m_grouped` **逐位**（0.0）、`nt` vs 独立 torch oracle 2.99e-09、expand 置换
+      有效行 3.06e-09；⑤ 判据利齿：`calc_diff` 对 `d*0.999` 仅 5.0e-07、单行归零漏（1.5e-05）、
+      1/8 行归零抓（6.8e-02）、1-ulp 只有逐位抓；真实 perf m-grouped（G=8,m=33792,n=7168,k=7168）
+      **223.1 TFLOPS/115 GB/s**、k-grouped（G=4,m=4096,n=7168,k=33792）**52.5 TFLOPS/33 GB/s**。
+      配套博客 `content/posts/mega-moe-82-legacy-test-oracle`（索引页新增第 82 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2238,8 +2274,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P71 各增量完成（P15-1…P41-1、P42-1…P71-1）。**
-  本轮 P71-1：新建 `docs/81-locality-domain-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P72 各增量完成（P15-1…P41-1、P42-1…P72-1）。**
+  本轮 P72-1：新建 `docs/82-legacy-test-oracle.md`
+  （+`harness/exp_legacy_test_oracle.{py,sh,out.txt}`）——补上整条测试栈里**最后一个还没被单独拆过的
+  顶层规格文件** `tests/test_legacy.py`（95 行、两个顶层函数、**无 arch 门控**、只测 bf16）：
+  legacy Triton grouped GEMM 的**分组语义规范**。m-grouped 枚举 32 配置（含未透传的 psum 轴，
+  仅 16 唯一，`generators.py:118-119/381`）、`expand×test_alias` 共 128 次发射；`test_alias` 是
+  主序别名薄壳（`nn`=`nt`+`B.mT`，两次抵消，逐位相等）、`expand` 用恒等行索引（逐位等于
+  `m_grouped`）；判据 `calc_diff<0.001`。k-grouped 四因子闸门 `psum / k_alignment!=128 /
+  not accumulate / out_dtype!=float`（注释「不裁每组 K 尾块」）**arch9 是 no-op、伪造 arch10
+  拦掉 119/126**；不裁尾块也能对靠 generator 把每组物理块 gap 置零。**H100 真机 19 PASS/0 FAIL**：
+  直接驱动真实测试体（只打桩 bench_kineto）全过，另做闸门直方图 / `nn`≡`nt` / expand≡m_grouped
+  逐位复核 / 判据利齿 / 真实 perf。索引页新增第 82 篇。
+  上一轮 P71-1：新建 `docs/81-locality-domain-test-oracle.md`
   （+`harness/exp_locality_domain_test_oracle.{py,sh,out.txt}`）——补上 SM 局部域一直缺席的
   **「验收测试即正确性规范」** `tests/test_locality_domain.py`（167 行，**纯 host / API 层**，
   一个 GPU kernel 都不启动）。5 个顶层函数按序调用（`:160-167`）；helper `assert_raises`（`:19-24`）
@@ -3061,7 +3108,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P71 已完成（最新 **P71-1 SM 局部域的验收测试即正确性规范**：
+- **下一步**：P0~P72 已完成（最新 **P72-1 legacy Triton grouped GEMM 的验收测试即正确性规范**：
+  `tests/test_legacy.py`（95 行，两个顶层函数，无 arch 门控，只测 bf16）——m-grouped 枚举 32 配置
+  （psum 轴未透传、仅 16 唯一）+ `expand×test_alias` 128 次发射，`test_alias` 是主序别名薄壳
+  （`nn`≡`nt` 逐位）、`expand` 恒等行索引（≡`m_grouped` 逐位）；k-grouped 四因子闸门 arch9 no-op /
+  伪造 arch10 拦 119/126；H100 真机直接驱动真实测试体 **19 PASS / 0 FAIL**；详见上）。
+  上一轮 P71-1：**SM 局部域的验收测试即正确性规范**：
   `tests/test_locality_domain.py`（167 行，纯 host / API 层，一个 GPU kernel 都不启动）——5 个顶层函数、
   `assert_raises` 只吞 RuntimeError（域越界 vs MLOPart 不可用分成两种异常）、域表四断言（TPC 成对 /
   恰好 50/50 / 只搬最少）、`balance` 的 `slice(0,n/2)` 是 start 不是长度（`surplus` 取后半段，读错被断言③抓）、
