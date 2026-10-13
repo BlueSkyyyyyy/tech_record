@@ -3286,6 +3286,40 @@
       端到端 `dispatch.cuh` 仍需 NCCL≥2.32.3（阻塞）。配套博客
       `content/posts/mega-moe-115-deepep-refs-fp8-dispatch`（索引页新增第 115 篇）。
 
+### P106 增量（opt-in，补齐 DeepEP `utils/` 的「流量生成层」）
+
+- [x] **P106-1** **DeepEP 的 MoE 路由分数/拓扑生成器 `deep_ep/utils/gate.py`**
+      （`deep_ep/utils/gate.py:4-180`；判据/上游 `tests/utils/test_gate.py:7-53`、
+      下游 `tests/ep/test_ep.py:13/77`）。第 65 篇把 `gate.py` 一句话概括为 DeepEP
+      `deep_ep/utils/` 的「流量生成层」、第 114 篇拆 `math.py` 时又顺手提过它，但这份
+      **让每份 EP 测试都能造出「某 rank 流量是别人几倍」最坏情况的路由夹具**从没被单独读过。
+      `gate.py` 只 `import torch`，按文件路径直接 exec 即可（绕开 `deep_ep/__init__.py:39` 的
+      `check_nccl_so()` 运行期阻塞），故 **H100 真机可跑真机实测**。
+      → `docs/116-deepep-gate-generators.md`（真实行号核对）：**它是夹具不是算子**——真实 router
+      输出不可控、无法稳定复现不均衡，于是 `gate.py` 制造**可控的 rank 级不均衡**，分两条互补
+      路线：`precise`（先造 rank 级流量表 `rank_count [T,R]`、再把这几个位置填高分，承诺「特殊
+      rank 0 恰拿 `ratio` 倍、其余 rank 近乎全均衡」）与 `random`（直接给专家打分、只保证比值大致）。
+      四个非平凡点：① `generate_topk_idx:4-29` 是 `rank_count ↔ topk_idx` 的**精确逆映射**——
+      逐 rank 独立乱序（`:16-18`）取前 `rank_count[t,r]` 个（`:22-23`）、展平后同 token 内**先按
+      rank 分组**；② `generate_rank_count:32-113` 先量「每 token 触及几个不同 rank」`a`（`:49-51`）
+      并 clamp 到 `int((R-1)/ratio)+1`（`:54`），再用**循环重复的同一个随机排列**（`:78` 的
+      `randperm.repeat` + `:98-104` 的 `col%a` 填充）铺普通 rank——**这才是 precise 均衡的机制**；
+      且 `rank_count` 元素**可以是 0..k**（多个 top-k 专家落同一 rank，实测 `max_entry=4`）；
+      `must_mask=(a==num_ranks)`（`:66`）只在 `k>=R` 时非空；③ `get_precise_unbalanced_scores:116-137`
+      用 **0.9 阈值**把选中/背景分数分开（`:127-136`）；④ `map_unbalanced_ratio_to_factor:148-164`
+      在单标量 `factor`（rank 0 专家分数上界）上 20 轮二分（`:149-164`，度量是 `one_hot.any:158-159`）
+      ——**大 R 时近似阈值开关**（`R=64` 附近 `ratio` 0.0→3.98→7.07）、**不可行目标静默饱和到上界**
+      （`R=16,EPR=1,k=4` 的 `ratio` 上限 ≈ `(R-1)/(k-1)=5`，目标 8 使二分返回 `factor=99.9999`、
+      实际 `ratio=4.959`，**不报错**）。**可行性闸门只在 precise 测试路径**（`test_gate.py:20-24`
+      的 `lb<=ub`，下界 `max(1,⌈k/E_s⌉)`、上界与 `gate.py:54` 同源；完整矩阵 **405→379、跳过 26**），
+      random 路径无保护。H100 真机 `harness/exp_deepep_gate.{sh,py,out.txt}`（`ALL PASS`，源码
+      sha256 `gate.py=5372e456…`）：`generate_topk_idx` 14 例**逐位可逆**且组内有序；结构不变式
+      7 组行和恒 `==k`、特殊 rank 恒为 rank 0（实测 `ratio=3.996`）；复刻 `test_gate.py:38-52`
+      判据 precise **45/45** 满足 vs random **14/45**（坐实断言只在 `if precise:` 分支）；
+      分数分离 selected∈`[0.9,1.0]`/bg∈`[0,0.9]`；二分单调命中可行目标、不可行静默饱和；
+      同 seed 逐位可复现、不同 seed 不同。配套博客
+      `content/posts/mega-moe-116-deepep-gate-generators`（索引页新增第 116 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3311,8 +3345,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P105 各增量完成（P15-1…P41-1、P42-1…P105-1）。**
-  本轮 P105-1：新建 `docs/115-deepep-refs-fp8-dispatch.md`
+- 当前进度：**P0~P14 全部完成；P15~P106 各增量完成（P15-1…P41-1、P42-1…P106-1）。**
+  本轮 P106-1：新建 `docs/116-deepep-gate-generators.md`
+  （+`harness/exp_deepep_gate.{py,sh,out.txt}`）——补齐第 65 篇只概括为「流量生成层」的
+  **DeepEP MoE 路由夹具 `deep_ep/utils/gate.py`**（180 行）：为 EP dispatch/combine 测试造
+  「某 rank 流量是别人几倍」的可控不均衡。要点：`generate_topk_idx:4-29` 是 `rank_count↔topk_idx`
+  **精确逆映射**（组内先按 rank）；`generate_rank_count:32-113` 量 a 并 clamp 到 `int((R-1)/ratio)+1`、
+  用**循环重复排列**铺普通 rank（precise 均衡机制）、`rank_count` 元素可为 0..k（多专家落同 rank）；
+  `get_precise_unbalanced_scores` 用 **0.9 阈值**分离选中/背景；`map_unbalanced_ratio_to_factor:148-164`
+  单标量 20 轮二分——大 R 近似**阈值开关**、不可行目标**静默饱和**（`R=16,EPR=1,k=4` 上限≈5、
+  目标 8 返回 `factor=99.9999` 实际 4.959 不报错）；**可行性闸门只在 precise 路径**（`test_gate.py:20-24`，
+  405→379 跳过 26）。H100 真机 ALL PASS：逆映射 14 例逐位、结构不变式 7 组、复刻 test_gate 判据
+  precise **45/45** vs random **14/45**、同 seed 逐位可复现；`gate.py` 只 import torch（绕开 NCCL 阻塞）。
+  索引页新增第 116 篇。
+  上一轮 P105-1：新建 `docs/115-deepep-refs-fp8-dispatch.md`
   （+`harness/exp_deepep_refs_fp8.{py,sh,out.txt}`、`src/deepep_token_layout_sf.cu`）——补齐第 65 篇
   只点一句、第 114 篇只碰一半的 **DeepEP `refs.dispatch` 的 FP8 分支**：`(x, sf)` 元组通路（参考侧）
   到设备端 `sf_pack_t`/`TokenLayout` SF 布局（设备侧）的接缝。要点：参考固定 **gran-128**
@@ -4504,12 +4550,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P105 已完成（最新 **P105-1 DeepEP `refs.dispatch` 的 FP8 分支 + 设备端
+- **下一步**：P0~P106 已完成（最新 **P106-1 DeepEP MoE 路由夹具 `deep_ep/utils/gate.py`**：
+  `generate_topk_idx` 精确逆映射、`generate_rank_count` 用循环重复排列铺普通 rank（precise 均衡）、
+  `map_unbalanced_ratio_to_factor` 单标量二分的大 R 阈值开关与不可行静默饱和、可行性闸门只在
+  precise 路径；H100 真机 ALL PASS，复刻 test_gate 判据 precise 45/45 vs random 14/45；
+  索引页新增第 116 篇。可继续（均为增量、非承诺）：第 65 篇 §8 列出的 `envs.py` 带宽/域解析
+  （第 73/86 篇已部分覆盖），或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P105-1：P0~P105 已完成（最新 **P105-1 DeepEP `refs.dispatch` 的 FP8 分支 + 设备端
   `sf_pack_t`/`TokenLayout` SF 布局**：参考 gran-128 契约 vs 设备缓冲 gran-32 上界（4 倍）、
   dispatch 列数取 `sf.size(1)`、union 两成员统一「一列=128 元素」、DeepEP 不打包 UE8M0；
   H100 真机 8 卡 all_to_all 逐位 + host 调真实 `TokenLayout` 逐字段 0 不符；`combine` 无 FP8 变体；
-  索引页新增第 115 篇。可继续（均为增量、非承诺）：第 65 篇 §8 列出的 `envs.py` 带宽/域解析
-  （第 73/86 篇已部分覆盖），或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  索引页新增第 115 篇。详见上）。
   上一轮 P104-1：P0~P104 已完成（最新 **P104-1 DeepEP 的 MoE 语义工具层 `deep_ep/utils/math.py`**：
   第 65 篇只提一句——判据 `calc_diff`、参考量化器 `per_token_cast_to_fp8/back`、top-k 专家去重
   oracle `inplace_unique`、group-limited 路由掩码 `create_grouped_scores`、记账；三组「同名不同契约」
