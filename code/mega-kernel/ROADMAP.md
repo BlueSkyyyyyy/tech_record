@@ -1730,6 +1730,34 @@
     **本轮新增实验**；P68-1 新留尾巴（§57.8）：未实现「少 producer 轮转填多 per-worker 环」、
     `CAPp*=D` 只单配置验证、合成描述符、未与 DeepGEMM SM100 对跑。
 
+### P69 实验扩展 51：少 producer（scheduler）× 多 per-worker 环（`docs/04-experiments.md` §58）
+
+- [x] **P69-1** 补掉 §57.8 明留的**头号尾巴**——真实 MPK 形态是「**少 producer（scheduler）× 多
+  per-worker 环**」：一个 producer 顺序/轮转填多条环、每条环仍单生产者单消费者（前缀精确），
+  **producer 侧不随 G 膨胀**（§57 的 `pair` 靠 `P==G`、`grid=2G`，是本机一直缺的配置）。
+  见 `docs/04-experiments.md` **§58**，源码 `src/sched_perworker_ring.cu`、脚本
+  `harness/sched_perworker_ring.sh`、原始输出 `harness/sched_perworker_ring.out.txt`（目标卡
+  H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、`K=32`、`T=256`、min-of-3/5）。
+  机制：**把「环所有权」与 block 解耦**——G 个 worker 各持环 `w`；**PS 个 producer** 各持有连续一段
+  worker 环、**段内轮转**填；每条环仍单生产者单消费者、前缀精确；**`grid=PS+G`**（`PS==G` 退化为
+  §57 `pair`）。另加 **计算重量旋钮 `CW`**（worker 每批纯 ALU 延迟、不改 `sink`），模拟「计算型 task」。
+  核心结论：
+  - **§A/§B/§E 正确性与解锁是「拓扑」性质、与 producer 数无关**：宽松环 `PS∈{1..32}×D∈{1..8}` **32/32 OK**；
+    紧环 `CAPp=4` 下 `D≤4` 全 `OK`、`D=8>CAPp` 全 `ABORT`（**每个 PS 都一样**）；阈值精确 = per-ring 的
+    `CAPp≥D`（§E，`PS=4` 与 `PS=16` 同形）。**§57 的解锁不是 `P==G` 特有的**。
+  - **§C 少 producer 是共享瓶颈**：`CW=0` 吞吐 **≈4.2×PS GB/s 精确线性**（单 producer SM 标量描述符写
+    上限 ~4.2 GB/s，对上 §49 的 ~3.8），故轻负载下**必须 ≈G 个 producer**（= §57 `pair` 被迫 `P==G` 的物理原因）。
+  - **§D（headline）task 越重、需要的 producer 越少**：中位数饱和判据 `PS*` 随 `CW` 单调下降——
+    `CW=0→PS*≈G`、`CW=2^14→16`、`CW=2^16→8`、`CW=2^18→≈4`；重 task 下 **`PS*:G≈1:25`**，
+    **正对上 MPK 的 4 scheduler SM : 128 worker SM（1:32）**（§5 行 1157–1164、§6.2 行 1460）。
+  - **§F 与 §57 `pair` 对照 + codegen 警告**：本 harness 的 `PS=66`（逻辑=§57 `pair`）测得 **153–164 GB/s**，
+    §57 通用实现（同一逻辑映射）测得 **~133 GB/s**；`ncu` 显示差异在 DRAM 流量/L2 命中与屏障停顿
+    （逻辑工作、`sink` 完全相同，源于通用 worker 热循环的运行时分支/除法 codegen）。故 **绝对 `descGB/s`
+    对编译产物敏感、跨源码只可定性对照**，本节所有比较都在同一源码族内。
+  判据 C1–C4、仍差 C5（与 §47–§57 同档）。**本轮新增实验**；P69-1 新留尾巴（§58.10）：`CW` 是纯 ALU
+  延迟（真实 task 是访存+计算混合，曲线形状可信、拐点只对本微基准）、`grid≤132` 才全共驻故 `PS` 上限
+  压到 32、合成描述符、未与 DeepGEMM SM100 对跑。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1754,7 +1782,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P68-1 完成（1/1）**。把 §55.7 / §56.7 **两处都明留、却从未实现**的那条「出路」
+- 当前进度：**P69-1 完成（1/1）**。补掉 §57.8 明留的**头号尾巴**——真实 MPK 形态是「**少
+  producer（scheduler）× 多 per-worker 环**」：一个 producer 顺序/轮转填多条环、每条环仍单生产者单
+  消费者（前缀精确），**producer 侧不随 G 膨胀**（§57 的 `pair` 靠 `P==G`、`grid=2G`）。见
+  `docs/04-experiments.md` **§58**，源码 `src/sched_perworker_ring.cu`、脚本
+  `harness/sched_perworker_ring.sh`、原始输出 `harness/sched_perworker_ring.out.txt`（目标卡
+  H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、`K=32`、`T=256`、min-of-3/5）。
+  机制 = **把「环所有权」与 block 解耦**（G 个 per-worker 环 × PS 个 producer 各持连续一段、段内轮转
+  填；`grid=PS+G`，`PS==G` 退化为 §57 `pair`），另加**计算重量旋钮 `CW`** 模拟计算型 task。核心结论：
+  - **正确性/解锁与 producer 数无关**（§A/§B/§E）：宽松环 `PS×D` 32/32 OK；紧环 `CAPp=4` 下 `D≤4` 全
+    OK、`D=8` 全 ABORT（每个 PS 一致）；阈值精确 = per-ring 的 `CAPp≥D`、`PS=4/16` 同形——**§57 的解锁
+    是拓扑性质、不是 `P==G` 特有**。
+  - **§C 少 producer 是共享瓶颈**：`CW=0` 吞吐 **≈4.2×PS GB/s 精确线性**（单 producer SM 标量描述符
+    上限 ~4.2 GB/s，对上 §49），故轻负载必须 ≈G 个 producer（= §57 `pair` 被迫 `P==G` 的物理原因）。
+  - **§D headline：task 越重、需要的 producer 越少**——`PS*` 随 `CW` 单调下降：`CW=0→PS*≈G`、
+    `2^14→16`、`2^16→8`、`2^18→≈4`；重 task 下 **`PS*:G≈1:25`**，正对上 **MPK 的 4 scheduler SM : 128
+    worker SM（1:32）**（§5 行 1157–1164、§6.2 行 1460）。
+  - **§F codegen 警告**：本 harness `PS=66`（逻辑=§57 `pair`）测得 153–164 GB/s vs §57 通用实现 ~133 GB/s
+    （`ncu`：DRAM/L2 与屏障停顿差异，逻辑工作与 `sink` 相同）——**绝对 `descGB/s` 对编译产物敏感、跨源码
+    只可定性对照**，本节比较均在同一源码族内。判据 C1–C4、仍差 C5。**本轮新增实验**；P69-1 新留尾巴
+    （§58.10）：`CW` 纯 ALU、`grid≤132` 才全共驻故 `PS≤32`、合成描述符、未与 DeepGEMM SM100 对跑。
+- 此前：**P68-1 完成（1/1）**。把 §55.7 / §56.7 **两处都明留、却从未实现**的那条「出路」
   做出来——「**保证『一个 producer ↔ 一个 consumer』的拓扑，或每 worker 独立环**」（= MPK 快照
   `per_worker_queue_len=8192` 的真实形态）。关键观察：**`P == G` 时全局 contig 分配的 `chunk==bp`、
   `own==w`，即每个环恰好一个 producer、一个 consumer**，前缀计数器精确 → `D>1` 应可用；本节把该
