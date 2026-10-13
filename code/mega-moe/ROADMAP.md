@@ -4779,6 +4779,31 @@
       → `docs/166-routing-skew-ep-comm.md`。配套博客
       `content/posts/mega-moe-166-routing-skew-ep-comm`（索引页新增第 166 篇）。
 
+### P157 增量（opt-in，把 ROADMAP「下一步」③做成真机原型：单 kernel 内通信+计算 warp specialization）
+
+- [x] **P157-1** **Mega-MoE-like 单 kernel 原型：warp specialization + 寄存器预算分区**（DeepGEMM
+      `sm100_fp8_fp4_mega_moe.cuh:56/90-92/326-335/344/692/758/821/941/948/1372`、
+      `sm100_bf16_mega_moe.cuh:284-289`、`sm100_mega_mhc.cuh:98`、
+      `heuristics/mega_moe.hpp:126/220-221`；DeepEP `hybrid_combine.cuh:103-104/111-112/357-358`、
+      `common/ptx.cuh:456-469`）。承接第 144/155 篇留下的口子，把「单 kernel 内 通信 warp + 计算
+      warp 按寄存器预算分区」在 **H100(sm90a) 上做成可跑原型**。**真实 Mega MoE 机制**：512 线程
+      = dispatch 128 + non-epilogue 128 + epilogue 256；编译期预算 `{48,40,208}`（或 `{96,72,168}`）
+      并以 `DG_STATIC_ASSERT(... <= 64512)` 钉死；运行时 `warpgroup_reg_dealloc<48/40>`（通信段）
+      + `warpgroup_reg_alloc<208>`（epilogue 段）动态再分配——DeepEP `hybrid_combine` 同款（40/216）。
+      **H100 真机三组实验**（`src/mega_moe_like_ws.cu` FMA 腿 + `src/mega_moe_like_ws_tc.cu` WGMMA 腿，
+      `harness/exp_mega_moe_like_ws.{sh,out.txt}`，7×H100 避开被占用的 GPU0）：
+      ① **寄存器分区可测且编译器可见**——有 `setmaxnreg.inc<216>` 时 ptxas 给计算 warpgroup 216 regs/
+      0 spill，无时只给 156（2.01× 慢）；极端形态（512 线程、`kAcc=200`、复刻 `48/40/208`）无则
+      **2300B spill 存储/有则 0**（~10×）。② **融合 vs 两 kernel co-residency**：CUDA-core 计算下，
+      **单 kernel 融合只重叠 ~30–60%（eff），而限块两 kernel 空间隔离能到 ~100%**——同 SM 争发射/LSU
+      （`fusedB` 通信腿单独 700–730us/215 GB/s，比独立还快，但叠加计算后被拖累）。③ **缺的是异步张量核**：
+      把计算腿从 CUDA-core FMA（996us）换成**真实 WGMMA**（`BF16MMASelector`+`ptx/wgmma.cuh`，924us，
+      同量级），在完全相同的 1 comm WG + 1 compute WG + `setmaxnreg` 40/216 结构下，重叠效率
+      **0.62 → 0.93**。⇒ **坐实 Mega MoE 的单 kernel 融合成立是因为其计算是异步张量核 UMMA**
+      （不占 CUDA-core 发射/LSU），正是「SM100 专属」的根。真实源码 sha256 `548fe0c6…`/`dad341b3…`。
+      融合 kernel 本体 SM100 专属、**仅分析**。→ `docs/167-mega-moe-single-kernel-prototype.md`。
+      配套博客 `content/posts/mega-moe-167-single-kernel-prototype`（索引页新增第 167 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4811,8 +4836,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P156 各增量完成（P15-1…P41-1、P42-1…P156-1）。**
-  本轮 P156-1：新建 `docs/166-routing-skew-ep-comm.md` + `harness/exp_routing_skew_comm.{py,sh,out.txt}`
+- 当前进度：**P0~P14 全部完成；P15~P157 各增量完成（P15-1…P41-1、P42-1…P157-1）。**
+  本轮 P157-1：新建 `docs/167-mega-moe-single-kernel-prototype.md` + `harness/exp_mega_moe_like_ws.{sh,out.txt}`
+  + `src/mega_moe_like_ws.cu`（CUDA-core FMA 计算腿）+ `src/mega_moe_like_ws_tc.cu`（WGMMA 异步张量核腿）
+  ——把 ROADMAP「下一步」③（单进程 Mega-MoE-like 单 kernel 原型）做成真机实验：**单 kernel 内 1 comm
+  warpgroup + 计算 warpgroup，按 Mega MoE 的 `setmaxnreg` 预算分区（comm→40）**，量它 vs「限块两 kernel
+  co-residency」。**三条结论**：① 寄存器分区**编译器可见**（有 `setmaxnreg` 则 ptxas 给 216 regs/0 spill、
+  无则 156/2.01× 慢；极端形态无则 2300B spill、~10×）；② H100 CUDA-core 计算下**单 kernel 融合只重叠
+  ~30–60%，限块两 kernel 空间隔离到 ~100%**（同 SM 争发射/LSU）；③ 计算腿换成**真实 WGMMA**（异步张量核、
+  同量级 924us）后重叠效率 **0.62 → 0.93** ⇒ **坐实 Mega MoE 融合成立的前提是其计算是异步张量核 UMMA**
+  （SM100 专属的根）。融合 kernel 本体仅分析。索引页新增第 167 篇。
+  上一轮 P156-1：新建 `docs/166-routing-skew-ep-comm.md` + `harness/exp_routing_skew_comm.{py,sh,out.txt}`
   ——把第 152 篇（P142-1）留下的「偏斜代价在显存与通信」半句补上**通信半边**：用 DeepEP 真实
   `gate.generate_rank_count` 造「特殊 rank 0 拿 ratio 倍流量」的可控不均衡，量出**偏斜几乎不改总字节、
   而是把字节集中到 hot rank（straggler）**。`T_local=2048,E=64,R=8,topk=2`、`ratio=1/2/4/8` 下 dispatch
@@ -6564,17 +6598,16 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P155 已完成（最新 **P155-1 把第 144 篇「同一 micro-batch 侧流 NCCL 不重叠」推进到
-  micro-batch 流水线维度**：8×H100 真实 grouped GEMM × NCCL a2a 的 `dispatch_{i+1} ∥ compute_i` 只藏
-  `ovf 1.21×/1.09×`（理想 1.39/1.86）、通信腿上下文膨胀 1.9×；正对照限块 NVLink 流水线在每个 SM 预算下
-  都到理想 **~99%**。结论：流水线没错、NCCL 没法给小 SM 预算——正是 Mega MoE 单 kernel warp/寄存器级
-  分区的动机。详见 `docs/165`。索引页新增第 165 篇）。
+- **下一步**：P0~P157 已完成（最新 **P157-1 把「下一步」③ 做成真机原型**：单 kernel 内 comm warp +
+  计算 warp 按 Mega MoE 的 `setmaxnreg` 预算分区，量出 ① 寄存器分区**编译器可见**（216 vs 156 regs /
+  2.01×；极端形态 0 vs 2300B spill）；② H100 CUDA-core 计算下**单 kernel 融合只重叠 ~30–60%，限块两
+  kernel 空间隔离到 ~100%**；③ 计算腿换**真实 WGMMA**（异步张量核、同量级）后重叠效率 **0.62 → 0.93**
+  ⇒ 坐实 Mega MoE 融合的前提是**异步张量核 UMMA**（SM100 专属的根）。详见 `docs/167`。索引页新增第 167 篇）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
   （需 NCCL≥2.32.3，见「阻塞」）；② 把 indexer 反向（连续/分页/稀疏/分页稀疏）**端到端接进真实前向 kernel**
-  （需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体定点复核；③ 用 §5 正对照的「限块通信
-  kernel」思想，在 8×H100 上做一个**单进程**的「Mega-MoE-like 单 kernel」原型（通信 warp + 计算 warp
-  同一 grid、寄存器预算分区）量它与「NCCL 侧流」的重叠差；④ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落
-  做定点复核。详见上。
+  （需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体定点复核；③ **已由 P157-1 完成**：单进程
+  「Mega-MoE-like 单 kernel」原型（结论：融合需异步张量核）；④ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余
+  小角落做定点复核。详见上。
   上一轮 P151-1：把多卡 EP MoE 图接上真实 SM90 FP8 grouped kernel
   上一轮 P146-1：把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」推到契约层——数值可行（真实
   `math.cuh` store 分支逐位复现，FP8 0/16777216、SF 0/524288），但契约是「单输出 + 无逐元素索引 + 无状态」，
