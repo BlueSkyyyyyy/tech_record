@@ -1781,6 +1781,25 @@
         vs §106 的 1.077）。**结论**：判据与 §89/§81 同源（TMA 只在「smem 台阶」上兑现），`K` 只改哪档过门槛；
        **默认部署仍 §45 的 `cf`**、六段核 bf16 取 `-DB2M_BF16[MMA]` 不开 TMA/BVK64。**边界**：单 shape、`BT=16`、
        两极性 `K≠V` 样本、未叠 DAMMA/INTRA/VDW。
+- [x] **P7-105** 关闭 §107.6（P7-104）明确留下的**最后一条边界**——`-DB2M_DAMMA`/`-DB2M_INTRA`/
+       `BF16_VDW` 与 `bf16mma_tma` 的 **`K≠V` 多旋钮叠加**（每个旋钮各自验过、也各自与 bf16 入口交叉过，
+       但「`bf16mma_tma` + `{DAMMA,INTRA,VDW}` 同时打开」从未运行）。**`b2_mma_probe.cu` 一行未改**
+       （只组合既有宏）；新增 `harness/check_bwd_b2_kv_stack.py`（`harness/check_bwd_b2_kv_stack.out.txt`，
+       空闲卡）+ `docs/07` §108。基准 `bmt=bf16mma_tma`（`PROD+HDW+BF16+BF16MMA+BVK=64+TMA`）+ 四个孪生
+       `bmt_vdw/bmt_da/bmt_intra/bmt_da_intra`，`K∈{64,128,256}`、`V∈{64,128,256}`、3 shape（含非整除
+       `T=250`、`B2T1024H8`）。**Part A（关键）**：`bmt_vdw ≡ bmt` **10 项逐位 0**（复现 §90 的 TMA no-op）、
+       `bmt_da` 非 `dApre/dA` **逐位 0**（只 `dApre ≤7.78e-4/dA ≤4.92e-4`＝tf32）、`bmt_intra` vs
+       `bmt+b3intra(K)` `dqg/dkg` **逐位 0**、`dg/db ≤9.54e-7`（fp32 序）、未触及 6 项逐位；
+       `bmt_da_intra` vs `bmt_da+b3` 同阶（`dqg/dkg` 逐位、`dg/db ≤9.54e-7`）——**三旋钮作用域互不相交、
+       可自由叠加、无新误差通道**；vs 纯 torch 最坏 `dqg 3.04e-7/dkg 2.66e-5/dg 2.02e-5/db 8.52e-5/dA
+       1.29e-4` 与 §105/§106 bf16 组逐值一致。**Part B**：`DAMMA` 略降 regs、smem 不变；`INTRA` 的 smem 增量
+       只随 `K`（`3·BT·K·4`）、与 `V` 无关，`(256,128)/(256,64)` **>227KiB 不可启动**（与 §103.6 逐字节互证）。
+       **Part C（CUPTI dev，B8T2048H8）**：`bmt_da/bmt` **0.819–0.941×**（DAMMA 免费净赢，同 §66/§69/§86）、
+       `bmt_intra/bmt` **1.203–2.204×**（折叠串行尾巴，同 §66/§95；最差 `(128,64)=2.204×` 因折叠把 TMA
+       救回的 2-block 占用顶回 1）、`bmt_da_intra` 介于两者。**结论**：§107.6 边界关闭；默认部署仍 §45 的 `cf`、
+       六段核 bf16 取 `-DB2M_BF16[MMA]` 不开 TMA/BVK64（§81.4/§107.5）；bf16-TMA 底座上取舍＝`DAMMA` 免费赢、
+       `INTRA` 仍是按 `K` 切换的串行尾巴。**边界**：单卡/`BT=16`/fp32 输出、`K=256` 叠 `INTRA` 不可启动
+       （资源）、未做 `ncu`（沿用 §107 读侧剖析）、其它两两组合未逐一。
 
 ### P8 小结 / 一页纸
 
@@ -2097,8 +2116,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-104 补测 + P8-3…P8-9**。
-  - P7-104（本轮）：**关闭 §106.6（P7-103）的最后一条边界——`bf16mma_tma` 的 `ncu`，并顺带关掉 §93.6 的
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-105 补测 + P8-3…P8-9**。
+  - P7-105（本轮）：**关闭 §107.6（P7-104）明确留下的最后一条边界——`bf16mma_tma` 与
+    `-DB2M_DAMMA`/`-DB2M_INTRA`/`BF16_VDW` 的 `K≠V` 多旋钮叠加**。**`b2_mma_probe.cu` 一行未改**
+    （只组合既有宏）；新增 `harness/check_bwd_b2_kv_stack.py`（`check_bwd_b2_kv_stack.out.txt`，空闲卡）+
+    `docs/07` §108。基准 `bmt=bf16mma_tma` + 四孪生（`vdw/da/intra/da_intra`），`K∈{64,128,256}`、
+    `V∈{64,128,256}`、3 shape（含非整除 `T=250`）。**Part A（关键）**：`bmt_vdw ≡ bmt` **10 项逐位 0**、
+    `bmt_da` 非 `dApre/dA` **逐位 0**（只 `dApre ≤7.78e-4/dA ≤4.92e-4`＝tf32）、`bmt_intra` vs
+    `bmt+b3intra(K)` `dqg/dkg` **逐位 0**、`dg/db ≤9.54e-7`、未触及 6 项逐位；`bmt_da_intra` vs
+    `bmt_da+b3` 同阶——**三旋钮作用域互不相交、可叠加、无新误差通道**；vs 纯 torch 最坏
+    `dqg 3.04e-7…dA 1.29e-4` 与 §105/§106 bf16 组逐值一致。**Part B**：`DAMMA` 略降 regs、smem 不变；
+    `INTRA` smem 只随 `K`（`3·BT·K·4`）、`(256,128)/(256,64)` **>227KiB 不可启动**（与 §103.6 逐字节互证）。
+    **Part C（CUPTI dev）**：`bmt_da/bmt` **0.819–0.941×**（DAMMA 免费赢）、`bmt_intra/bmt`
+    **1.203–2.204×**（折叠串行尾巴；最差 `(128,64)` 因折叠把 TMA 救回的 2-block 占用顶回 1）、
+    `bmt_da_intra` 介于两者。**结论**：§107.6 边界关闭；默认部署仍 §45 的 `cf`、六段核 bf16 不开 TMA/BVK64。
+    **下一步（可选）**：专题维持维护态——§45 的 `cf` 仍是目标卡反向默认；或把 `docs/08-summary.md` 补
+    §108 一行。
+  - P7-104（上轮）：**关闭 §106.6（P7-103）的最后一条边界——`bf16mma_tma` 的 `ncu`，并顺带关掉 §93.6 的
     「`TMA` × `K≠128` 未做 `ncu`」**：§89 剖析过 `bf16mma_tma` 但**固定 `K=128` 只扫 `V`**，§94 让 `K` 走动
     却不带 TMA。`b2_mma_probe.cu` **一行未改**，把 `ncu_b2_k128_dtype_driver.py` 的线格式集合扩到
     `BVK=64`/TMA bf16 build。新增 `harness/probe_b2_kvk_ncu.sh`（`probe_b2_kvk_ncu.out.txt`）+
@@ -3639,7 +3673,7 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-104 补测（+ P8-2…P8-9 一页纸补全）**，进入收尾/维护。
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-105 补测（+ P8-2…P8-9 一页纸补全）**，进入收尾/维护。
   **P7-104 + P8-9（最新）**：关闭 §106.6（P7-103）的「`bf16mma_tma` 的 `ncu`」并顺带关掉 §93.6 的「`TMA` ×
   `K≠128` 未做 `ncu`」——把 `K` 轴扫全（`K≠V`，`K∈{64,128,256}`）。TMA 的读侧修复**对 `K` 免疫**（`ldsec` 恒
   0.532×、L2 −16%、残差随 `K` 长），`K=128` 行与 §89 逐值复现；时间符号仍由 **smem 2-block 门槛 `116224 B`**
