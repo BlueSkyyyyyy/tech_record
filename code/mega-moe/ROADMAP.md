@@ -4883,7 +4883,30 @@
       **3.4%**、mxfp4 **15%**）；长上下文缩放缓（C=131072：fp8 0.957 / mxfp4 0.811）。主 kernel 的
       MXFP4 UMMA 部分 **SM100 专属、仅分析**。→ `docs/171-indexer-selection-stability.md`（真实行号核对），
       实验 `harness/exp_indexer_selection_stability.{py,sh,out.txt}`。配套博客
-      `content/posts/mega-moe-171-indexer-selection-stability`（索引页新增第 171 篇）。
+       `content/posts/mega-moe-171-indexer-selection-stability`（索引页新增第 171 篇）。
+
+### P162 增量（opt-in，把 P161 留的「选择翻转对下游」口子补上）
+
+- [x] **P162-1** **indexer 选择翻转对下游稀疏注意力输出的端到端影响**
+      （`csrc/apis/attention.hpp:22-32/124-129`、`tests/test_attention.py:59-72/78-101`、
+      `deep_gemm/utils/math.py:13-16/84-97`、README `:88-110`）。第 171 篇（P161-1）量了选择翻转的
+      **发生率**（FP8/MXFP8 recall 0.966、MXFP4 0.851），结尾留口子「④ 选择翻转对**下游稀疏注意力
+      输出**的影响未量」。本篇把它接进**真实注意力输出**（`softmax` 只在支持集内归一化再对 `V` 加权），
+      量「选错 3.4%/15% 支持集，输出错多少」。**两档建模**：① **自洽档**（注意力打分 = indexer 打分，
+      隔离「换支持集」、是下界）；② **失配档** `a=ρ·I+√(1−ρ²)·σ_row(I)·noise`（真实 DSA 的 indexer 是
+      另训小模型，ρ<1）。**关键下游变量是注意力平坦度**（logits 尺度 ~18，`tau=1` 时 top-2048 含全部
+      质量、翻转无关痛痒），故扫 `tau∈{1,4,8,16}`。**H100(sm90) 真机**（真实 `fp8_fp4_mqa_logits` 锚定
+      max-rel 2.5e-4；T=1536,C=32768,H=32,D=64,topk=2048,block=16）：① **选择翻转是二阶的**——量化选择
+      误差远小于稀疏近似本身（`tau=8` fp8 `2.6e-3` vs 基线 `5.6e-2` 约 **21×**；`tau=4` 约 39×）；
+      ② **输出误差 ≈ 丢掉质量**（`tau=8` fp8 丢 1.75e-3/误差 2.62e-3、mxfp4 丢 1.05e-2/误差 9.07e-3）
+      ⇒ 第 171 篇的「概率质量」是下游误差的正确预测器；③ 随机支持集对照 `relL2≈1.4–2.1`（cos 0.07）；
+      ④ **主权变量是 ρ**：`ρ=0.4` fp8 选择误差 `9.7e-2` 超过 FP8 量化在 `ρ=1` 的贡献一个数量级
+      ⇒ **对齐质量优先于量化精度**；⑤ **块级翻得少但单次更重**（块级下游 fp8 `2.1e-2`/mxfp4 `5.9e-2`，
+      比 token 级大 ~8×；块 `max` 聚合与 token top-k 本身差 0.287）；⑥ 长上下文 C 8K→128K 选择误差涨
+      ~10×（fp8 `5.9e-4→5.8e-3`）但仍比稀疏误差小一个数量级。主 kernel UMMA 部分 **SM100 专属、仅分析**。
+      → `docs/172-indexer-selection-downstream.md`（真实行号核对），实验
+      `harness/exp_indexer_downstream.{py,sh,out.txt}`。配套博客
+      `content/posts/mega-moe-172-indexer-selection-downstream`（索引页新增第 172 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4914,11 +4937,27 @@
   舍入差（~1e-4）当成算法误差（见 `docs/141` §5）。
 - **8 卡节点是共享的**：并行自驱任务会同时占用 GPU，通信/带宽测量可能是**受争用的下界**；
   报数时注明环境或与无争用基线（如第 1 篇）交叉对照。
+- **两个易漏的发布坑（P162 踩到并已修）**：① 每轮新增 `content/posts/mega-moe-NNN-*/index.md`
+  后，别忘了在 `content/posts/mega-moe-00-index/index.md` 末尾补一条编号条目（上轮第 171 篇就漏了）；
+  ② `date:` 若落在**当前时刻之后**（如凌晨 07:00 跑却写 `08:30`，或裸 `YYYY-MM-DD` = 当天 08:00 CST），
+  Hugo 会**静默跳过**该页（`public/posts/<slug>/` 不存在、线上 404，但不打 ERROR）。发前用
+  `ls public/posts/<slug>/` 自检；凌晨跑一律写**带时区且已过去**的时间。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P161 各增量完成（P15-1…P41-1、P42-1…P161-1）。**
-  本轮 P161-1：新建 `docs/171-indexer-selection-stability.md` +
+- 当前进度：**P0~P14 全部完成；P15~P162 各增量完成（P15-1…P41-1、P42-1…P162-1）。**
+  本轮 P162-1：新建 `docs/172-indexer-selection-downstream.md` +
+  `harness/exp_indexer_downstream.{py,sh,out.txt}`——把第 171 篇（P161-1）结尾「④ 选择翻转对下游
+  稀疏注意力输出的影响未量」补上。**H100(sm90) 真机**（真实 `fp8_fp4_mqa_logits` 锚定，T=1536,
+  C=32768,topk=2048）：把选择接进**真实注意力输出**（softmax 只在支持集内归一化再对 V 加权）。
+  **自洽档**（注意力=indexer 打分）扫温度 `tau∈{1,4,8,16}`：**选择翻转是二阶的**——量化选择误差远小于
+  稀疏近似本身（`tau=8` fp8 2.6e-3 vs 基线 5.6e-2，约 21×；`tau=4` 39×）；**输出误差 ≈ 丢掉质量**
+  （fp8 丢 1.75e-3/误差 2.62e-3、mxfp4 丢 1.05e-2/误差 9.07e-3）；随机支持对照 relL2 1.4–2.1。
+  **失配档**（ρ 旋钮）：`ρ=0.4` fp8 9.7e-2 超过 FP8 量化在 ρ=1 的贡献一个数量级 ⇒ 对齐质量 > 精度。
+  **块级**翻得少但单次更重（下游 fp8 2.1e-2 vs token 2.6e-3，~8×）。长上下文 C 8K→128K 选择误差
+  涨 ~10×（fp8 5.9e-4→5.8e-3）但仍小一个数量级。主 kernel UMMA 部分仅分析。索引页新增第 172 篇
+  （并补上上一轮漏加的第 171 篇索引条目 + 修正 171 篇 `date` 落在未来会被 Hugo 静默跳过的问题）。
+  上一轮 P161-1：新建 `docs/171-indexer-selection-stability.md` +
   `harness/exp_indexer_selection_stability.{py,sh,out.txt}`——补齐 indexer 前向/反向之间从没量过的
   **「选择」一环**（第 157~160 篇把 `S_t=Top-k(I_t,:)` 当给定）。**H100(sm90) 真机**用真实
   `fp8_fp4_mqa_logits` 锚定（vs torch 复刻 max-rel 2.5e-4），纯 torch 复刻 FP8/MXFP8/MXFP4 三档：
@@ -6713,17 +6752,19 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P161 已完成（最新 **P161-1 补齐 indexer 前向/反向之间从没量过的「选择」一环**：
-  `S_t=Top-k(I_t,:)` 在 FP8/MXFP8/MXFP4 量化下的 recall 0.966/0.965/0.851，诊断量是「阈值±σ 候选池」
-  而非 margin，iid 对照逐位相等；H100(sm90) 真实 kernel 锚定 + torch 复刻。详见 `docs/171`，
-  索引页新增第 171 篇）。上一轮 P160-1 把 `deep_jit/utils/` 剩余 7 个支撑头拆透（`docs/170`）。
+- **下一步**：P0~P162 已完成（最新 **P162-1 把第 171 篇留的「选择翻转对下游」口子补上**：
+  在 H100 上把 indexer 选择接进**真实稀疏注意力输出**，量出选择翻转是**二阶的**（量化选择误差
+  远小于稀疏近似本身，`tau=8` 约 21×）、输出误差 ≈ 丢掉质量、主权变量是 indexer 与注意力的
+  对齐 ρ（`ρ=0.4` 时 fp8 9.7e-2 > 精度贡献一个数量级）、块级翻得少但单次更重；详见 `docs/172`，
+  索引页新增第 172 篇）。上一轮 P161-1：indexer 选择稳定性（`docs/171`，recall 0.966/0.965/0.851，
+  诊断量是「阈值±σ 候选池」非 margin，iid 对照逐位相等）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
   （需 NCCL≥2.32.3，见「阻塞」）；② indexer 剩余的 **varlen（SM100）**变体定点复核；**选择稳定性的
-  下游**：把本篇的 top-k 翻转接进**真实稀疏注意力输出**量端到端影响（DSA 支持集变化 → attention 输出
-  误差），或量 **MXFP4 indexer 的「排序精度 vs 2× 带宽」净收益**；③ **已由 P157-1 完成**：单进程
-  「Mega-MoE-like 单 kernel」原型（结论：融合需异步张量核）；④ **已由 P160-1 完成**：`deep_jit/utils/`
-  剩余 7 个支撑头；继续可选 DeepGEMM/DeepEP `csrc/utils/` 或 `deep_jit/utils/` 之外的小角落做定点复核。
-  详见上。
+  下游续**：把本篇的注意力输出误差接到**真实 DSA 主注意力**（另训 q/k、per-head softmax、GQA/MQA 头共享）
+  或与第 157~160 篇的**训练反向**做联合误差，或量 **MXFP4 indexer 的「排序精度 vs 2× 带宽」净收益**；
+  ③ **已由 P157-1 完成**：单进程「Mega-MoE-like 单 kernel」原型（结论：融合需异步张量核）；
+  ④ **已由 P160-1 完成**：`deep_jit/utils/` 剩余 7 个支撑头；继续可选 DeepGEMM/DeepEP `csrc/utils/`
+  或 `deep_jit/utils/` 之外的小角落做定点复核。详见上。
   上一轮 P151-1：把多卡 EP MoE 图接上真实 SM90 FP8 grouped kernel
   上一轮 P146-1：把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」推到契约层——数值可行（真实
   `math.cuh` store 分支逐位复现，FP8 0/16777216、SF 0/524288），但契约是「单输出 + 无逐元素索引 + 无状态」，

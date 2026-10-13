@@ -1,0 +1,50 @@
+NVIDIA H100 80GB HBM3, 9.0
+# indexer selection → downstream sparse-attention output | T=1536 C=32768 H=32 D=64 topk=2048 block=16 tau=1.0
+# arch major = (9, 0), num_sms = 132
+
+== Part A: kernel 锚定 + 三档 token 级支持集 ==
+  kernel vs torch-fp8 ref: max-abs-rel = 2.499e-04
+  [fp8       ] top-2048 recall = 0.9662 (flipped 69)
+  [mxfp8     ] top-2048 recall = 0.9650 (flipped 72)
+  [mxfp4     ] top-2048 recall = 0.8507 (flipped 306)
+
+== Part B: 自洽档（注意力打分 = indexer 打分）——换支持集的下游输出误差 vs tau ==
+  tau=  1.0: teacher 质量=1.000000 | 稀疏基线 O(t) vs dense relL2=1.143e-04 | 随机支持 relL2=1.362e+00
+      [kernel-fp8] vs O(t) relL2=4.123e-08 cos=1.000000 | vs dense=1.143e-04 | 丢=5.674e-18 补=1.784e-18
+      [fp8       ] vs O(t) relL2=4.120e-08 cos=1.000000 | vs dense=1.143e-04 | 丢=5.701e-18 补=1.788e-18
+      [mxfp8     ] vs O(t) relL2=4.209e-08 cos=1.000000 | vs dense=1.143e-04 | 丢=5.808e-18 补=1.758e-18
+      [mxfp4     ] vs O(t) relL2=6.170e-08 cos=1.000000 | vs dense=1.143e-04 | 丢=1.910e-14 补=2.936e-18
+  tau=  4.0: teacher 质量=0.999803 | 稀疏基线 O(t) vs dense relL2=3.410e-04 | 随机支持 relL2=1.527e+00
+      [kernel-fp8] vs O(t) relL2=8.730e-06 cos=1.000000 | vs dense=3.445e-04 | 丢=1.507e-05 补=1.128e-05
+      [fp8       ] vs O(t) relL2=8.727e-06 cos=1.000000 | vs dense=3.445e-04 | 丢=1.507e-05 补=1.129e-05
+      [mxfp8     ] vs O(t) relL2=9.167e-06 cos=1.000000 | vs dense=3.448e-04 | 丢=1.561e-05 补=1.156e-05
+      [mxfp4     ] vs O(t) relL2=9.612e-05 cos=1.000000 | vs dense=4.240e-04 | 丢=1.211e-04 补=3.224e-05
+  tau=  8.0: teacher 质量=0.950933 | 稀疏基线 O(t) vs dense relL2=5.589e-02 | 随机支持 relL2=2.037e+00
+      [kernel-fp8] vs O(t) relL2=2.620e-03 cos=0.999987 | vs dense=5.621e-02 | 丢=1.752e-03 补=1.484e-03
+      [fp8       ] vs O(t) relL2=2.619e-03 cos=0.999987 | vs dense=5.621e-02 | 丢=1.752e-03 补=1.484e-03
+      [mxfp8     ] vs O(t) relL2=2.669e-03 cos=0.999986 | vs dense=5.623e-02 | 丢=1.815e-03 补=1.529e-03
+      [mxfp4     ] vs O(t) relL2=9.069e-03 cos=0.999924 | vs dense=6.258e-02 | 丢=1.049e-02 补=5.010e-03
+  tau= 16.0: teacher 质量=0.565434 | 稀疏基线 O(t) vs dense relL2=8.320e-01 | 随机支持 relL2=2.086e+00
+      [kernel-fp8] vs O(t) relL2=5.154e-02 cos=0.998263 | vs dense=8.343e-01 | 丢=1.149e-02 补=1.048e-02
+      [fp8       ] vs O(t) relL2=5.154e-02 cos=0.998264 | vs dense=8.343e-01 | 丢=1.149e-02 补=1.048e-02
+      [mxfp8     ] vs O(t) relL2=5.240e-02 cos=0.998206 | vs dense=8.339e-01 | 丢=1.190e-02 补=1.082e-02
+      [mxfp4     ] vs O(t) relL2=1.163e-01 cos=0.991709 | vs dense=8.690e-01 | 丢=5.930e-02 补=3.953e-02
+
+== Part C: 失配档（tau=8）——注意力打分 a = ρ·I + √(1-ρ²)·σ_row(I)·noise ==
+  rho=1.0: 稀疏基线(O(t) vs dense)=5.589e-02  fp8(vs O(t))=2.619e-03/cos=0.999987  mxfp8(vs O(t))=2.669e-03/cos=0.999986  mxfp4(vs O(t))=9.069e-03/cos=0.999924
+  rho=0.7: 稀疏基线(O(t) vs dense)=3.723e-01  fp8(vs O(t))=3.464e-02/cos=0.997760  mxfp8(vs O(t))=3.371e-02/cos=0.997856  mxfp4(vs O(t))=1.018e-01/cos=0.988186
+  rho=0.4: 稀疏基线(O(t) vs dense)=1.266e+00  fp8(vs O(t))=9.731e-02/cos=0.982452  mxfp8(vs O(t))=9.228e-02/cos=0.984176  mxfp4(vs O(t))=2.913e-01/cos=0.920775
+  rho=0.0: 稀疏基线(O(t) vs dense)=2.325e+00  fp8(vs O(t))=1.755e-01/cos=0.956546  mxfp8(vs O(t))=1.709e-01/cos=0.959190  mxfp4(vs O(t))=5.148e-01/cos=0.817209
+  （ρ=1 即自洽档；ρ 越小 indexer 与注意力越脱节，同样翻转率的后果越大）
+
+== Part D: 块级（compressed indexer, max 聚合, tau=8）下游输出误差 ==
+  block=16, top-128 blocks → 2048 tokens; 块级 vs token 级 O(teacher): relL2=2.871e-01 cos=0.996539
+  [fp8       ] 块 recall=0.9497 | 块级下游 vs O(块级 teacher): relL2=2.080e-02 cos=0.9995486 | vs O(token teacher)=2.888e-01
+  [mxfp8     ] 块 recall=0.9477 | 块级下游 vs O(块级 teacher): relL2=2.115e-02 cos=0.9995362 | vs O(token teacher)=2.890e-01
+  [mxfp4     ] 块 recall=0.7841 | 块级下游 vs O(块级 teacher): relL2=5.939e-02 cos=0.9973497 | vs O(token teacher)=3.234e-01
+
+== Part E: 下游输出误差 vs 上下文长度（top-k=2048 固定, tau=8）==
+  C=  8192 (top-2048/8192=0.250, 稀疏基线=9.113e-03):  fp8 relL2=5.867e-04/cos=0.999999  mxfp4 relL2=2.016e-03/cos=0.999995
+  C= 32768 (top-2048/32768=0.062, 稀疏基线=5.596e-02):  fp8 relL2=2.612e-03/cos=0.999987  mxfp4 relL2=9.039e-03/cos=0.999926
+  C=131072 (top-2048/131072=0.016, 稀疏基线=1.594e-01):  fp8 relL2=5.809e-03/cos=0.999942  mxfp4 relL2=2.038e-02/cos=0.999681
+  （每档都用 teacher 打分做注意力权重、只换支持集，隔离「选择」这一环）

@@ -1,6 +1,6 @@
 ---
 title: "Mega MoE 实现解析（一百七十一）：Lightning indexer 的 top-k 选择在量化前向下稳不稳"
-date: 2026-10-14T08:30:00+08:00
+date: 2026-10-14T06:00:00+08:00
 draft: false
 weight: 171
 series: ["mega-moe"]
