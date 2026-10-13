@@ -3298,6 +3298,43 @@
   P121-1 新留尾巴（§9）：**`mla_sm100_2sm.cuh`（3165 行，2SM 协作 attention）未逐行**（最直接的下一步）、
   注意力之外的 SM100 task 家族未覆盖、split gather 未做扁平化 ILP、未与生产端到端对跑。**本轮新增增量。**
 
+### P122 SM100 2SM MLA attention（整颗 CUTLASS kernel）走读（`docs/36-mpk-sm100-mla-2sm.md`）
+
+- [x] **P122-1** 补掉 `docs/35`（P121-1）**§9「局限」明留的头号尾巴**——`mla_sm100_2sm.cuh`
+  （3165 行，2SM 协作 attention，`task_header.cuh:53` 有 include、standalone 单测有 caller）未逐行。
+  见 `docs/36-mpk-sm100-mla-2sm.md`（快照 `f9eb70c`，与 `docs/06`–`docs/35` 同快照；**纯源码走读
+  （资料分析），本轮无新实验**——SM100 `sm_100f`/`sm_100a` 在目标卡 H100/sm90 不可执行）。三条 headline：
+  - **(A) 它是「整颗 kernel」而非「一个 task body」**：文件头 `:1-20` 自陈 *"Self-contained MLA Device
+    Kernel for Blackwell (SM100) … flashinfer dependencies inlined"*；落地形态是 CUTLASS 惯用法——
+    `device::MLA<Kernel>::run()` 用 `ClusterLauncher::launch`（`:3102-3109`）自持发 `(2,1,1)` cluster grid，
+    带完整 `can_implement`/`initialize`/`update`/`get_workspace_size`（`:2968-3158`），**不经过 MPK 运行层
+    `_execute_task`**。全仓 caller 只有 standalone 单测 wrapper（`runtime_kernel_wrapper_sm100_mla.cu:23`，
+    pybind `mla_attention`）+ `task_header.cuh:53` 的聚合 include；**无 `TaskType`/`graph.cc` op/
+    `register_*_task`/Python layer**——比 `docs/35` §3/§4 的旧 decode/reduce 更彻底（那两者进了注册表被顶替，
+    它从未进注册表），同族于 `docs/30` 的 `cute/hopper/gemm.cu`（CUTLASS standalone）。
+  - **(B) 2SM 是全文件第一性设定**：`kIs2Sm=true`（`:610`）→ `ClusterShape=Shape<_2,_1,_1>`（`:617-618`）、
+    `TmemAllocator=Allocator2Sm`（`:631-632`）、`kWarpsInN=2`（`:635`）、`KernelTmaWarpSpecialized2SmSm100`
+    （`:689-692`）、`AtomThrShapeMNK`（`:740-743`）。一对 CTA 一体：只有 **leader CTA**（`cta_coord_v==0`，
+    `:1102-1104`）发 UMMA 与 TMEM 分配（`:1365`）、TMA `is_leader` 也要求它（`:1134-1135`）；TMEM 按
+    `kWarpsInN` 对半切（`kSizeS=64`/`kSizeO=256`/`kSizeAccO=128`，`:816-829`）；softmax 的 `row_max`/`row_sum`
+    靠 **SMEM 交换 + 命名屏障（128 线程）+ `peer_index=(threadIdx.x+64)%128`** 做 2×2 数据并行归约
+    （`:2447-2457`/`:2847-2856`）；LSE 只由前半 CTA 写（`threadIdx.x<64`，`:2657-2659`/`:2713-2717`，注释
+    自陈 *"the index is wrong"*）。这正是 `docs/04` §22（P33 `cta_group::2`）/`docs/21`（Blackwell 2SM
+    transpiler）那套 SM100 2SM 原语在 MLA 上的**手工消费者**。
+  - **(C) 七 warp 五 pipeline 把整颗 FlashInfer 风格查表注意力压进一条流水**：warp 角色 `kCompute(0-3)`/
+    `kMma(4)`/`kLoad(5,6)`/`kLoadPageTable(7)`（`kWarpAssignment=0x4221'3333`，`:640-675`）、五 pipeline
+    `PipelineLoadQK/S/P/O/PT`（`:749-761`，`PipelineLoadPV` 与 LoadQK 共用一段 SMEM staging，KC/VC 走 union，
+    `:841-844`）；分页 KV 用 `CustomStride`/`Gather`（`:100-265`）在 CuTe 层表达、`load_cpasync` 的
+    `copy_split`（`:1606-1622`）先算完所有 page-table 再发拷贝；`load_tma` 走 TMA 描述符。主循环
+    `mma`:2185-2388 / `softmax`:2390-2524 / `rescale`:2526-2575 / `epilogue`:2577-2720 / `compute`:2722-2882。
+    与 `docs/35` §2 的手写 KV gather（flatten+ILP）是同一问题的两种表达。
+  判据**只贡献 C3**（独立 kernel、自持 launch/cluster_sync/TMEM 生命周期 → C1/C2/C4/C5 均不满足，同
+  `docs/29`–`docs/35`）；是「一个 task = 一整颗 CUTLASS cluster kernel」的形态上限参照，反证 MPK 生产
+  为何必须按常驻内核约束重写 task（C2 与 CUTLASS device 层「发一次跑完退」根本冲突）。配套博客 post
+  `mega-kernel-37-mpk-sm100-mla-2sm`（weight 38）并更新 `mega-kernel-00-index` 第 37 项。P122-1 新留尾巴
+  （§8）：CUTLASS `collective_builder` 侧 QK/PV atom 未展开、`B2B` 宏路径未细究、`docs/35` §9 其余
+  尾巴（注意力之外的 SM100 task 家族、`mla_prefill_host.cu` 原型）仍未覆盖。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3529,7 +3566,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P121-1 完成（1/1）**。补掉 `docs/34`（P120-1）**§6「局限」明留的 MLA attention 段尾巴**
+- 当前进度：**P122-1 完成（1/1）**。补掉 `docs/35`（P121-1）**§9「局限」明留的头号尾巴**——
+  `mla_sm100_2sm.cuh`（3165 行，2SM 协作 attention）未逐行，见 `docs/36-mpk-sm100-mla-2sm.md`
+  （快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** 它是 MLA 家族里唯一的「整颗
+  CUTLASS kernel」形态——`device::MLA::run()` 用 `ClusterLauncher::launch` 自持发 `(2,1,1)` cluster
+  grid（`:3102-3109`），全仓 caller 只有 standalone 单测 wrapper + `task_header.cuh:53` 聚合 include，
+  **无 `TaskType`/注册/前端**（比 `docs/35` §3/§4 的旧 decode/reduce 更彻底）；**(B)** `kIs2Sm=true`
+  （`:610`）派生 `Allocator2Sm`/`2SmSm100`/`kWarpsInN=2`、只有 leader CTA 发 UMMA+分配 TMEM、TMEM 对半切、
+  softmax 2×2 数据并行 peer 归约（SMEM 交换 + 命名屏障 + `peer_index=(threadIdx.x+64)%128`）、LSE 只由
+  前半 CTA 写（源码自陈索引未重排），是 P33 `cta_group::2` 的真实 SM100 消费者；**(C)** 七 warp 五
+  pipeline（`PipelineLoadQK/S/P/O/PT`）把整颗查表注意力（QK→softmax→PV→rescale→epilogue）压进一条流水，
+  分页 KV 用 `CustomStride`/`Gather` 在 CuTe 层表达。判据**只贡献 C3**。配套博客 post
+  `mega-kernel-37-mpk-sm100-mla-2sm`（weight 38）并更新 `mega-kernel-00-index` 第 37 项。P122-1 新留尾巴见
+  §8（CUTLASS atom 未展开、`B2B` 未细究、`docs/35` §9 其余尾巴未覆盖）。
+- 此前：**P121-1 完成（1/1）**。补掉 `docs/34`（P120-1）**§6「局限」明留的 MLA attention 段尾巴**
   （KV gather 两变体 / decode / reduce / prefill 吸收版 / prefill_tp8 未吸收版），见
   `docs/35-mpk-sm100-mla-family.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
   **(A)** KV gather（扁平化 ILP gather `:119-157`）与 prefill（吸收版 715 行 / 未吸收 TP8 版 486 行、
