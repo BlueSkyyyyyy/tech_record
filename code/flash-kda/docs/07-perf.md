@@ -6015,3 +6015,112 @@ CUPTI `dev`（kernel-only，µs；`da` = P7-54 `dApre`、`sand` = +sandwich）�
 - **本轮同时更正了 §57 的 `dw` 符号**并在 `check_bwd_b2_da.py`/`b2_mma_probe.cu` 落地；§57 的 `out.txt`
   数值（CUDA vs 自身参考 `5.3e-7`、逐位一致、计时比值）在符号改正后**不变**（两侧同步翻转），故未重跑覆盖；
   P7-54 的 ncu（字节/冲突/时长）与符号无关。
+
+## 59. 「K2 形状 CUDA B2」补非 GEMM 段第五刀：**写入门梯度 `db = Σ_v dvb·v + Σ_k dkgb·kg`** 落进 CUDA（P7-56）
+
+§55–§58 把 `dA` 支路（`dvb`→`dApre`→sandwich）与 `dkgb` 补进 CUDA 后，B2 六项里只剩 **`db`** 与**门控链**。
+本轮落 `db`——它是唯一一个**纯归约、无新收缩**的段：
+
+    db[o] = Σ_v dvb[o,v] · v[o,v]   +   Σ_k dkgb[o,k] · kg[o,k]
+
+对应 FLA `chunk_bwd.py` / `check_bwd_dqkg_kernel.py`：先 `b_db = (b_dvb * b_v).sum(dim=3)`
+（`check_bwd_dqkg_kernel.py:169-171`），后 `b_db = b_db + (b_dkgb * b_kg).sum(dim=3)`（`:179-183`），
+Triton 里就是 `b_db += tl.sum(b_dvb * b_v, axis=1)`（`:295`）。其中 `dvb = A@dv`（P7-52 §55）与
+`dkgb = A@(-dw)`（P7-53 §56）**都已在同一核里算出**，各自被一个 warp 的列切片私有，所以 `db` 就是
+**对两个 warp 私有列和做一次跨 warp 归约**。`db` 是 B2 的**完整输出**（门控链不再改它），可独立核验。
+
+证据：`harness/b2_mma_probe.cu`（新增 `-DB2M_DB`，需 `-DB2M_OUT -DB2M_DKGB`；诊断开关 `-DB2M_NODB`；
+新符号 `b2db_launch`，输出 `dvb`/`dv2`/`dkgb`/`db`）+ `harness/check_bwd_b2_db.py`
+（`harness/check_bwd_b2_db.out.txt`，空闲卡）+ `harness/ncu_b2_db_driver.py` / `harness/probe_b2_db_ncu.sh`
+（`harness/probe_b2_db_ncu.out.txt`）。
+
+### 59.1 设计：两个 warp 私有列和 → smem 跨 warp 归约（`db` 无新操作数）
+
+- **操作数已在手**：`dvb` 是输出支路（P7-52）的 `acc2` 累加器，`dkgb` 是 `dkgb` 段（P7-53）的 `acc3`；
+  两者在 **相同 warp 列划分**下（`acc2` 按 V 列、`acc3` 按 k 列，都取 `[w*BW, w*BW+BW)`），`kg`（`skg`）与
+  原始 `v` 都是逐 token 的 `[BT,·]`——所以 `db[o]` 只是把每个 warp 自己那 16 列的和加起来。
+- **`dvb·v` 项需要一次 `v` 的持久镜像**（`Stage::vv` 是逐 V-tile 暂存、会被后续 stage 覆写，而 `acc2` 要等
+  整个 V 循环跑完才完整）：在 warp 拥有该 V 列的 stage 里把 `vv` 的这 16 列抄进 `sh->dbv[warp][BT][BW]`
+  （`b2_mma_probe.cu:750-762`）；`kg·dkgb` 项的 `skg` 本就是持久 buffer，直接读。
+- **归约**（`b2_mma_probe.cu:848-878`）：`acc2/acc3` 的 mma 片段行是 `g/g+8`、列是 `nt*8+2t,nt*8+2t+1`，
+  故每 lane 先把这 8 个片元乘对应 `dbv`/`skg` 求和，再在**行组内 4 个 lane** 上 `shfl_xor`（1、2）归约，
+  由 `t==0` 写 `sh->dbrow[warp][g/g+8]`；最后每行读 8 个 warp 的部分和落盘。**全程无新 global 读**
+  （`skg`/`dbv` 都在 smem）；`db` 落盘是 `[B,T,H]` 一个 fp32。
+- `-DB2M_VV_KG_ON = (B2M_DA || B2M_DB)`（`:192`）复用 `vv` 暂存与 `skg`；`B2M_DB` 要求 OUT+DKGB
+  （`:180-184`）。`-DB2M_NODB` 保留 build/签名/smem 但跳过归约+落盘，作计时基线（`:186`）。
+
+### 59.2 Part A — 正确性：归约对 torch 落 fp32 序 ~1.8e-7，整链 vs FLA 落 tf32 底噪，四布局逐位相同
+
+四组 shape（`BT=16`，含非整除 `T=250`）。`db vs torch(same dvb/dkgb)` 吃 **CUDA 自己产出的 `dvb/dkgb`**
+（关 tf32 走真 fp32），隔离的正是归约本身：
+
+| 量（四组最坏 `max_rel`） | 值 |
+|---|---|
+| `db` vs torch（同一 `dvb/dkgb`） | **1.3e-7 ~ 1.8e-7**（纯 fp32 归约序） |
+| `db` vs torch（从操作数重算） | 2.0e-4 ~ 2.3e-4（=tf32 的 `dvb/dkgb`） |
+| `dvb` / `dkgb` vs torch（从操作数） | 2.6e-4~4.4e-4 / 3.4e-4~3.6e-4 |
+| `db` vs FLA `db` | **5.5e-4 ~ 6.3e-4**（=tf32 底噪，与 `dv2` vs FLA 的 6.2e-4~8.8e-4 同阶） |
+| `db` vs `db_tma` / `db_tma64` | **0（逐位相同）** |
+
+三件事被钉死：(1) **CUDA `db` 代数无误、且归约就是 fp32 序**——与 torch 在同一份 `dvb/dkgb` 上 ~1.8e-7
+（非逐位：CUDA 按「每 warp 16 列、组内 4 lane、8 warp」的固定顺序累加，torch 按整条 V/k 轴，仅加法序不同）；
+(2) **三种 stage 布局（非 TMA / TMA@32 / TMA@64 atom 拆分）对 `db` 零影响（`max_abs=0`）**——因为 `dvb/dkgb`
+已逐位、归约序与 staging 无关；(3) **最终 `db` vs FLA 落 tf32 底噪 6.3e-4**——与 `dkgb`/`dv2` 的 tf32 误差同阶，
+无算法级偏差。
+
+### 59.3 Part B — 计时：`db` 段只值 +2~8%（非 TMA）/ +2~13%（TMA）
+
+CUPTI `dev`（kernel-only，µs；`*_nodb` = 同 build 跳过 `db` 归约）：
+
+| shape | `db_nodb` | `db` | `tma_nodb` | `db_tma` | `db_tma64` | 全 Triton B2 | `db_nodb→db` | `tma_nodb→tma` |
+|---|---|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | 755.5 | 774.6 | 742.5 | 763.1 | 1024.4 | 896.5 | 1.03× | 1.03× |
+| `B2 T1024 H8` | 109.5 | 111.6 | 107.7 | 110.6 | 138.6 | 121.3 | 1.02× | 1.03× |
+| `T512 H4` | 14.7 | 15.3 | 13.9 | 15.7 | 15.4 | 15.4 | 1.05× | 1.13× |
+| `T250 H3`（非整除） | 13.6 | 14.5 | 13.0 | 14.6 | 13.7 | 14.1 | 1.07× | 1.13× |
+
+- **第五刀最便宜的一类**：`db` 只加 **1.02–1.07×（非 TMA）/ 1.03–1.13×（TMA）**——因为它是纯 smem 归约
+  （`dbv` 镜像 + 8 个 warp 的部分和），**没有任何新 global 读、没有新收缩维**。
+- 含 OUT+DKGB+DB 的 CUDA 核（`db_tma`）到全 Triton B2：`B8` **0.85×**、`B2` **0.91×**、`T512` ~1.0×、
+  `T250` 1.04×——即 CUDA 核已补进 `dv2`/`dkgb`/`db` 三条支路后仍**不慢于/略快于**全 Triton B2（差门控链）。
+- `db_tma64`（BVK=64）：`B8` 1024µs——与本专题多次结论一致，`BVK=64` 在本核上因 smem/占用无正收益，取 `BVK=32`。
+
+### 59.4 `ncu` — 增量＝`db` 落盘（+0.5 MB）+ `dbv/skg` 标量 smem 读，冲突/占用/带宽都不动
+
+`B8 T2048 H8`，同一批 fp32 操作数（`probe_b2_db_ncu.out.txt`）：
+
+| 变体 | DRAM 读 | DRAM 写 | Duration | L2 bytes | tensor% | occ | bank conflict | shared wavefronts | l1tex 全局读 sectors | SASS LDS | STG |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `db_tma_nodb` | 1.55 GB | 398.1 MB | 742.2 µs | 3.28 GB | 5.77% | 24.55% | 9.89 M | 40.30 M | 10.49 M | 104 | 49 |
+| `db_tma`（本轮） | 1.56 GB | **399.5 MB** | **762.3 µs** | 3.26 GB | 5.61% | 24.55% | **12.87 M** | 44.92 M | 10.49 M | **124** | **50** |
+
+- **增量就是把 `db` 写下去 + 读 smem 里的 `dbv/skg`**：DRAM 写 `+1.4 MB`（`db` 一个 `[B,T,H]` fp32=0.5 MB，
+  余为 L2 记账噪声）、DRAM 读 `+0.01 GB`、l1tex 全局读 sectors **不变**（`db` 不读 global）、SASS
+  `LDS 104→124`（+20 = `dbv` 镜像 + 归约的标量 shared load）、`STG 49→50`（+1 = `db` 落盘）。
+- **不引入新瓶颈**：占用率（24.55%，纹丝不动）、DRAM/L2 SOL（78.5→76.5% / 86.7→84.6%，核仍 **DRAM/L2 双
+  bound**）、tensor%（5.77→5.61，被标量段稀释）都基本不动；`Duration +20 µs（+2.7%）`。bank conflict
+  9.89→12.87 M（+30%，全部来自 `dbv/skg` 的标量 shared load），但 shared-load wavefront 只 +11%，**不改变
+  核的 bound**（同 §57/§58 的「加一小块确定性工作」）。
+
+### 59.5 结论 / 对目标卡的设计输入
+
+- **B2 的 `db` 支路在 CUDA 里闭环**：`db = Σ_v dvb·v + Σ_k dkgb·kg`，**独立可证**（归约对 torch ~1.8e-7、
+  整链 vs FLA 落 tf32 底噪 6.3e-4）、**四种 stage 布局逐位一致**（含非整除 `T=250`）。`db` 是**最便宜的一刀**
+  （+2~13%），因为它纯做 smem 归约、无新收缩维、无新 global 读。
+- **设计输入**：目标卡 CUDA B2 里 `db` 这类「**warp 私有列和 → 跨 warp 归约**」的段，落点就是
+  **`shfl_xor` 行组归约 + 一次 smem 跨 warp 归约 + 一个 `[BT]` 落盘**，不要为它另起收缩；
+  `dvb·v` 项的 `v` 需在拥有该列的 stage 里**存一份持久镜像**（`dbv`），否则 stage 缓冲早被覆写。
+- **同 CTA 交接的收益**：本轮 `dkgb` 仍吃**从 global 重读的 `dw`**（见 §59.6 的坑）；生产形态应把 `dw`
+  留在寄存器/同 CTA smem，`dkgb`/`db`/`dA` 都就地取——可再省 `dw` 的写+读（此处约 0.5 GB@`B8`）。
+
+### 59.6 坑与边界（诚实）
+
+- **坑（本轮真实踩到，值得记）**：harness 一开始把 `dw` 的**输入指针与 `dw_out` 输出指针设成同一个张量**
+  （`dw = dv@h` 的 round-trip），结果 `dkgb` 大面积错（`max_rel≈2`）、`db` 随之错——**逐位对照 dkgb 专用 build
+  才定位**。即：本原型里 `dw` 是**先算后写、再从 global 读回**的两趟契约，输入与输出**共用缓冲会被流水/落盘
+  覆写**；harness 改为独立 `dw_out` 缓冲后，DB build 的 `dkgb` 与 §56 的 dkgb 专用 build **逐位相同
+  （`max_abs=0`）**。这也正是「`dw` 应在同 CTA 交接、不走 global」的实证动机（§59.5 末条）。
+- 本轮只落 `db`；**门控链**（`dg` 的 `q·dq`/`kdk`/`m_last·dgk`/`kg·dkgb·beta` 与 `dk += dkgb·gb`）**仍未落
+  CUDA**——落完后 B2 的六项 `dq/dk/dv2/db/dg/dA` 才算全搬进 CUDA。下一步＝在 `db` 之后补门控链。
+- 只覆盖 `K=V=128`、`BT=16`、fp32；`B2M_DB` 要求 `OUT+DKGB`，未与 `B2M_DA`/`B2M_SAND` 组合；`db` 落盘用
+  标量 32-bit（`-DB2M_VECST` 未接）。这些都不影响本节结论（增量机制＝一小块 smem 归约 + 一次落盘）。

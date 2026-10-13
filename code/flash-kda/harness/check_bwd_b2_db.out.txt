@@ -1,0 +1,67 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+================================================================================================
+Part A: correctness -- CUDA db = sum_v dvb*v + sum_k dkgb*kg, bit-id, vs FLA
+================================================================================================
+
+# B8 T2048 H8  grid=(128, 64)
+    db vs torch(same dvb/dkgb) max_abs=9.537e-07  max_rel=1.757e-07  ref_max=5.428e+00
+    db vs torch(from operands) max_abs=1.255e-03  max_rel=2.312e-04  ref_max=5.428e+00
+    dvb vs torch(from operands) max_abs=2.350e-04  max_rel=4.396e-04  ref_max=5.347e-01
+    dkgb vs torch(from operands) max_abs=1.012e-03  max_rel=3.380e-04  ref_max=2.993e+00
+    db vs FLA db             max_abs=3.417e-03  max_rel=6.297e-04  ref_max=5.425e+00
+    dv2 vs FLA               max_abs=3.910e-04  max_rel=8.781e-04  ref_max=4.452e-01
+    db vs db_tma             max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.428e+00
+    db vs db_tma64           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.428e+00
+
+# B2 T1024 H8  grid=(64, 16)
+    db vs torch(same dvb/dkgb) max_abs=7.153e-07  max_rel=1.414e-07  ref_max=5.058e+00
+    db vs torch(from operands) max_abs=1.015e-03  max_rel=2.007e-04  ref_max=5.058e+00
+    dvb vs torch(from operands) max_abs=1.273e-04  max_rel=2.581e-04  ref_max=4.935e-01
+    dkgb vs torch(from operands) max_abs=9.966e-04  max_rel=3.370e-04  ref_max=2.957e+00
+    db vs FLA db             max_abs=3.155e-03  max_rel=6.240e-04  ref_max=5.057e+00
+    dv2 vs FLA               max_abs=2.449e-04  max_rel=6.197e-04  ref_max=3.953e-01
+    db vs db_tma             max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.058e+00
+    db vs db_tma64           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.058e+00
+
+# T512 H4  grid=(32, 4)
+    db vs torch(same dvb/dkgb) max_abs=7.153e-07  max_rel=1.790e-07  ref_max=3.996e+00
+    db vs torch(from operands) max_abs=8.014e-04  max_rel=2.006e-04  ref_max=3.996e+00
+    dvb vs torch(from operands) max_abs=1.279e-04  max_rel=2.795e-04  ref_max=4.578e-01
+    dkgb vs torch(from operands) max_abs=9.782e-04  max_rel=3.496e-04  ref_max=2.798e+00
+    db vs FLA db             max_abs=2.338e-03  max_rel=5.854e-04  ref_max=3.995e+00
+    dv2 vs FLA               max_abs=2.356e-04  max_rel=6.008e-04  ref_max=3.921e-01
+    db vs db_tma             max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.996e+00
+    db vs db_tma64           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.996e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    db vs torch(same dvb/dkgb) max_abs=4.768e-07  max_rel=1.278e-07  ref_max=3.730e+00
+    db vs torch(from operands) max_abs=7.733e-04  max_rel=2.073e-04  ref_max=3.730e+00
+    dvb vs torch(from operands) max_abs=1.234e-04  max_rel=2.769e-04  ref_max=4.455e-01
+    dkgb vs torch(from operands) max_abs=9.449e-04  max_rel=3.639e-04  ref_max=2.597e+00
+    db vs FLA db             max_abs=2.045e-03  max_rel=5.483e-04  ref_max=3.729e+00
+    dv2 vs FLA               max_abs=2.292e-04  max_rel=6.279e-04  ref_max=3.650e-01
+    db vs db_tma             max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.730e+00
+    db vs db_tma64           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.730e+00
+
+worst max_rel over all shapes:
+  torch          1.790e-07
+  torch_ops      2.312e-04
+  dvb_torch      4.396e-04
+  dkgb_torch     3.639e-04
+  vs_fla         6.297e-04
+  dv2_fla        8.781e-04
+  vs_db_tma      0.000e+00
+  vs_db_tma64    0.000e+00
+
+================================================================================================
+Part B: timing -- db segment delta (vs B2M_NODB baseline) and vs full Triton B2
+================================================================================================
+  case               |  db_nodb       db |  tma_nodb   db_tma  db_tma64 |   fullB2 |  db/db_nodb  tma/tma_nodb
+  B8 T2048 H8        |    755.5    774.6 |     742.5    763.1    1024.4 |    896.5 |       1.03x         1.03x
+  B2 T1024 H8        |    109.5    111.6 |     107.7    110.6     138.6 |    121.3 |       1.02x         1.03x
+  T512 H4            |     14.7     15.3 |      13.9     15.7      15.4 |     15.4 |       1.05x         1.13x
+  T250 H3 (non-div)  |     13.6     14.5 |      13.0     14.6      13.7 |     14.1 |       1.07x         1.13x
+
+DONE

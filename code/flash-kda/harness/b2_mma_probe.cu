@@ -168,6 +168,28 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 #if B2M_SAND && !B2M_DA
 #error "B2M_SAND requires B2M_DA"
 #endif
+// P7-56: the *fifth non-GEMM segment* of B2 in CUDA -- the per-token write-gate gradient
+//   db[o_A] = sum_v dvb[o_A,v] * v[o_A,v]  +  sum_k dkgb[o_A,k] * kg[o_A,k]
+// (FLA `chunk_bwd.py`, `check_bwd_dqkg_kernel.py:180-210`: `b_db = sum_V(b_dvb*b_v)` then
+// `b_db += sum_k(b_dkgb*b_kg)`).  Both operands are already computed in the same kernel -- `dvb`
+// is the P7-52 output branch (`=A@dv`) and `dkgb` is the P7-53 finalize term (`=A@(-dw)`), each
+// owned by a per-warp column slice -- so `db` is exactly a **cross-warp reduction** of two
+// warp-private column sums.  It is a *complete* B2 output (never touched by the gate chain), so it
+// is verifiable standalone.  Requires the output and dkgb branches (`B2M_OUT` + `B2M_DKGB`), plus
+// the raw `v` staging and the chunk `kg=k*exp2(g)` buffer (shared with `B2M_DA`).
+#ifndef B2M_DB
+#define B2M_DB 0
+#endif
+#if B2M_DB && !(B2M_OUT && B2M_DKGB)
+#error "B2M_DB requires B2M_OUT and B2M_DKGB"
+#endif
+//   B2M_NODB : keep the `B2M_DB` build/signature/smem but skip the `db` reduction+store
+//              (baseline for the isolated `db` segment timing).
+#ifndef B2M_NODB
+#define B2M_NODB 0
+#endif
+// raw `v` staging (`Stage::vv`) and the `kg` buffer are needed by `B2M_DA` (base dA) and/or `B2M_DB`.
+#define B2M_VV_KG_ON (B2M_DA || B2M_DB)
 constexpr int BVK = B2M_BVK;   // V-tile (contraction) depth staged per pipeline stage
 constexpr int NS  = B2M_NS;    // pipeline stages
 #if B2M_TMA_ON
@@ -190,8 +212,8 @@ struct alignas(128) Stage {
     float dv [NAT][BT][32];   // dv  [t, v]
     float h  [NAT][KD][32];   // h  [k, v]  (rows = output N index, cols = contraction v)
     float dh [NAT][KD][32];   // dh [k, v]
-#if B2M_DA
-    float vv [NAT][BT][32];   // raw v [t, v]  (base dA operand)
+#if B2M_VV_KG_ON
+    float vv [NAT][BT][32];   // raw v [t, v]  (base dA / `db` operand)
 #endif
 #if B2M_DKGB
     float dwm[NAT][BT][32];   // dw [t, k]  (P7-53: B-operand of `A @ -dw`, k-tiled)
@@ -202,7 +224,7 @@ struct alignas(128) Stage {
     float dv [BT][BVP];   // dv  [t, v]
     float h  [KD][BVP];   // h  [k, v]  (rows = output N index, cols = contraction v)
     float dh [KD][BVP];   // dh [k, v]
-#if B2M_DA
+#if B2M_VV_KG_ON
     float vv [BT][BVP];   // raw v [t, v]
 #endif
 #if B2M_DKGB
@@ -215,14 +237,24 @@ struct alignas(128) Shared {
 #if B2M_TMA_ON
     uint64_t full[NS];    // per-stage TMA-completion mbarrier (arrive count 1)
 #endif
-#if B2M_DA
-    // per-chunk `kg = k*exp2(g)` [BT, KD] (loaded once per chunk, padded row stride), the
-    // per-warp `dw` mirror `swall[NW][BT][BW]`, the 8 per-warp partials `dapart`, and the
-    // reduced tile `da16`.
+#if B2M_VV_KG_ON
+    // per-chunk `kg = k*exp2(g)` [BT, KD] (loaded once per chunk, padded row stride), shared
+    // by the `B2M_DA` base dA and the `B2M_DB` `sum_k dkgb*kg` term.
     float skg[BT][KD];
+#endif
+#if B2M_DA
+    // the per-warp `dw` mirror `swall[NW][BT][BW]`, the 8 per-warp partials `dapart`, and
+    // the reduced tile `da16`.
     float swall[NW][BT][BW];
     float dapart[NW][BT][BT];
     float da16[BT][BT];
+#endif
+#if B2M_DB
+    // `db` cross-warp reduction: per-warp per-row partials (`dbrow[NW][BT]`) plus the raw-v
+    // mirror of each warp's owned V columns (`dbv[NW][BT][BW]`), since the staged `vv` tile is
+    // overwritten before the output branch's `acc2` is complete.
+    float dbrow[NW][BT];
+    float dbv[NW][BT][BW];
 #endif
 #if B2M_SAND
     // b_A[p][j] = A[o_t=j, o_A=p]  (P7-55 sandwich operand; loaded once per chunk)
@@ -320,12 +352,12 @@ DEV void prefetch(Stage* st, const float* __restrict__ v, const float* __restric
         float* pd = &st->do_[row][cg * 4];
         float* pv = &st->vn [row][cg * 4];
         float* pw = &st->dv [row][cg * 4];
-#if B2M_DA
+#if B2M_VV_KG_ON
         float* pvv = &st->vv[row][cg * 4];
 #endif
 #if B2M_NODOV
         for (int j = 0; j < 4; ++j) { pd[j] = 0.f; pv[j] = 0.f; pw[j] = 0.f; }
-  #if B2M_DA
+  #if B2M_VV_KG_ON
         for (int j = 0; j < 4; ++j) pvv[j] = 0.f;
   #endif
 #else
@@ -334,12 +366,12 @@ DEV void prefetch(Stage* st, const float* __restrict__ v, const float* __restric
             cp16(pd, do_ + off);
             cp16(pv, vn  + off);
             cp16(pw, dv  + off);
-  #if B2M_DA
+  #if B2M_VV_KG_ON
             cp16(pvv, v + off);
   #endif
         } else {
             for (int j = 0; j < 4; ++j) { pd[j] = 0.f; pv[j] = 0.f; pw[j] = 0.f; }
-  #if B2M_DA
+  #if B2M_VV_KG_ON
             for (int j = 0; j < 4; ++j) pvv[j] = 0.f;
   #endif
         }
@@ -380,13 +412,13 @@ DEV void issue_tma(Stage* st, const CUtensorMap* dom, const CUtensorMap* vnm,
 #if B2M_DKGB
                    const CUtensorMap* dwm,
 #endif
-#if B2M_DA
+#if B2M_VV_KG_ON
                    const CUtensorMap* vvm,
 #endif
                    int n, int hh, int c, int v0, uint64_t* bar) {
     const int t0 = c * BT;
     mbar_arrive_tx(bar, (uint32_t)(((3
-#if B2M_DA
+#if B2M_VV_KG_ON
                                     + 1
 #endif
 #if B2M_DKGB
@@ -399,7 +431,7 @@ DEV void issue_tma(Stage* st, const CUtensorMap* dom, const CUtensorMap* vnm,
         tma4d_load(dom, &st->do_[a][0][0], va, t0, hh, n, bar);
         tma4d_load(vnm, &st->vn [a][0][0], va, t0, hh, n, bar);
         tma4d_load(dvm, &st->dv [a][0][0], va, t0, hh, n, bar);
-#if B2M_DA
+#if B2M_VV_KG_ON
         tma4d_load(vvm, &st->vv [a][0][0], va, t0, hh, n, bar);
 #endif
         tma5d_load(hm,  &st->h  [a][0][0], va, 0, hh, c, n, bar);
@@ -419,7 +451,7 @@ DEV void issue_tma(Stage* st, const CUtensorMap* dom, const CUtensorMap* vnm,
 #define TMA_DWM_ARG
 #define PRE_DW_ARG
 #endif
-#if B2M_DA
+#if B2M_VV_KG_ON
 #define TMA_VV_ARG , &vvm
 #else
 #define TMA_VV_ARG
@@ -433,14 +465,14 @@ b2mma_kernel(
 #if B2M_DKGB
              const __grid_constant__ CUtensorMap dwm,
 #endif
-#if B2M_DA
+#if B2M_VV_KG_ON
              const __grid_constant__ CUtensorMap vvm,
 #endif
 #endif
              const float* __restrict__ v, const float* __restrict__ vn,
              const float* __restrict__ h, const float* __restrict__ dh,
              const float* __restrict__ do_, const float* __restrict__ dv,
-#if B2M_DA
+#if B2M_VV_KG_ON
              const float* __restrict__ kptr, const float* __restrict__ gptr,
 #endif
 #if B2M_DKGB
@@ -457,6 +489,9 @@ b2mma_kernel(
 #endif
 #if B2M_DKGB
              float* __restrict__ dkgb,
+#endif
+#if B2M_DB
+             float* __restrict__ db_out,
 #endif
 #if B2M_DA
              float* __restrict__ dApre,
@@ -499,8 +534,10 @@ b2mma_kernel(
     float dbpart[8], dkpart[8];   // per-lane partials: 8 [r,c] entries each (r=l>>1, c=(l&1)*8+i)
     #pragma unroll
     for (int i = 0; i < 8; ++i) { dbpart[i] = 0.f; dkpart[i] = 0.f; }
+#endif
+#if B2M_VV_KG_ON
     // `kg = k*exp2(g)` for this chunk (rows t<T; pad rows zeroed).  One load per chunk (not per
-    // V-tile); read back post-loop by `rdp` in the `dw@kg^T` partial.
+    // V-tile); read back post-loop by `rdp` (P7-54 `dw@kg^T`) and by the P7-56 `db` term.
     {
         for (int idx = threadIdx.x; idx < BT * KD; idx += NW * 32) {
             const int row = idx / KD, col = idx % KD, tt = i_t * BT + row;
@@ -512,6 +549,7 @@ b2mma_kernel(
             sh->skg[row][col] = kv * exp2f(gv);
         }
     }
+#endif
 #if B2M_SAND
     // b_A[p][j] = A[b, t=i_t*BT+j, h, c=p]  (only rows t<T valid); beta[o_t] (rows t<T).
     for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
@@ -526,6 +564,7 @@ b2mma_kernel(
         sh->sbeta[r] = (i_t * BT + r < T) ? beta[((int64_t)(n * T + i_t * BT + r) * H + hh)] : 0.f;
     }
 #endif
+#if B2M_DA || B2M_VV_KG_ON || B2M_SAND
     __syncthreads();
 #endif
 #if B2M_OUT || B2M_DKGB
@@ -708,6 +747,19 @@ b2mma_kernel(
             }
         }
 #endif
+#if B2M_DB && !B2M_NODB
+        // ---- P7-56: mirror the raw `v` of this warp's owned V columns into `dbv` (the staged
+        // `vv` tile is overwritten before `acc2` is complete, so `db`'s `dvb*v` term needs a copy).
+        {
+            const int local0 = warp * BW - it * BVK;
+            if (local0 >= 0 && local0 + BW <= BVK) {
+                for (int idx = l; idx < BT * BW; idx += 32) {
+                    const int r = idx / BW, j = idx % BW;
+                    sh->dbv[warp][r][j] = rd((const float*)st->vv, r, local0 + j, BT);
+                }
+            }
+        }
+#endif
         __syncthreads();
     }
 
@@ -791,6 +843,38 @@ b2mma_kernel(
         const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
         if (tr0 < T) { dkgb[o0] = acc3[nt][0]; dkgb[o0 + 1] = acc3[nt][1]; }
         if (tr1 < T) { dkgb[o1] = acc3[nt][2]; dkgb[o1 + 1] = acc3[nt][3]; }
+    }
+#endif
+#if B2M_DB && !B2M_NODB
+    // ---- P7-56: db = sum_v dvb*v + sum_k dkgb*kg (cross-warp reduction of column sums) ----
+    // acc2/acc3 fragment rows are g/g+8, cols nt*8+2t,nt*8+2t+1 (within the warp's owned slice).
+    // `skg` is persistent (ensures the `dkgb*kg` term can be read post-loop); `dbv` mirrors the
+    // warp's V columns of raw `v` for the `dvb*v` term.
+    {
+        float p0 = 0.f, p1 = 0.f;
+        #pragma unroll
+        for (int nt = 0; nt < 2; ++nt) {
+            const int cl = nt * 8 + 2 * t;          // column within the warp's owned 16-wide slice
+            const int ck = warp * BW + cl;          // absolute k column (== V column index)
+            p0 += acc2[nt][0] * sh->dbv[warp][g][cl]     + acc2[nt][1] * sh->dbv[warp][g][cl + 1];
+            p0 += acc3[nt][0] * sh->skg[g][ck]           + acc3[nt][1] * sh->skg[g][ck + 1];
+            p1 += acc2[nt][2] * sh->dbv[warp][g + 8][cl] + acc2[nt][3] * sh->dbv[warp][g + 8][cl + 1];
+            p1 += acc3[nt][2] * sh->skg[g + 8][ck]       + acc3[nt][3] * sh->skg[g + 8][ck + 1];
+        }
+        p0 += __shfl_xor_sync(0xffffffffu, p0, 1); p0 += __shfl_xor_sync(0xffffffffu, p0, 2);
+        p1 += __shfl_xor_sync(0xffffffffu, p1, 1); p1 += __shfl_xor_sync(0xffffffffu, p1, 2);
+        if (t == 0) { sh->dbrow[warp][g] = p0; sh->dbrow[warp][g + 8] = p1; }
+    }
+    __syncthreads();
+    {
+        const int idx = threadIdx.x;
+        if (idx < BT) {
+            float s = 0.f;
+            #pragma unroll
+            for (int w = 0; w < NW; ++w) s += sh->dbrow[w][idx];
+            if (i_t * BT + idx < T)
+                db_out[((int64_t)(n * T + i_t * BT + idx) * H + hh)] = s;
+        }
     }
 #endif
 #if B2M_DA
@@ -921,7 +1005,7 @@ static void make_map_hdh(CUtensorMap* m, void* ptr, int H, int NT, int B) {
 }
 #endif
 
-#if !B2M_DA
+#if !B2M_DA && !B2M_DB
 static int b2mma_launch_impl(const void* v, const void* vn, const void* h, const void* dh,
                              const void* dov, const void* dvv,
 #if B2M_DKGB
@@ -1030,7 +1114,7 @@ extern "C" int b2dkgb_launch(const void* v, const void* vn, const void* h, const
                              A4, dkgb, B, T, H, NT, stream);
 }
 #endif
-#endif  // !B2M_DA
+#endif  // !B2M_DA && !B2M_DB
 
 #if B2M_DA && !B2M_SAND
 // P7-54 dedicated launcher (`b2da_launch`): only valid when compiled with `-DB2M_DA` and
@@ -1133,6 +1217,67 @@ extern "C" int b2sand_launch(const void* v, const void* vn, const void* h, const
                               dq, dk, dw, dgk, dApre, dA, B, T, H, NT, stream);
 }
 #endif  // B2M_SAND
+
+
+#if B2M_DB
+// P7-56 dedicated launcher (`b2db_launch`): compiled with `-DB2M_OUT -DB2M_DKGB -DB2M_DB`
+// (plus the usual stage options).  Emits `dvb` (P7-52), `dkgb` (P7-53) and the complete `db`.
+static int b2db_launch_impl(const void* v, const void* vn, const void* h, const void* dh,
+                            const void* dov, const void* dvv, const void* dwin,
+                            const void* k, const void* g, const void* A4, const void* beta,
+                            void* dq, void* dk, void* dw, void* dgk, void* dkgb,
+                            void* dv2, void* dvb, void* db_out,
+                            int B, int T, int H, int NT, void* stream) {
+    dim3 grid(NT, B * H);
+    int smem = (int)sizeof(Shared);
+    static int configured = 0;
+    if (!configured) {
+        if (cudaFuncSetAttribute(b2mma_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                 smem) != cudaSuccess)
+            return -3;
+        configured = 1;
+    }
+#if B2M_TMA_ON
+    CUtensorMap dom, vnm, dvm, hm, dhm, dwm, vvm;
+    make_map_dov(&dom, (void*)dov, H, T, B);
+    make_map_dov(&vnm, (void*)vn,  H, T, B);
+    make_map_dov(&dvm, (void*)dvv, H, T, B);
+    make_map_dov(&dwm, (void*)dwin, H, T, B);
+    make_map_dov(&vvm, (void*)v,   H, T, B);
+    make_map_hdh(&hm,  (void*)h,  H, NT, B);
+    make_map_hdh(&dhm, (void*)dh, H, NT, B);
+    b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
+        dom, vnm, dvm, hm, dhm, dwm, vvm,
+        (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
+        (const float*)dov, (const float*)dvv, (const float*)k, (const float*)g,
+        (const float*)dwin,
+        (float*)dq, (float*)dk, (float*)dw, (float*)dgk,
+        (const float*)A4, (const float*)beta, (float*)dv2, (float*)dvb,
+        (float*)dkgb, (float*)db_out,
+        B, T, H, NT);
+#else
+    b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
+        (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
+        (const float*)dov, (const float*)dvv, (const float*)k, (const float*)g,
+        (const float*)dwin,
+        (float*)dq, (float*)dk, (float*)dw, (float*)dgk,
+        (const float*)A4, (const float*)beta, (float*)dv2, (float*)dvb,
+        (float*)dkgb, (float*)db_out,
+        B, T, H, NT);
+#endif
+    return (int)cudaGetLastError();
+}
+
+extern "C" int b2db_launch(const void* v, const void* vn, const void* h, const void* dh,
+                           const void* dov, const void* dvv, const void* dwin,
+                           const void* k, const void* g, const void* A4, const void* beta,
+                           void* dq, void* dk, void* dw, void* dgk, void* dkgb,
+                           void* dv2, void* dvb, void* db_out,
+                           int B, int T, int H, int NT, void* stream) {
+    return b2db_launch_impl(v, vn, h, dh, dov, dvv, dwin, k, g, A4, beta,
+                            dq, dk, dw, dgk, dkgb, dv2, dvb, db_out, B, T, H, NT, stream);
+}
+#endif  // B2M_DB
 
 
 extern "C" int b2mma_smem_bytes() { return (int)sizeof(Shared); }
