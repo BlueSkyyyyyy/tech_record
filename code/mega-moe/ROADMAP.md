@@ -1972,7 +1972,35 @@
       9 配置真实方法 vs 独立 oracle 逐位一致；QP 模型逐位一致；`get_expected_topk` 6 组对拍暴力枚举
       差 ≤4.4e-16；边界（4 倍数/≤132/≥4/overlap 关 ≥64/EP1=132）；**三个真实边界**：`E%num_groups==0`、
       本机无 IB 时 hybrid 自动探测 `ZeroDivisionError`、direct `min(num_sms,9)`。配套博客
-      `content/posts/mega-moe-73-deepep-sm-qp-autotuning`（索引页新增第 73 篇）。
+       `content/posts/mega-moe-73-deepep-sm-qp-autotuning`（索引页新增第 73 篇）。
+
+### P64 增量（opt-in，补齐整条测试栈最基础的「顶层规格」）
+
+- [x] **P64-1** **稠密 GEMM 的验收测试即正确性规范**（`tests/test_fp8_fp4.py` 406 行 /
+      `tests/test_bf16.py` 341 行；`tests/generators.py` 的枚举器与 `QuantConfig`）。
+      测试栈此前拆过基座（第 40 篇 `deep_gemm/testing/`）、生成器（第 41 篇 `generators.py`）、
+      逐位断言（第 43 篇 `tests/utils.py`）以及四个 mega 算子的端到端测试（第 41/47/50/57 篇），
+      但**整条栈最基础、最先跑的两个顶层文件**一直只被顺带引用几行。本篇把它们当「稠密 GEMM 算什么对」
+      的**可执行规格**来拆。**主体 kernel 在 H100(sm90) 上真的会跑**（FP8→1D2D、BF16→NoSF），
+      FP4 / `use_alpha` / UE8M0 / 随机舍入 / PSUM 零填充为 SM100 专属（仅分析）。
+      → `docs/74-dense-gemm-test-oracle.md`（真实行号核对）：**顶层结构**——`test_fp8_fp4.py:396-406`
+      无 arch 门控无条件跑四函数；`test_bf16.py:326-341` 前三个被 `if get_arch_major()>=9` 包住、
+      后三个 cuBLASLt 函数无条件跑。**arch 门控矩阵**（`generators.py`）：`get_kernel_types:100-104`
+      （SM90 FP8 只有 1D2D）、`get_list_from_dtype:76-86`（SM90 一个 legacy 配置、SM100 加 FP8×FP4/FP4×FP4）、
+      `get_ue8m0_usage:95-98`、`enumerate_normal:122-173`、`enumerate_k_grouped_contiguous:229-262`
+      （SM90 强制累积+FP32 输出）、`enumerate_m_grouped_*:194-226`。**逐函数「从松到严」判据**：
+      `calc_diff<max_diff`（`test_fp8_fp4.py:54`）→ 20× `torch.equal` 确定性（`:79/145/212/289`）→
+      direct==FP32 累积（`:306`）→ 随机舍入 quartet 哈希（`:65/311`）→ FP4==无损 FP8 `<1e-14`
+      （`:99/152/219/285`）→ SF K-stride padding 逐位（`:93/351`）→ PSUM 零填充（`:158`）→
+      空组 D/NaN 不变（`:269-271`）；且 `test_gemm` 的 `test_alias` 走 `nt/nn/tn/tt` 转置薄壳。
+      **`calc_diff` 盲区实证**（`numeric.py:5-13` 是余弦相似度）：对全局缩放**完全不变**
+      （真实 BF16 输出缩放 0.999/1.0001 后 calc_diff 一字不变）、单元素 1-ulp 扰动不敏感
+      （1.782e-8→1.487e-11），坐实逐位判据不可省。**H100 真机**
+      `harness/exp_dense_gemm_test_oracle.{sh,py,out.txt}`：直接 import 真实测试模块、调用
+      **真实测试体 11 个函数**（只压形状枚举、打桩 `bench_kineto`，测试体一行未改）全部断言通过；
+      枚举计数 arch9 **252 用例** vs 假 arch10 更大；真实 `bench_kineto` 采 BF16 `bf16_gemm_nt`
+      **235 TFLOPS（m=4096,n=7168,k=7168）/ 413 TFLOPS（方阵）**——**18 PASS / 0 FAIL**。
+      配套博客 `content/posts/mega-moe-74-dense-gemm-test-oracle`（索引页新增第 74 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -1998,8 +2026,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P63 各增量完成（P15-1…P41-1、P42-1…P63-1）。**
-  本轮 P63-1：新建 `docs/73-deepep-sm-qp-autotuning.md`（+`harness/exp_deepep_sm_qp.{sh,py,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P64 各增量完成（P15-1…P41-1、P42-1…P64-1）。**
+  本轮 P64-1：新建 `docs/74-dense-gemm-test-oracle.md`（+`harness/exp_dense_gemm_test_oracle.{sh,py,out.txt}`）
+  ——补上整条测试栈最基础的**顶层规格**：`tests/test_fp8_fp4.py` / `tests/test_bf16.py`。前面拆过基座
+  （第 40 篇）、生成器（第 41 篇）、逐位断言（第 43 篇）与四个 mega 算子的端到端测试（第 41/47/50/57 篇），
+  唯独这两个最先跑的文件一直只被顺带引用。本篇把它当「稠密 GEMM 算什么对」的可执行规格：
+  完整 `__main__` 门控、arch 门控矩阵（H100 真机枚举 **252 用例**）、每函数从松到严的判据链
+  （`calc_diff` → 20× 逐位 → direct==FP32 累积 → 随机舍入 quartet 哈希 → FP4==无损 FP8 → SF K-stride
+  padding → PSUM 零填充 → 空组 NaN 不变），并实证 `calc_diff` 作为余弦相似度的两处盲区（全局缩放不变 /
+  单元素 1-ulp 不敏感）。**H100 真机直接 import 真实测试模块调用真实测试体 11 个函数、18 PASS / 0 FAIL**，
+  真实 `bench_kineto` 采 BF16 235/413 TFLOPS。配套博客
+  `content/posts/mega-moe-74-dense-gemm-test-oracle`（索引页新增第 74 篇）。
+  上一轮 P63-1：新建 `docs/73-deepep-sm-qp-autotuning.md`（+`harness/exp_deepep_sm_qp.{sh,py,out.txt}`）
   ——补上 DeepEP dispatch/combine 一直缺席的**上游问题**：每次 `dispatch()`/`combine()` 开多少 SM / QP？
   答案不是超参，而是 host 侧**解析式 roofline** `EPBuffer.get_theoretical_num_sms:431-541` /
   `get_theoretical_num_qps:543-560`：把通信拆成「HBM 读 / HBM 写 / RDMA / NVLink」四本**每 token 流量账**，
@@ -2729,7 +2767,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P63 已完成（最新 **P63-1 DeepEP dispatch/combine 的自动 SM/QP 选择模型 + 带宽探测层**：
+- **下一步**：P0~P64 已完成（最新 **P64-1 稠密 GEMM 的验收测试即正确性规范**：
+  `tests/test_fp8_fp4.py` / `tests/test_bf16.py` 作为整条测试栈的顶层规格——`__main__`/arch 门控矩阵
+  （H100 枚举 252 用例）、逐函数「从松到严」判据链（`calc_diff`→20× 逐位→direct==累积→随机舍入哈希→
+  FP4==FP8→SF K-stride padding→PSUM 零填充），并实证 `calc_diff` 的两处盲区；H100 真机直接跑真实测试体
+  **18 PASS / 0 FAIL**；详见上）。
+  上一轮 P63-1：**DeepEP dispatch/combine 的自动 SM/QP 选择模型 + 带宽探测层**：
   host 侧解析式 roofline（四本每 token 流量账 + 期望命中组数 + 瓶颈链路标尺 + 每 SM HBM 带宽换算），
   纯 host、H100 真机 ast 抽取真实方法体跑 **16 PASS / 0 FAIL**；详见上）。
   上一轮 P62-1：**DeepEP bucket 的 `all_reduce`/`reduce_scatter`**：

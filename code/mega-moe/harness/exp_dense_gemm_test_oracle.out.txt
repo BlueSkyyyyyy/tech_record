@@ -1,0 +1,263 @@
+NVIDIA H100 80GB HBM3, 9.0
+
+==============================================================================
+Part A：两个稠密 GEMM 测试文件的顶层结构（真机 introspection）
+==============================================================================
+get_arch_major() = 9  (本机 H100 = sm90)
+
+test_fp8_fp4: functions = ['test_gemm', 'test_k_grouped_gemm_contiguous', 'test_m_grouped_gemm_contiguous', 'test_m_grouped_gemm_masked']
+  __main__ 调用序列：['test_gemm()', 'test_m_grouped_gemm_contiguous()', 'test_m_grouped_gemm_masked()', 'test_k_grouped_gemm_contiguous()']
+
+test_bf16: functions = ['test_cublaslt_batched_symm', 'test_cublaslt_batched_syrk', 'test_cublaslt_gemm', 'test_gemm', 'test_k_grouped_gemm_contiguous', 'test_m_grouped_gemm_contiguous', 'test_m_grouped_gemm_masked']
+  __main__ 调用序列：['if get_arch_major() >= 9:', 'test_gemm()', 'test_m_grouped_gemm_contiguous()', 'test_m_grouped_gemm_masked()', 'test_k_grouped_gemm_contiguous()', 'test_cublaslt_gemm()', 'test_cublaslt_batched_syrk()', 'test_cublaslt_batched_symm()']
+
+门控：test_bf16 的 GEMM 主体在 `get_arch_major() >= 9` 后（本机 9）→ 会跑；
+      test_fp8_fp4 无 arch 门控 → FP8 1D2D 会跑（1D1D/FP4/UE8M0 为 SM100 专属）。
+[PASS] A: 两模块可 import 且入口可见: test_fp8_fp4/test_bf16 共 10 个 test_* 函数
+
+==============================================================================
+Part B：验收「利齿」阈值表（真机读真实常量）
+==============================================================================
+QuantConfig.max_diff()  [calc_diff 阈值，越大越松]：
+  legacy FP8xFP8 (128,128)        -> 0.001
+  FP8xFP4       (128, 32)         -> 0.01
+  FP4xFP4       (32, 32)          -> 0.02
+BF16 稠密 GEMM (test_bf16.py:46/91/138/178) -> 1e-5
+cuBLASLt 参考 (test_bf16.py:227)  -> 1e-5 (BF16 累积) / 6e-7 (其余)
+cuBLASLt SYRK/SYMM (test_bf16.py:252/288) -> 6e-7
+FP4 与「无损转 FP8」交叉核对 (test_fp8_fp4.py:99/152/219/285) -> < 1e-14
+test_fp8_fp4 的 1D1D wgrad legacy recipe -> (1,1,128)，见 generators.py:60-67
+[PASS] B: 阈值表提取: PASS
+
+==============================================================================
+Part C：直接调用真实测试体（形状枚举/bench 缩小打桩，测试体不改）
+==============================================================================
+Testing GEMM:
+ > Perf (m=     1, n=  2112, k=  7168, 1D2D, layout=NT, BF16, acc=0): 1000000.0 us |    0 TFLOPS |    0 GB/s | 3.00x cuBLAS speedup
+ > Perf (m=     1, n=   576, k=  7168, 1D2D, layout=NT, BF16, acc=0): 1000000.0 us |    0 TFLOPS |    0 GB/s | 3.00x cuBLAS speedup
+ > Perf (m=     1, n= 24576, k=  1536, 1D2D, layout=NT, BF16, acc=0): 1000000.0 us |    0 TFLOPS |    0 GB/s | 3.00x cuBLAS speedup
+ > Perf (m=     1, n= 32768, k=   512, 1D2D, layout=NT, BF16, acc=0): 1000000.0 us |    0 TFLOPS |    0 GB/s | 3.00x cuBLAS speedup
+ > Perf (m=     1, n=  7168, k= 16384, 1D2D, layout=NT, BF16, acc=0): 1000000.0 us |    0 TFLOPS |    0 GB/s | 3.00x cuBLAS speedup
+ > Perf (m=     1, n=  4096, k=  7168, 1D2D, layout=NT, BF16, acc=0): 1000000.0 us |    0 TFLOPS |    0 GB/s | 3.00x cuBLAS speedup
+[PASS] C: test_fp8_fp4.test_gemm: no assertion violated
+Testing m-grouped contiguous GEMM:
+ > Perf (num_groups=4, m=35456, n=  6144, k= 7168, 1D2D, layout=NT, psum=True, zero_pad=False): 1000000 us |    3 TFLOPS |    1 GB/s
+ > Perf (num_groups=4, m=36096, n=  7168, k= 3072, 1D2D, layout=NT, psum=True, zero_pad=False): 1000000 us |    2 TFLOPS |    1 GB/s
+ > Perf (num_groups=4, m=31104, n=  4096, k= 4096, 1D2D, layout=NT, psum=True, zero_pad=False): 1000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (num_groups=4, m=32896, n=  4096, k= 2048, 1D2D, layout=NT, psum=True, zero_pad=False): 1000000 us |    1 TFLOPS |    0 GB/s
+
+[PASS] C: test_fp8_fp4.test_m_grouped_gemm_contiguous: no assertion violated
+Testing m-grouped masked GEMM:
+ > Perf (num_groups=32, expected_m_per_group= 192, n=6144, k=7168, 1D2D, psum=1): 1000000 us (max: 1000000 us) |    1 TFLOPS |    1 GB/s
+ > Perf (num_groups=32, expected_m_per_group= 192, n=7168, k=3072, 1D2D, psum=1): 1000000 us (max: 1000000 us) |    0 TFLOPS |    1 GB/s
+ > Perf (num_groups=32, expected_m_per_group= 192, n=4096, k=4096, 1D2D, psum=1): 1000000 us (max: 1000000 us) |    0 TFLOPS |    1 GB/s
+
+[PASS] C: test_fp8_fp4.test_m_grouped_gemm_masked: no assertion violated
+Testing k-grouped GEMM:
+ > Perf (FP8, num_groups= 8, m=  768, n= 2048, k=  962, gran_k=128, k_alignment=128, psum=0, acc=1, FP32): 1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (FP8, num_groups= 4, m= 4096, n= 7168, k=30526, gran_k=128, k_alignment=128, psum=0, acc=1, FP32): 1000000 us |    2 TFLOPS |    1 GB/s
+ > Perf (FP8, num_groups= 4, m= 7168, n= 2048, k=32098, gran_k=128, k_alignment=128, psum=0, acc=1, FP32): 1000000 us |    1 TFLOPS |    1 GB/s
+
+[PASS] C: test_fp8_fp4.test_k_grouped_gemm_contiguous: no assertion violated
+Testing GEMM:
+ > Perf (m=     1, n=  2112, k=  7168, layout=NT, BF16, acc=0): 1000000.0 us |    0 TFLOPS |    0 GB/s | 2.00x cuBLAS
+ > Perf (m=     1, n=  2112, k=  7168, layout=NT, BF16, acc=1): 1000000.0 us |    0 TFLOPS |    0 GB/s | 2.00x cuBLAS
+ > Perf (m=     1, n=   576, k=  7168, layout=NT, BF16, acc=0): 1000000.0 us |    0 TFLOPS |    0 GB/s | 2.00x cuBLAS
+ > Perf (m=     1, n=   576, k=  7168, layout=NT, BF16, acc=1): 1000000.0 us |    0 TFLOPS |    0 GB/s | 2.00x cuBLAS
+ > Perf (m=     1, n= 24576, k=  1536, layout=NT, BF16, acc=0): 1000000.0 us |    0 TFLOPS |    0 GB/s | 2.00x cuBLAS
+ > Perf (m=     1, n= 24576, k=  1536, layout=NT, BF16, acc=1): 1000000.0 us |    0 TFLOPS |    0 GB/s | 2.00x cuBLAS
+Average speedup over cuBLASLt: 2.000x
+
+[PASS] C: test_bf16.test_gemm: no assertion violated
+Testing m-grouped contiguous GEMM:
+ > Perf (num_groups=4, m=35456, n= 6144, k= 7168, layout=NT, psum=True, zero_pad=False): 1000000 us |    3 TFLOPS |    1 GB/s
+ > Perf (num_groups=4, m=36096, n= 6144, k= 7168, layout=NN, psum=True, zero_pad=False): 1000000 us |    3 TFLOPS |    1 GB/s
+ > Perf (num_groups=4, m=31104, n= 7168, k= 3072, layout=NT, psum=True, zero_pad=False): 1000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (num_groups=4, m=32896, n= 7168, k= 3072, layout=NN, psum=True, zero_pad=False): 1000000 us |    1 TFLOPS |    1 GB/s
+
+[PASS] C: test_bf16.test_m_grouped_gemm_contiguous: no assertion violated
+Testing m-grouped masked GEMM:
+ > Perf (num_groups=32, expected_m_per_group= 192, n=6144, k=7168, psum=1): 1000000 us (max: 1000000 us) |    1 TFLOPS |    3 GB/s
+ > Perf (num_groups=32, expected_m_per_group= 192, n=7168, k=3072, psum=1): 1000000 us (max: 1000000 us) |    0 TFLOPS |    1 GB/s
+ > Perf (num_groups=32, expected_m_per_group= 192, n=4096, k=4096, psum=1): 1000000 us (max: 1000000 us) |    0 TFLOPS |    1 GB/s
+
+[PASS] C: test_bf16.test_m_grouped_gemm_masked: no assertion violated
+Testing k-grouped contiguous GEMM:
+ > Perf (num_groups= 8, m=  768, n= 2048, k=  962, align=128, psum=0, acc=1, FP32): 1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (num_groups= 4, m= 4096, n= 7168, k=30526, align=128, psum=0, acc=1, FP32): 1000000 us |    2 TFLOPS |    2 GB/s
+ > Perf (num_groups= 4, m= 7168, n= 2048, k=32098, align=128, psum=0, acc=1, FP32): 1000000 us |    1 TFLOPS |    1 GB/s
+
+[PASS] C: test_bf16.test_k_grouped_gemm_contiguous: no assertion violated
+Testing cuBLASLt GEMM:
+ > Perf (m=     1, n=  2112, k=  7168, layout=NT, BF16, acc=0): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (m=     1, n=  2112, k=  7168, layout=NT, BF16, acc=1): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (m=     1, n=   576, k=  7168, layout=NT, BF16, acc=0): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (m=     1, n=   576, k=  7168, layout=NT, BF16, acc=1): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (m=     1, n= 24576, k=  1536, layout=NT, BF16, acc=0): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (m=     1, n= 24576, k=  1536, layout=NT, BF16, acc=1): 3000000 us |    0 TFLOPS |    0 GB/s
+
+[PASS] C: test_bf16.test_cublaslt_gemm: no assertion violated
+Testing cuBLASLt batched SYRK:
+ > Perf (batch=16, m=  4608, n=  4608, k=  5120, layout=N, BF16): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  4608, n=  4608, k=  5120, layout=T, BF16): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  1536, n=  1536, k=  5120, layout=N, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  1536, n=  1536, k=  5120, layout=T, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=   576, k=  5120, layout=N, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=   576, k=  5120, layout=T, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  1536, n=  1536, k= 24576, layout=N, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  1536, n=  1536, k= 24576, layout=T, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n=   512, k= 32768, layout=N, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n=   512, k= 32768, layout=T, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=4, m=  5120, n=  5120, k= 16384, layout=N, BF16): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=4, m=  5120, n=  5120, k= 16384, layout=T, BF16): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  4096, n=  4096, k=  7168, layout=N, BF16): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  4096, n=  4096, k=  7168, layout=T, BF16): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  2048, k=  7168, layout=N, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  2048, k=  7168, layout=T, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  4608, n=  4608, k=  5120, layout=N, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=16, m=  4608, n=  4608, k=  5120, layout=T, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=16, m=  1536, n=  1536, k=  5120, layout=N, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  1536, n=  1536, k=  5120, layout=T, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=   576, k=  5120, layout=N, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=   576, k=  5120, layout=T, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  1536, n=  1536, k= 24576, layout=N, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  1536, n=  1536, k= 24576, layout=T, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n=   512, k= 32768, layout=N, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n=   512, k= 32768, layout=T, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=4, m=  5120, n=  5120, k= 16384, layout=N, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=4, m=  5120, n=  5120, k= 16384, layout=T, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=  4096, n=  4096, k=  7168, layout=N, FP32): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  4096, n=  4096, k=  7168, layout=T, FP32): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  2048, k=  7168, layout=N, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  2048, k=  7168, layout=T, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+
+[PASS] C: test_bf16.test_cublaslt_batched_syrk: no assertion violated
+Testing cuBLASLt batched SYMM:
+ > Perf (batch=16, m=  4608, n=  5120, k=  4608, layout=NN, BF16): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=16, m=  4608, n=  5120, k=  4608, layout=NT, BF16): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=16, m=  4608, n=  5120, k=  4608, layout=TN, BF16): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=16, m=  4608, n=  5120, k=  4608, layout=TT, BF16): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=16, m=  1536, n=  5120, k=  1536, layout=NN, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  1536, n=  5120, k=  1536, layout=NT, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  1536, n=  5120, k=  1536, layout=TN, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  1536, n=  5120, k=  1536, layout=TT, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=  5120, k=   576, layout=NN, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=  5120, k=   576, layout=NT, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=  5120, k=   576, layout=TN, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=  5120, k=   576, layout=TT, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  1536, n= 24576, k=  1536, layout=NN, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  1536, n= 24576, k=  1536, layout=NT, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  1536, n= 24576, k=  1536, layout=TN, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  1536, n= 24576, k=  1536, layout=TT, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n= 32768, k=   512, layout=NN, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n= 32768, k=   512, layout=NT, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n= 32768, k=   512, layout=TN, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n= 32768, k=   512, layout=TT, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=4, m=  5120, n= 16384, k=  5120, layout=NN, BF16): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=4, m=  5120, n= 16384, k=  5120, layout=NT, BF16): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=4, m=  5120, n= 16384, k=  5120, layout=TN, BF16): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=4, m=  5120, n= 16384, k=  5120, layout=TT, BF16): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=  4096, n=  7168, k=  4096, layout=NN, BF16): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  4096, n=  7168, k=  4096, layout=NT, BF16): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  4096, n=  7168, k=  4096, layout=TN, BF16): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  4096, n=  7168, k=  4096, layout=TT, BF16): 3000000 us |    1 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  7168, k=  2048, layout=NN, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  7168, k=  2048, layout=NT, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  7168, k=  2048, layout=TN, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  7168, k=  2048, layout=TT, BF16): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  4608, n=  5120, k=  4608, layout=NN, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=16, m=  4608, n=  5120, k=  4608, layout=NT, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=16, m=  4608, n=  5120, k=  4608, layout=TN, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=16, m=  4608, n=  5120, k=  4608, layout=TT, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=16, m=  1536, n=  5120, k=  1536, layout=NN, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  1536, n=  5120, k=  1536, layout=NT, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  1536, n=  5120, k=  1536, layout=TN, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=  1536, n=  5120, k=  1536, layout=TT, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=  5120, k=   576, layout=NN, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=  5120, k=   576, layout=NT, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=  5120, k=   576, layout=TN, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=16, m=   576, n=  5120, k=   576, layout=TT, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  1536, n= 24576, k=  1536, layout=NN, FP32): 3000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=  1536, n= 24576, k=  1536, layout=NT, FP32): 3000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=  1536, n= 24576, k=  1536, layout=TN, FP32): 3000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=  1536, n= 24576, k=  1536, layout=TT, FP32): 3000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=   512, n= 32768, k=   512, layout=NN, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n= 32768, k=   512, layout=NT, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n= 32768, k=   512, layout=TN, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=   512, n= 32768, k=   512, layout=TT, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=4, m=  5120, n= 16384, k=  5120, layout=NN, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=4, m=  5120, n= 16384, k=  5120, layout=NT, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=4, m=  5120, n= 16384, k=  5120, layout=TN, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=4, m=  5120, n= 16384, k=  5120, layout=TT, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=  4096, n=  7168, k=  4096, layout=NN, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=  4096, n=  7168, k=  4096, layout=NT, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=  4096, n=  7168, k=  4096, layout=TN, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=  4096, n=  7168, k=  4096, layout=TT, FP32): 3000000 us |    1 TFLOPS |    1 GB/s
+ > Perf (batch=8, m=  2048, n=  7168, k=  2048, layout=NN, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  7168, k=  2048, layout=NT, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  7168, k=  2048, layout=TN, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (batch=8, m=  2048, n=  7168, k=  2048, layout=TT, FP32): 3000000 us |    0 TFLOPS |    0 GB/s
+
+[PASS] C: test_bf16.test_cublaslt_batched_symm: no assertion violated
+
+==============================================================================
+Part D：负样本控制——为什么必须用「逐位」判据（calc_diff 的盲区）
+==============================================================================
+D1) calc_diff 对全局缩放的解析不变性  1 - 2c/(1+c^2)：
+   y = 1.0000 * x  ->  calc_diff = 0.000e+00
+   y = 1.0001 * x  ->  calc_diff = 5.000e-09
+   y = 0.9990 * x  ->  calc_diff = 5.005e-07
+   y = 0.9000 * x  ->  calc_diff = 5.525e-03
+   y = 0.5000 * x  ->  calc_diff = 2.000e-01
+
+D2) 真实 BF16 GEMM (m=128,n=576,k=7168)：cal 基准 calc_diff(d, ref) = 1.782e-08
+    ref 整体缩放 1.0001  -> calc_diff = 1.782e-08  (阈值 1e-5) -> PASS，torch.equal = False
+    ref 整体缩放 0.999   -> calc_diff = 1.782e-08  (阈值 1e-5) -> PASS，torch.equal = False
+    ref 整体缩放 0.9     -> calc_diff = 5.524e-03  (阈值 1e-5) -> FAIL，torch.equal = False
+[PASS] D2: 全局缩放躲过 calc_diff 但 bitwise 抓到: 见上表
+
+D3) 单元素 1-ulp 扰动：elem#0 -18.0 -> -18.125，rel = 6.944e-03
+    calc_diff(d, d_pert) = 1.487e-11  (远低于 1e-5 -> 会漏)
+    assert_bitwise_equal 抛出：bitwise mismatch (1-ulp): num_bytes=147456, num_mismatch=1, first_byte=0, elem=0, coord=(0, 0), byte_in_elem=0, x_byte=144, y_byte=145, x_val=-18.0, y_val=-18.1
+[PASS] D3: 1-ulp 扰动 calc_diff 漏、bitwise 抓到: 
+[PASS] D: calc_diff 盲区已坐实: D1/D2/D3
+
+==============================================================================
+Part E：枚举计数 + arch 门控矩阵（真实数出 H100 会跑多少用例）
+==============================================================================
+E1) 本机 arch=9 时的用例数（真实 enumerator）：
+   test_fp8_fp4.test_gemm: enumerate_normal(FP8)        = 42
+   test_bf16.test_gemm: enumerate_normal(BF16)          = 84
+   m_grouped_contiguous(FP8)                            = 16
+   m_grouped_contiguous(BF16)                           = 32
+   m_grouped_masked(FP8)                                = 32
+   m_grouped_masked(BF16)                               = 32
+   k_grouped_contiguous(FP8)                            = 7
+   k_grouped_contiguous(BF16)                           = 7
+
+E2) 假装 arch=10（仅改枚举器的 arch 判定，不发射任何 kernel）时的用例数：
+ > Testing with gran_k_a=128, gran_k_b=128, is_fp4_a=False, is_fp4_b=False
+ > Testing with gran_k_a=128, gran_k_b=32, is_fp4_a=False, is_fp4_b=True
+ > Testing with gran_k_a=32, gran_k_b=32, is_fp4_a=True, is_fp4_b=True
+   enumerate_normal(FP8)                = 182
+   enumerate_normal(FP4)                = 42
+ > Testing with gran_k_a=128, gran_k_b=128, is_fp4_a=False, is_fp4_b=False
+ > Testing with gran_k_a=128, gran_k_b=32, is_fp4_a=False, is_fp4_b=True
+ > Testing with gran_k_a=32, gran_k_b=32, is_fp4_a=True, is_fp4_b=True
+   m_grouped_contiguous(FP8)            = 120
+   k_grouped_contiguous(FP8)            = 252
+   k_grouped_contiguous(FP4)            = 126
+
+   本机 arch=9 时 FP8 前向 quant 配置数 = 1；假 arch=10 时 = 3（legacy + (128,32,False,True) + (32,32,True,True)）
+[PASS] E: 枚举计数与 arch 门控矩阵: arch9 共 252 个枚举用例
+
+==============================================================================
+Part F：测试自带 perf 路径的真实吞吐（真实 bench_kineto，两个代表形状）
+==============================================================================
+   BF16 bf16_gemm_nt (m=4096,n=7168,k=7168):  1790.0 us |    235 TFLOPS
+   BF16 bf16_gemm_nt (m=4096,n=4096,k=4096):   333.0 us |    413 TFLOPS
+[PASS] F: 真实 bench_kineto 吞吐: BF16 两形状
+
+==============================================================================
+总计：18 PASS / 0 FAIL  (共 18 项)
+==============================================================================
