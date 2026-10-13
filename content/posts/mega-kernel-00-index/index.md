@@ -35,5 +35,6 @@ categories: ["算子开发"]
 15. [MPK 前端与算子层走读：从 mirage 图 API 到 task_configs / bGraph]({{< relref "mega-kernel-15-mpk-frontend" >}}) —— 补齐运行层/device/依赖分析器三篇的上游：手工构图的 task API
 16. [MPK 自动路径源码走读：Mirage superoptimizer 与 thread-block 级生成]({{< relref "mega-kernel-16-mpk-superoptimizer" >}}) —— 论文 §4.1/§4.2 的「自动分解 + thread-block 超优化」在 `src/search`/`src/transpiler` 的落点
 17. [MPK 搜索器辅助模块走读：e-graph 等价类、区间推导、符号化图]({{< relref "mega-kernel-17-mpk-search-passes" >}}) —— 主搜索循环之外的三块剪枝/抽象子系统（含「已实现未接线」证据）
+18. [MPK 多卡/NVSHMEM 路径源码走读：把通信编进同一个常驻 mega-kernel]({{< relref "mega-kernel-18-mpk-multigpu" >}}) —— 跨卡 event、两种 AllReduce（AllGather+Reduce / NVLS tile）与「多卡被迫单 kernel」
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

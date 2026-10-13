@@ -2725,9 +2725,46 @@
   `instantiate_symbolic_graph` 首行 `++counter; return false;`（`search.cc:836-842`）、
   `generate_kernel_graphs_symbolic` **无任何调用者**（`search_c.cc:106` 只调 `generate_kernel_graphs`）；
   §4 调用点汇总表（哪一步真剪枝：代数子表达式/算子序=是，维度约束联合/区间范围=否）；§5 与论文
-  §4.1/§4.2 对照 + 判据映射（三块都只贡献 C3）；§6 局限（纯走读、未量化剪枝收益、egg 规则集/z3 与
-  启发式等价性未证）。**纯源码走读（资料分析），本轮无新实验。**
-  配套博客 post `mega-kernel-17-mpk-search-passes`（weight 18）并更新 `mega-kernel-00-index` 第 17 项。
+   §4.1/§4.2 对照 + 判据映射（三块都只贡献 C3）；§6 局限（纯走读、未量化剪枝收益、egg 规则集/z3 与
+   启发式等价性未证）。**纯源码走读（资料分析），本轮无新实验。**
+   配套博客 post `mega-kernel-17-mpk-search-passes`（weight 18）并更新 `mega-kernel-00-index` 第 17 项。
+
+### P103 MPK 多卡/NVSHMEM 路径源码走读（`docs/17-mpk-multigpu.md`）
+
+- [x] **P103-1** 补齐 `docs/15`（P101-1）**§9 明留的尾巴** 与 `docs/16`（P102-1）**§6 明确转引的
+   同一条**——「**多 GPU/NVSHMEM 路径未展开**：`resolve_distributed_config`（`transpiler.h:53-58`）的
+   `gpu_dim`/NVSHMEM 分支与 `multigpu.py` 的张量并行切分未走读」。前面六篇源码走读全是单卡视角，
+   而论文标题/摘要反复强调 multi-GPU。见 `docs/17-mpk-multigpu.md`（快照 `mirage-project/mirage`
+   分支 `mpk` commit `f9eb70c`，与 `docs/06`/`07`/`08`/`14`/`15`/`16` 同快照；纯源码走读、无新实验）。
+   §0 编译栈各层的「GPU 维」坐标表（结论：MPK **没有**为多卡另造 runtime，只加两样东西）；
+   §1 启动栈（MPI 定 world/rank `mpk.py:298-312`、`use_nvshmem = world_size>1`、
+   `nvshmemx_init_attr(MPI_COMM_WORLD)` + `nvshmem_barrier_all`、launch/finalize 各一道跨卡 barrier、
+   **每 rank 各生成 tGraph、各编一个 launcher `.so`**）；§2（headline）**多卡被迫单 kernel**——
+   `nvshmemx_collective_launch` 顺序启动、不支持 split worker/scheduler
+   （`persistent_kernel.cuh:1988-1990,2025`），故多卡下「C1 单次 launch」从优化变**唯一路径**；
+   §3 event id 多卡编码 `nvshmem_tag:16|owner:16|idx:32`（`runtime_header.h:75-80`）与语义差
+   （普通 event 由本 GPU worker 触发、**NVSHMEM event 由别的 GPU 触发**）；
+   §4 编译期：`get_num_subtasks` 只对 `ALLGATHER_STRIDED_PUT` 返回 `num_gpus-1`
+   （`runtime.cc:66-74`）、subtask 的 `trigger_event` 改写成**目标 GPU 的 event id**
+   （`:129-150`/`:604-639`）、`layer_is_multigpu`（`:657-659`）、而 `TILE_ALLREDUCE` **不打标签**
+   （`:442-446`）；§5 设备侧：worker 对 NVSHMEM event 用 `nvshmem_signal_wait_until`
+   （`persistent_kernel.cuh:1095-1102`）、触发分支为空操作（信号在 task 内部、
+   `:1234-1248`）；§6 **两种 AllReduce**：策略 A `AllGather+Reduce`
+   （`multigpu.py:156-184`；`putmem_nbi` + `nvshmemx_signal_op` 到目标 GPU 计数器
+   `tasks/ampere/allreduce.cuh:31-58` + 本地 `reduction_kernel:67-92`，=论文 §6.5 行 1563-1567）
+   与策略 B `NVSHMEM Tile`（`multigpu.py:187-208`；Hopper `nvshmemx::tile_sum_reduce_block` NVLS
+   `ONE_SHOT_PULL_NBI` `tasks/hopper/allreduce.cuh:29-63`、Blackwell **手写** `multimem.ld_reduce`
+   + 内联散布式 barrier 以保共驻 `tasks/blackwell/allreduce.cuh:377-514`；是**本地 task**、
+   跨卡同步在 task 内）；自动选择（SM≥90+VMM+multicast+peer → Tile，否则 A，`multigpu.py:224-247`）；
+   附对照表；§7 张量与 TP residual「只 rank0 加、否则 allreduce 重复计 world_size 次」
+   （`persistent_kernel.py:2347-2361,2470-2474`；交叉引用 `../mega-moe/`）；
+   §8 host launcher per-rank（`persistent_kernel.py:38-141`）、host 无 per-token 通信调度；
+   §9 与论文对照表（**最大落差：论文只描述策略 A，SM≥90 主路径已是 NVLS tile=策略 B，论文未提**）；
+   §10 判据 C1–C5 映射（多卡把 C3 扩到「跨卡算子+通信」、C4 从设备内扩到设备间、C1 从优化变硬约束）；
+   §11 局限（纯走读未跑多卡、未走 `nvshmemx_collective_launch` 内部、策略 A 布局假设、
+   team 分配代价未测；`docs/15` 另两条尾巴仍未覆盖；跨卡重叠只有单机替身 `docs/04` §14）。
+   **纯源码走读（资料分析），本轮无新实验。** 配套博客 post `mega-kernel-18-mpk-multigpu`（weight 19）
+   并更新 `mega-kernel-00-index` 第 18 项。
 
 ## 每轮增量流程（autopilot）
 
@@ -2890,7 +2927,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P102-1 完成（1/1）**。补掉 `docs/15`（P101-1）**§9 明留的尾巴**——「只精读主搜索
+- 当前进度：**P103-1 完成（1/1）**。补齐 `docs/15`（P101-1）**§9 明留的尾巴** 与 `docs/16`（P102-1）
+  **§6 转引的同一条**——「**多 GPU/NVSHMEM 路径未展开**」。见 `docs/17-mpk-multigpu.md`（快照
+  `f9eb70c`，纯源码走读无新实验）：把前面六篇单卡走读之外的**多卡路径**逐段走通——§0 编译栈各层
+  「GPU 维」坐标表（MPK 未为多卡另造 runtime）；§1 MPI 定 world/rank + `nvshmemx_init_attr` +
+  launch/finalize 跨卡 barrier + **每 rank 各生成 tGraph/各编 launcher**；§2（headline）**多卡被迫
+  单 kernel**（`nvshmemx_collective_launch` 不支持 split worker/scheduler，`persistent_kernel.cuh:1988-1990`）
+  ——多卡下 C1 从优化变硬约束；§3 event id `nvshmem_tag|owner|idx` 编码与「NVSHMEM event 由别的 GPU
+  触发」语义；§4 编译期只给 `ALLGATHER_STRIDED_PUT` 打标签、`num_gpus-1` subtask、`trigger_event`
+  改写成目标 GPU（`runtime.cc:66-74,129-150,604-639,657-659`），`TILE_ALLREDUCE` 是本地 task；§5
+  worker 用 `nvshmem_signal_wait_until` 等、触发分支空操作（信号在 task 内）；§6 两种 AllReduce
+  （策略 A `AllGather+Reduce`=论文 §6.5；策略 B `NVLS tile` one-shot pull，Blackwell 手写
+  `multimem.ld_reduce` 保共驻，**论文未提**）；§7 TP residual 只 rank0 加；§8 per-rank launcher；
+  §9 论文对照表；§10 C1–C5（C3 扩到跨卡算子+通信、C4 扩到设备间）。配套博客 post
+  `mega-kernel-18-mpk-multigpu`（weight 19）、更新 `mega-kernel-00-index` 第 18 项。
+- 此前：**P102-1 完成（1/1）**。补掉 `docs/15`（P101-1）**§9 明留的尾巴**——「只精读主搜索
   循环；`abstract_expr/`、`range_propagation/`、`symbolic_graph/` 三块未逐行走读其内部算法」。
   见 `docs/16-mpk-search-passes.md`（快照 `f9eb70c`，纯源码走读无新实验）：把主搜索循环之外的**三个
   判断器**逐行走通——§1 `abstract_expr`（C++ 15 节点 + Rust **egg** e-graph：代数律/`sum` 换序/动态
