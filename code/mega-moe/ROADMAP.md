@@ -3465,6 +3465,39 @@
       配套博客 `content/posts/mega-moe-120-mega-moe-scheduler`（索引页新增第 120 篇；并修掉索引页
       重复的第 119 条）。
 
+### P111 增量（opt-in，补齐四个 Buffer 家族共享、却从没被单独读过的生命周期契约）
+
+- [x] **P111-1** **DeepEP 四个 Buffer 家族共享的生命周期契约 `BufferBase`**
+      （`deep_ep/buffers/base.py`（27 行）+ `csrc/buffers/base.hpp`（63 行）；
+      四个派生家族 `csrc/buffers/{ep,engram,pp,bucket}.hpp` + `deep_ep/buffers/{ep,engram,pp,bucket}.py`；
+      `deep_ep/__init__.py:63`）。前面 120 篇把 DeepEP 的通信原语、地基、测试/部署面都拆遍了，
+      但四个 Buffer 家族都继承、**却从没被单独读过**的公共基类一直被当 boilerplate。
+      **纯 host、架构无关，H100(sm90) 可跑真机实测**。
+      → `docs/121-deepep-bufferbase-lifecycle.md`（真实行号核对，`base.py` sha256[:16]
+      `17e6d15585068396` / `base.hpp` sha256[:16] `ba2c0cab18b449f4`）。**三个非平凡点**：
+      ① **两条平行继承链**——Python 的 `BufferBase`（ABC）与 C++ 的 `deep_ep::BufferBase` 是两个
+      独立类：`pybind11::class_<EPBuffer, BufferBase>`（`ep.hpp:1085`/`engram.hpp:308`/`pp.hpp:127`/
+      `bucket.hpp:344`）把 C++ 继承暴露给 pybind，Python `EPBuffer(BufferBase)`（`ep.py:208` 等）
+      继承 ABC 后另建 `self.runtime = _C.EPBuffer(...)`（`ep.py:339`），靠 `self.runtime` 引线相连
+      ——「Python 管用户可见语义、C++ 管资源释放时序」；② **`destroy_on_destruction` 三分支**
+      （`base.hpp:18-29`）——默认自动销毁 + 清 `main_context`（`:20-22`）、显式模式不销毁则打印
+      泄漏告警（`:25-27`，`name` 分 `EP`/`Engram`/`PP`/**小写 `bucket`**）、`destroyed` 标志
+      （`:14`）把重复销毁变硬错误；`destroy()` 是纯虚（`:35`）故只能由派生析构体（`ep.hpp:98-99`
+      等）调用——模板方法；③ **两个跨语言分歧**——`~BufferBase() noexcept(false)`（`:34`）是刻意
+      的（`destroy()` 会抛，默认 `noexcept(true)` 会 `std::terminate`）；二次 `destroy()` Python
+      **幂等**（`base.py:25` 的 `if self.runtime is not None:`）而 C++ **抛异常**（`ep.hpp:103` 的
+      `EP_HOST_ASSERT(not destroyed)`）。另：`main_context` 是 **property**（`base.py:11-14`）销毁后
+      自动返回 `None`；`destroy` 是**带实现的 `@abstractmethod`**（`:21-27`），四家族各自覆盖又用
+      `super().destroy()` 复用（`ep.py:365-371`/`pp.py:69-72`/`bucket.py:394-398`/`engram.py:106-110`
+      清理字段各异）；DeepEP 全部测试都传 `explicitly_destroy=True`（`tests/ep/test_ep.py:538` 等）
+      以取确定性释放。H100 实测 `harness/exp_deepep_bufferbase_lifecycle.{sh,py,out.txt}` +
+      `src/bufferbase_lifecycle.cpp` **32 PASS / 0 FAIL**：Part 1 在临时目录搭「影子 include 树」
+      （真实 `base.hpp` 逐字节拷入、最小 stub 顶掉 pybind11 与 `comm/api.hpp`）g++ 编译运行真实类体
+      （A/B/C/D/E/F 覆盖三分支 + 泄漏告警恰一次 + `sizeof(BufferBase)=32/alignof=8`）；Part 2 按文件
+      路径加载真实 `base.py`（抽象基类不可实例化 / property 转发 / 默认模式撞 `assert explicitly_destroy`
+      且未销毁 runtime / 二次销毁幂等）；Part 3 源解析四个家族五要素齐全 + 顶层 re-export。
+      配套博客 `content/posts/mega-moe-121-deepep-bufferbase-lifecycle`（索引页新增第 121 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3490,8 +3523,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P110 各增量完成（P15-1…P41-1、P42-1…P110-1）。**
-  本轮 P110-1：新建 `docs/120-mega-moe-scheduler.md`
+- 当前进度：**P0~P14 全部完成；P15~P111 各增量完成（P15-1…P41-1、P42-1…P111-1）。**
+  本轮 P111-1：新建 `docs/121-deepep-bufferbase-lifecycle.md`
+  （+`harness/exp_deepep_bufferbase_lifecycle.{sh,py,out.txt}`、`src/bufferbase_lifecycle.cpp`）——补齐
+  DeepEP 四个 Buffer 家族都继承、却从没被单独读过的公共基类 `BufferBase`（`deep_ep/buffers/base.py`
+  27 行 + `csrc/buffers/base.hpp` 63 行）。要点：Python ABC 与 C++ pybind **两条平行继承链**（靠
+  `self.runtime` 引线相连）；`destroy_on_destruction` 三分支状态机（自动销毁 / 显式模式泄漏告警 /
+  `destroyed` 标志把重复销毁变硬错误）+ 为什么必须由派生析构体调用（`destroy()` 纯虚）；
+  `~BufferBase() noexcept(false)` 是刻意的；二次 `destroy()` 的跨语言分歧（Python 幂等 / C++ 抛异常）。
+  纯 host、架构无关，**H100(sm90) 真机 32 PASS / 0 FAIL**。索引页新增第 121 篇。
+  上一轮 P110-1：新建 `docs/120-mega-moe-scheduler.md`
   （+`harness/exp_mega_moe_scheduler.{sh,out.txt}`、`src/mega_moe_scheduler.cu`）——补齐四个调度器里
   **最后一个、也是 Mega MoE 主 kernel 自己**的任务调度器 `deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh`
   （481 行）。要点：行容量公式 `get_num_max_live_pool_blocks:48-80` + `get_num_l1_warmup_waves:17-45`
@@ -4728,15 +4769,19 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P110 已完成（最新 **P110-1 Mega MoE 主 kernel 的任务调度器
+- **下一步**：P0~P111 已完成（最新 **P111-1 DeepEP 四个 Buffer 家族共享的生命周期契约
+  `BufferBase`**：Python ABC 与 C++ pybind **两条平行继承链**、`destroy_on_destruction` 三分支
+  状态机、`~BufferBase() noexcept(false)` 的用意、二次 `destroy()` 的跨语言分歧（Python 幂等 /
+  C++ 抛异常）；纯 host、架构无关，H100(sm90) 真机 **32 PASS / 0 FAIL**；索引页新增第 121 篇。
+  可继续（均为增量、非承诺）：
+  `semantic.py` 的 `weak_lru`/`find_pkgs` setup 侧（第 83/86 篇已覆盖大半）、
+  或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P110-1：P0~P110 已完成（最新 **P110-1 Mega MoE 主 kernel 的任务调度器
   `scheduler/mega_moe.cuh`（481 行）**：补全四个调度器的最后一格——行容量公式
   `get_num_max_live_pool_blocks`/`get_num_l1_warmup_waves`（host ring 分配的唯一几何契约）、
   `L2KBlockDependency` 的 XOR 位图 + ring 世代奇偶、`create_task` 的 warp 现算池块映射、
   locality-domain 分域 + 工作窃取、发布/消费顺序契约（只有 epilogue release）；
   H100(sm90a) 真机 **34 PASS / 0 FAIL**；索引页新增第 120 篇（并修掉索引页重复的第 119 条）。
-  可继续（均为增量、非承诺）：
-  `semantic.py` 的 `weak_lru`/`find_pkgs` setup 侧（第 83/86 篇已覆盖大半）、
-  或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
   上一轮 P109-1：P0~P109 已完成（最新 **P109-1 DeepEP 的 NVLink 连接自检
   `check_nvlink_connections` 与 H100 P2P 拓扑**：字符串门 / PCIe 硬上限 / NVML 8×8 能力矩阵 /
   `can_device_access_peer` / `cudaMemcpyPeerAsync` 带宽矩阵；H100 真机 16 PASS / 0 FAIL；
