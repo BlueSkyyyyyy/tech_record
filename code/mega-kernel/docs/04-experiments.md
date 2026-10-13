@@ -13965,3 +13965,164 @@ T=512 起降到 4）、寄存器只比 `mbar` 多 2–4（多出的 `lane`/`NW` 
   min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；共享机器上开发期长跑曾出现
   `U=16` 探针瞬时 `0/N`（重跑即复现正常），已用「至多 3 次重试」处理并如实记录；未做 ncu 归因
   （「每 round ~1 µs 固定项」是「资源同档 + 单变量去 fence + 扫 `NW`/`SEG`」的对照推断）。
+
+## 93. TMA multicast × 占用率 / 寄存器预算：multicast 的「省 L2」随占用率放大，而 delivery 在 ~7 TB/s 饱和（P168-1）
+
+本节补掉 §19.6 与 §86 之间明留的**未叠加组合**——「§19 的 TMA multicast 尚未与占用率叠加」
+（§19 的所有广播都在 `grid=128`（≈1 块/SM）上测，**从未把「每 SM 驻留块数」当旋钮**；
+而 §86 只量了 **DSM 远端读/写** 路径对占用率的免疫，**不是 TMA 载入** 路径）。它同时回应
+§19.6 的「deliver 饱和在 ~6.6 TB/s：这是 SMEM 写入 / TMA issue 的上限」这一**未定论断**——
+若真是每 SM 常数墙，则抬占用率不该抬高聚合吞吐；若不是，则占用率是一阶旋钮。
+
+### 93.1 问题
+
+四个问题：
+
+- **Q1（§B）**：把占用率用 **grid = numSM·O** 钉死（小 SMEM 不 binding），**多块/SM 能不能抬高
+  delivery 聚合吞吐？** 还是 ~6.6 TB/s 本就是每 SM 常数（占用率不是旋钮）？
+- **Q2（§C）**：换一个**独立**的占用率口径（固定 grid、用 **SMEM padding** 改每块动态 SMEM），
+  Q1 的结论是否一致？（对照 §68 的「grid 钉占用率 vs SMEM-pad 钉占用率」双口径。）
+- **Q3（§D）**：**寄存器预算 `__maxnreg__(R)`** 是不是这一 load-path 内核的旋钮？（对照 §69：数据面
+  认的是寄存器预算 ILP；但 TMA 由**单线程 issue**，怀疑寄存器预算根本无关。）
+- **Q4（§E）**：§19 的 headline「multicast 省源侧 L2 请求」**是不是与占用率无关**？在低占用率下
+  还成立吗？
+
+### 93.2 方法
+
+源码 `src/multicast_occupancy.cu`，脚本 `harness/multicast_occupancy.sh`，原始输出
+`harness/multicast_occupancy.out.txt`（目标卡 H100 / sm90a、numSM=132、**固定空闲 device 6**、
+nvcc 13.2、**每配置独立进程**——cluster launch failure 会 sticky 污染 context）。
+
+kernel 是 §19 `bcast_kernel` 的忠实复刻（同一 burst 结构：`L` 个 SMEM chunk 槽、每轮发 `L` 次 TMA、
+一个 `mbarrier` `expect_tx` 累计 `L·chunk` 字节后一次等待、`cl.sync()` 收尾；mode0 = 每个 CTA 各发普通
+TMA，mode1 = 仅 rank0 发 `...multicast::cluster`、`mask=(1<<C)-1`）。三处新增**独立旋钮**：
+
+- **动态 SMEM = `L·chunk·4 + pad`**：`pad` 只抬每块 SMEM 足迹、kernel **不使用**，用它把每 SM 驻留块数
+  钉到目标值（与 pipeline 深度 `L` 解耦）；
+- **grid = numSM·O**：把「每 SM 块数」用 grid 钉死（`O ≤ SMEM/寄存器上限`时占用率只由 `O` 决定）；
+- **`__maxnreg__(R)` 模板变体**：`R ∈ {24,32,40,64,96}` + 无属性基线 `mcast_nat`，扫寄存器预算。
+
+主机侧用 `cudaOccupancyMaxActiveBlocksPerMultiprocessor` 报实测占用率（`occ`）与有效驻留
+（`eff=min(occ, grid/numSM)`）；`per-blk` = 聚合 deliver / grid；`maxerr` 对照解析参考。ncu 段取
+`lts__t_bytes.sum` / `lts__t_sectors_srcunit_tex_op_read.sum` / `dram__bytes_read.sum`。
+
+### 93.3 §A 资源表：寄存器预算对这一 load-path kernel 是 **no-op**
+
+`ptxas -v`：`mcast_nat` 与 **全部** `__maxnreg__(R)` 变体**一律 `10 registers, 0 spill, 128 B smem`**
+（`R≥24` 都远高于自然需求 10，故属性完全无效果；本机 `__maxnreg__` 下限为 24，无法压到 10 以下）。
+寄存器上限占用率 `reg_occ = 65536/(10·128) = 51`，恒被块上限 32 覆盖 → **寄存器永远不是约束**。
+SMEM 才是占用率旋钮（`cudaOccupancyMaxActiveBlocksPerMultiprocessor` 实测，每块动态 SMEM）：
+
+```
+  smem/块   16KB   32KB   64KB   128KB  144KB  176KB  192KB
+  occ       13      6      3       1      1      1      1      (blocks/SM)
+```
+
+（H100 每 SM 227–228 KB SMEM，扣除系统保留后 16KB→13、32KB→6、64KB→3，≥128KB 一律 1。）
+
+### 93.4 §B（Q1）占用率（grid 轴）是 delivery 吞吐的一阶旋钮，在 `eff≈4–6` 饱和
+
+固定 `chunk=8KB, L=2`（每块 16KB，SMEM 不 binding）、`C=4, R=300`，扫 `grid = 132·O`：
+
+```
+   O  grid   eff   mode0 GB/s   mode1 GB/s   m1/m0
+  --- ----- ----- ----------- ----------- -------
+   1    132    1     2694.8      2616.5     0.971
+   2    264    2     4554.9      4384.6     0.963
+   4    528    4     7015.0      7167.4     1.022
+   8   1056    8     6645.1      6937.5     1.044
+```
+
+**聚合 delivery 从 1 块/SM 的 ~2.7 TB/s 抬到 4 块/SM 的 ~7.0 TB/s（2.6×），随后在 8 块/SM 回落到
+~6.6 TB/s**。故 §19.6 的「~6.6 TB/s 是每 SM 常数墙」**不成立**——饱和点其实是**全机 L2→SMEM 的聚合
+带宽**，只要给足并发块就能逼近 ~7 TB/s；`per-blk` 从 20.4 降到 6.3 GB/s 说明这是**共享全机资源**的
+分摊。**multicast（mode1）的墙钟优势只在 `eff≥4` 出现**（+2.2%/+4.4%），在 1–2 块/SM 反而 **慢 3–4%**
+（mode1 每 cluster 只有 rank0 发 TMA，在飞请求数变少、延迟受限时吃亏）。
+
+### 93.5 §C（Q2）占用率（SMEM-pad 轴）交叉验证，峰值同档
+
+固定 `grid=1056, L=2, C=4, R=300`，用 `pad` 扫占用率：
+
+```
+  pad    smem/块  occ   mode0 GB/s   mode1 GB/s   m1/m0
+  ----- ------- ----- ----------- ----------- -------
+    0     16KB     8     6646.9      6933.4     1.043
+   16     32KB     6     7138.4      6785.6     0.951
+   48     64KB     3     5822.2      5735.2     0.985
+   96    112KB     2     4267.0      4179.2     0.980
+  144    160KB     1     2472.6      2502.9     1.012
+  200    216KB     1     2469.8      2503.3     1.014
+```
+
+与 §B **两种口径一致**：峰值同在 ~7.0–7.1 TB/s（§B 的 `eff=4`=`7015`、§C 的 `occ=6`=`7138`）；
+`occ=2` 的 `4267` 与 §B 的 `eff=2`=`4555` 同档。占用率降到 1 时聚合掉到 ~2.5 TB/s（8 波串行）。
+**两张口径的差异只在「`occ` 与 `eff` 相等的区间」**（§B 是 grid 恰好铺满，§C 是 grid 过配成多波），
+但**吞吐对「实际驻留块数」几乎只依赖一个变量**。注意 `occ=6` 与 `occ=8` 的 honoring 之外，
+`mode1/mode0` 在 0.95–1.04 间**非单调抖动**——**multicast 的墙钟墙收益（≤5%）在噪声量级**，
+真正稳的是 §E 的 L2 流量差。
+
+### 93.6 §D（Q3）寄存器预算 `__maxnreg__(R)` 扫描：完全无差别
+
+固定 `grid=1056, L=2, pad=0, R=300`，`maxr ∈ {0,24,32,40,64,96}`（`0`=无属性基线），两模式
+12 个点的 deliver **全部落在 6639–6944 GB/s**（mode0 ~6650、mode1 ~6930），与资源表「一律 10 regs」
+一致——**寄存器预算对这一由单线程 issue TMA 的 load-path kernel 是纯 no-op**。这与 §69/§93 系列
+「数据面认寄存器预算 ILP」**不矛盾**：那说的是**每线程在飞 load 数**由寄存器决定的数据面 task；
+TMA 广播的能量在**拷贝引擎**、不在线程寄存器。
+
+### 93.7 §E（Q4）ncu：multicast 省 L2 随占用率放大，且依赖 `C`/`L` 结构
+
+固定 `C=4, L=2, chunk=8KB, R=200`，扫 `O`（`ncu -c 1`）：
+
+```
+   O   mode   lts__t_bytes   L2 read sectors   dram__bytes_read
+  --- ------ ------------- ----------------- ------------------
+   1    0      250.71 MB        3,439,484           3.28 MB
+   1    1      248.75 MB        3,379,200           3.28 MB
+   2    0      497.35 MB        6,935,076           3.28 MB
+   2    1      488.90 MB        6,758,400           3.28 MB
+   4    0      923.42 MB       14,857,172           3.28 MB
+   4    1      875.55 MB       13,516,800           3.28 MB
+   8    0     1670.  MB       34,527,932           3.28 MB
+   8    1     1450.  MB       27,033,600           3.28 MB
+  m0/m1 (bytes)   1.009  1.017  1.055  1.152
+  m0/m1 (sectors) 1.018  1.026  1.099  1.277
+```
+
+**multicast 的 L2 收益随占用率单调放大**：sectors 比从 **1.02×@1 块/SM 升到 1.29×@8 块/SM**、
+bytes 比从 1.01× 升到 1.15×；**DRAM 字节在所有档位恒等（3.28 MB）**。这与 §B 的「mode1 只在
+高占用率才在墙钟上小幅领先」方向一致：**低占用率下 L2 不紧张，mode0 的重复请求被 L2 合并掉，
+multicast 无从发挥；占用率一高，L2 请求压力上来，multicast 的削减才显形**。
+
+**与 §19 的差异（重要）**：§19 D 在 `C=8, L=24, grid=128` 下量到 sectors 比 **2.10×**、bytes 比
+1.84×。本节 §E2 用**同一 kernel** 复现该配置，得 sectors **41.13M vs 19.66M = 2.09×**、bytes
+1.51GB vs 821MB = 1.84×、DRAM 71.3MB 两模式相同——**逐位复现 §19**。故 §19 的「2×」不是普适常数：
+它来自 `C=8`（每 cluster 8 个 CTA 的重复请求）与 `L=24`（每 CTA 每轮 24 条不同地址的长请求流，
+L2 来不及合并 mode0 的跨 CTA 重复），而本节的 `C=4/L=2` 短流让 L2 几乎完全合并。**结论：multicast
+的 L2 收益 `= f(C, L, 占用率)`，此前 §19 只在单点测过。**
+
+### 93.8 结论、判据与局限
+
+- **结论一（headline，修正 §19.6）**：TMA 广播的 delivery 吞吐**不是每 SM 常数**——把每 SM 驻留块数
+  从 1 抬到 4–6，聚合 delivery 从 ~2.7 TB/s 升到 ~7.0 TB/s（2.6×），随后回落。**占用率是 delivery
+  的一阶旋钮，饱和点 ~7 TB/s 是全机 L2→SMEM 的聚合墙**（两种占用率口径一致）。
+- **结论二（headline）**：multicast 相对「每 CTA 各读」的**墙钟收益很小（≤5%）且只在 `eff≥4` 才为正**
+  （低占用率反而慢 3–4%）——因为其能量在**拷贝引擎/SMEM 写**、不在线程；而**源侧 L2 收益随占用率
+  单调放大**（sectors 1.02×→1.29×），且**强依赖 `C`/`L` 的请求流结构**（`C=8/L=24` 时达 2.09×，
+  `C=4/L=2` 时仅 1.02×）。DRAM 字节在一切档位恒等。
+- **结论三（对照 §69/§86）**：**寄存器预算对这一 load-path kernel 是纯 no-op**（自然需求仅 10 regs，
+  远低于任何档位；`__maxnreg__` 无法压到 24 以下）——与 §86「DSM 交换不吃占用率」方向一致但机制不同：
+  §86 是**远端 SMEM 访问延迟**不被寄存器预算影响，本节是**拷贝引擎不被线程寄存器影响**。
+- **对 MPK / 生产案例的印证**：DeepGEMM Mega MoE 写死「**Always multicast on A**」
+  （`heuristics/mega_moe.hpp:141–143`、`docs/02` §1.5），核心理由正是本节量到的 **L2 请求削减**——
+  在常驻 megakernel 里机器总是**被占满**（MPK §5.1 把 SM 分给 worker/scheduler、§7 寄存器按各 task
+  最大值），即 `O` 落在 multicast 收益最大的高占用率区；而它把 multicast 只放在**被多 CTA 共享、
+  最值得省源带宽的那一路（A）**、B/权重仍独立载入，与本节的「wall-clock 差小、真正省的是 L2 余量
+  给别的 task」一致。
+- **判据（C1–C5，`docs/00` §3）**：cluster kernel 满足 C1+C2+C3，`cluster.sync`/multicast 细化 **C4**；
+  **仍不是 C5**（无固定 worker/scheduler 动态派发）。与 §18–§23/§86–§92 同档。
+- **局限（诚实标注）**：只测 H100/sm90a（cluster 上限 16、grid 须为 C 的倍数；本机 SM100 的
+  `SM100_TMA_2SM_LOAD` 不可执行）；合成 `float` 数据、非真实 task tile；占用率用
+  `cudaOccupancyMaxActiveBlocksPerMultiprocessor` 的**静态**上界，未用 ncu 的 achieved occupancy
+  交叉验证；`R=300`、`iters=20`、取均值，绝对值受同机 HBM/调度噪声影响（共享机器单轮曾出现
+  ~13% 瞬时离群，重跑即复现正常），**只采信同族相对排序**；ncu 在共享机器上推高绝对时间，只用来
+  读**字节/请求计数**（比值稳定）；未扫 `chunk`、未测 2D/3D cluster 与 multicast 子集掩码。

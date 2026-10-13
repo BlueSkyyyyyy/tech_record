@@ -4809,6 +4809,32 @@
    `cluster.sync`/`mbarrier` 细化 **C4**、**仍非 C5**。**本轮新增实验**；P167-1 新留尾巴（§92.7）：只测
    H100/sm90a、`TH` 编译期宏非运行期单二进制、合成 `float`、未做 ncu 归因。
 
+### P168 实验扩展 69：TMA multicast × 占用率 / 寄存器预算（`docs/04-experiments.md` §93）
+
+- [x] **P168-1** 补掉「下一步候选」长期点名的**未叠加组合**——「§19 的 TMA multicast
+   尚未与占用率叠加」（§19 全部广播在 `grid=128`≈1 块/SM 上测，从未把每 SM 驻留块数当旋钮；
+   §86 只量了 **DSM 远端读/写** 路径对占用率的免疫，不是 **TMA 载入** 路径），并检验 §19.6 的
+   「deliver 饱和 ~6.6 TB/s 是每 SM 常数墙」这一未定论断。见 `docs/04-experiments.md` **§93**，
+   源码 `src/multicast_occupancy.cu`（§19 `bcast_kernel` 忠实复刻 + 三处独立旋钮：动态 SMEM
+   `=L·chunk·4+pad`、`grid=numSM·O`、`__maxnreg__(R)` 模板变体），脚本
+   `harness/multicast_occupancy.sh`、原始输出 `harness/multicast_occupancy.out.txt`（目标卡
+   H100/sm90a、numSM=132、**固定空闲 device 6**、nvcc 13.2、每配置独立进程）。
+   五个 Section：§A 资源表 + §B（grid 轴扫占用率）/§C（SMEM-pad 轴交叉验证）/§D（`__maxnreg__`
+   扫寄存器预算）/§E（ncu 源侧 L2 流量）。核心结论：**(1)（headline，修正 §19.6）TMA 广播 delivery
+   不是每 SM 常数**——每 SM 驻留块数 1→4 把聚合 delivery 从 ~2.7 TB/s 抬到 **~7.0 TB/s（2.6×）**
+   再回落，饱和点 ~7 TB/s 是**全机 L2→SMEM 聚合墙**（grid 轴与 SMEM-pad 轴两口径一致，峰值
+   `eff=4`=7015 / `occ=6`=7138 GB/s）；**(2)（headline）multicast 相对「每 CTA 各读」的墙钟收益小
+   （≤5%）且只在 `eff≥4` 为正**（低占用率反慢 3–4%；mode1 每 cluster 仅 rank0 发 TMA、在飞请求少）；
+   **源侧 L2 收益随占用率单调放大**（sectors 比 **1.02×@1 块/SM → 1.29×@8 块/SM**、bytes 1.01×→1.15×），
+   且**强依赖 `C`/`L` 请求流结构**——§E2 用同一 kernel 复现 §19 的 `C=8/L=24/grid=128` 得 sectors
+   **2.09×**、bytes 1.84×、DRAM 恒等（逐位复现 §19 的 2.10×），而 `C=4/L=2` 下短流被 L2 完全合并
+   只剩 1.02×；**(3) 寄存器预算（`__maxnreg__`）对 load-path kernel 是纯 no-op**——自然需求仅
+   **10 regs**、`R≥24` 全不 binding，12 个点 deliver 全在 6639–6944 GB/s（对照 §69「数据面认寄存器
+   ILP」：TMA 能量在拷贝引擎、不在线程寄存器）。DRAM 字节在一切档位恒等（3.28 MB）。判据：cluster
+   kernel C1+C2+C3、`cluster.sync`/multicast 细化 **C4**、**仍非 C5**。**本轮新增实验**；P168-1
+   新留尾巴（§93.8）：只测 H100/sm90a、合成 `float`、占用率用静态上界未用 ncu achieved、未扫
+   `chunk`/2D-3D cluster/multicast 子集掩码。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -5311,10 +5337,41 @@
 - **`cluster_concurrency.cu` 的 `probe` 分支不检查 `SEG>sb`**（P167-1/§92）：`run` 分支有
   `SEG>sb → SKIP` 保护，但 `probe` 分支没有；`T=1024,U=16` 时 `SEG=16384 > sb=8192` 会**静默跑非法
   配置**并报 `0/N ok`（看似「不稳定」，实为无效配置）。扫参数时须按 `TH·U ≤ sb` 过滤。
+- **`cudaOccupancyMaxActiveBlocksPerMultiprocessor` 对动态 SMEM > 48 KB 的内核必须先
+  `cudaFuncSetAttribute(..., cudaFuncAttributeMaxDynamicSharedMemorySize, smem)`**（P168-1/§93）：
+  否则查询在 SMEM 超默认 48 KB 门槛时**静默返回 `occ=0`**（看似「跑不动」，实为没 opt-in）。
+  且必须在**每次 query 之前**设——只在 launch（`cudaLaunchKernelExC` 前）设一次，之后的 occupancy
+  查询仍拿到 0。症状：`waves` 被算成 `grid/(numSM·1)`（虚高），或误判「该 SMEM 下不可驻留」。
+- **共享机器上单轮微基准会有 ~13% 级瞬时离群**（P168-1/§93）：同一配置（如 `__maxnreg__` 扫描）
+  首轮出现过 mode0 掉到 ~5800 GB/s 的点、重跑即回到 ~6650 GB/s；因该 kernel 各变体 `numRegs` 完全
+  相同，离群**只能归因于同机干扰/热态**。故这类「属性 no-op」的对照尤其要**重跑确认**、且只采信
+  同族相对排序，不能拿单轮绝对值下结论。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P167-1 完成（1/1）**。补掉 P166-1（§91）**§91.8 明留的尾巴**——「`mbarw`/`mbarw0`
+- 当前进度：**P168-1 完成（1/1）**。补掉「下一步候选」长期点名的**未叠加组合**——「§19 的 TMA
+  multicast 尚未与占用率叠加」（§19 全部广播在 `grid=128`≈1 块/SM 上测、从未把每 SM 驻留块数当旋钮；
+  §86 只量了 DSM 远端读/写路径对占用率的免疫，不是 TMA 载入路径），并检验 §19.6「deliver 饱和
+  ~6.6 TB/s 是每 SM 常数墙」的未定论断。见 `docs/04-experiments.md` **§93**，源码
+  `src/multicast_occupancy.cu`（§19 `bcast_kernel` 忠实复刻 + 三处独立旋钮：动态 SMEM `=L·chunk·4+pad`、
+  `grid=numSM·O`、`__maxnreg__(R)` 模板变体），脚本 `harness/multicast_occupancy.sh`、原始输出
+  `harness/multicast_occupancy.out.txt`（目标卡 H100/sm90a、numSM=132、**固定空闲 device 6**、nvcc 13.2、
+  每配置独立进程）。三条 headline：**(1)（修正 §19.6）TMA 广播 delivery 不是每 SM 常数**——每 SM
+  驻留块数 1→4 把聚合 delivery 从 ~2.7 TB/s 抬到 **~7.0 TB/s（2.6×）**再回落，饱和点 ~7 TB/s 是
+  **全机 L2→SMEM 聚合墙**（grid 轴 `eff=4`=7015 与 SMEM-pad 轴 `occ=6`=7138 两口径一致）；**(2)
+  multicast 墙钟收益 ≤5% 且只在 `eff≥4` 为正**，但**源侧 L2 收益随占用率单调放大**（sectors 比
+  **1.02×→1.29×**），且**强依赖 `C`/`L`**——用同一 kernel 复现 §19 的 `C=8/L=24` 得 sectors **2.09×**
+  （逐位复现 §19 的 2.10×），而 `C=4/L=2` 只剩 1.02×；**(3) 寄存器预算是纯 no-op**（自然 10 regs，
+  12 个点 deliver 全 6639–6944 GB/s）。DRAM 恒 3.28 MB。判据 cluster C1+C2+C3、细化 **C4**、
+  **仍非 C5**。**本轮新增实验**；两条坑（occupancy 查询要先 opt-in、共享机器 13% 离群）已记入「已知坑」。
+- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §93）——如 **`__maxnreg__` × TMA
+  multicast 的 SM100 版**（本机不可执行，仅资料）、**cluster × 端到端骨架**（把 §62/§74 的骨架放进
+  cluster）、**multicast 的 `C`×`L`×`chunk` 三维面**（§93 只扫了 `C`/`L` 两点、`chunk` 未扫）、
+  **multicast 子集掩码 / 2D-3D cluster**（§20 的 2D/3D 未与 multicast 叠加）、或 **ncu achieved
+  occupancy 交叉验证**（§93 用静态上界）；也可回到源码走读主线（`docs/35` §9 余的「`bf16` 之外 SM100
+  task 家族未逐一走读」）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft attention（已核零命中、
+  **不可走读**，仅供静态落差记录）。
+- 此前：**P167-1 完成（1/1）**。补掉 P166-1（§91）**§91.8 明留的尾巴**——「`mbarw`/`mbarw0`
   只在 `T=256`（`NW=8`）上测，**未扫 `NW`**」，并借此检验 §91.3 的「`mbarw` 慢在 `NW×2=16` 条 cluster
   fence」成本模型。源码 `src/cluster_concurrency.cu` **仅把 `TH` 提升为编译期宏**（`:49-51`），逐 `T`
   （`-DTH=64/128/256/512/1024`）编译；见 `docs/04-experiments.md` **§92**，脚本
