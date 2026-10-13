@@ -229,8 +229,8 @@ test_locality_domain.py:77: assert deep_gemm.is_localization_available()
 ### 5.2 `test_without_mlopart`（`:133-157`）——本机真机通过
 
 这个用例的巧妙之处：它**主动模拟「老 MPS 不认识 `-mlopart`」**——写一个假的 `nvidia-cuda-mps-control`
-包一层，把命令行里的 ` -mlopart` 剥掉再转发给真 CLI（`mlopart.py:135` 的 `shutil.which` + `:149-153`
-的假脚本 `sed "s/ -mlopart//"`）。然后在子进程里跑一段脚本（`:137-148`），断言：
+包一层，把命令行里的 ` -mlopart` 剥掉再转发给真 CLI（`tests/test_locality_domain.py:136` 的 `shutil.which` +
+`:150-151` 的假脚本 `sed "s/ -mlopart//"`）。然后在子进程里跑一段脚本（`:137-148`），断言：
 
 - `not deep_gemm.is_localization_available()`；
 - **恰好一次** `UserWarning`，且文案含 `"MLOPart is unavailable"`（`:141`，对应 `mlopart.py:37`）；

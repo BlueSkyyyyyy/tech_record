@@ -28,7 +28,7 @@
   - deep_gemm/legacy/tune_options.py:12-23 _gemm_configs（A100 smem 166912 过滤 + <=align 过滤）
   - deep_gemm/legacy/m_grouped_gemm.py:14-38  block 首行取组号 + 空 token 写零
   - deep_gemm/legacy/m_grouped_gemm.py:56-70  主循环（b 按 batch_id 取组，IS_B_K_MAJOR 走址）
-  - deep_gemm/legacy/m_grouped_gemm.py:86-92  契约断言（M%align==0）
+  - deep_gemm/legacy/m_grouped_gemm.py:61-72  契约断言（M%align==0，assert 在 :72）
   - deep_gemm/legacy/a_fused_m_grouped_gemm.py:35-44  空 token 写零；:46-48 m_row_indices 逐行 gather
   - deep_gemm/legacy/a_fused_m_grouped_gemm.py:74-83  契约断言（m_indices.numel()%align==0）
   - deep_gemm/legacy/a_fused_k_grouped_gemm.py:45-56  主循环（A 用 rows=k_indices gather）
@@ -130,7 +130,7 @@ a_bad = torch.randn((1000, k), device=DEV, dtype=torch.bfloat16)
 d_bad = torch.empty((1000, n), device=DEV, dtype=torch.bfloat16)
 mi_bad = torch.zeros((1000,), device=DEV, dtype=torch.int32)
 ok, msg = raises(lambda: m_grouped_bf16_gemm_nt_contiguous_tl(a_bad, b, d_bad, mi_bad))
-check('M%align!=0 被拒 (m_grouped_gemm.py:92)', ok, msg)
+check('M%align!=0 被拒 (m_grouped_gemm.py:72)', ok, msg)
 
 # ---------------------------------------------------------------------------
 # B) a_fused_m：m_row_indices 逐行 gather 源激活行

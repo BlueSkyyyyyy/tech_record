@@ -241,7 +241,7 @@ mk_alignment_for_contiguous_layout = 128
   PASS  m-grouped vs torch 参考 (calc_diff)            calc_diff=0.000e+00
   PASS  padding 行严格写零                              pad rows=357, nonzeros=0
   PASS  有效行逐位等于参考
-  PASS  M%align!=0 被拒 (m_grouped_gemm.py:92)
+  PASS  M%align!=0 被拒 (m_grouped_gemm.py:72)
 [B] a_fused_m（A 逐行 gather）
   PASS  identity m_row_indices 逐位等于 m_grouped       max_abs_diff=0.000e+00
   PASS  置换 m_row_indices 复现任意逐行 gather          calc_diff=1.786e-10

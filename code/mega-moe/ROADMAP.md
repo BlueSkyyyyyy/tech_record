@@ -3002,7 +3002,27 @@
       **ALL_OK=True**：`symm buffer` fp8xfp4==fp8xfp8（2145.3MB）、`block_m` 与 dtype 无关、packed 往返
       逐位、`unpack∘interleave == interleave∘unpack` 逐位、FP4 权重使 MoE 输出误差 ~3.2×（量化本身
       ~4.4×）、权重显存**恰好减半**。配套博客 `content/posts/mega-moe-105-fp4-mega-moe-weights`
-      （索引页新增第 105 篇）。
+       （索引页新增第 105 篇）。
+
+### P96 增量（opt-in，给前 105 篇做一次引用体检 + 全算子索引）
+
+- [x] **P96-1** **DeepGEMM / DeepEP 算子总索引与引用行号健康检查（source-rot audit）**：
+      105 篇已写 ~1900 处 `file:line`，会被内联到博客却无人回核；上游每版会漂移。本篇把「还有多少
+      引用对得上」做成可复现数字，并给全局算子 → 覆盖篇目索引，**当场闭环修掉体检发现的真实错误**。
+      **纯文件解析、架构无关，H100/任意机器可跑**。
+      → `docs/106-deepgemm-source-index-audit.md`（真实数字）：源 `DeepGEMM 057ca59`（`#462`）/
+      `DeepEP 93eb6eb`（v2.5.0），脚本 `harness/exp_deepgemm_source_audit.{py,sh}`（+`.out.txt`）。
+      方法四层核对（可解析 / 行号在界 / 行非空 / 同 Markdown 行反引号标识符内容命中）+ 同名多文件
+      按「(行号在界, 严格命中, 宽松命中, 路径后缀)」字典序打分消歧。**结果**：总 1904 条引用、
+      可解析 **1898（99.68%）**、**行号越界 0**、无法解析 6（全为 `...` 占位）、被引行全空 10、
+      内容抽查 741 条（严格 554=74.76%、宽松 646=87.18%）、覆盖 198 个源文件；**19 个 device impl +
+      11 个 host api 全部至少被一篇覆盖（无 none）**；精确引用最多 `gemm.hpp`(95)/`ep.py`(66)/
+      `layout.hpp`(60)。**修掉 2 处真实错误 + 1 处简写歧义**：① `docs/39`+`exp_legacy_grouped_gemm.py`
+      的 `m_grouped_gemm.py:92/86-92`→`:72/61-72`（文件仅 84 行，重跑实验输出）；② `docs/81` 把
+      `mlopart.py:135`→`tests/test_locality_domain.py:136/:150-151`（引错文件）；③ `docs/38` 的
+      `mega_moe.cuh:1440/1419/613/1243`→全名 `sm100_fp8_fp4_mega_moe.cuh:…`（简写被解析到越界）。
+      另列 10 条同名歧义 + 92 条轻微漂移（off-by-one / 同行多引用串扰的启发式假阳性）供后续复核。
+      配套博客 `content/posts/mega-moe-106-source-index-audit`（索引页新增第 106 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3029,8 +3049,15 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P95 各增量完成（P15-1…P41-1、P42-1…P95-1）。**
-  本轮 P95-1：新建 `docs/105-fp4-mega-moe-weights.md`
+- 当前进度：**P0~P14 全部完成；P15~P96 各增量完成（P15-1…P41-1、P42-1…P96-1）。**
+  本轮 P96-1：新建 `docs/106-deepgemm-source-index-audit.md`
+  （+`harness/exp_deepgemm_source_audit.{py,sh,out.txt}`）——本专题第一篇**元层级**增量：给前 105 篇
+  的 ~1900 处 `file:line` 引用做一次可复现的**引用体检**，并给全局算子/API 索引。要点：四层核对 +
+  同名文件打分消歧；**1904 条引用里 1898（99.68%）可解析、行号越界 0、19 个 impl + 11 个 api 全部有
+  专篇覆盖**；内容严格命中 554、宽松命中 646（741 条抽查）。**闭环修掉 2 处真实错误 + 1 处简写歧义**
+  （`m_grouped_gemm.py:92→72`、`mlopart.py:135→tests/test_locality_domain.py:136`、doc38 `mega_moe.cuh`
+  →`sm100_fp8_fp4_mega_moe.cuh`），并重跑受影响的 legacy 实验。索引页新增第 106 篇。
+  上一轮 P95-1：新建 `docs/105-fp4-mega-moe-weights.md`
   （+`harness/exp_fp4_mega_moe_weights.{py,sh,out.txt}`）——补齐 **Mega MoE 的第二个 dtype 形态：FP4 路由权重**。
   要点：`fp8xfp8`/`fp8xfp4` 同映射到 `MmaKind::MXFP8FP4`，差异只在路由权重 dtype（`kPackedFP4=int8`，
   每字节 2 个 e2m1，逻辑 K 靠「×2」恢复）；TMA 用 `16U4_ALIGN16B` 把 4-bit 摊成可寻址的未打包形式，

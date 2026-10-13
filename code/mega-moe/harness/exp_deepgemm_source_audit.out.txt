@@ -1,0 +1,202 @@
+P96-1 · DeepGEMM / DeepEP 源码引用行号健康检查 + 算子 / API 全索引
+DeepGEMM: 057ca59  (Public release 26/09/30 (#462))
+DeepEP  : 93eb6eb  (Update README)
+索引文件数: 2567（DeepGEMM + DeepEP + 本专题）
+====================================================================================================
+Part A · DeepGEMM 算子 / API 全索引（device impls + host apis，含 sha256 与覆盖篇目）
+====================================================================================================
+
+-- device impls（19 个）--
+file                                           sha256           行数  覆盖篇目(#)
+sm100_bf16_gemm.cuh                            38d5d079d50e    432  103 31 36 48 52 54
+sm100_bf16_mega_gate.cuh                       0fbf34534703    447  05 102 52 96
+sm100_bf16_mega_moe.cuh                        0387bd9bea62   1316  105 20 38 52 77 87 89
+sm100_bmk_bnk_mn.cuh                           49f167d1a23a    271  17 52
+sm100_fp8_fp4_gemm_1d1d.cuh                    88dd217719c1    579  12 31 35 52 54 92
+sm100_fp8_fp4_mega_moe.cuh                     9d577f200e48   1528  01 02 03 04 09 10 105 11 20 34 38 44 51 52 54 58 77 87 96 99
+sm100_locality_domain.cuh                      a94bd377d699     26  11 34 55
+sm100_mega_mhc.cuh                             77fe3a79ad04    704  05 102 16 38 52 54 67 77 88 89
+sm100_mqa_logits.cuh                           3221a1809e2a    609  23 24 30 52 54 60 77 92
+sm100_sparse_mqa_logits.cuh                    3bdd07b6475a    688  22 38 52 88
+sm100_tf32_hc_prenorm_gemm.cuh                 37d28d517a78    351  16 52 79 97
+sm90_bf16_gemm.cuh                             b854395703c9    399  18 21 29 48 49 52 77 88
+sm90_bmk_bnk_mn.cuh                            614f643a9daa    182  17 49 52
+sm90_fp8_gemm_1d1d.cuh                         8d2cc57af14b    362  12 28 32 35 38 49 52 77
+sm90_fp8_gemm_1d2d.cuh                         fe9a88b1a2cc    452  21 32 33 49 52 87 99
+sm90_fp8_mqa_logits.cuh                        2f8d570cbc04    324  19 49 52 54 60
+sm90_fp8_paged_mqa_logits.cuh                  99adfbe0ef93    334  19 30 52 54 60
+sm90_tf32_hc_prenorm_gemm.cuh                  57f8d0f19f42    294  16 49 52 79
+smxx_layout.cuh                                cb72206057f0    295  25 26 33 52 54 78 91
+
+-- host apis（11 个）--
+file                                           sha256           行数  覆盖篇目(#)
+attention.hpp                                  2c0cc337cf65    478  19 22 23 24 30 60 84 91
+config.hpp                                     61b70480befe     50  103 105 17 27 28 33 36 47 48 50 52 84 88 98
+einsum.hpp                                     27d93bcc1bbd    311  17 18 21 27 31 35 45 48 76 84 91
+epilogue_class.hpp                             f0ecbff74d52     27  27 31 84
+gemm.hpp                                       7cfdbdcf9fcc    997  01 04 06 08 103 12 13 14 15 16 18 25 27 28 29 31 32 33 35 36 41 43 45 46 48 52 79 82 84 88 97
+hyperconnection.hpp                            0c73a4ad3f96     64  16 79 84 97
+layout.hpp                                     63ec154c971a    144  02 105 12 13 21 25 26 28 32 34 35 41 45 46 48 78 81 84 91
+locality_domain.hpp                            9ba4d8cd931a    162  06 11 34 81 84 90
+mega_gate.hpp                                  1e0cfc3361a1    196  05 06 102 48 57 84 96 97
+mega_mhc.hpp                                   8a46910b0fe3    287  05 06 102 48 67 84 89 97
+mega_moe.hpp                                   b52f852760da    400  02 03 06 10 105 11 20 34 42 44 48 51 84 89 91 96 97 99
+
+====================================================================================================
+Part B · 引用健康检查（docs/*.md 里所有 `file.ext:line[-line]`）
+====================================================================================================
+
+总引用条数            : 1904
+  可解析到源文件      : 1898  (99.68%)
+  无法解析（占位/截断）: 6
+  行号越界/文件缺失   : 0
+  被引行全为空        : 10
+内容抽查（同行有 ≥4 字符反引号标识符）: 741 条
+  · 严格命中（标识符就在被引行）    : 554 (74.76%)
+  · 轻微漂移（符号在本文件、不在被引行）: 92 → 见 Part C，可复核
+  · 宽松命中（符号在文件内）        : 646 (87.18%)
+  · 行内标识符与本文件无关（多为散文里的算子名/构造参数）: 95
+覆盖的源文件数        : 198
+
+-- 引用最多的 20 个源文件 --
+    95  gemm.hpp
+    66  ep.py
+    60  layout.hpp
+    59  mega_moe.hpp
+    57  runtime.hpp
+    52  einsum.hpp
+    41  math.py
+    41  test_lazy_init.py
+    39  __init__.py
+    37  config.hpp
+    34  smxx_layout.hpp
+    32  sm100_fp8_fp4_mega_moe.cuh
+    32  generators.py
+    28  locality_domain.hpp
+    27  test_fp8_fp4.py
+    27  mega_moe.cuh
+    25  mega_gate.hpp
+    25  attention.hpp
+    24  barrier.cuh
+    24  utils.py
+
+-- 引用最多的 15 篇文档 --
+    53  48-runtime-switches.md
+    47  64-deepep-bucket-collectives.md
+    45  43-deepgemm-test-utils.md
+    45  80-lazy-init-test-oracle.md
+    44  27-cublaslt-fallback.md
+    44  81-locality-domain-test-oracle.md
+    40  28-deepgemm-best-config.md
+    39  37-deepgemm-reference-quantizer.md
+    39  50-runtime-lifecycle.md
+    38  33-deepjit-runtime.md
+    37  91-sf-contract-cross-api.md
+    36  98-deepep-jit-config.md
+    35  75-deepep-stream-event-overlap.md
+    34  72-bucket-allreduce-reduce-scatter.md
+    33  47-deepjit-posthook.md
+
+====================================================================================================
+Part C · 漂移清单（需要人工复核的引用）
+====================================================================================================
+
+[无法解析] 6 条：
+  02-mega-moe-architecture.md:246  impls/...cuh:56
+  10-mega-moe-mma-epilogue.md:282  impls/...hpp:72
+  97-sm100-hc-prenorm-gemm.md:44  sm90_...hpp:30
+  97-sm100-hc-prenorm-gemm.md:81  sm90_...hpp:55-79
+  97-sm100-hc-prenorm-gemm.md:284  sm90_...hpp:30
+  97-sm100-hc-prenorm-gemm.md:288  sm90_...hpp:79
+
+[被引行全空] 10 条：
+  102-mega-gate-mhc-split-barrier.md:102  mega_mhc.cuh:32  -> DeepGEMM/deep_gemm/include/deep_gemm/layout/mega_mhc.cuh
+  103-sm100-swap-ab-dgrad.md:63  heuristics/common.hpp:16  -> DeepGEMM/csrc/jit_kernels/heuristics/common.hpp
+  34-locality-domain-probe.md:47  csrc/runtime/locality_domain.hpp:13  -> DeepGEMM/csrc/runtime/locality_domain.hpp
+  45-muon-syrk-symm.md:324  gemm.hpp:806  -> DeepGEMM/csrc/apis/gemm.hpp
+  48-runtime-switches.md:259  runtime.hpp:44  -> DeepGEMM/csrc/jit_kernels/heuristics/runtime.hpp
+  50-runtime-lifecycle.md:286  runtime.hpp:44  -> DeepGEMM/csrc/jit_kernels/heuristics/runtime.hpp
+  80-lazy-init-test-oracle.md:136  runtime.hpp:44  -> DeepGEMM/csrc/jit_kernels/heuristics/runtime.hpp
+  98-deepep-jit-config.md:41  csrc/python_api.cpp:22  -> DeepGEMM/csrc/python_api.cpp
+  98-deepep-jit-config.md:131  csrc/buffers/bucket.hpp:78  -> DeepEP/csrc/buffers/bucket.hpp
+  98-deepep-jit-config.md:243  csrc/python_api.cpp:29  -> DeepGEMM/csrc/python_api.cpp
+
+[轻微漂移：符号在本文件、不在被引行] 92 条（建议复核；含 off-by-one / 行区间端点）：
+  01-moe-ep-basics.md:116  dispatch.cuh:103  -> DeepEP/deep_ep/include/deep_ep/impls/ep/dispatch.cuh  ids=['deduplicate']
+  02-mega-moe-architecture.md:127  csrc/apis/mega_moe.hpp:35  -> DeepGEMM/csrc/apis/mega_moe.hpp  ids=['BLOCK_M']
+  05-mega-gate-mhc.md:648  mega_mhc.hpp:81-82  -> DeepGEMM/csrc/apis/mega_mhc.hpp  ids=['y_fp8']
+  07-deepep-dispatch-combine.md:37  symmetric.hpp:79  -> DeepEP/csrc/kernels/comm/symmetric.hpp  ids=['cuMemCreate']
+  07-deepep-dispatch-combine.md:83  token.cuh:84  -> DeepEP/deep_ep/include/deep_ep/layout/ep/token.cuh  ids=['BufferLayout']
+  07-deepep-dispatch-combine.md:168  combine_utils.cuh:55  -> DeepEP/deep_ep/include/deep_ep/impls/ep/combine_utils.cuh  ids=['combine_reduce']
+  07-deepep-dispatch-combine.md:169  combine_utils.cuh:67  -> DeepEP/deep_ep/include/deep_ep/impls/ep/combine_utils.cuh  ids=['enable_hadd_bypass']
+  07-deepep-dispatch-combine.md:170  combine_utils.cuh:8  -> DeepEP/deep_ep/include/deep_ep/impls/ep/combine_utils.cuh  ids=['use_rank_layout']
+  08-h100-environment.md:63  csrc/apis/gemm.hpp:369  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['k_grouped_fp8_gemm_tn_contiguous']
+  10-mega-moe-mma-epilogue.md:117  mma/sm100.cuh:30  -> DeepGEMM/deep_gemm/include/deep_gemm/mma/sm100.cuh  ids=['make_smem_desc']
+  10-mega-moe-mma-epilogue.md:185  heuristics/mega_moe.hpp:80-82  -> DeepGEMM/csrc/jit_kernels/heuristics/mega_moe.hpp  ids=['block_k']
+  101-deepep-barrier-test-oracle.md:340  kernels/comm/barrier.hpp:25-41  -> DeepEP/csrc/kernels/comm/barrier.hpp  ids=['launch_barrier']
+  102-mega-gate-mhc-split-barrier.md:131  layout/mega_mhc.cuh:86  -> DeepGEMM/deep_gemm/include/deep_gemm/layout/mega_mhc.cuh  ids=['Workspace']
+  103-sm100-swap-ab-dgrad.md:11  sm100_bf16_gemm.cuh:43  -> DeepGEMM/deep_gemm/include/deep_gemm/impls/sm100_bf16_gemm.cuh  ids=['sm100_bf16_gemm']
+  103-sm100-swap-ab-dgrad.md:265  runtime.hpp:59-67  -> DeepGEMM/csrc/jit_kernels/heuristics/runtime.hpp  ids=['get_theoretical_mk_alignment_for_contiguous_layout']
+  103-sm100-swap-ab-dgrad.md:272  sm100_bf16_gemm.hpp:66  -> DeepGEMM/csrc/jit_kernels/impls/sm100_bf16_gemm.hpp  ids=['block_m']
+  105-fp4-mega-moe-weights.md:147  runtime_utils.hpp:63  -> DeepGEMM/csrc/jit_kernels/impls/runtime_utils.hpp  ids=['ALIGN16B']
+  12-moe-backward-wgrad.md:50  gemm.hpp:340-349  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['k_grouped_fp8_gemm_tn_contiguous']
+  12-moe-backward-wgrad.md:181  gemm.hpp:388  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['k_alignment']
+  13-moe-backward-dgrad.md:293  gemm.hpp:218  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['grouped_layout']
+  14-moe-backward-kernels.md:47  gemm.hpp:69  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['check_k_grouped_args']
+  14-moe-backward-kernels.md:63  gemm.hpp:194-233  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['m_grouped_fp8_fp4_gemm_nt_contiguous']
+  14-moe-backward-kernels.md:135  gemm.hpp:320  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['DG_HOST_UNREACHABLE']
+  15-moe-backward-profiling.md:79  csrc/apis/gemm.hpp:403  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['k_grouped_fp8_gemm_nt_contiguous']
+  15-moe-backward-profiling.md:142  gemm.hpp:403  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['k_grouped']
+  19-attention-mqa-logits.md:19  attention.hpp:380  -> DeepGEMM/csrc/apis/attention.hpp  ids=['fp8_fp4_sparse_mqa_logits']
+  19-attention-mqa-logits.md:263  attention.hpp:32  -> DeepGEMM/csrc/apis/attention.hpp  ids=['q_sf']
+  27-cublaslt-fallback.md:52  jit_kernels/impls/epilogue_class.hpp:35  -> DeepGEMM/csrc/jit_kernels/impls/epilogue_class.hpp  ids=['EpilogueClass']
+  28-deepgemm-best-config.md:102  runtime.hpp:12  -> DeepGEMM/csrc/jit_kernels/heuristics/runtime.hpp  ids=['mk_alignment_for_contiguous_layout']
+  28-deepgemm-best-config.md:105  runtime.hpp:12  -> DeepGEMM/csrc/jit_kernels/heuristics/runtime.hpp  ids=['mk_alignment']
+  28-deepgemm-best-config.md:368  runtime.hpp:14-18  -> DeepGEMM/csrc/jit_kernels/heuristics/runtime.hpp  ids=['HeuristicsRuntime']
+  29-sm90-bf16-gemm.md:33  mma/sm90.cuh:89  -> DeepGEMM/deep_gemm/include/deep_gemm/mma/sm90.cuh  ids=['BLOCK_M']
+  29-sm90-bf16-gemm.md:267  gemm.hpp:707-710  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['epilogue']
+  30-sm90-paged-mqa-logits-schedule.md:264  sm90_fp8_mqa_logits.hpp:192  -> DeepGEMM/csrc/jit_kernels/impls/sm90_fp8_mqa_logits.hpp  ids=['schedule_meta']
+  32-sm90-fp8-gemm.md:36  mma/sm90.cuh:42-59  -> DeepGEMM/deep_gemm/include/deep_gemm/mma/sm90.cuh  ids=['FP8MMASelector']
+  32-sm90-fp8-gemm.md:57  tests/generators.py:132-137  -> DeepGEMM/tests/generators.py  ids=['Kernel1D2D']
+  36-sm100-bf16-gemm-tc-util.md:54  csrc/jit_kernels/heuristics/config.hpp:22  -> DeepGEMM/csrc/jit_kernels/heuristics/config.hpp  ids=['GemmDesc']
+  37-deepgemm-reference-quantizer.md:147  math.py:109  -> DeepGEMM/deep_gemm/utils/math.py  ids=['per_token_cast_to_fp8']
+  38-deepgemm-ptx-primitives.md:31  scheduler/mega_moe.cuh:157  -> DeepGEMM/deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh  ids=['ld_acq_gpu']
+  45-muon-syrk-symm.md:31  smxx_cublaslt.hpp:223-234  -> DeepGEMM/csrc/jit_kernels/impls/smxx_cublaslt.hpp  ids=['cublaslt_bhd_bhr_hdr']
+
+[行内标识符与本文件无关] 95 条（多为散文里引用的算子名/构造参数，非漂移）：
+  05-mega-gate-mhc.md:161  ptx/tcgen05.cuh:191-205  -> DeepGEMM/deep_gemm/include/deep_gemm/ptx/tcgen05.cuh  ids=['epilogue:64']
+  06-summary.md:65  scheduler/mega_moe.cuh:48  -> DeepGEMM/deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh  ids=['get_symm_buffer_size_for_mega_moe']
+  06-summary.md:69  mma/sm100.cuh:150-153  -> DeepGEMM/deep_gemm/include/deep_gemm/mma/sm100.cuh  ids=['valid_m']
+  06-summary.md:138  gemm.hpp:369  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['fp8_fp4_mega_moe']
+  07-deepep-dispatch-combine.md:37  csrc/buffers/ep.hpp:71  -> DeepEP/csrc/buffers/ep.hpp  ids=['cuMemCreate']
+  10-mega-moe-mma-epilogue.md:90  mma/sm100.cuh:150-153  -> DeepGEMM/deep_gemm/include/deep_gemm/mma/sm100.cuh  ids=['valid_m']
+  105-fp4-mega-moe-weights.md:178  sm100_fp8_fp4_mega_moe.hpp:189  -> DeepGEMM/csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp  ids=['weight_dtype_t']
+  11-mega-moe-dispatch-combine.md:213  impls/sm100_locality_domain.cuh:7-20  -> DeepGEMM/deep_gemm/include/deep_gemm/impls/sm100_locality_domain.cuh  ids=['sm100_locality_domain_probe_chase']
+  12-moe-backward-wgrad.md:206  gemm.hpp:333-334  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['enumerate_k_grouped_contiguous']
+  15-moe-backward-profiling.md:160  gemm.hpp:403  -> DeepGEMM/csrc/apis/gemm.hpp  ids=['k_grouped_nt']
+  17-einsum-batch-reduced-gemm.md:219  sm100_bmk_bnk_mn.hpp:23-24  -> DeepGEMM/csrc/jit_kernels/impls/sm100_bmk_bnk_mn.hpp  ids=['num_total_stages']
+  20-bf16-mega-moe.md:215  math.cuh:68-72  -> DeepGEMM/deep_gemm/include/deep_gemm/common/math.cuh  ids=['kFastMath', '__expf', 'expf']
+  21-fp8-einsum-projection.md:291  einsum.hpp:224  -> DeepGEMM/csrc/apis/einsum.hpp  ids=['Kernel1D1D']
+  22-sparse-mqa-logits.md:115  sm100_sparse_mqa_logits.hpp:15-18  -> DeepGEMM/csrc/jit_kernels/impls/sm100_sparse_mqa_logits.hpp  ids=['SPLIT_KV']
+  24-mqa-logits-paged-schedule.md:213  sm100_mqa_logits.hpp:32  -> DeepGEMM/csrc/jit_kernels/impls/sm100_mqa_logits.hpp  ids=['BLOCK_Q']
+  24-mqa-logits-paged-schedule.md:339  sm100_mqa_logits.hpp:45-49  -> DeepGEMM/csrc/jit_kernels/impls/sm100_mqa_logits.hpp  ids=['SM100PagedMQALogitsScheduler']
+  28-deepgemm-best-config.md:371  sm100.hpp:271-272  -> DeepGEMM/csrc/jit_kernels/heuristics/sm100.hpp  ids=['num_cycles']
+  29-sm90-bf16-gemm.md:25  mma/sm90.cuh:91  -> DeepGEMM/deep_gemm/include/deep_gemm/mma/sm90.cuh  ids=['MMA_64xNx32_F32E4M3E4M3_SS', 'MMA_64xNx16_F32BF16BF16_SS']
+  30-sm90-paged-mqa-logits-schedule.md:114  sm90_fp8_mqa_logits.hpp:192  -> DeepGEMM/csrc/jit_kernels/impls/sm90_fp8_mqa_logits.hpp  ids=['num_next_n_atoms']
+  30-sm90-paged-mqa-logits-schedule.md:265  attention.hpp:153-162  -> DeepGEMM/csrc/apis/attention.hpp  ids=['kPadOddN']
+
+====================================================================================================
+汇总 JSON
+====================================================================================================
+{
+  "total": 1904,
+  "unresolved": 6,
+  "oob": 0,
+  "empty": 10,
+  "content_total": 741,
+  "content_ok": 554,
+  "content_weak_ok": 646,
+  "near_miss": 92,
+  "hard_miss": 95,
+  "files": 198
+}

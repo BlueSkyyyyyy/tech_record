@@ -69,13 +69,13 @@ DeepGEMM 的上层 kernel 有两类逻辑：
 |---|---|---|---|---|
 | `ld_acq` | `ld.acquire.gpu.global.b32` | gpu | — | `comm/barrier.cuh:45` grid_sync 自旋 |
 | `ld_acq_gpu` | `ld.acquire.gpu.global.b64` | gpu | — | `scheduler/mega_moe.cuh:164` L2 位图；`mega_gate.cuh:28/37`、`mega_mhc.cuh:33/47` |
-| `ld_acq_sys` | `ld.acquire.sys.global.{b32,b64,s32}` | sys | — | `comm/barrier.cuh:82` NVLink barrier；`mega_moe.cuh:1440` combine 等对端 |
+| `ld_acq_sys` | `ld.acquire.sys.global.{b32,b64,s32}` | sys | — | `comm/barrier.cuh:82` NVLink barrier；`sm100_fp8_fp4_mega_moe.cuh:1440` combine 等对端 |
 | `ld_volatile` | `ld.volatile.global.{b32,b64}` | (无) | — | `scheduler/mega_moe.cuh:294/402` 轮询专家计数 / L1 任务计数 |
 | `st_rel` | `st.release.gpu.global.u64` | gpu | — | 跨 SM 发布标志 |
-| `st_rel_sys` | `st.release.sys.global.u64` | sys | — | `mega_moe.cuh:1419` / `bf16_mega_moe.cuh:1207` 发布 `grid_idx` 到远端 |
+| `st_rel_sys` | `st.release.sys.global.u64` | sys | — | `sm100_fp8_fp4_mega_moe.cuh:1419` / `bf16_mega_moe.cuh:1207` 发布 `grid_idx` 到远端 |
 | `st_relaxed_sys` | `st.L1::no_allocate.relaxed.sys.global.u64` | sys | — | 弱序远端发布（配 `ld_acq_sys`） |
 | `atomic_add_rel` | `atom.release.gpu.global.add.u32` | gpu | 旧值 | `comm/barrier.cuh:42`；`sm100_sparse_mqa_logits_metadata.cuh:445` 数末 CTA |
-| `red_add_rel` | `red.release.gpu.global.add.u32` | gpu | —（不返回）| `mega_moe.cuh:613/1243` dispatch 计数通知 |
+| `red_add_rel` | `red.release.gpu.global.add.u32` | gpu | —（不返回）| `sm100_fp8_fp4_mega_moe.cuh:613/1243` dispatch 计数通知 |
 | `red_or_rel_sys` | `red.release.sys.global.or.b64` | sys | — | 远端位图置位 |
 | `red_or_rel_gpu` | `red.release.gpu.global.or.b64` | gpu | — | 本卡位图置位 |
 | `red_xor_rel` | `red.release.gpu.global.xor.b64` | gpu | — | `scheduler/mega_moe.cuh:157` L1 翻转位 |

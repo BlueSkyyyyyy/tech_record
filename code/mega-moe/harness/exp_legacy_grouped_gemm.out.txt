@@ -9,7 +9,7 @@ mk_alignment_for_contiguous_layout = 128
   [PASS] m-grouped vs torch 参考 (calc_diff 判据)  calc_diff=0.000e+00
   [PASS] padding 行严格写零  pad rows=357, nonzeros=0
   [PASS] 有效行逐位等于参考  
-  [PASS] M%align!=0 被拒 (m_grouped_gemm.py:92)  AssertionError (无消息)
+  [PASS] M%align!=0 被拒 (m_grouped_gemm.py:72)  AssertionError (无消息)
 
 [B] a_fused_m_grouped_... —— A 逐行 gather（dgrad 的 scatter 版本）
   [PASS] identity m_row_indices 逐位等于 m_grouped  max_abs_diff=0.000e+00
@@ -30,8 +30,8 @@ mk_alignment_for_contiguous_layout = 128
   [PASS] ACC=False：空组 D 写零  nonzeros=0
 
 [E] H100 性能（legacy Triton，Triton 在 sm90 上编译）
-    m-grouped: 4096x4096x4096 (G=8)    962.0 us   142.9 TFLOPS
-    k-grouped: K=16384 4096x7168 (G=4)   8934.0 us   107.7 TFLOPS
+    m-grouped: 4096x4096x4096 (G=8)   1414.0 us    97.2 TFLOPS
+    k-grouped: K=16384 4096x7168 (G=4)  13590.0 us    70.8 TFLOPS
 
 ==============================================================================
 RESULT: 16/16 PASS
