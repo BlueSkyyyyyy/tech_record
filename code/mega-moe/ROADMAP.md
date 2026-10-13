@@ -1867,7 +1867,45 @@
       全 `0 errors` rc=0（`DG_USE_NVIDIA_TOOLS` 让 perf 打印 1000000us）；D) 缓存分配器
       `reserved 20MiB > allocated 8MiB` vs 关闭后 `reserved=0`；E) `bench_kineto` 旁路返回 1。
       **盲区**：不跑 racecheck/initcheck、排除 mega_moe/locality_domain、`kns=nvjet` 排除 cuBLASLt。
-      配套博客 `content/posts/mega-moe-70-deepgemm-sanitizer`（索引页新增第 70 篇）。
+       配套博客 `content/posts/mega-moe-70-deepgemm-sanitizer`（索引页新增第 70 篇）。
+
+### P61 增量（opt-in，补齐 EP 通信一直缺席的「两级域」hybrid kernel）
+
+- [x] **P61-1** **DeepEP 的两级（hybrid）EP dispatch / combine**（`deep_ep/include/deep_ep/impls/ep/
+       hybrid_dispatch.cuh`（674 行）/ `hybrid_combine.cuh`（627 行）；`csrc/kernels/ep/dispatch.hpp`、
+       `combine.hpp`；依赖 `common/{math,ptx}.cuh`、`layout/ep/token.cuh`、`impls/ep/combine_utils.cuh`）。
+       第 7/48/61 篇拆的是**单级**（`num_scaleout_ranks==1`）路径，本篇补上 Mega MoE 在 EP8/EP16 上
+       真正跑的 **hybrid** kernel：同一 kernel 内同时编排 **scale-out（跨节点 RDMA，`ncclTeamTagRail`）**
+       与 **scale-up（同节点 NVLink，`ncclTeamTagLsa`）**。**数据面用 NCCL GIN 设备 API → SM100 无关但
+       本机 NCCL 2.29.7 不支持 → 仅分析**；四个**架构无关内核**在 H100 真机跑真实设备代码。
+       → `docs/71-deepep-hybrid-dispatch-combine.md`（真实行号核对）：host 分派 `dispatch.hpp:89-114`
+       （`num_scaleout_ranks==1` 走 `dispatch_impl`，否则 `hybrid_dispatch_impl` + warp 角色 3 元组）
+       / `combine.hpp:64-90`（2 元组）；rank 混合进制编码 `hybrid_dispatch.cuh:60`；warp 角色
+       notify（`kNumNotifyWarps=4` `dispatch.hpp:20`）/scaleout/forward（`dispatch.hpp:80-85`）。
+       **dispatch 三角色**：notify（`:107-328`：本地 `atomicAdd_block` 计数 + rank 去重 `:126-135` →
+       `red_add (1<<32)|count` 把 SM 到达数打包进高位 `:140-143` → SM0 等 `>>32==kNumSMs` 后
+       `encode_decode_positive` 编码写远端 `:155-156` → `gin.put` 跨 scale-out `:177-188` →
+       `recv_and_reduce` 汇聚 `:193-219` → `put_value`/`red_add_rel<ncclTeamTagLsa>` 传播 `:221-252`
+       → 等就绪 + 对齐 `:263-300` → `do_psum` rank 含端点 / expert 排他前缀和 `:302-327`）；
+       scaleout（`:329-460`：`preload_next_token` TMA+cp.async `:354-385`、按 rank 去重分槽 `:408-417`、
+       `gin.put` RDMA `:445-452`、本地目的绕过 `:432-436`、间隔 tail `update_scaleout_tail` `:338-351`）；
+       forward（`:461-656`：round-robin 位图选 rank `:490-494`、chunk=`kNumSlotsPerForwardChunk=6`
+       `:527-530`、`gin.get_sym_ptr<ncclTeamTagLsa>` 直写 + `tma_store_1d` `:590-596`、写
+       `token_metadata_at_forward` `:609-627` + 链式列表 `:475-479/638-649`、PDL `cudaTrigger...`
+       `:665`）。**combine 两角色**：scaleup（`:107-351`：沿 `channel_linked_list` 迭代、三情形归约
+       `:230-303`、`combine_reduce`、`update_tails` 间隔 `st.release.sys` `:122-149`）；forward
+       （`:352-622`：重放 `token_metadata_at_forward` `:390-403`、等 tail 水位 `:405-447`、
+       `flush_last_tma_and_issue_rdma` 重叠 `:372-388`、多次归约先 `combine_reduce` 再转发 `:496-572`、
+       清 tail + `red_add_rel` scale-out 到位线 `:579-620`）。**四个架构无关机制**：就绪哨兵
+       `encode_decode_positive=-c-1`（`math.cuh:26-33`，区分「未写=0」与「写了 0」）、tail 增量
+       `pack2/unpack2`（`math.cuh:45-68`，**finish 低 32 / tail 高 32**）、`do_psum`、round-robin 位图。
+       H100 实测 `src/deepep_hybrid.cu` + `harness/exp_deepep_hybrid.{sh,py,out.txt}`：**直接 include
+       真实头文件、编译运行真实设备代码**——Part1 哨兵 8 计数（含 0/`2^20`/`INT32_MAX`）编解码对合 +
+       host 4096 计数；Part2 pack2/unpack2 位段 + 增量 {2→5→9} 累加；Part3 `do_psum`（逐字搬运
+       `:304-320`）含端点/排他 8 组；Part4 round-robin（逐字搬运 `:490-532`）4 组「每 rank `[0,tail)`
+       恰好一次 + 序列 = 贪心 oracle」；Part5 `TokenLayout` 每槽字节（`hidden=7168,sf=56,topk=8,meta`
+       → `bytes<false>=7360/bytes<true>=7392`）。**设备 7 PASS / Python oracle 6 PASS / 0 FAIL**。
+       配套博客 `content/posts/mega-moe-71-deepep-hybrid-dispatch-combine`（索引页新增第 71 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -1893,8 +1931,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P60 各增量完成（P15-1…P41-1、P42-1…P60-1）。**
-  本轮 P60-1：新建 `docs/70-deepgemm-sanitizer.md`（+`src/sanitizer_negctl.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P61 各增量完成（P15-1…P41-1、P42-1…P61-1）。**
+  本轮 P61-1：新建 `docs/71-deepep-hybrid-dispatch-combine.md`（+`src/deepep_hybrid.cu`、
+  `harness/exp_deepep_hybrid.{sh,py,out.txt}`）——补上 DeepEP 的**两级（hybrid = scale-out RDMA ×
+  scale-up NVLink）EP dispatch/combine**（`hybrid_dispatch.cuh` 674 行 + `hybrid_combine.cuh` 627 行），
+  即 Mega MoE 在 EP8/EP16 上真正跑的那条路（第 7/48/61 篇讲的都是 `num_scaleout_ranks==1` 的单级）。
+  数据面（`gin.put/get_sym_ptr`、跨 rank barrier、TMA）走 NCCL GIN 设备 API，本机 2.29.7 不提供 →
+  **仅分析**；但四个**架构无关内核**在 H100 上**直接 include 真实头文件跑真实设备代码**——计数就绪
+  哨兵 `encode_decode_positive`（`-c-1` 对合，区分「未写=0」与「写了 0」）、tail 增量 `pack2/unpack2`
+  （finish 低 32 / tail 高 32）、`do_psum` 含端点/排他前缀和、forward warp 的 round-robin 位图分片调度；
+  **设备 7 PASS / Python oracle 6 PASS / 0 FAIL**。dispatch 三角色（notify 计数汇聚 + 前缀和 / scaleout
+  RDMA 收发 / forward NVLink 转发 + 元数据）、combine 两角色（scaleup 链式列表 / forward 重放 + 转发）
+  全部逐段精读。配套博客 `content/posts/mega-moe-71-deepep-hybrid-dispatch-combine`（索引页新增第 71 篇）。
+  上一轮 P60-1：新建 `docs/70-deepgemm-sanitizer.md`（+`src/sanitizer_negctl.cu`、
   `harness/exp_sanitizer.{py,sh,out.txt}`）——补上测试栈的**第四个维度：内存安全 / 同步正确性**
   （前三层是第 40 篇计时判对、第 41 篇生成器、第 43 篇逐位断言，都在问「结果对不对」）。
   它不是一个测试用例，而是**驱动器** `tests/test_sanitizer.py`：把 `tests/` 下每个 `test*` 放进
@@ -2589,9 +2638,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P60 已完成（最新 **P60-1 DeepGEMM 内存安全验证层 `tests/test_sanitizer.py`**：
+- **下一步**：P0~P61 已完成（最新 **P61-1 DeepEP 的两级（hybrid）EP dispatch/combine**
+  （`hybrid_dispatch.cuh` + `hybrid_combine.cuh`，即 Mega MoE 在 EP8/EP16 上真正跑的两级域路径）：
+  数据面 NCCL GIN 仅分析；就绪哨兵 / tail 增量 / `do_psum` 前缀和 / round-robin 分片调度四个架构无关
+  内核在 H100 真机跑**真实设备代码**，设备 7 PASS / Python 6 PASS / 0 FAIL；详见上）。
+  上一轮 P60-1：**DeepGEMM 内存安全验证层 `tests/test_sanitizer.py`**：
   compute-sanitizer 驱动的独立子进程测试栈 + 六 env/六 flag 的「为什么」；H100 真机 30 PASS 含
-  racecheck/synccheck/memcheck 负样本与缓存分配器屏蔽实证；详见上）。
+  racecheck/synccheck/memcheck 负样本与缓存分配器屏蔽实证；见上）。
   上一轮 **P53-1 DeepEP 的多 rank 屏障与 symmetric-memory 句柄层**：
   每个 dispatch/combine/bucket kernel 起止都调的 `comm::barrier`——`NCCLGin` 对称窗口句柄
   （`get_sym_ptr` 同 offset 翻译）、`gpu_barrier` 两级域编排（scaleup NVLink + scaleout RDMA）、
@@ -2739,9 +2792,11 @@
      已由 P54-1 补齐**（`all_gather` copy-engine 真机跨 NVLink peer 逐字节一致）；**流水线并行
       send/recv 已由 P58-1 补齐**（`pp_send_recv`，数据面 TMA 流水 + 寻址面索引 H100 真机 40/40
       byte-exact + 168 有序对 0 不符）；**带索引的远程抓取 Engram 已由 P59-1 补齐**（`engram_fetch`，
-      布局/发射映射/请求索引/SF 拷贝 H100 真机设备 5 + Python 32 PASS）。DeepEP 侧余下的运行期空档
-      （bucket 的 `all_reduce/reduce_scatter` 内核、Engram 真实 RDMA 与端到端）都要 NCCL GIN 设备 API，
-      待环境。
+      布局/发射映射/请求索引/SF 拷贝 H100 真机设备 5 + Python 32 PASS）；**EP 的两级域 hybrid
+      dispatch/combine 已由 P61-1 补齐**（`hybrid_dispatch.cuh`/`hybrid_combine.cuh`：数据面 NCCL GIN
+      仅分析，就绪哨兵/tail 增量/`do_psum`/round-robin 四个架构无关内核 H100 真机 7+6 PASS）。DeepEP
+      侧余下的运行期空档（bucket 的 `all_reduce/reduce_scatter` 内核、Engram 真实 RDMA 与端到端、
+      hybrid 的端到端）都要 NCCL GIN 设备 API，待环境。
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
     shared expert 分支的更深精读；端到端需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。

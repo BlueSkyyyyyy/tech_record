@@ -1,0 +1,73 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+
+=== DeepEP commit: 93eb6eb ===
+DeepEP hybrid dispatch/combine —— 架构无关内核 H100 真机验证
+DeepEP commit 93eb6eb；真实 include：common/math.cuh、common/ptx.cuh、layout/ep/token.cuh
+
+=== Part 1: 计数就绪哨兵 encode_decode_positive（math.cuh:26-33） ===
+    c=0           raw(encode)=-1           decode=0           ready(decode)=1 ready(unwritten0)=0 
+    c=1           raw(encode)=-2           decode=1           ready(decode)=1 ready(unwritten0)=0 
+    c=2           raw(encode)=-3           decode=2           ready(decode)=1 ready(unwritten0)=0 
+    c=7           raw(encode)=-8           decode=7           ready(decode)=1 ready(unwritten0)=0 
+    c=1023        raw(encode)=-1024        decode=1023        ready(decode)=1 ready(unwritten0)=0 
+    c=65535       raw(encode)=-65536       decode=65535       ready(decode)=1 ready(unwritten0)=0 
+    c=1048576     raw(encode)=-1048577     decode=1048576     ready(decode)=1 ready(unwritten0)=0 
+    c=2147483647  raw(encode)=-2147483648  decode=2147483647  ready(decode)=1 ready(unwritten0)=0 
+  [PASS] encode/decode 对合 + 哨兵语义（写过的 c 解码后就绪、初值 0 解码后未就绪）
+  [PASS] 同一函数 host 侧对合（4096 个计数）
+
+=== Part 2: tail 信号 pack2/unpack2（math.cuh:45-68；dispatch:341/347、combine:590-596） ===
+    finish=0  tail=0           packed=0x0000000000000000 unpack=(finish=0,tail=0) 
+    finish=1  tail=1           packed=0x0000000100000001 unpack=(finish=1,tail=1) 
+    finish=1  tail=6           packed=0x0000000600000001 unpack=(finish=1,tail=6) 
+    finish=0  tail=100         packed=0x0000006400000000 unpack=(finish=0,tail=100) 
+    finish=1  tail=1048576     packed=0x0010000000000001 unpack=(finish=1,tail=1048576) 
+    finish=0  tail=2147483647  packed=0x7fffffff00000000 unpack=(finish=0,tail=2147483647) 
+  [PASS] pack2/unpack2 低 32=finish、高 32=tail 逐位一致
+  [PASS] 增量累加后 tail=9、finish=1（= dispatch:347 / combine:594）
+
+=== Part 3: do_psum 前缀和（hybrid_dispatch.cuh:304-320 逐字搬运） ===
+    n=1 inclusive    count[0..2]={3,22045,0} out tail=3 ref=3 
+    n=32 inclusive   count[0..2]={3,10,6} out tail=158 ref=158 
+    n=33 inclusive   count[0..2]={3,10,6} out tail=165 ref=165 
+    n=8 exclusive    count[0..2]={3,10,6} out tail=44 ref=44 
+    n=32 exclusive   count[0..2]={3,10,6} out tail=158 ref=158 
+    n=33 exclusive   count[0..2]={3,10,6} out tail=165 ref=165 
+    n=70 exclusive   count[0..2]={3,10,6} out tail=351 ref=351 
+    n=130 exclusive  count[0..2]={3,10,6} out tail=653 ref=653 
+  [PASS] do_psum 含端点(rank)/排他(expert) 前缀和 vs host oracle
+
+=== Part 4: forward warp round-robin 分片调度（hybrid_dispatch.cuh:490-532） ===
+    R=4 chunk=6 tails={20,13,5,0} steps=8 covered=Y seq_match=Y
+    R=8 chunk=6 tails={1,2,3,4,5,6,7,8} steps=10 covered=Y seq_match=Y
+    R=3 chunk=100 tails={7,7,7} steps=3 covered=Y seq_match=Y
+    R=5 chunk=1 tails={9,0,0,3,0} steps=12 covered=Y seq_match=Y
+  [PASS] 每 rank [0,tail) 恰好处理一次 + 选择序列 = 贪心 round-robin
+
+=== Part 5: TokenLayout 每槽字节（layout/ep/token.cuh:10-82） ===
+    hidden=7168   sf=56  topk=8 meta=true  bytes<false>=7360 bytes<true>=7392 
+    hidden=14336  sf=0   topk=8 meta=false bytes<false>=14400 bytes<true>=14432 
+  [PASS] TokenLayout 三段对齐 + RDMA 64B 对齐 vs host oracle
+
+================ 总计: PASS=7 FAIL=0 ================
+
+=== Python: 独立 host oracle（哨兵/tail/前缀和/round-robin/布局） ===
+P61-1 Python host oracle（独立复刻四级内核 + 布局）
+
+=== Part 1: 计数就绪哨兵 ===
+  [PASS] encode/decode 对合 + 写过的就绪、初值 0 未就绪
+
+=== Part 2: tail 信号 ===
+  [PASS] pack2/unpack2 位段一致（finish 低、tail 高）
+  [PASS] 增量累加 tail=9 finish=1
+
+=== Part 3: do_psum 前缀和 ===
+  [PASS] 含端点/排他前缀和 8 组
+
+=== Part 4: round-robin 分片调度 ===
+  [PASS] 每 rank 分片次数 == ceil(tail/chunk)
+
+=== Part 5: TokenLayout 每槽字节 ===
+  [PASS] 三段 32B 对齐 + RDMA 64B 对齐
+
+================ Python 总计: PASS=6 FAIL=0 ================
