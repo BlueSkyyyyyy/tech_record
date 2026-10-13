@@ -1466,6 +1466,37 @@
       未单独向量化，但饱和已转写带宽）、P=128 是消费者瓶颈、`sched` 地板随描述符数组大小变、run-to-run
       抖动 ~34%（P=16 gen）、合成描述符/数据面、未与 DeepGEMM SM100 路径对跑。
 
+### P60 实验扩展 42：动态生产者的写入向量化（`docs/04-experiments.md` §49）
+
+- [x] **P60-1** 补掉 P59-1（§48）§48.8 明留的**尾巴②**——「`gen` 仍是**标量 strided 写**（每线程顺序写
+      88 字、跨线程步长 352 B、非 coalesced）；向量化/协作写未单独做，向量化至多改变饱和点、不改
+      『生成 ≫ 预计算读』的量级」：把「写入形态」分解成两个正交旋钮——**(a) 存储宽度**（4 B 标量 →
+      16 B `uint4`）与 **(b) 访存 coalescing**（逐线程 strided vs 跨线程连续），各自量贡献与饱和点。
+      见 `docs/04-experiments.md` **§49**，源码 `src/dyn_producer_vector.cu`、脚本
+      `harness/dyn_producer_vector.sh`、原始输出 `harness/dyn_producer_vector.out.txt`（目标卡 H100/sm90a、
+      **固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、`NDESC=393216`（138.4 MB ≫ L2）、`K=32`、`D=2`、
+      `T=256`、`grid=P+G=132=NSM` 全共驻、min-of-7）。唯一新变量 `gvar`：0 标量 / 1 逐线程 `uint4` /
+      2 协作 coalesced（payload 内容同 `gen_word`）；另加 `mode 5 pure`（只 launch P 个 producer、
+      无 worker/背压）量纯写吞吐。五 Section 核心结论：
+      - **§A**：三种写入形态 × P∈{1,2}，`static`/`sched`/`gen` **全部逐位一致**（`got=404219327039195`）
+        ——向量化/协作写语义透明。
+      - **§B（headline）**：static=0.1711 ms/809.1 GB/s。逐线程 `uint4`（v4）在 P=1 把 `gen`
+        **36.58→10.49 ms（3.5×）**、相对 static **213.8×→61.3×**；协作 coalesced 约 **1.9×**（113.9×）。
+        **饱和点右移**：标量 `gen·P` 在 P≥8 起偏离（P≈8 后不再按 1/P 改善）、v4 到 P=64 仍近似线性；
+        但最优 v4（P=64）仍是 **3.44× static** ⇒ §48「动态必须落在调度、不能落在生成」**依旧成立**。
+      - **§C（机制）**：`mode 5` 纯写——单 SM **3.8（标量）→13.2（v4）GB/s**，瓶颈是 **store 发射/指令
+        吞吐而非 DRAM 写带宽**；整机写天花板标量 ~**207 GB/s**（P≈32 饱和）、v4 **827**、coop **875**
+        （P=128），向量化抬高 ~**4×**。**coalescing 是更弱的第二旋钮**：v4（不 coalesce）在低 P 更快
+        （索引开销），只在 P=128 写带宽成墙时 coop 才反超（875 vs 827）——真正值钱的是 **16 B store**。
+      - **§D 接数据面**：P=16 / EDW=4096，标量 `s/max=1.52`（复现 §48 §E），协作向量化压到 **`co/max=1.32`**
+        ——收窄但未翻案；EDW≤256 仍 8.5–15.4×。
+      - **§E**：高 P 下 `gen` 慢于纯写（P=64 116 vs 175 GB/s）是 **producer 写与 worker 读争 HBM**。
+      含义：给 MPK「**编译期预计算 `FullTaskDesc` + scheduler 只做事件→id 映射**」（`runtime.cc` /
+      `persistent_kernel.cuh:1254-1523`）与 DeepGEMM「静态角色 + 编译期常量」以量化理由——**造一趟描述符
+      比读回来贵一个量级**，且要吃生产者 SM。判据 C1–C4、仍差 C5 一步。**本轮新增实验**；P60-1 新留尾巴
+      （§49.7）：**TMA bulk store（SMEM→global）作更宽写载体未测**（最值得做的下一条）、高 P 读写争抢
+      未单独量化、合成描述符、未与 DeepGEMM SM100 对跑。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1490,7 +1521,28 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P59-1 完成（1/1）**。补掉 P58-1（§47）§47.8 明留的**前三条尾巴**——「`gen` 的 producer
+- 当前进度：**P60-1 完成（1/1）**。补掉 P59-1（§48）§48.8 明留的**尾巴②**——「`gen` 仍是**标量
+  strided 写**；向量化/协作写未单独做」：把 producer 写入形态分解成 **存储宽度**（4 B→16 B `uint4`）
+  与 **coalescing**（逐线程 strided vs 协作连续）两个正交旋钮，实测各自贡献与饱和点。`docs/04-experiments.md`
+  新增 **§49**，源码 `src/dyn_producer_vector.cu`、脚本 `harness/dyn_producer_vector.sh`、原始输出
+  `harness/dyn_producer_vector.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、
+  `NDESC=393216`（138.4 MB ≫ L2）、`K=32`、`D=2`、`T=256`、`grid=P+G=132=NSM` 全共驻、min-of-7）。
+  `gvar`：0 标量 / 1 逐线程 `uint4` / 2 协作 coalesced（payload 同 `gen_word`）；`mode 5 pure` 量纯写。
+  核心结论：
+  - **§A** 三形态 × P∈{1,2}，static/sched/gen **逐位一致**（`got=404219327039195`）。
+  - **§B（headline）** static=0.1711 ms/809.1 GB/s；逐线程 `uint4` 在 P=1 把 `gen` **36.58→10.49 ms
+    （3.5×）**、相对 static **213.8×→61.3×**；协作 coalesced ~**1.9×**；**饱和点右移**（标量 P≈8 后
+    偏离、v4 到 P=64 仍近线性），但最优 v4（P=64）仍 **3.44× static** ⇒ §48「动态必须落在调度、不能
+    落在生成」依旧成立。
+  - **§C（机制）** 纯写：单 SM **3.8→13.2 GB/s**（标量→v4），瓶颈是 **store 发射而非 DRAM 写带宽**；
+    整机写天花板标量 ~**207**（P≈32 饱和）→ v4 **827** / coop **875**（P=128），抬高 ~4×。**coalescing
+    是更弱第二旋钮**（v4 低 P 更快、P=128 才被 coop 反超）——真正值钱的是 **16 B store**。
+  - **§D** P=16/EDW=4096 标量 `s/max=1.52`（复现 §48 §E）→ 协作向量化 **1.32**，收窄未翻案。
+  - **§E** 高 P 下 `gen` 慢于纯写（写与 worker 读争 HBM）。
+  含义：给 MPK「编译期预计算 `FullTaskDesc` + scheduler 只映射」与 DeepGEMM「静态角色/编译期常量」
+  以量化理由。判据 C1–C4、仍差 C5 一步。**本轮新增实验**；P60-1 新留尾巴见 §49.7（**TMA bulk store
+  作更宽写载体未测**——最值得做的下一条、高 P 读写争抢未单独量化、合成描述符、未与 DeepGEMM SM100 对跑）。
+- 此前：**P59-1 完成（1/1）**。补掉 P58-1（§47）§47.8 明留的**前三条尾巴**——「`gen` 的 producer
   是**单块**（可分散到多块/SM）」（①）「`gen` 标量 strided 写」（②）「`sched` 的 1.36 ms 是**单块
   producer** 上界，MPK 实际用 **16 scheduler SM**」（③）：把 §47 的单块 producer 扩成 **P 块（独占 P 个
   SM）**，量 gen/sched 代价随 P 的标度与饱和点。`docs/04-experiments.md` 新增 **§48**，源码
