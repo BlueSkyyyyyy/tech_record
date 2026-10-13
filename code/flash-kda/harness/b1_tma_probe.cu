@@ -69,6 +69,26 @@ DEV void tma5d(const CUtensorMap* m, void* sm, int c0, int c1, int c2, int c3, i
           "r"(saddr(bar))
         : "memory");
 }
+#ifdef B1T_TMADH
+// P7-32: store the per-chunk `dh` [KD,BV] tile via TMA (smem->global) instead of the
+// per-thread scalar `st.global`.  §34.1 localized the scalar store's cost to `lg_throttle`
+// (the LSU/store-queue backs up) + a ~3x L2 write amplification, *not* DRAM bandwidth;
+// moving it to the TMA engine takes it off the LSU issue path entirely.  The tile is
+// per-warp [KD, BW] (SWIZZLE_NONE, 32 B inner dim), so no cross-warp barrier is needed.
+DEV void tma5d_store(const CUtensorMap* m, const void* sm, int c0, int c1, int c2, int c3,
+                     int c4) {
+    asm volatile(
+        "cp.async.bulk.tensor.5d.global.shared::cta.bulk_group "
+        "[%0, {%1,%2,%3,%4,%5}], [%6];\n"
+        ::"l"(m), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4), "r"(saddr(sm))
+        : "memory");
+}
+DEV void tma_store_commit() { asm volatile("cp.async.bulk.commit_group;\n" ::: "memory"); }
+template <int N>
+DEV void tma_store_wait_read() {
+    asm volatile("cp.async.bulk.wait_group.read %0;\n" ::"n"(N) : "memory");
+}
+#endif
 #ifdef B1T_ETMA
 // P7-21: stage the per-chunk gate factor E^tot = 2^{g_cum[last]} ([128] fp32) via TMA
 // instead of reading it from global *inside* the mma loop.  The reg kernel already
@@ -166,6 +186,10 @@ struct alignas(1024) Shared {
     Stage<BT> st[NSTAGE];
     bf16 sdh[NW][KD][BWS];
     bf16 sdu[NW][BT][BWS];
+#ifdef B1T_TMADH
+    // double-buffered per-warp `dh` store tile, unpadded [KD,BW] (TMA needs exact stride)
+    alignas(1024) bf16 dho[2][NW][KD][BW];
+#endif
     alignas(8) uint64_t full[NSTAGE];
     alignas(8) uint64_t empty[NSTAGE];
 };
@@ -180,6 +204,9 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
               const __grid_constant__ CUtensorMap dVmap,
 #ifdef B1T_ETMA
               const __grid_constant__ CUtensorMap emap,
+#endif
+#ifdef B1T_TMADH
+              const __grid_constant__ CUtensorMap dhmap,
 #endif
               const float* __restrict__ etot,
               bf16* __restrict__ dh_g, float* __restrict__ dh0_g, bf16* __restrict__ dv2_g,
@@ -260,9 +287,13 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
             const Stage<BT>* st = &sh->st[s];
             const int vbase = v0 + warp * BW;
 
-            // ---- publish S: global dh[c] + per-warp bf16 mirror ----
+            // ---- publish S: per-warp bf16 mirror (+ `dh` store: scalar or TMA) ----
             {
-#ifndef B1T_NODH
+#if defined(B1T_TMADH)
+                bf16 (*dho)[BW] = sh->dho[i & 1][warp];
+                if (i >= 2 && l == 0) tma_store_wait_read<1>();
+                __syncwarp();
+#elif !defined(B1T_NODH)
                 const int64_t base = ((int64_t)(n * NT + c) * H + h) * KD * VD;
 #endif
                 #pragma unroll
@@ -275,7 +306,11 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                         bf16 b2 = f2b(S[m][nn][2]), b3 = f2b(S[m][nn][3]);
                         sdh[r0][cc] = b0; sdh[r0][cc + 1] = b1;
                         sdh[r1][cc] = b2; sdh[r1][cc + 1] = b3;
-#ifndef B1T_NODH
+#if defined(B1T_TMADH)
+                        // P7-32: stage into smem; lane 0 issues the TMA store below.
+                        dho[r0][cc] = b0; dho[r0][cc + 1] = b1;
+                        dho[r1][cc] = b2; dho[r1][cc + 1] = b3;
+#elif !defined(B1T_NODH)
                         // P7-31: skip the per-chunk `dh` global store to measure the
                         // B1->B2 round-trip a K2-shaped fusion would keep in registers.
                         int gc = vbase + cc;
@@ -287,6 +322,12 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                     }
             }
             __syncwarp();
+#if defined(B1T_TMADH)
+            if (l == 0) {
+                tma5d_store(&dhmap, &sh->dho[i & 1][warp][0][0], vbase, 0, h, c, n);
+                tma_store_commit();
+            }
+#endif
             // ---- op1: cdu[BT,BW] = k[BT,KD] @ S[KD,BW] ----
             float cdu[MTKt][2][4];
             #pragma unroll
@@ -415,6 +456,25 @@ static void make_map(CUtensorMap* m, void* ptr, int H, int T, int B, int BT) {
         fprintf(stderr, "cuTensorMapEncodeTiled failed\n");
 }
 
+#ifdef B1T_TMADH
+// dh is [B, NT, H, KD, VD] bf16 (contiguous).  dims {VD, KD, H, NT, B}, box {BW,KD,1,1,1},
+// SWIZZLE_NONE (inner dim is only BW=16 bf16 = 32 B); one store per compute warp.
+static void make_map_dh(CUtensorMap* m, void* ptr, int H, int NT, int B) {
+    cuuint64_t gdim[5] = {(cuuint64_t)VD, (cuuint64_t)KD, (cuuint64_t)H, (cuuint64_t)NT,
+                          (cuuint64_t)B};
+    cuuint64_t gstr[4] = {(cuuint64_t)VD * 2, (cuuint64_t)KD * VD * 2,
+                          (cuuint64_t)H * KD * VD * 2, (cuuint64_t)NT * H * KD * VD * 2};
+    cuuint32_t box[5] = {(cuuint32_t)BW, (cuuint32_t)KD, 1, 1, 1};
+    cuuint32_t estr[5] = {1, 1, 1, 1, 1};
+    if (cuTensorMapEncodeTiled(m, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 5, ptr, gdim, gstr, box,
+                               estr, CU_TENSOR_MAP_INTERLEAVE_NONE,
+                               CU_TENSOR_MAP_SWIZZLE_NONE,
+                               CU_TENSOR_MAP_L2_PROMOTION_L2_128B,
+                               CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE) != CUDA_SUCCESS)
+        fprintf(stderr, "cuTensorMapEncodeTiled(dh) failed\n");
+}
+#endif
+
 #ifdef B1T_ETMA
 // E^tot is [B, NT, H, KD] fp32 (contiguous).  dims {KD, NT*H, B}, box {KD,1,1}, no swizzle.
 static void make_map_e(CUtensorMap* m, void* ptr, int H, int NT, int B) {
@@ -446,6 +506,10 @@ static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* eto
     CUtensorMap em;
     make_map_e(&em, etot, H, NT, B);
 #endif
+#ifdef B1T_TMADH
+    CUtensorMap dhm;
+    make_map_dh(&dhm, dh, H, NT, B);
+#endif
     dim3 grid(VD / BV, B * H);
     int smem = (int)sizeof(Shared<BT, NSTAGE>);
     static int configured = 0;
@@ -459,6 +523,9 @@ static int launch_impl(void* q, void* k, void* w, void* do_, void* dv, void* eto
         qm, km, wm, dom, dvm,
 #ifdef B1T_ETMA
         em,
+#endif
+#ifdef B1T_TMADH
+        dhm,
 #endif
         (const float*)etot, (bf16*)dh, (float*)dh0, (bf16*)dv2, T, NT, H,
         scale);

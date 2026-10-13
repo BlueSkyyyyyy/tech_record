@@ -24,6 +24,7 @@ sys.path.insert(0, HARNESS)
 from check_bwd_dh_roundtrip import (                                       # noqa: E402
     build, load, run_b1, B1_BASE_SO, B1_NODH_SO,
 )
+from check_bwd_b1_tma_store import B1_TMA_SO                               # noqa: E402
 from check_bwd_dhu_dtype import make_inputs, as_dtype, fla_dhu, cdiv      # noqa: E402
 
 
@@ -42,6 +43,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--side", choices=["b1", "b2"], required=True)
     ap.add_argument("--nodh", action="store_true")
+    ap.add_argument("--tma", action="store_true", help="B1: TMA `dh` store (B1T_TMADH)")
     ap.add_argument("--B", type=int, default=8)
     ap.add_argument("--T", type=int, default=2048)
     ap.add_argument("--H", type=int, default=8)
@@ -54,9 +56,13 @@ def main():
     B, T, H = args.B, args.T, args.H
 
     if args.side == "b1":
-        so = B1_NODH_SO if args.nodh else B1_BASE_SO
+        so = B1_TMA_SO if args.tma else (B1_NODH_SO if args.nodh else B1_BASE_SO)
         if not args.no_build:
-            extra = ["-lcuda", "-DB1T_ETMA"] + (["-DB1T_NODH"] if args.nodh else [])
+            extra = ["-lcuda", "-DB1T_ETMA"]
+            if args.tma:
+                extra.append("-DB1T_TMADH")
+            elif args.nodh:
+                extra.append("-DB1T_NODH")
             build("b1_tma_probe.cu", so, extra=extra)
         F, do, scale = synth_b1(B, T, H)
         lib = load(so)
@@ -76,7 +82,8 @@ def main():
     for _ in range(args.prof):
         call()
     torch.cuda.synchronize()
-    print(f"DONE side={args.side} nodh={args.nodh} B={B} T={T} H={H} bt={args.bt} ns={args.ns}")
+    print(f"DONE side={args.side} nodh={args.nodh} tma={args.tma} B={B} T={T} H={H} "
+          f"bt={args.bt} ns={args.ns}")
 
 
 if __name__ == "__main__":

@@ -499,6 +499,23 @@
       下一优先级＝**B1 的 `dh`/`dv2` 改 TMA store**，而非 B1→B2 融合。**待验证**：TMA store 变体能否
       复现这 33%（预期能，TMA 有独立引擎、不求 LSU 发射）。
 
+- [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
+      验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
+      `[KD,BW]=[128,16]` 未 padding tile 写入加进 `Shared` 的**双缓冲** `dho[2][NW][KD][BW]`，lane 0 发
+      `cp.async.bulk.tensor.5d.global.shared::cta.bulk_group`（`make_map_dh`：dims `{VD,KD,H,NT,B}`、
+      box `{BW,KD,1,1,1}`、`SWIZZLE_NONE`）+ `wait_group.read` 复用；稳态循环仍无 `__syncthreads()`。
+      新增 `harness/check_bwd_b1_tma_store.py`（`check_bwd_b1_tma_store.out.txt`）+ `probe_b1_tma_store_ncu.sh` /
+      `ncu_dh_roundtrip_driver.py --tma`（`probe_b1_tma_store_ncu.out.txt`）+ `docs/07` §35。**Part A**：16 组
+      （`BT=32/64`、`NS=1/2`、含非整除 `T=250`）TMA vs scalar `dh/dv2/dh0` **逐位相同（max_abs=0）**、vs FLA 仍
+      bf16 1 ulp。**Part B**：CUPTI 恢复占比 `(base−tma)/(base−nodh)` = **0.58–0.84（均值 ~0.72）**，tma/base
+      0.40–0.78、base→tma 提速 **1.28–2.48×**。**Part D（ncu）**：`lg_throttle` **0.66→0.04** / **0.89→0.05**
+      （落回 nodh 的 0.05/0.03）——**直接坐实 §34.1 的「逐标量 store 打满队列」就是真凶**；DRAM write
+      **92.1→91.4 / 7.12→7.17 基本不变**（不是省带宽）、L2 字节 860→487 / 161→86（**−43%**，消掉标量 2 B
+      store 的 ~3× 放大）；theoretical occ 腰斩 15.62→7.81% 但 achieved 7.77% 不动（再排除占用率）。
+      **结论**：§34.4 答案是**能**——TMA store 在**不做任何融合**下吃掉那 33% 的大头；目标卡 CUDA 反向第一
+      优先级＝B1 `dh`（及 `dv2`）改 TMA store（独立、低风险、逐位无损），B1→B2 融合净增量只剩 B2 侧 ~5%。
+      **待验证**：`dv2` 的 TMA store 推广未实测（本节只改 `dh`，与 §34.1 口径一致）。
+
 ### P8 小结 / 一页纸
 
 - [x] **P8-1** `docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总
@@ -529,8 +546,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-31 补测**。
-  - P7-31（本轮）：量化 §30.5 遗留的「K2 形状内 B1→B2 融合」**收益上界**（不建融合 kernel）。用
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-32 补测**。
+  - P7-32（本轮）：兑现 §34.4 的**待验证**——把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**
+    （`-DB1T_TMADH`：per-warp `[KD,BW]` 未 padding tile + 双缓冲 `dho` + `cp.async.bulk.tensor.5d`），
+    验证能否复现 §34.1「删掉 store」收益的那 33%。`dv2/dh0/dh` 与 scalar **逐位相同**；CUPTI 恢复占比
+    `(base−tma)/(base−nodh)` = **0.58–0.84（均值 ~0.72）**、base→tma 提速 **1.28–2.48×**；`ncu` 把
+    `lg_throttle` **0.66→0.04 / 0.89→0.05**（落回 nodh 档，**坐实「逐标量 store 打满队列」是真凶**）、
+    DRAM write 基本不变（**不是省带宽**）、L2 字节 **−43%**（消掉 ~3× 写放大）、theoretical occ 腰斩但
+    achieved 不动。**结论**：答案是**能**——TMA store 在**不做融合**下吃掉那 33% 大头；目标卡 CUDA 反向
+    第一优先级＝B1 `dh`（及 `dv2`）改 TMA store；B1→B2 融合净增量只剩 B2 侧 ~5%。新增
+    `harness/check_bwd_b1_tma_store.py`（`check_bwd_b1_tma_store.out.txt`）+ `harness/probe_b1_tma_store_ncu.sh` /
+    `ncu_dh_roundtrip_driver.py --tma`（`probe_b1_tma_store_ncu.out.txt`）+ `docs/07` §35。
+    **待验证**：`dv2` 的 TMA store 推广未实测（本轮只改 `dh`，与 §34.1 口径一致）。
+  - P7-31（上轮）：量化 §30.5 遗留的「K2 形状内 B1→B2 融合」**收益上界**（不建融合 kernel）。用
     受控消融把 `dh` 落盘往返拆两半：**Part A（B1 侧）** 给 `b1_tma_probe.cu` 加 `-DB1T_NODH` 删掉
     `dh` 全局 store（保留 op1 用的 `sdh` 镜像）、`dv2/dh0` 逐位不变下 B1 快 **0.28–0.67×**（BT=64 占
     33%、BT=32 NS=2 占 **72%**）；`ncu` 定位**不是带宽**（DRAM read 不变、write 仅 −62 MB）而是
@@ -968,13 +996,20 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-31 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-32 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-32（`docs/07` §35）兑现 §34.4 待验证＝把 B1 的 `dh` 落盘改成 TMA store**：`-DB1T_TMADH`
+    （per-warp `[KD,BW]` tile + 双缓冲 + `cp.async.bulk.tensor.5d`），`dh/dv2/dh0` 与 scalar **逐位相同**；
+    CUPTI 恢复占比 **0.58–0.84（均值 ~0.72）**、base→tma **1.28–2.48×**；`ncu` 把 `lg_throttle`
+    **0.66→0.04 / 0.89→0.05**（坐实真凶）、DRAM write 基本不变（**不是带宽**）、L2 **−43%**、theoretical occ
+    腰斩但 achieved 不动。**答案：能**——TMA store 不融合即吃掉那 33% 大头。**下一步**：目标卡 CUDA 反向
+    第一优先级＝B1 `dh`（及 `dv2`）改 TMA store；B1→B2 融合降到最后（净增量只剩 B2 侧 ~5%）。
+    **待验证**：`dv2` 的 TMA store 推广未实测。
   - **P7-31（`docs/07` §34）量化「K2 形状内 B1→B2 融合」收益上界**：受控消融拆 `dh` 落盘往返——
     B1 去掉 `dh` store（`-DB1T_NODH`）快 **0.28–0.67×**（`dv2/dh0` 逐位），`ncu` 证明是**逐标量
     `st.global` 的 `lg_throttle`（0.67→0.06）+ L2 放大 ~3×**、**不是带宽**；B2 不读 `dh` 只值 **~5%**。
     **往返上界 ≈ B1+B2 的 ~10%，且 ~2/3 是 B1 侧 store 效率（非融合专属）**。**下一步（修正 §30.5）**：
     目标卡 CUDA 反向优先把 **B1 的 `dh`/`dv2` 落盘改成 TMA/专职 STORE warp**（镜像前向 K2 的 STORE
-    warp），而非 B1→B2 融合（融合净增量只剩 ~5%）。**待验证**：TMA store 变体能否复现这 33%。
+    warp），而非 B1→B2 融合（融合净增量只剩 ~5%）。**该待验证已由 P7-32 关闭（答案：能）。**
   - **P7-30（`docs/07` §33）B2/B3 融合兑现**：把 B3 对角（`NC=1` 只剩 Parts B/D）折进 B2，
     `dq/dk/dg` 累加器留寄存器、`dA` 不落盘；`dq/dv2` 逐位、其余 ≤2.2e-7（fp32 序），链 `dev`
     **0.83–0.93×**、`wall` **0.90–0.92×**、DRAM 字节 **−23%**。**唯一使能条件＝`BK=K`+`BV=V`+`nw=8`**

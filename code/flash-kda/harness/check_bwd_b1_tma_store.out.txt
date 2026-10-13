@@ -1,0 +1,56 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1t_base.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_NODH ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1t_nodh.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -lcuda -DB1T_ETMA -DB1T_TMADH ~/proj/tech_record/code/flash-kda/harness/b1_tma_probe.cu -o /tmp/b1t_tma.so
+
+====================================================================================================
+Part A: correctness — TMA `dh` store vs scalar store must be BIT-IDENTICAL
+   tma vs base: dh / dv2 / dh0 max_abs;  vs FLA `dhu`: dh max_abs (sanity)
+====================================================================================================
+  shape             BT  NS |         dh        dv2        dh0 |    dh vs FLA
+  B1 T512 H4       32   1 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B1 T512 H4       32   2 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B1 T512 H4       64   1 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B1 T512 H4       64   2 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B2 T1024 H8       32   1 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B2 T1024 H8       32   2 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B2 T1024 H8       64   1 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B2 T1024 H8       64   2 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B8 T2048 H8       32   1 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B8 T2048 H8       32   2 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B8 T2048 H8       64   1 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B8 T2048 H8       64   2 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B1 T250 H3       32   1 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B1 T250 H3       32   2 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B1 T250 H3       64   1 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+  B1 T250 H3       64   2 |   0.00e+00   0.00e+00   0.00e+00 |     4.88e-04
+
+====================================================================================================
+Part B: timing — CUPTI us/call (idle card).  nodh/base = §34.1 bound; tma/base = recovered
+====================================================================================================
+  shape             BT  NS |   base µs   nodh µs    tma µs | nodh/base  tma/base | tma vs nodh
+  B1 T512 H4       32   1 |      68.0      34.4      43.6 |     0.506     0.642 |       0.724
+  B1 T512 H4       32   2 |      67.1      26.3      38.9 |     0.392     0.579 |       0.692
+  B1 T512 H4       64   1 |      44.8      28.7      33.9 |     0.642     0.756 |       0.680
+  B1 T512 H4       64   2 |      43.2      24.8      29.6 |     0.574     0.685 |       0.740
+  B2 T1024 H8       32   1 |     141.6      69.3      99.5 |     0.490     0.703 |       0.582
+  B2 T1024 H8       32   2 |     133.7      49.1      72.4 |     0.367     0.541 |       0.725
+  B2 T1024 H8       64   1 |      91.2      56.1      70.8 |     0.616     0.776 |       0.582
+  B2 T1024 H8       64   2 |      84.6      46.0      56.3 |     0.543     0.666 |       0.732
+  B8 T2048 H8       32   1 |     296.4     163.2     215.1 |     0.551     0.726 |       0.610
+  B8 T2048 H8       32   2 |     357.5      99.1     144.2 |     0.277     0.403 |       0.825
+  B8 T2048 H8       64   1 |     194.5     129.3     152.1 |     0.664     0.782 |       0.650
+  B8 T2048 H8       64   2 |     209.7      87.8     107.9 |     0.419     0.515 |       0.835
+  B1 T250 H3       32   1 |      35.4      19.0      23.8 |     0.536     0.672 |       0.706
+  B1 T250 H3       32   2 |      37.1      16.6      21.9 |     0.447     0.591 |       0.739
+  B1 T250 H3       64   1 |      25.1      17.3      19.0 |     0.688     0.758 |       0.774
+  B1 T250 H3       64   2 |      24.5      16.0      17.4 |     0.655     0.709 |       0.844
+
+====================================================================================================
+Part C: summary — fraction of the removed-store gain recovered by TMA
+====================================================================================================
+  recovered = (base - tma) / (base - nodh);  1.0 == full recovery of the §34.1 bound
+
+DONE
