@@ -3767,3 +3767,95 @@ ours≈FLA（§17.2：23.0 vs 23.1）——BT=64 的单 kernel 确实打平，�
   但**不能**再宣称「已经反超 FLA」；诚实定位是「**与 FLA 反向同档（~0.9×），且省掉 FLA 的前向状态重算**」。
 - **方法学**：这条与 §25.5（孤立 vs 链内归因差 ~1.3×）、§11.4（chunk 粒度）并列，是本专题第三个
   「计时口径」陷阱——**跨实现的 `xFLA` 必须先对齐 dtype、chunk、归因窗口三者**。
+
+## 38. 把「K2 形状 CUDA B1」的累计收益收口成 matched-bf16 的 `xFLA`，并暴露手写 pipeline 在 `NSTAGE≥2` 的竞态（P7-35）
+
+§22–§36 把目标卡形状的 **CUDA B1**（寄存器常驻状态 + `ldmatrix`/`mma.sync` + TMA 输入 + warp
+specialization）一轮轮垒起来，但每轮报的 `xFLA` 分母**各不相同**：§22 2.10–3.75、§23 1.73–3.80、
+§24 最好 1.63（都是 `-DB1T_ETMA`、**标量** `dh`/`dv2` store），而 §35/§36 的 TMA store 只报了
+**相对自身**的提速（`tma2/base`、`lg_throttle` 等），**从未**把当前最强组合
+`-DB1T_ETMA -DB1T_TMADH -DB1T_TMADV`（记作 `tma2`）重新对回 FLA。§37（P7-34）又把口径钉死为
+**matched dtype**（FLA `dhu` 必须喂 **bf16**）。本节用
+`harness/check_bwd_b1_xfla.py`（`harness/check_bwd_b1_xfla.out.txt`，空闲卡 `CUDA_VISIBLE_DEVICES=1`）
+把这条线**收口**，并顺手加了一个 run-to-run 确定性扫描。
+
+三个变体（都带 `-DB1T_ETMA`，`E^tot` 已在流水里）：
+
+- `base`＝标量 `dh` + 标量 `dv2`（§24 的最好形态）；
+- `tma` ＝TMA `dh` + 标量 `dv2`（P7-32）；
+- `tma2`＝TMA `dh` + TMA `dv2`（P7-33，**当前最强**）。
+
+### 38.1 Part A：正确性（bit-identical + bf16 1 ulp）
+
+`tma2` vs `base` 在 `BT=32/64`、`NS=1/2`、4 组 shape（含非整除 `T=250`）上
+`dh/dv2/dh0` **逐位相同（max_abs=0）**；`tma2` vs 直接 bf16 FLA `dhu` 仍 **bf16 1 ulp**
+（`dh/dv2` max_abs `4.88e-4`，`T=250` 的 `dv2` 为 `2.44e-4`）——与 §35/§36 一致。
+
+### 38.2 Part B/C：`tma2` 对 matched-bf16 FLA `dhu` 的 `xFLA`
+
+FLA 分母 = **直接调用** `chunk_gated_delta_rule_bwd_dhu` 且喂 **bf16 操作数**（同 §37 口径），
+CUPTI `us/call`。`xFLA = ours / FLA_bf16`，`BT=64` 与 FLA `dhu` 的默认 chunk 一致：
+
+| shape | ours `tma2` NS=1 | ours `tma2` NS=2 | FLA `dhu` bf16 (BT=64) | `xFLA` NS=1 | `xFLA` NS=2 |
+|---|---|---|---|---|---|
+| B1 T512 H4 | 29.9 | 25.4 | 13.0 | **2.30** | 1.96 |
+| B2 T1024 H8 | 62.1 | 47.9 | 23.1 | **2.69** | 2.07 |
+| B8 T2048 H8 | 137.6 | 99.0 | 119.6 | **1.15** | **0.83** |
+| B1 T250 H3 | 16.7 | 14.9 | 7.4 | **2.24** | 2.00 |
+
+（CUPTI `us/call`；FLA 值 `13.0/23.1/119.6/7.4` 与 §37 Part A 的 `13.1/23.3/120.0` 一致。）
+
+**读法**：
+
+- **大 shape（B8 T2048 H8）**：`tma2` 把 §24 的 `xFLA=1.63`（标量 store）压到 **1.15（NS=1）/0.83
+  （NS=2）**——即 TMA store 之后，K2 形状的 CUDA B1 在**与 FLA 同 chunk、同 dtype** 下已**追平甚至略快**
+  （NS=2 时 99.0 µs vs FLA 119.6）。这坐实了 §35/§36「两条逐标量 store 改 TMA 恢复全删上界 ~75%」的
+  累计效果：**它确实把最大 shape 的 xFLA 从 1.63 拉到 ≤1.15**。
+- **小 shape（B1 T512 H4 / B2 T1024 H8 / B1 T250 H3）**：`xFLA` 仍 **2.0–2.7×**，与 §22–§24 基本未变
+  ——因为这些 shape 的瓶颈不是 store 而是**每 warp 发射效率/并行度**（§35.5：`wait`/`tensor`），
+  TMA store 对它无能为力。这也解释了为什么 §24 的「全表最好 xFLA=1.63」只出现在 `B8T2048H8`。
+- **BT=16（部署粒度）无法在这里测 `xFLA`**：FLA 前向 `chunk_kda_fwd_intra` **只支持 chunk 32/64**
+  （直接跑 `BT=16` 报 `ValueError: ... only supports chunk_size 32 or 64`），故 CUDA 探针**喂不进**
+  16 块操作数；§37.3 的「部署粒度 BT=16 的 bf16 B1 慢 FLA 2.3–2.5×」仍是来自 Triton 组装链的口径。
+
+### 38.3 Part D：手写 mbarrier pipeline 在 `NSTAGE≥2` 存在 run-to-run 竞态
+
+为在正确性里覆盖 `BT=16`，本节给探针加了**重复运行确定性扫描**（同一 `base` 连跑两次、
+`tma2` 与 `base` 对比；`base` 不含 TMA store，故竞态不能赖在 store 上）：
+
+| shape | BT | NS | `base`/`base` `dh` | `tma2`/`base` `dh` | verdict |
+|---|---|---|---|---|---|
+| B2 T1024 H8 | 16 | 1 | 0 | 0 | ok |
+| B2 T1024 H8 | 16 | 2 | 0 | 0 | ok |
+| B8 T2048 H8 | 16 | **2** | **3.64e-2** | 1.29e-3 | **RACY** |
+| B8 T2048 H8 | 16 | 3 | 0 | 0 | ok |
+| B8 T2048 H8 | 32 | **3** | **4.52e-3** | 0 | **RACY** |
+| B8 T2048 H8 | 32 | 1/2 | 0 | 0 | ok |
+| B8 T2048 H8 | 64 | 1/2 | 0 | 0 | ok |
+
+即：**`base` kernel 本身在 `NSTAGE≥2` 的大 shape 上不是 run-to-run 可复现的**（两处复现：
+`BT=16 NS=2` 3.6e-2、`BT=32 NS=3` 4.5e-3），而 **`NSTAGE=1` 在所有 `BT` 上都稳定**。竞态是
+**间歇性**的——小 shape、以及本轮多数 `NS=2` 行偶然全对，所以 §35/§36 当时「16 组逐位相同」是
+**观测到的、而非有保证的**。含义有三：
+
+1. **回授 §24 的结论**：P7-21「`E^tot` 修好后最优回到 `NS=1`」不只是性能选择，**`NS=1` 也是唯一
+   有保证正确的配置**；目标卡 CUDA B1 应以 `NSTAGE=1` 为基准（或改 CUTLASS `PipelineTmaAsync` 重做
+   多 stage）。
+2. **本轮 `xFLA` 表的 NS=1 列可信**（`B8T2048H8` 1.15；小 shape 2.3–2.7），NS=2 列的时间仍然有效
+   （计时不受竞态影响）但其数值来源是未完全排干的流水。
+3. 竞态根因**未定位**（本节只确认它在 `base` 输入流水、非 store 路径，且 `NS=1` 免疫）——留作
+   **待验证**：手写 `full`/`empty` 的 parity 协议在 `NSTAGE≥2` 下是否存在 off-by-one 的
+   producer/consumer 覆写窗口。
+
+### 38.4 结论 / 对上游的修正
+
+- **K2 形状 CUDA B1 的累计 `xFLA`（matched bf16、BT=64）**：大 shape `B8T2048H8` **1.15（NS=1）/
+  0.83（NS=2）**（§24 标量 store 时 1.63）；小 shape 仍 **2.0–2.7×**。即 **TMA store 兑现了「大
+  shape 追平 FLA」这一半**，而**小 shape 的残差是每 warp 发射效率**（§24.5 的手写 mbarrier 上限），
+  与 store 无关。
+- **诚实定位**：目标卡 CUDA B1 **在大 shape 上已与 FLA bf16 同档或略快、在小 shape 上仍慢 ~2–2.7×**；
+  部署粒度（BT=16）的对比只能由 Triton 链给出（§37.3：慢 ~2.3–2.5×，差距是**16 块粒度**）。
+- **新增方法学约束**：多 stage 的手写流水 kernel 必须做 **run-to-run 确定性检查**（本节的 Part D），
+  否则会把间歇竞态当正确性通过。这与 §25.5（归因窗口）、§37（dtype/chunk 对齐）并列。
+- **下一步**：与 §35/§36 一致——手写 mbarrier 已到结构上限，若要安全地吃多 stage 的收益需换
+  CUTLASS `PipelineTmaAsync`（本节的竞态是又一条动机）。

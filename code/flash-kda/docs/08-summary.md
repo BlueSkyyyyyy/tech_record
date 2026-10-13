@@ -294,3 +294,13 @@ DRAM write 基本不变（**不是带宽**）、L2 字节 **−52%**、tensor �
 下一块瓶颈只剩**每 warp 发射效率**（`wait` 1.40），即 §24.5 的手写 mbarrier 结构上限（需换 CUTLASS
 `PipelineTmaAsync`，属更大工程）。**坑**：TMA 张量图 `globalStrides` 按 dim 从 1 起算，写反 T/H stride 时
 `H==1` 全对、仅 `H>1` 时 `dv2` 错。
+
+**P7-35（`docs/07` §38）**：把「K2 形状 CUDA B1」的累计收益**收口成 matched-bf16 的 `xFLA`**（§22–§24 报过、
+§35/§36 的 store 轮只报相对收益），并**发现手写 pipeline 的 run-to-run 竞态**。三变体
+`base`/`tma`/`tma2`（=ETMA/+TMADH/+TMADV）在 `BT=32/64 NS=1/2`（含非整除 `T=250`）`tma2` vs `base`
+**逐位相同**。**`xFLA`（ours/FLA bf16，同 `BT=64`）**：大 shape `B8T2048H8` **1.15（NS=1）/0.83（NS=2）**
+（§24 标量 store 时 1.63 → TMA store 兑现「大 shape 追平 FLA」）；小 shape `2.0–2.7×`（残差＝每 warp
+发射效率）。**BT=16 无法在探针测**（FLA 前向只支持 chunk 32/64），部署口径仍归 §37.3。**踩坑（新）**：
+run-to-run 确定性扫描暴露 `base` kernel 在 `NSTAGE≥2` 大 shape 上不可复现（`BT=16 NS=2` 3.64e-2、
+`BT=32 NS=3` 4.52e-3），`NSTAGE=1` 全 `BT` 稳定 → §35/§36 的「逐位相同」属**观测而非保证**，根因
+（`full`/`empty` parity 在 `NS≥2`）待验证。**回授**：§24「最优回到 `NS=1`」同时是唯一有保证正确的配置。

@@ -545,6 +545,20 @@
       BT=64 时 ours≈FLA）。诚实定位＝**与 FLA 反向同档（~0.9×）且省掉 FLA 的前向状态重算**；工程重点
       （B1 粒度 + store、B2/B3 融合）不变。**注意**：§10/§11 当时我方 B1 亦为 fp32（fair）、§17–24/§34–36
       两侧均 bf16（fair），只有 §25 跨 dtype。
+- [x] **P7-35** 把「K2 形状 CUDA B1」的累计收益**收口成 matched-bf16 的 `xFLA`**（§22–§24 报过、
+      §35/§36 的 store 轮只报相对收益），并在加 `BT=16` 覆盖时**发现手写 pipeline 的竞态**。新增
+      `harness/check_bwd_b1_xfla.py`（`check_bwd_b1_xfla.out.txt`，空闲卡）+ `docs/07` §38。三个变体
+      `base`/`tma`/`tma2`（=ETMA/+TMADH/+TMADV）。**Part A**：`tma2` vs `base` `BT=32/64 NS=1/2`（含非整除
+      `T=250`）**逐位相同**、vs 直接 bf16 FLA `dhu` 仍 1 ulp。**Part B/C（关键）**：`xFLA`（ours/FLA bf16，
+      同 `BT=64`）——大 shape `B8T2048H8` **1.15（NS=1）/0.83（NS=2）**（§24 标量 store 时 **1.63**，即 TMA
+      store 兑现「大 shape 追平 FLA」）、小 shape（`B1T512H4/B2T1024H8/B1T250H3`）仍 **2.0–2.7×**（残差＝
+      每 warp 发射效率，非 store）；**BT=16 无法在探针测 `xFLA`**（FLA 前向 `chunk_kda_fwd_intra` 只支持
+      chunk 32/64，直接 `BT=16` 报 `ValueError`），部署粒度口径仍归 §37.3。**Part D（踩坑/新发现）**：
+      run-to-run 确定性扫描暴露 **`base` kernel 在 `NSTAGE≥2` 的大 shape 上不可复现**（`BT=16 NS=2` 3.64e-2、
+      `BT=32 NS=3` 4.52e-3），而 **`NS=1` 在所有 `BT` 稳定**——即 §35/§36 的「16 组逐位相同」是**观测到而非
+      有保证**；根因（手写 `full`/`empty` parity 在 `NS≥2` 的覆写窗口）**待验证**。**回授**：§24「最优回到
+      `NS=1`」同时是**唯一有保证正确**的配置，多 stage 收益须换 CUTLASS `PipelineTmaAsync` 才安全。
+      **新方法学**：多 stage 手写流水必须做 run-to-run 确定性检查（与 §25.5 归因窗口、§37 dtype 对齐并列）。
 
 ### P8 小结 / 一页纸
 
@@ -580,8 +594,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-34 补测**。
-  - P7-34（本轮）：**测量学复核**——澄清 `docs/07` 里两个 FLA `dhu` baseline 并更正 §25（P7-22）的
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-35 补测**。
+  - P7-35（本轮）：把「K2 形状 CUDA B1」的累计收益**收口成 matched-bf16 的 `xFLA`**，并**发现手写
+    pipeline 在 `NSTAGE≥2` 的 run-to-run 竞态**。新增 `harness/check_bwd_b1_xfla.py`
+    （`check_bwd_b1_xfla.out.txt`，空闲卡）+ `docs/07` §38。三变体 `base`/`tma`/`tma2`。**正确性**：
+    `tma2` vs `base`（`BT=32/64 NS=1/2`、含非整除 `T=250`）**逐位相同**、vs 直接 bf16 FLA `dhu` 1 ulp。
+    **`xFLA`（ours/FLA bf16，同 `BT=64`）**：大 shape `B8T2048H8` **1.15（NS=1）/0.83（NS=2）**（§24
+    标量 store 时 1.63 → TMA store 兑现「大 shape 追平 FLA」）；小 shape `B1T512H4 2.30/B2T1024H8 2.69/
+    B1T250H3 2.24`（残差＝每 warp 发射效率，§24.5 上限）。**BT=16 无法在探针测**（FLA 前向只支持
+    chunk 32/64），部署口径仍归 §37.3。**踩坑（新）**：run-to-run 扫描暴露 `base` kernel 在 `NSTAGE≥2`
+    大 shape 上不可复现（`BT=16 NS=2` 3.64e-2、`BT=32 NS=3` 4.52e-3），`NSTAGE=1` 全 `BT` 稳定 →
+    §35/§36 的「16 组逐位相同」属**观测而非保证**；根因（`full`/`empty` parity 在 `NS≥2`）**待验证**。
+    **回授**：§24「最优回到 `NS=1`」同时是**唯一有保证正确**的配置；多 stage 收益须换 CUTLASS
+    `PipelineTmaAsync` 才安全。**新方法学**：多 stage 手写流水须做 run-to-run 确定性检查。
+  - P7-34（上轮）：**测量学复核**——澄清 `docs/07` 里两个 FLA `dhu` baseline 并更正 §25（P7-22）的
     计时结论。同一条 `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64` 在 §17–36 报 ~23µs（**bf16 直接
     调用**）、在 §10/§11/§25 报 ~137µs（**fp32 链内**）。新增 `harness/check_bwd_fla_dhu_baseline.py`
     （`check_bwd_fla_dhu_baseline.out.txt`，空闲卡）+ `docs/07` §37。**根因＝operand dtype**：直接调用
