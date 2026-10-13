@@ -1,0 +1,118 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190  triton=3.6.0
+==============================================================================
+Part A: fused chain (B1+B2 fused, then B3+cumsum) vs FLA torch.autograd
+==============================================================================
+
+# T=512 H=4  B=1 T=512 H=4 seed=0
+  -- fused chain (B1+B2 fused + B3) vs FLA --
+  fused dq vs FLA            max_abs=1.790e-03  max_rel=2.660e-03  ref_max=6.730e-01
+  fused dk vs FLA            max_abs=1.689e-03  max_rel=2.462e-03  ref_max=6.861e-01
+  fused dv vs FLA            max_abs=3.308e-04  max_rel=5.542e-03  ref_max=5.969e-02
+  fused dbeta vs FLA         max_abs=2.772e-03  max_rel=5.618e-03  ref_max=4.934e-01
+  fused dg vs FLA            max_abs=2.340e-04  max_rel=4.210e-03  ref_max=5.558e-02
+  fused dh0 vs FLA           max_abs=1.964e-04  max_rel=3.905e-03  ref_max=5.029e-02
+  -- fused B1+B2 (isolated) vs unfused B1+B2, same operands --
+    dq fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.183e-01
+    dk fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.511e-01
+    dv fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.964e-02
+    db fused vs unfused      max_abs=5.960e-08  max_rel=1.213e-07  ref_max=4.915e-01
+    dg fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.459e-02
+    dh0 fused vs unfused     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.042e-02
+
+# B2 T=1024 H=8  B=2 T=1024 H=8 seed=1
+  -- fused chain (B1+B2 fused + B3) vs FLA --
+  fused dq vs FLA            max_abs=2.103e-03  max_rel=2.100e-03  ref_max=1.001e+00
+  fused dk vs FLA            max_abs=1.759e-03  max_rel=1.914e-03  ref_max=9.192e-01
+  fused dv vs FLA            max_abs=4.890e-04  max_rel=6.206e-03  ref_max=7.880e-02
+  fused dbeta vs FLA         max_abs=3.260e-03  max_rel=3.703e-03  ref_max=8.804e-01
+  fused dg vs FLA            max_abs=1.866e-04  max_rel=2.670e-03  ref_max=6.988e-02
+  fused dh0 vs FLA           max_abs=2.915e-04  max_rel=7.326e-03  ref_max=3.979e-02
+  -- fused B1+B2 (isolated) vs unfused B1+B2, same operands --
+    dq fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.733e-01
+    dk fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.896e-01
+    dv fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.913e-02
+    db fused vs unfused      max_abs=1.192e-07  max_rel=1.354e-07  ref_max=8.806e-01
+    dg fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.831e-02
+    dh0 fused vs unfused     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.002e-02
+
+# B8 T=2048 H=8  B=8 T=2048 H=8 seed=2
+  -- fused chain (B1+B2 fused + B3) vs FLA --
+  fused dq vs FLA            max_abs=3.491e-03  max_rel=3.624e-03  ref_max=9.633e-01
+  fused dk vs FLA            max_abs=2.799e-03  max_rel=3.097e-03  ref_max=9.039e-01
+  fused dv vs FLA            max_abs=6.814e-04  max_rel=8.821e-03  ref_max=7.725e-02
+  fused dbeta vs FLA         max_abs=4.300e-03  max_rel=4.819e-03  ref_max=8.924e-01
+  fused dg vs FLA            max_abs=4.455e-04  max_rel=4.349e-03  ref_max=1.024e-01
+  fused dh0 vs FLA           max_abs=4.098e-04  max_rel=6.880e-03  ref_max=5.957e-02
+  -- fused B1+B2 (isolated) vs unfused B1+B2, same operands --
+    dq fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.323e-01
+    dk fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.472e-01
+    dv fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.793e-02
+    db fused vs unfused      max_abs=1.192e-07  max_rel=1.336e-07  ref_max=8.922e-01
+    dg fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.432e-02
+    dh0 fused vs unfused     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.971e-02
+
+# T=250 H=3 nondiv  B=1 T=250 H=3 seed=3
+  -- fused chain (B1+B2 fused + B3) vs FLA --
+  fused dq vs FLA            max_abs=1.073e-03  max_rel=1.758e-03  ref_max=6.104e-01
+  fused dk vs FLA            max_abs=6.766e-04  max_rel=1.039e-03  ref_max=6.510e-01
+  fused dv vs FLA            max_abs=2.527e-04  max_rel=5.027e-03  ref_max=5.026e-02
+  fused dbeta vs FLA         max_abs=1.944e-03  max_rel=3.672e-03  ref_max=5.293e-01
+  fused dg vs FLA            max_abs=7.882e-05  max_rel=1.950e-03  ref_max=4.041e-02
+  fused dh0 vs FLA           max_abs=2.117e-04  max_rel=4.662e-03  ref_max=4.541e-02
+  -- fused B1+B2 (isolated) vs unfused B1+B2, same operands --
+    dq fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.003e-01
+    dk fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.877e-01
+    dv fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.040e-02
+    db fused vs unfused      max_abs=5.960e-08  max_rel=1.145e-07  ref_max=5.207e-01
+    dg fused vs unfused      max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.416e-02
+    dh0 fused vs unfused     max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.541e-02
+
+worst-case max_rel vs FLA across cases:
+  dq      3.624e-03
+  dk      3.097e-03
+  dv      8.821e-03
+  dbeta   5.618e-03
+  dg      4.349e-03
+  dh0     7.326e-03
+
+==============================================================================
+Part B: timing -- fused kernel vs unfused B1+B2 vs full B1+B2+B3 chain
+==============================================================================
+  case               |  B1+B2 dev  fused dev   ratio | chain unfused  chain fused   ratio
+  T=512 H=4          |       81.8     2459.3  30.06x |         114.4       2496.0  21.81x
+  B2 T=1024 H=8      |      265.0     5210.2  19.66x |         395.3       5310.6  13.43x
+  B8 T=2048 H=8      |     1373.3    19148.6  13.94x |        2293.1      20082.0   8.76x
+  T=250 H=3 nondiv   |       47.7     1194.8  25.02x |          72.3       1226.0  16.96x
+
+==============================================================================
+Part C: B1 alone -- V-partition sweep (BV=32 deployed vs BV=V fusion forces)
+==============================================================================
+  case                 BV  NS       dev       grid
+  T=512 H=4            32   1      54.3     (4, 4)
+  T=512 H=4            32   3      45.2     (4, 4)
+  T=512 H=4            64   1      74.4     (2, 4)
+  T=512 H=4            64   3      64.6     (2, 4)
+  T=512 H=4           128   1     220.3     (1, 4)
+  T=512 H=4           128   3     206.8     (1, 4)
+  B2 T=1024 H=8        32   1     146.0    (4, 16)
+  B2 T=1024 H=8        32   3      85.1    (4, 16)
+  B2 T=1024 H=8        64   1     178.5    (2, 16)
+  B2 T=1024 H=8        64   3     125.9    (2, 16)
+  B2 T=1024 H=8       128   1     470.1    (1, 16)
+  B2 T=1024 H=8       128   3     473.1    (1, 16)
+  B8 T=2048 H=8        32   1     474.7    (4, 64)
+  B8 T=2048 H=8        32   3     396.2    (4, 64)
+  B8 T=2048 H=8        64   1     532.4    (2, 64)
+  B8 T=2048 H=8        64   3     368.0    (2, 64)
+  B8 T=2048 H=8       128   1    1060.3    (1, 64)
+  B8 T=2048 H=8       128   3    1023.7    (1, 64)
+  T=250 H=3 nondiv     32   1      33.2     (4, 3)
+  T=250 H=3 nondiv     32   3      29.3     (4, 3)
+  T=250 H=3 nondiv     64   1      43.4     (2, 3)
+  T=250 H=3 nondiv     64   3      38.3     (2, 3)
+  T=250 H=3 nondiv    128   1     116.2     (1, 3)
+  T=250 H=3 nondiv    128   3     115.5     (1, 3)
+
+DONE

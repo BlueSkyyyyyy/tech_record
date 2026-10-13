@@ -2840,3 +2840,114 @@ V 侧读 = `4·T·V·4B·B·H·2 = 512 MB`，去重后 256 MB（省 256 MB = 总
 - **产物**：`harness/check_bwd_b2_hdh.py`（`harness/check_bwd_b2_hdh.out.txt`）+
   `harness/ncu_b2_hdh_driver.py` / `harness/probe_b2_hdh_ncu.sh`
   （`harness/probe_b2_hdh_ncu.out.txt`）。
+
+## 30. B1→B2 融合原型：`dh` 根本不落盘（P7-27）
+
+§29.5 把反向链里「唯一剩下的真结构项」定为 **B1→B2 融合**——今天 B1（状态伴随）把每块的状态伴随
+`dh[B,NT,H,K,V]` 写 global，B2（`wy_dqkg`）再读回；而 B1 的 program 在逆序扫块时**本来就持有**
+`dS == dh[c]` 在寄存器里，若 B2 的逐块工作在同一 program 里做，`dh` 就永远不碰 DRAM。本轮把它做成
+**最小可运行原型**并量清「省流量」与「丢并行度/爆寄存器」的净账。产物
+`harness/check_bwd_fused.py`（`harness/check_bwd_fused.out.txt`）+
+`harness/probe_fused_regs.py`（`harness/probe_fused_regs.out.txt`）+
+`harness/ncu_bwd_fused_driver.py` / `harness/probe_bwd_fused_ncu.sh`
+（`harness/probe_bwd_fused_ncu.out.txt`）。
+
+### 30.1 设计：为什么原型取 `BV = V`（无跨 V 归约）
+
+B1 沿 `V` 分块（grid `(cdiv(V,BV), B·H)`），B2 沿 chunk 分块（grid `(NT, B·H)`）。B2 对 **整个 V**
+收缩（`b_dq = do @ b_hT`、`b_dk = vn @ b_dhT`、`b_dw`、`b_dgk = Σ_V h⊙dh`…），所以一个只持 `V` 切片
+的 program 只能算出**部分和**，B2 后段的**非线性/衰减收尾**（`b_dg = q⊙dq − k⊙dk + …`、
+`dA ← Aᵀ(β⊙dA)Aᵀ`）必须先跨 V 归约——要么 `atomic_add` + 第二个 epilogue kernel，要么在
+program 内 V 全量。最干净的**无原子**原型就是 **`BV = V`**：一个 program 管一个 `(b,h)`，逆序扫
+全部 chunk，`b_dS[K,V]` 常驻寄存器，每块做完 B1 立刻做 B2 的这一块（`dh = b_dS` 不落盘），再更新
+`b_dS`。grid 退化为 `(B·H,)`——**正是前向 K2 的形状**（head 并行、沿 T 串行）。
+
+### 30.2 Part A：融合内核与「B1+B2」**逐位相同**
+
+把融合内核的 `dq/dk/dv/dbeta/dg/dh0` 接上**同一条** B3 + 反向 cumsum 尾巴，4 组 case
+（`T=512H4` / `B2T1024H8` / `B8T2048H8` / 非整除 `T=250H3`，P6-8 的同一份激活操作数、loss 含终态项）：
+
+- **融合链 vs FLA `torch.autograd`**：六项最坏 `dq 3.62e-3 / dk 3.10e-3 / dv 8.82e-3 /
+  dbeta 5.62e-3 / dg 4.35e-3 / dh0 7.33e-3`——与部署链（P6-8/P7-26 的 3.4e-3…8.3e-3）**同阶**，
+  即 bf16/tf32 底噪，融合没有引入可测量偏差。
+- **融合 B1+B2（不含 B3）vs 未融合 B1+B2，同一份操作数**：`dq/dk/dv/dg/dh0` 全部
+  **`max_abs = 0`（逐位相同）**、`db` `max_abs ≤ 1.2e-7`（`tl.sum` 的归约序差）。融合内核的每一
+  行算术、每一条 mma 操作数与「B1 kernel → 落盘 dh → B2 kernel」完全同序，只是把 `dh` 留在寄存器
+  ——**证明融合在代数/数值上是无损的**。
+
+### 30.3 Part B：计时——融合反而慢 **14–30×**
+
+反向链计时（CUPTI `dev`，CHUNK=16 部署粒度）：
+
+| case | 未融合 B1+B2 | 融合 B1+B2 | 比 | 未融合整链 | 融合整链 | 比 |
+|---|---|---|---|---|---|---|
+| `T=512 H=4` | 81.3 µs | 2477.1 µs | **30.5×** | 115.3 | 2506.6 | 21.7× |
+| `B2 T=1024 H=8` | 265.8 | 5406.5 | **20.3×** | 392.6 | 5531.0 | 14.1× |
+| `B8 T=2048 H=8` | 1373.6 | 19132.2 | **13.9×** | 2282.6 | 20124.7 | 8.8× |
+| `T=250 H=3`（非整除） | 47.6 | 1202.6 | **25.3×** | 72.9 | 1232.6 | 16.9× |
+
+融合把 B1+B2 从 ~1.4 ms 抬到 ~19 ms。这**不是**「省下的 `dh` 流量不够」，而是融合内核**根本没算完**
+——它先被寄存器压垮（§30.4）。
+
+### 30.4 归因：1786 次寄存器溢出把「省流量」变成「爆流量」
+
+**(1) 编译期寄存器（`harness/probe_fused_regs.py`）**：
+
+| kernel | regs | spill | smem | nw |
+|---|---|---|---|---|
+| **融合 B1+B2** | **255（上限）** | **1786** | 96.3 KB | 8 |
+| B1 `dhu_bf16` | 160 | 0 | 22.5 KB | 4 |
+| B2 `wy_dqkg` | 255 | 12 | 51.2 KB | 4 |
+
+融合内核在一个循环体里同时活着 `b_dS[K,V]`（fp32，64 KB）、`trans(b_dS)`、`b_h[K,V]`、
+`trans(b_h)` 以及全部 `[BT,K]`/`[BT,V]` 中间量——**远超寄存器文件**，于是溢出 **1786** 次（vs B1 的 0、
+B2 的 12）。`launch__occupancy_limit_registers = 1 block`（255 regs 钉死占用率）。
+
+**(2) `ncu` DRAM 字节（`B8T2048H8`，`harness/probe_bwd_fused_ncu.out.txt`）**：
+
+| kernel | DRAM 读 | DRAM 写 | 时长 | DRAM% | regs |
+|---|---|---|---|---|---|
+| **融合 B1+B2**（grid 64） | **12.92 GB** | **18.93 GB** | **19.10 ms** | 49.7% | 255 |
+| B1 `dhu_bf16`（grid 4×64） | 178 MB | 588 MB | 0.386 ms | 59.2% | 160 |
+| B2 `wy_dqkg`（grid 128×64） | 1.65 GB | 309 MB | 0.898 ms | 65.0% | 255 |
+
+未融合一对合计 **读 ~1.83 GB / 写 ~0.90 GB**；融合内核 **读 12.92 GB / 写 18.93 GB（总 31.9 GB，
+≈17×）**——融合的**真实操作数**只有 ~0.9 GB（`h` 536 MB + `q/k/g/do/dv/v/vn` 各 ~67 MB），多出的
+~12 GB 读 / ~18 GB 写**全是溢出流量**（local memory 经 L1/L2/DRAM）。原意想省的 `dh`
+写+读（约 0.59 GB 写 + B2 `dh` 读的一多半 ≈ 0.8 GB，合计 ~1.4 GB）被 Σ溢出流量的 +30 GB 彻底淹没。
+
+**(3) 融合强制的 `BV=V` 分区本身也是 2–4× 代价（Part C，B1 单独）**：先只看 B1，把它的
+`V` 分区从部署的 `BV=32` 拧到融合强制的 `BV=V`：
+
+| case | BV=32 NS3 | BV=64 NS3 | **BV=128 NS3** | BV128/BV32 |
+|---|---|---|---|---|
+| `T=512 H=4` | 46.1 µs | 64.6 | **206.7** | **4.5×** |
+| `B2 T=1024 H=8` | 85.4 | 126.6 | **475.8** | **5.6×** |
+| `B8 T=2048 H=8` | 396.2 | 368.2 | **1024.2** | **2.6×** |
+| `T=250 H=3` | 29.1 | 39.1 | **116.3** | **4.0×** |
+
+即「一个 program 持有整条 `[K,V]` 状态」这件事，**在 B1 单独**就慢 2.6–5.6×（program 数从 `4·B·H`
+掉到 `1·B·H`，每 program 串行全 T、状态 64 KB 常驻）；融合再把 B2 的整块工作压进同一 program，
+溢出后直接慢 14–30×。
+
+### 30.5 结论与设计输入
+
+- **B1→B2 融合在代数与数值上是无损的**（Part A：`dq/dk/dv/dg/dh0` 与未融合 **逐位相同**），但
+  **朴素 `BV=V` 单 kernel 融合不可行**：状态 `[K,V]` + 逐块 B2 工作集**超过寄存器文件**，溢出
+  **1786** 次，DRAM 流量从 2.7 GB 爆到 **31.9 GB（≈17×）**，端到端慢 **14–30×**。
+- **根因有两层**、且都在「融合把并行结构改成 K2 形状」这一步：(1) `BV=V` 让 grid 退化为
+  `B·H`、B1 单独即慢 2.6–5.6×（§30.4(3)）；(2) 把 B2 的 `[BT,K]`/`[BT,V]`/A 工作集塞进同一个
+  program，寄存器需求叠加到溢出。
+- **设计输入（更新 §29.5）**：B1→B2 融合**不是**在 Triton 里「把两段并成一个 program」就能兑现的
+  杠杆。若要做，必须**改并行结构**——即**用 §22–24 的 K2 形状**（warp-specialized：状态由多个
+  MMA warp 的累加器寄存器分片常驻、操作数走 TMA/`ldmatrix` 大块搬运、`dh` 在 smem/寄存器里直接喂给
+  同 CTA 的 B2 阶段），而不是把整条 `[K,V]` 状态塞进一个 monolithic Triton program。换言之，
+  §29 把融合列为「唯一剩下的真结构项」是对的，但**它的前置条件是 K2 形状，而不是一个独立可加的
+  开关**——这与 §15/§17/§20 对「流水/拆链/K2 形状」的结论一致。
+- **待验证**：本轮只证了「无原子、`BV=V`、单 kernel」的融合形态不可行；「K2 形状内融合」
+  （寄存器分片常驻 + TMA + 同 CTA 内 B1→B2 交接）是未实现的下一步，其可行性/收益须在目标卡上、
+  以 K2 为基座再测。
+- **产物**：`harness/check_bwd_fused.py`（`harness/check_bwd_fused.out.txt`，Part A 正确性 + Part B
+  计时 + Part C `V` 分区扫描）+ `harness/probe_fused_regs.py`（`harness/probe_fused_regs.out.txt`）+
+  `harness/ncu_bwd_fused_driver.py` / `harness/probe_bwd_fused_ncu.sh`
+  （`harness/probe_bwd_fused_ncu.out.txt`）。

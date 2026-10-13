@@ -1,0 +1,12 @@
+
+=== T512H4: grid fused=(B*H)=4, unfused B1 grid=(cdiv(V,32),B*H)=(4,4), B2 grid=(NT,B*H)=(32,4) ===
+  fused    regs=255 spill=1786 smem=96256 nw=8
+  B1 bf16  regs=160 spill=0 smem=22528 nw=4
+  B2       regs=255 spill=12 smem=51200 nw=4
+
+=== B8T2048H8: grid fused=(B*H)=64, unfused B1 grid=(cdiv(V,32),B*H)=(4,64), B2 grid=(NT,B*H)=(128,64) ===
+  fused    regs=255 spill=1796 smem=96256 nw=8
+  B1 bf16  regs=160 spill=0 smem=22528 nw=4
+  B2       regs=255 spill=12 smem=51200 nw=4
+
+DONE

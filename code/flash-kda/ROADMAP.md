@@ -415,6 +415,24 @@
       且去重须改累加结构、寄存器反弹，**在 Triton 原型不做**。**(3) 顺手复核**：唯一进 3 blocks/SM
       的 `BK=BV=32`（162 reg）反慢 1.25× → 占用率不是旋钮。至此 B2 廉价/半廉价杠杆全走完，唯一剩余
       真结构项＝**B1→B2 融合（`dh` 不落盘）**或与 K2 形状（寄存器常驻 + TMA，§22–24）合做。
+- [x] **P7-27** 兑现 §29.5 的「唯一剩下的真结构项」——**B1→B2 融合原型**（`dh` 留在寄存器、不落盘）。
+      设计：B2 对整条 `V` 收缩且后段有非线性收尾，故无原子的最干净原型取 **`BV=V`**（一个 program 管
+      一个 `(b,h)`、逆序扫全块、`b_dS[K,V]` 常驻，每块 B1 完立刻做 B2、`dh` 不落盘；grid `(B·H,)`
+      =**K2 形状**）。新增 `harness/check_bwd_fused.py`（`harness/check_bwd_fused.out.txt`，A 正确性 +
+      B 计时 + C `V` 分区扫描）+ `harness/probe_fused_regs.py`（`harness/probe_fused_regs.out.txt`）+
+      `harness/ncu_bwd_fused_driver.py` / `harness/probe_bwd_fused_ncu.sh`
+      （`harness/probe_bwd_fused_ncu.out.txt`）+ `docs/07` §30。**Part A**：融合 B1+B2 与未融合
+      B1+B2 在同一份操作数上 **`dq/dk/dv/dg/dh0` 逐位相同（`max_abs=0`）**、`db ≤1.2e-7`；融合链 vs
+      FLA 六项最坏 `dq 3.62e-3 … dh0 7.33e-3`（=bf16/tf32 底噪，同 P6-8/P7-26）。**Part B（关键）**：
+      融合**反而慢 14–30×**（`B1+B2` 1.37→**19.13 ms** @`B8T2048H8`；整链 8.8–21.7×）。**Part C/归因**：
+      (1) 融合内核 **溢出 1786**（regs 255 上限、B1 0 / B2 12）；(2) `ncu` DRAM **读 12.92 GB / 写
+      18.93 GB（总 31.9 GB，未融合一对仅 2.7 GB）**——多出的 ~30 GB 全是溢出流量，把原意省的 `dh`
+      写+读（~1.4 GB）彻底淹没；(3) 融合强制的 `BV=V` 分区**本身**让 B1 单独就慢 **2.6–5.6×**
+      （grid `4·B·H`→`1·B·H`）。**结论**：B1→B2 融合**代数无损但朴素 `BV=V` 单 kernel 不可行**；
+      要做必须**改并行结构**＝用 §22–24 的 **K2 形状**（状态由多 MMA warp 分片常驻寄存器 + TMA 大块
+      搬运 + 同 CTA 内 B1→B2 交接），而非把整条 `[K,V]` 塞进一个 monolithic Triton program。
+      即「融合是唯一剩下的真结构项」成立，但**其前置是 K2 形状**、不是独立开关（同 §15/§17/§20）。
+      **待验证**：K2 形状内融合（寄存器分片 + TMA + 同 CTA 交接）须在目标卡以 K2 为基座再测。
 
 ### P8 小结 / 一页纸
 
@@ -446,8 +464,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-26 补测**。
-  - P7-26（本轮）：把 §28.7 留给 B2 的两条结构项（`h/dh` bf16、`i_k` 去重）在**真实组装链 +
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-27 补测**。
+  - P7-27（本轮）：兑现 §29.5「唯一剩下的真结构项」——**B1→B2 融合原型**（`dh` 不落盘）。
+    无原子的最干净形态取 **`BV=V`**（一 program 管一个 `(b,h)`、逆序扫全块、`b_dS[K,V]` 常驻、
+    每块 B1 完立刻做 B2；grid `(B·H,)`=**K2 形状**）。新增 `harness/check_bwd_fused.py`
+    （`harness/check_bwd_fused.out.txt`，A 正确性 + B 计时 + C `V` 分区扫描）+ `harness/probe_fused_regs.py`
+    （`harness/probe_fused_regs.out.txt`）+ `harness/ncu_bwd_fused_driver.py` / `harness/probe_bwd_fused_ncu.sh`
+    （`harness/probe_bwd_fused_ncu.out.txt`）+ `docs/07` §30。**Part A**：融合 B1+B2 与未融合 B1+B2
+    **`dq/dk/dv/dg/dh0` 逐位相同（`max_abs=0`）**、`db ≤1.2e-7`；融合链 vs FLA 六项最坏
+    `dq 3.62e-3 … dh0 7.33e-3`（bf16/tf32 底噪，同 P6-8/P7-26）。**Part B**：融合**反而慢 14–30×**
+    （`B1+B2` 1.37→**19.13 ms** @`B8T2048H8`）。**归因**：融合内核**溢出 1786**（regs 255；B1 0/B2 12）；
+    `ncu` DRAM **读 12.92 GB / 写 18.93 GB（31.9 GB，未融合一对仅 2.7 GB）**——多出的 ~30 GB 全是
+    溢出流量，淹没原意省的 `dh` 写+读（~1.4 GB）；且融合强制的 `BV=V` 分区**本身**让 B1 单独慢
+    **2.6–5.6×**（grid `4·B·H`→`1·B·H`）。**结论**：融合**代数无损、朴素 `BV=V` 单 kernel 不可行**；
+    要做必须**用 §22–24 的 K2 形状**（状态多 MMA warp 分片常驻 + TMA 大块搬运 + 同 CTA 内 B1→B2 交接），
+    而非一个 monolithic Triton program——「融合是唯一剩下的真结构项」成立但**前置是 K2 形状**。见 `docs/07` §30。
+  - P7-26（上轮）：把 §28.7 留给 B2 的两条结构项（`h/dh` bf16、`i_k` 去重）在**真实组装链 +
     部署 dtype** 下核验（**收口/反例**轮）。新增 `harness/check_bwd_b2_hdh.py`
     （`harness/check_bwd_b2_hdh.out.txt`）+ `harness/ncu_b2_hdh_driver.py` /
     `harness/probe_b2_hdh_ncu.sh`（`harness/probe_b2_hdh_ncu.out.txt`）+ `docs/07` §29。
@@ -818,11 +850,16 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-26 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-27 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-27（`docs/07` §30）把 §29.5「唯一剩下的真结构项」＝ B1→B2 融合做成原型并证伪朴素形态**：
+    融合 B1+B2 在代数/数值上**无损**（与未融合 `dq/dk/dv/dg/dh0` **逐位相同**），但朴素 `BV=V`
+    单 kernel **溢出 1786、DRAM 流量爆 17×（31.9 GB vs 2.7 GB）、端到端慢 14–30×**，且融合强制的
+    `BV=V` 分区**本身**让 B1 单独慢 2.6–5.6×。**下一步（真结构项）＝用 §22–24 的 K2 形状**
+    （状态多 MMA warp 分片常驻寄存器 + TMA 大块搬运 + 同 CTA 内 B1→B2 交接）来实现融合，
+    **而不是把整条 `[K,V]` 状态塞进一个 monolithic Triton program**（待验证，须在目标卡以 K2 为基座测）。
   - **P7-26（`docs/07` §29）把 B2 的两条结构项收口**：部署链 B2 实为**全 fp32**，读 1.63 GB
     （`h/dh`=66%）；`h/dh` bf16 只值 B2 内核 ~10% 且**需原生 bf16 出口**（harness 运行期转换落链净负）；
-    `i_k` 去重被 L2 吸收不划算；占用率非旋钮。**下一步只剩真结构项：B1→B2 融合（`dh` 不落盘）或把
-    `h/dh` bf16 与 K2 形状（§22–24 寄存器常驻 + TMA）合做。**
+    `i_k` 去重被 L2 吸收不划算；占用率非旋钮。（其遗留的「B1→B2 融合」已由 P7-27 证伪朴素形态。）
   - **P7-23（`docs/07` §26）第一次把链级新瓶颈 B2/B3 量清楚**：组装链按 kernel 归因，
     `B8T2048H8` 上 **B2+B3 = 66.6%**（B2 906/B3 580/B1 只 13.8%）。免费旋钮已用尽（`num_stages`
     对 B2/B3 **无效**、tiling 已最优、只有 B3 `num_warps=2` 值 1.16–1.27×，落链 `dq/dk/dv/dg`
