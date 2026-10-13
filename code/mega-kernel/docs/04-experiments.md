@@ -7453,3 +7453,170 @@ static（G=132，无 producer）= **0.1698 ms / 815 GB/s**（138.4 MB 描述符�
   发 `cp.async.bulk` → **`illegal memory access` / 后续 kernel 挂起**；修正为仅 `is_gen || smem_only`
   才走 TMA 写路径后恢复正常。另：`-G`/`-lineinfo` + cuda-gdb attach 显示挂起时 worker 全停在 `wait_head`
   的自旋（`wait_head` 循环），producer 已退出——即**上游指向未分配的环**，与本条一致。
+
+## 51. 动态生产者 TMA store 的「正确握手 + 流水」：把 serialized 的完成等待换成窗口发布，能追回 rolling 吗（P62-1）
+
+> 本节接续 §50（P61-1），补掉 §50.7 明留的**「最值得做的下一条尾巴」**：
+>
+> - 「本节最坏的 472 GB/s 来自『每批 `wait_group 0`』这一**过保守**的握手；一个**流水但正确**的形态
+>   （FIFO commit 后、发布第 j 批 head 前只 `cp.async.bulk.wait_group (win-1)` 保证最老批完成、
+>   `head` 落后 `win` 批发布）**未做**——理论可把 serialized 的 472 拉回 rolling 的 ~722–828
+>   且保持正确。**这是最值得做的下一条尾巴。**」
+>
+> §50 把动态生产者「现场生成描述符」的写载体扩到最宽的 **TMA bulk store**（`cp.async.bulk.global.shared::cta`，
+> SMEM→global），结论是 serialized（正确握手）只 **472 GB/s**、不到 rolling（不保证完成的「fire-and-forget」）
+> 的 **722 GB/s**，并**把差距归因于每批 `cp.async.bulk.wait_group 0`**。本节把那条尾巴做出来：**把完成等待
+> 从「每批全 drain」换成「窗口发布」**（提交成 FIFO 组、发布第 `bj-win+1` 批 `head` 前只
+> `wait_group (win-1)`、`head` 落后 `win` 批），**载体固定 TMA store、其余协议完全不变**，看它能否追回 rolling。
+>
+> 三个问题：
+>
+> **Q1（§A）** 窗口化握手写出的 payload 是否仍与寄存器写逐位一致（发布滞后后跨 proxy 可见性是否仍正确）？
+> **Q2（§B headline）** 窗口握手把 `gen`（有 worker）相对 static 的代价从 serialized 的 ~206× 压到多少？窗口多大够？
+> **Q3（§C/§E）** 纯写吞吐：ser 的 454 → 流水能否追回 rolling 的 733？窗口/暂存深度更深是否继续逼近？
+>
+> 真实锚点（mirage 快照 `f9eb70c`，与 docs/06–docs/09 同快照）：MPK 的 scheduler **不现场生成**描述符
+> （`execute_scheduler` `persistent_kernel.cuh:1254-1523` 只做「事件→task id」映射，payload 来自编译期一次性
+> emit 的 `FullTaskDesc` 数组 `runtime.cc`）；而它的队列协议本身就是「**`st.relaxed.gpu` 写数据 + 单条
+> `atom.add/.cas.release.gpu` 推游标**」，靠**批量/环形**摊薄一次 release/acquire（`docs/06` §5.3、本专题
+> P47-1 §36）。本节把同样的「批量摊薄 + 窗口流水」用在 TMA store 的**跨 proxy 正确握手**上——结论是：
+> **窗口能省掉「完成等待」，却省不掉「每批发布一次进度」这本账**。
+>
+> 源码 `src/dyn_producer_tma_pipe.cu`，脚本 `harness/dyn_producer_tma_pipe.sh`，原始输出
+> `harness/dyn_producer_tma_pipe.out.txt` 与 ncu 归因 `harness/dyn_producer_tma_pipe_ncu.out.txt`
+> （目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B（对齐论文 §6.1）、`NDESC=393216`
+> （静态数组 138.4 MB ≫ 50 MB L2）、`K=32`、`D=2`、`T=256`、`grid=P+G=132=NSM`（全共驻）、每配置
+> 2 次不计时 warmup + **min-of-7**）。
+
+### 51.1 机制：唯一新变量 = 发布握手（serialized vs 窗口）
+
+沿用 §50 的骨架（`DW=88`=352 B 自描述描述符、TMA bulk + 硬件 mbarrier 取数、`D` 槽环、执行 = 控制面折叠 +
+数据面流式读 + `R` 轮 LCG、P 段子环 + 背压 + 每生产者游标），写载体固定 **`gvar 3` = TMA bulk store**
+（batch 粒度协作生成到 SMEM 暂存槽 → `cp.async.bulk` 整批 11 KB 落环）——**唯一新变量是发布握手**：
+
+- **`mode 1`（serialized，= §50 的 `gen`）**：每批 store 后 `cp.async.bulk.wait_group 0`（**全 drain**）→
+  `fence.proxy.async.global` → `st.release head=(bj+1)·K`。
+- **`mode 8`（pipelined gen，本节新增）**：精确等价于 `mode 1`，但每批 `bulk_commit` 成一组、**只等到最老
+  一组完成**：发布 `head=(bj-win+2)·K` 前 `cp.async.bulk.wait_group (win-1)`（等待但**不**全清队列）→
+  `fence.proxy.async.global` → `st.release`。`head` 因此**落后 `win` 批**，但发布时该批 store 已确认完成，
+  **仍是正确握手**（`wait_group` 不带 `.read` = 写完成可见）。SMEM 暂存槽 `sb` 个（`win ≤ sb`）。
+- **`mode 5`/`mode 9`** = `mode 1`/`mode 8` 的**纯写**版（只 launch P 个 producer、无 worker/背压，
+  `CAP=NDESC` 使背压为空操作），隔离写入路径。
+- **`mode 6`/`mode 7`** = §50 的 `sgen`（只生成到 SMEM、不落 global）/ `pure-big`（滚动 commit、
+  **不算正确握手**、测 store 引擎上限）。
+
+另外本节用一组**哨兵口径**（`win` 取负、**故意不正确**、只为拆代价）把 serialized 的 454 GB/s 逐项归因：
+
+- `win=-1`（`nowait`）：跳过完成等待，仍推 `head`；
+- `win=-2`（`nofence`）：再跳过 `fence.proxy.async.global`；
+- `win=-3`（`nobp`）：再跳过背压 + `head`，只剩 store；
+- `win=-4`（`skipbp`）：**只**跳过背压（保留 `head`）；
+- `win=-5`（`skiphd`）：**只**跳过 `head`（保留背压）。
+
+### 51.2 §A 正确性：窗口化握手与寄存器写逐位一致
+
+`P∈{1,2}` × `static` / serialized(win=1) / pipelined(win=2,3,4)，有界子环 + 背压 + 每生产者游标：
+
+- **全部逐位一致**（`got=404219327039195`，与 §48–§50 同值）——**发布滞后 `win-1` 批后，跨 async proxy 的
+  store→load 可见性仍然正确**。这是本节的前置条件：窗口化只是推迟发布、不是跳过完成确认，语义透明。
+
+### 51.3 §B（headline）窗口握手只把 `gen` 压 ~2–4%，远不能追平 static
+
+static（G=132，无 producer）= **0.1667 ms / 830.5 GB/s**（138.4 MB 描述符流）。有 worker 的 `gen` 相对 static：
+
+| P | G | ser(ms) | ×static | pipe2(ms) | ×static | v4(ms) | ×static | co(ms) | ×static |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | 131 | 34.995 | 209.99× | 33.838 | 203.04× | 10.478 | 62.88× | 19.276 | 115.66× |
+| 16 | 116 | 2.445 | 14.67× | 2.355 | 14.13× | 0.888 | 5.33× | 1.434 | 8.61× |
+| 64 | 68 | 0.958 | 5.75× | 0.937 | 5.63× | 0.599 | 3.59× | 0.708 | 4.25× |
+
+- **窗口（win=2）把 serialized 压 2.2%–3.7%**（P=1 209.99→203.04、P=16 14.67→14.13、P=64 5.75→5.63）；
+  `win=3/4` 与 `win=2` 打平（P=16 2.3659/2.3669 ms）。**离 v4（~62×…~3.6×）和 coop 仍差 1.6–2.4×**，
+  **§50.7 预测的「把 gen 拉回 rolling、接近寄存器写」在带 worker 的主口径上同样被证伪**。
+
+### 51.4 §C 纯写吞吐：ser 454 → 窗口 463 → 仍远低于 rolling 733 / v4 826
+
+`mode 5`（ser）/ `mode 9`（pipe win=2/3/4）/ `mode 7`（rolling）纯写吞吐（138.4 MB / 时间，GB/s）：
+
+| P | ser | p2 | p3 | p4 | rolling | v4 | coop |
+|---|---|---|---|---|---|---|---|
+| 1 | 3.7 | 3.8 | 3.8 | 3.8 | 5.9 | 13.3 | 7.2 |
+| 16 | 59.3 | 60.8 | 60.8 | 60.8 | 94.1 | 203.3 | 114.4 |
+| 64 | 233.7 | 239.5 | 239.3 | 240.0 | 372.3 | 646.0 | 450.7 |
+| 128 | **453.7** | **462.8** | 463.2 | 462.8 | **733.2** | **827.8** | **884.9** |
+
+- P=128：窗口只把 **453.7→462.8 GB/s（+2.0%）**，`win=3/4` 不再涨。**远不到 rolling 的 733**——
+  §50.7 的核心预测（472→722–828）**证伪**。
+- rolling（733）仍是 TMA store 的引擎上限、v4/coop（828/885）仍是绝对天花板，与 §50 一致。
+
+### 51.5 §E 更深窗口 × 暂存深度：饱和在 +1.6%
+
+把暂存槽 `sb` / 窗口 `win` 从 4 加到 16（SMEM 暂存随之用到 180 KB），P=128 纯写：
+
+| sb | win | GB/s | vs(sb4,win2) |
+|---|---|---|---|
+| 4 | 2 | 460.8 | 1.000 |
+| 8 | 8 | 467.5 | 1.014 |
+| 16 | 16 | **468.3** | **1.016** |
+
+- **窗口无论多深都只带来 ~1.6%**（460.8→468.3）——**饱和得极快、且离 rolling 733 差 1.57×**。
+  这说明 serialized 的瓶颈**根本不是「队列深度」**（§50.7 假设的机制），窗口不是正确的旋钮。
+
+### 51.6 §F（headline 之二）代价归因：瓶颈是「每批发布进度」，不是完成等待
+
+把 serialized 的每一步逐个拆掉（哨兵口径，部分**故意不正确**），P=128 纯写（GB/s）：
+
+| ser | pipe2 | nowait(-1) | nofence(-2) | **nobp(-3)** | skipbp(-4) | skiphd(-5) | rolling | sgen | v4 |
+|---|---|---|---|---|---|---|---|---|---|
+| 453.6 | 461.9 | 486.3 | 484.9 | **664.3** | **664.5** | **664.8** | 733.1 | 719.3 | 825.6 |
+
+- **拆掉完成等待（nowait）只回到 486（+7%）**；**连 `fence.proxy.async.global` 也拆掉（nofence）仍是 485**
+  ——§50 归因的「每批 `wait_group 0`」**根本不是主因**。
+- **拆掉「背压 + `head` 发布」（nobp）直接跳到 664（+46%）**——**正确握手真正的代价是「每批发布一次进度」**
+  （`st.release head` + 读 `tail` 的背压门），不是 TMA 的完成语义。
+- 更细：**只拆背压（skipbp 664.5）或只拆 `head`（skiphd 664.8）都足以回到 664**——**两者同时存在才昂贵**，
+  这指向「背压的每批会合（多一次 `__syncthreads()`）+ `head` 的 release」形成了**串行化**（把 lane0 的发布
+  放到全体线程的临界路径上），而非两个操作各自的原始成本。**该交互的最底层微架构原因本节未完全钉死（见 §51.8）。**
+- 拆掉进度本账（664）后，**TMA store 本身又把 719（sgen）拉到 664**（store 引擎 ~8%），rolling 733 ≈ sgen 719，
+  即 **`cp.async.bulk` 的 store 引擎几乎免费、完成等待也便宜，唯一贵的是「每批对外报进度」。**
+
+ncu 归因（P=128，纯写，`win=1` vs `win=-3`，`harness/dyn_producer_tma_pipe_ncu.out.txt`）：
+
+| 口径 | 时长 | barrier 停顿 | long_scoreboard | membar | DRAM 写 |
+|---|---|---|---|---|---|
+| ser（win=1，正确） | 305.2 µs | **31.19%** | 5.49% | 1.52% | 115.85 MB |
+| nobp（win=-3） | 205.9 µs | **11.85%** | 0.01% | 0.04% | 115.87 MB |
+
+- **DRAM 写字节完全相同**（只改发布握手、不改搬运）；正确握手的 **barrier 停顿从 11.85% 抬到 31.19%**，
+  并额外出现 `long_scoreboard`/`membar` 停顿——与「多一次会合 + release 发布挡住全体线程」一致。
+
+### 51.7 结论与判据
+
+- **§50.7 的预测被证伪**：把 serialized 的完成等待换成「窗口流水」**追不回 rolling**——纯写只看
+  **454→463 GB/s（+2%）**、深窗（sb=win=16）也只 **+1.6%**；带 worker 的主口径同样只 **2.2–3.7%**。
+- **§50 的归因需要修正**：serialized 慢**不是**因为每批 `wait_group 0`（拆掉只回 +7%），而是因为**正确握手
+  要求「每批发布一次跨 SM 进度」**（`st.release head` + 背压门 `ld.acquire tail`，且每次发布夹一次
+  `__syncthreads()`），**两者同时存在时把 lane0 的发布放到全体线程临界路径上**，代价 ~46%（+ncu 的
+  barrier 停顿翻倍）。这是**协议开销、不是 DMA 语义开销**。
+- **对描述符通路的总画像（收口 §39–§51）**：worker **读**端可达 809–3000 GB/s（TMA bulk load，§39–§46）；
+  producer **写**端任何载体 ≤ **885**（coop）、正确握手 TMA store **454–468 GB/s**。写端追不平读端，**且
+  瓶颈不在 store 引擎、也不在完成等待，而在「逐批对外报进度」这一簿记**——正是 MPK 用「编译期预计算
+  `FullTaskDesc` + scheduler 只做事件→id 映射、批量/环形摊薄一次 release」绕开的那本账
+  （`runtime.cc` / `persistent_kernel.cuh:1254-1523`；本专题 P47-1 §36）。**「预计算 + 读」是描述符通路的
+  唯一可行形态**这一结论**更强**（它连「正确握手怎么优化」都不必再讨论）。
+- **判据**：`ser`/`pipe`/`nobp`/`nobp` 等所有 `gen` 档均 **C1–C4**（单 kernel、persistent、多算子范围、
+  设备内协调）、比 §36–§50 更接近 C5（P 个固定角色 producer），但 worker 仍静态分配 batch ⇒ **仍差 C5 一步**。
+
+### 51.8 局限与踩到的坑
+
+- **产物是合成描述符**（内容 = `gen_word`，非真实 GEMM/RMSNorm）；未与 DeepGEMM SM100 路径对跑（SM100 专属，本机不具备）。
+- **「只拆一个就够快」的交互未钉死**：`nobp`/`skipbp`/`skiphd` 三者恒 ~664，说明贵在「背压会合 + `head`
+  release」的**组合**而非单操作；本节用 ncu 给出**症状**（barrier 停顿翻倍、出现 membar/long_scoreboard），
+  但未到 SASS/依赖链一级给出**因果**（可能是一个 loop-carried 依赖阻止了编译器软件流水）。**记为开放问题。**
+- **哨兵口径故意不正确**（`win<0` 跳过完成等待/fence/背压/head）：只用于**拆代价上界**，其数值**不可**当
+  正确实现；正确性由 §A 的 `mode 8`（win≥2）保证。
+- **纯写口径无 worker**：`mode 5/9` 的背压是空操作（`CAP=NDESC`）；带 worker 的真实口径见 §B（结论一致但幅度更小）。
+- **`wait_group` 立即数**：`cp.async.bulk.wait_group[.read] N` 的 `N` 必须是立即数，故 `bulk_wait_n`/`bulk_wait_read_n`
+  用 switch 展开到 15（见 `docs/04` 已知坑）；深窗 `sb=16` 的 SMEM 暂存 180 KB，须 `cudaFuncSetAttribute` opt-in。
+- **踩坑**：`mode 7`（无 `is_gen`）与 `mode 9`（`is_gen`）走**同构**的 store 循环，但 `mode 9` 带背压 + `head`
+  发布、`mode 7` 不带——两者 733 vs 463 的差距**正是本节要归因的那本账**（§50 误记为 `wait_group 0`）。

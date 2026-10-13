@@ -1524,9 +1524,39 @@
   含义：**「现场生成描述符」这条路的写端天花板，即使接上最宽写载体也是 ~828（rolling）/472（正确握手）**，
   远低于 worker **读**端的 809–3000 GB/s——给 MPK「编译期预计算 `FullTaskDesc` + scheduler 只映射」
   与 DeepGEMM「静态角色/编译期常量」以**更强**量化理由。判据 C1–C4、仍差 C5 一步。**本轮新增实验**；
-  P61-1 新留尾巴（§50.7）：**「正确握手 + 流水」的组合未测**（FIFO commit + 发布 head 前只
-  `wait_group (win-1)`，理论把 472 拉回 722–828 且保持正确——最值得做的下一条）、高 P 读写争抢未量化、
-  store 粒度受 SMEM 限（跨 block 协作 stage 未测）、合成描述符、未与 DeepGEMM SM100 对跑。
+  P61-1 新留尾巴（§50.7）：~~**「正确握手 + 流水」的组合未测**（FIFO commit + 发布 head 前只
+  `wait_group (win-1)`，理论把 472 拉回 722–828 且保持正确——最值得做的下一条）~~（**已由 P62-1/§51 补掉，
+  结论：预测被证伪**）、高 P 读写争抢未量化、store 粒度受 SMEM 限（跨 block 协作 stage 未测）、合成描述符、
+  未与 DeepGEMM SM100 对跑。
+
+### P62 实验扩展 44：TMA store 的「正确握手 + 流水」（`docs/04-experiments.md` §51）
+
+- [x] **P62-1** 补掉 P61-1（§50）§50.7 明留的**「最值得做的下一条尾巴」**——「serialized 的 472 来自『每批
+  `wait_group 0`』这一过保守握手，一个**流水但正确**的形态（FIFO commit + 发布第 j 批 head 前只
+  `wait_group (win-1)`、head 落后 win 批）理论可拉回 rolling 的 ~722–828 且保持正确」。
+  见 `docs/04-experiments.md` **§51**，源码 `src/dyn_producer_tma_pipe.cu`、脚本
+  `harness/dyn_producer_tma_pipe.sh`、原始输出 `harness/dyn_producer_tma_pipe.out.txt` + ncu 归因
+  `harness/dyn_producer_tma_pipe_ncu.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+  `DW=88`=352 B、`NDESC=393216`（138.4 MB ≫ L2）、`K=32`、`D=2`、`T=256`、`grid=132` 全共驻、min-of-7）。
+  唯一新变量 = 发布握手（serialized win=1 vs 窗口 win≥2，载体固定 TMA store）；另用一族**哨兵口径**
+  （`win<0`，**故意不正确**）拆代价。核心结论（**§50.7 预测证伪 + §50 归因修正**）：
+  - **§A**：static/win=1/win=2/3/4 **逐位一致**（`got=404219327039195`）——发布滞后 `win-1` 批后跨 proxy
+    可见性仍正确。
+  - **§B（有 worker）窗口只压 2.2–3.7%**（P=1 209.99×→203.04×、P=16 14.67×→14.13×、P=64 5.75×→5.63×），
+    离 v4/coop 仍差 1.6–2.4×。**§C 纯写 P=128：ser 453.7 → pipe 462.8（+2%）→ rolling 733.2 / v4 827.8**，
+    **远追不回**。**§E 深窗**（`sb`=win=16，SMEM 180 KB）也只 **468.3（+1.6%）**——**饱和极快，窗口不是旋钮**。
+  - **§F（headline 归因，P=128 纯写）**：ser 453.6 / pipe2 461.9 / **nowait 486.3**（拆完成等待，仅 +7%）/
+    nofence 484.9 / **nobp 664.3**（拆背压+head，**+46%**）/ **skipbp 664.5**（**只**拆背压）/ **skiphd 664.8**
+    （**只**拆 head）/ rolling 733.1 / sgen 719.3 / v4 825.6。⇒ **§50 归因的「每批 `wait_group 0`」不是主因**
+    （拆掉只 +7%）；**真正贵的是「每批发布一次跨 SM 进度」**（`st.release head` + 背压门 `ld.acquire tail`），
+    且**两者同时存在才昂贵**（单拆任一个都回 664）——是**协议簿记开销、不是 DMA 语义开销**。
+  - **ncu**：DRAM 写字节相同（115.8 MB），正确握手 **barrier 停顿 31.19% vs 11.85%**、并多出
+    `long_scoreboard`/`membar` 停顿。
+  - 含义：**写端正确握手的瓶颈不在 store 引擎、不在完成等待，而在逐批报进度**——正是 MPK「编译期预计算
+    `FullTaskDesc` + scheduler 只做事件→id 映射、批量/环形摊薄一次 release」绕开的那本账；**「预计算 + 读」
+    是描述符通路唯一可行形态**的结论更强。判据 C1–C4、仍差 C5。**本轮新增实验**；P62-1 新留尾巴（§51.8）：
+    「只拆一个就够快」的**组合交互未钉到 SASS/依赖链一级**（开放问题）、合成描述符、纯写口径无 worker、
+    未与 DeepGEMM SM100 对跑。
 
 
 ## 每轮增量流程（autopilot）
@@ -1553,7 +1583,29 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P61-1 完成（1/1）**。补掉 P60-1（§49）§49.7 明留的**「最值得做的下一条尾巴」**——把动态
+- 当前进度：**P62-1 完成（1/1）**。补掉 P61-1（§50）§50.7 明留的**「最值得做的下一条尾巴」**——把动态
+  生产者 TMA bulk store 的**发布握手**从 serialized（每批 `wait_group 0` 全 drain）换成**窗口流水**
+  （FIFO commit + 发布第 `bj-win+1` 批 head 前只 `wait_group (win-1)`、head 落后 win 批），看能否把 §50
+  的 472 GB/s 拉回 rolling 的 ~722–828。`docs/04-experiments.md` 新增 **§51**，源码
+  `src/dyn_producer_tma_pipe.cu`、脚本 `harness/dyn_producer_tma_pipe.sh`、原始输出
+  `harness/dyn_producer_tma_pipe.out.txt` + ncu 归因 `harness/dyn_producer_tma_pipe_ncu.out.txt`（目标卡
+  H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`DW=88`=352 B、`NDESC=393216`、`K=32`、`D=2`、`T=256`、
+  `grid=132` 全共驻、min-of-7）。唯一新变量 = 发布握手；另用一族**哨兵口径**（`win<0`、**故意不正确**）拆代价。
+  核心结论（**§50.7 预测证伪 + §50 归因修正**）：
+  - **§A** static/win=1/2/3/4 **逐位一致**（`got=404219327039195`）——窗口化发布语义透明。
+  - **§B（有 worker）窗口只压 2.2–3.7%**（P=16 14.67×→14.13×）；**§C 纯写 P=128 ser 453.7→pipe 462.8（+2%）**，
+    rolling 733.2 / v4 827.8，**远追不回**；**§E 深窗**（`sb`=win=16、SMEM 180 KB）也只 **468.3（+1.6%）**。
+  - **§F（headline 归因）**：ser 453.6 / nowait 486.3（拆完成等待仅 **+7%**）/ **nobp 664.3（拆背压+head，+46%）**/
+    skipbp 664.5（**只**拆背压）/ skiphd 664.8（**只**拆 head）/ rolling 733.1 / sgen 719.3 / v4 825.6。
+    ⇒ **§50 的「每批 `wait_group 0`」不是主因；真正贵的是「每批发布一次跨 SM 进度」**（`st.release head` +
+    背压门 `ld.acquire tail`），且**两者同时存在才昂贵**（单拆任一个都回 664）。
+  - **ncu**：DRAM 写字节相同（115.8 MB），正确握手 **barrier 停顿 31.19% vs 11.85%**、多出 `long_scoreboard`/`membar`。
+  含义：**写端正确握手瓶颈不在 store 引擎、不在完成等待，而在逐批报进度**——正是 MPK「编译期预计算
+  `FullTaskDesc` + scheduler 只做事件→id 映射、批量/环形摊薄一次 release」绕开的那本账；**「预计算 + 读」是
+  描述符通路唯一可行形态**的结论更强。判据 C1–C4、仍差 C5。**本轮新增实验**；P62-1 新留尾巴见 §51.8
+  （「只拆一个就够快」的组合交互**未钉到 SASS/依赖链一级**——开放问题；合成描述符；纯写口径无 worker；
+  未与 DeepGEMM SM100 对跑）。
+- 此前：**P61-1 完成（1/1）**。补掉 P60-1（§49）§49.7 明留的**「最值得做的下一条尾巴」**——把动态
   生产者的写载体从寄存器 store（标量/v4/coop）扩到最宽的 **TMA bulk store**（`cp.async.bulk.global.shared::cta`，
   SMEM→global），看它能否把「写」接上近 HBM 带宽。`docs/04-experiments.md` 新增 **§50**，源码
   `src/dyn_producer_tma.cu`、脚本 `harness/dyn_producer_tma.sh`、原始输出 `harness/dyn_producer_tma.out.txt`
