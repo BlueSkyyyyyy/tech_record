@@ -1,0 +1,43 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+==============================================================================
+P52-1 DeepEP `EPHandle.deterministic_sort` —— 真实源码逐行抽取 + 独立 oracle 对拍
+==============================================================================
+  device            : NVIDIA H100 80GB HBM3
+  torch             : 2.12.0a0+0291f960b6.nv26.04.48445190
+  deep_ep ep.py     : /usr/local/lib/python3.12/dist-packages/deep_ep/buffers/ep.py
+  deterministic_sort: 6171 chars, sha256=22f3026c1dfbc9f4
+
+== 用例 A：非 expand + 非 cached（'排序即按 src 索引规范化'）==
+  [PASS] recv_x == 原张量[order]
+  [PASS] recv_src_metadata 已置换且 col0 非降
+  [PASS] recv_topk_idx / weights 同步置换
+  [PASS] cached_recv_src_metadata_before_sort 为排序前副本
+  [PASS] 幂等（二次排序不变）
+
+== 用例 B：不同接收顺序 → 同一规范化输出（确定性核心）==
+  [PASS] 6 种接收顺序输出逐位一致
+  [PASS] 规范输出 == 按 src 索引升序
+
+== 用例 C：非 expand + OOB 尾块（do_cpu_sync=False）==
+  [PASS] OOB 行被压到末尾且内部顺序正确
+  [PASS] 末尾恰为 OOB 行集合
+
+== 用例 D：expand + non-cached ==
+  [PASS] 专家块内有效槽按 src 升序、填充槽殿后
+  [PASS] recv_x == 原张量[order]
+  [PASS] recv_topk_weights 同步置换
+  [PASS] recv_src_metadata[:,2:] 槽位指针已反置换
+  [PASS] 指针指向新位置且该位置内容为原槽
+
+== 用例 D：expand + cached ==
+  [PASS] cached：展开数组与元数据均不变
+
+== 用例 E：非 expand + channel_linked_list 反置换 ==
+  [PASS] channel_linked_list 按逆置换更新、越界项跳过
+
+== 用例 F：expand 模式下不同接收顺序 → 同一规范化展开顺序 ==
+  [PASS] 6 种接收顺序展开输出逐位一致
+
+==============================================================================
+TOTAL: 7 PASS / 0 FAIL
+==============================================================================

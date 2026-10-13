@@ -1596,8 +1596,33 @@
       `metadata[2+l]` 24/24 未触碰）；expand 原子分配（专家区内 token 集合正确、计数器到 `base+count`、
       token 行 hidden 正确、padding 行 hidden/SF/权重全零、`metadata[2+l]` 指向区内）；cached
       （严格按 metadata 行、`psum` 不变）；链式列表（写槽 + 尾哨兵 + workspace 归零）。Python oracle
-      独立复刻 `TokenLayout` 偏移、expand 对齐分配与零填充 dst 公式（含 `__ffs` 取**最低**满足 lane
-      这一关键点）。配套博客 `content/posts/mega-moe-61-deepep-dispatch-copy-epilogue`（索引页新增第 61 篇）。
+       独立复刻 `TokenLayout` 偏移、expand 对齐分配与零填充 dst 公式（含 `__ffs` 取**最低**满足 lane
+       这一关键点）。配套博客 `content/posts/mega-moe-61-deepep-dispatch-copy-epilogue`（索引页新增第 61 篇）。
+
+### P52 增量（opt-in，补齐 DeepEP dispatch 的「确定性」侧）
+
+- [x] **P52-1** **DeepEP 的确定性 dispatch 排序 `EPHandle.deterministic_sort`**
+      （`deep_ep/buffers/ep.py:27-205`；`impls/ep/dispatch.cuh:341`；
+      `layout/ep/token.cuh:63-77`；`deep_ep/utils/envs.py:184-190`）。第 7 篇讲了 dispatch/combine
+      数据流、第 48/51 篇讲了两个 epilogue，但都隐含「接收行序稳定」这一前提。本篇补上把它**抹平**的
+      那一层：dispatch 的槽位由**对称缓冲里的 `atomicAdd` 计数器**分配（`dispatch.cuh:341`），
+      同一批 token 多次运行的物理行序可变；`EPBuffer(deterministic=True)` 时 dispatch 结束即挂
+      `deterministic_sort`（`ep.py:734-743`，`async` 时挂 `after_wait` 钩子）把顺序规范化回
+      **源 token 全局索引序**。要点：① `EPHandle`（`ep.py:27-105`）冻结路由——`topk_idx` 有
+      `_version` 守卫、`psum_*`/`num_unaligned_*`/`recv_src_metadata` 是排序与反向的输入；
+      ② 排序键**恒取自「排序前快照」**（`ep.py:135-140`），因为 cached dispatch 不重生成元数据；
+      ③ 非 expand（`ep.py:159-172`）：按 col0 全局排序 + OOB 尾块置 dtype-max + 非 cached 才排
+      `recv_src_metadata`，并逆置换更新 `channel_linked_list`；④ expand（`ep.py:174-205`）：
+      `expert*1e10 + (-5e9 + src)` 双键**稳定排序**（有效行 < 填充行、块内按 src 升序），
+      `scatter_add_` 构键，只排 `recv_x/sf/topk_weights` 并把槽位指针用逆置换重映射；cached expand
+      整个跳过。**方法纯 host/Python、架构无关**（只 `torch.sort`/`index_select`/`scatter_add_`），
+      故 H100 上**逐行原样抽取真实源码运行**（`ast` 抽取，绕过本机拒绝 `import deep_ep` 的
+      `check_nccl_so`；抽取片段 sha256 `22f3026c…` 与 `~/github/DeepEP@93eb6eb` 一致）。
+      → `docs/62-deepep-deterministic-sort.md`（真实行号核对）。**H100 实测**
+      `harness/exp_deepep_deterministic_sort.{py,sh,out.txt}` **7 PASS / 0 FAIL**：非 expand
+      同步置换 + 快照 + 幂等；6 种接收顺序输出**逐位一致**且 = src 升序；OOB 压尾；expand 块内升序
+      + 填充殿后 + 槽位指针逆置换自洽；cached 不变；`channel_linked_list` 逆置换；expand 跨接收顺序
+      规范化顺序逐位一致。配套博客 `content/posts/mega-moe-62-deepep-deterministic-sort`（索引页新增第 62 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -1623,8 +1648,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P51 各增量完成（P15-1…P41-1、P42-1…P51-1）。**
-  本轮 P51-1：新建 `docs/61-deepep-dispatch-copy-epilogue.md`（+`src/deepep_dispatch_copy_epilogue.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P52 各增量完成（P15-1…P41-1、P42-1…P52-1）。**
+  本轮 P52-1：新建 `docs/62-deepep-deterministic-sort.md`（+`harness/exp_deepep_deterministic_sort.{py,sh,out.txt}`）
+  ——补上 DeepEP dispatch 的**「确定性」侧**：dispatch 的槽位由对称缓冲里的 `atomicAdd` 计数器分配
+  （`dispatch.cuh:341`），同一批 token 多次运行的物理行序可变；`EPBuffer(deterministic=True)` 时
+  dispatch 结束即挂 `EPHandle.deterministic_sort`（`ep.py:734-743`）把顺序规范化回**源 token 全局索引序**，
+  使整个 MoE 前向逐位可复现。要点：① `EPHandle` 冻结路由（`topk_idx` 有 `_version` 守卫、
+  `psum_*`/`num_unaligned_*`/`recv_src_metadata` 是排序与反向的输入）；② 排序键恒取自「排序前快照」
+  （cached dispatch 不重生成元数据）；③ 非 expand：全局按 col0 排序 + OOB 尾块置 dtype-max + 非 cached
+  才排元数据 + 逆置换更新 `channel_linked_list`；④ expand：`expert*1e10 + (-5e9 + src)` 双键稳定排序
+  （有效行 < 填充行、块内按 src 升序）、`scatter_add_` 构键、只排数据张量 + 槽位指针逆置换；cached expand
+  整个跳过。**方法纯 host/Python、架构无关**，故 H100 上 `ast` **逐行抽取真实源码运行**（绕过本机拒绝
+  `import deep_ep` 的 `check_nccl_so`；片段 sha256 `22f3026c…` 与 `~/github/DeepEP@93eb6eb` 一致），
+  独立 oracle 对拍 **7 PASS / 0 FAIL**（含「6 种接收顺序输出逐位一致」这一确定性核心）。配套博客
+  `content/posts/mega-moe-62-deepep-deterministic-sort`（索引页新增第 62 篇）。
+  上一轮 P51-1：新建 `docs/61-deepep-dispatch-copy-epilogue.md`（+`src/deepep_dispatch_copy_epilogue.cu`、
   `harness/exp_deepep_dispatch_copy_epilogue.{sh,py,out.txt}`）——补上 DeepEP dispatch 的**输出落盘侧**：
   主 dispatch kernel 把 token 搬进对称缓冲后，由**独立的第二 kernel** `dispatch_copy_epilogue_impl`
   落盘成下游张量，是第 48 篇 combine 归约 epilogue 的**对称另一半**。**关键：整段不碰 NCCL 设备 API**，
@@ -2162,7 +2200,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P51 已完成（新增 **P51-1 DeepEP dispatch 的拷贝 epilogue**：
+- **下一步**：P0~P52 已完成（新增 **P52-1 DeepEP 的确定性 dispatch 排序 `EPHandle.deterministic_sort`**：
+  dispatch 槽位由 `atomicAdd` 分配、行序不确定，`deterministic=True` 时改排回源 token 索引序
+  （非 expand 全局排序；expand `expert*1e10+src` 双键稳定排序）；纯 host/Python、架构无关，
+  H100 上 `ast` 逐行抽取真实源码运行 **7 PASS/0 FAIL**；见上）。
+  上一轮 P51-1：**DeepEP dispatch 的拷贝 epilogue**：
   `dispatch_copy_epilogue_impl`——主 dispatch 之后的第二段 kernel，把对称缓冲里的 token 落盘成下游张量，
   靠 PDL 衔接；一个 kernel 覆盖非 expand/expand(+cached)/零填充/链式列表五形态；整段不碰 NCCL，
   H100 真机直接 include 真实头文件 21 PASS/0 FAIL；见上）。
@@ -2289,10 +2331,12 @@
   `impls/sm100_sparse_mqa_logits.cuh` 主 kernel 的 TMA 快路 / 尾裁剪细节精读；
   ② **einsum 家族 FP8 投影（P11 已开）**：`bhr,hdr->bhd` 已做；`bhd,hdr->bhr` / `bhd,bhr->hdr`
   是 arch10 专属（仅分析）。可再补 `fp8_einsum` 的 FP8 输出对（SM100 `Kernel1D1D`）精读；
-  ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
-  并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）。**DeepEP 的设备端公共层
-  已由 P49-1 补齐**（`common/ptx.cuh` 等，H100 真机 41 PASS）；DeepEP 侧余下的运行期空档（bucket
-  集合通信 `all_gather/all_reduce/reduce_scatter`、`pp_send_recv`、`engram`）都要 NCCL 设备 API，待环境。
+   ③ **DeepEP 运行期实验**：待「阻塞」中的 NCCL≥2.32.3 环境就绪后，在 H100 上跑真实 dispatch/combine
+   并测 expanded layout 与 compute overlap（PDL / `async_with_compute_stream`）。**DeepEP 的设备端公共层
+   已由 P49-1 补齐**（`common/ptx.cuh` 等，H100 真机 41 PASS）；**与运行期无关的「确定性 dispatch 排序」
+   已由 P52-1 补齐**（`EPHandle.deterministic_sort`，纯 host/Python，H100 抽取真实源码 7 PASS）；DeepEP
+   侧余下的运行期空档（bucket 集合通信 `all_gather/all_reduce/reduce_scatter`、`pp_send_recv`、`engram`）
+   都要 NCCL 设备 API，待环境。
   ④ **Mega MoE 端到端 / 其它变体**：`fp8xfp8`/`fp8xfp4`（已在 `MmaKind::MXFP8FP4` 下统一）、
     shared expert 分支的更深精读；端到端需 SM100，当前不可行。
   ⑤ **k-grouped SF 打包**：P16-1 已完成（host 契约 + device 逐行对拍，H100 真实设备代码）。
