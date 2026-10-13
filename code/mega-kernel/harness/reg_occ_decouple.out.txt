@@ -1,0 +1,171 @@
+########## §68 寄存器预算 vs 占用率 解耦（P80-1，补 §67.4 尾巴） ##########
+# nvcc -O3 -arch=sm_90a --ptxas-options=-v；DEV=2
+
+===== ptxas -v：ro_kernel 各实例的 registers / spill（载体 × MINB）=====
+ptxas info    : Function properties for _Z9ro_kernelILi8ELi2ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi4ELi2ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi2ELi2ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi1ELi2ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi8ELi4ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi4ELi4ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi2ELi4ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi1ELi4ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi8ELi6ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi4ELi6ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi2ELi6ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi1ELi6ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 31 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi8ELi8ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi4ELi8ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi2ELi8ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi1ELi8ELi1EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi8ELi2ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi4ELi2ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi2ELi2ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 25 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi1ELi2ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 16 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi8ELi4ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 64 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi4ELi4ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 44 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi2ELi4ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi1ELi4ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi8ELi6ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi4ELi6ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 40 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi2ELi6ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi1ELi6ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi8ELi8ELi0EEvixiPK5uint4Py
+    8 bytes stack frame, 4 bytes spill stores, 4 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 8 bytes cumulative stack size, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi4ELi8ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi2ELi8ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 26 registers, used 1 barriers, 2048 bytes smem
+ptxas info    : Function properties for _Z9ro_kernelILi1ELi8ELi0EEvixiPK5uint4Py
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 18 registers, used 1 barriers, 2048 bytes smem
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 15 registers, used 0 barriers
+
+===== 运行 bench（§A 正确性 / §B 固定占用率扫寄存器预算 / §C 固定预算扫占用率 / §D SMEM-pad 对照 / §E 载体交叉 / §F 属性）=====
+########################################################################
+# §68 寄存器预算 vs 占用率 解耦：网格钉占用率 × MINB 钉寄存器预算
+# 目标卡 H100/sm90a；numSM=132，smem/SM=233472 B；总读 2 GiB = grid·BP（uint4=16B）
+# 占用率用 grid=numSM·O 钉死（每 SM 恰好 O 块），寄存器预算用 MINB∈{8,6,4,2}
+########################################################################
+
+===== §A 正确性（NBLK=16，BP=16384）：两载体 vs host 参考 =====
+  reg U=4 : sink=562601267102948 ref=562601267102948 -> OK
+  ca  DC=2048: sink=562601267102948 ref=562601267102948 -> OK
+
+===== §B 固定占用率 O，只扫寄存器预算 MINB（U=4，reg 载体）=====
+  (每个 O 一行：grid=numSM·O 不变，只改 MINB → 寄存器上限 32/42/64/128)
+  --- O=1 ---
+  B-O1-MINB8       O=1  pad=0   KB grid=132   blk/SM(API)=8  resident=1  MINB=8 U=4 reg -> OK    ms=1.2869 GB/s= 1668.7
+  B-O1-MINB6       O=1  pad=0   KB grid=132   blk/SM(API)=6  resident=1  MINB=6 U=4 reg -> OK    ms=0.7585 GB/s= 2831.2
+  B-O1-MINB4       O=1  pad=0   KB grid=132   blk/SM(API)=5  resident=1  MINB=4 U=4 reg -> OK    ms=0.7542 GB/s= 2847.2
+  B-O1-MINB2       O=1  pad=0   KB grid=132   blk/SM(API)=6  resident=1  MINB=2 U=4 reg -> OK    ms=0.7546 GB/s= 2845.8
+  --- O=2 ---
+  B-O2-MINB8       O=2  pad=0   KB grid=264   blk/SM(API)=8  resident=2  MINB=8 U=4 reg -> OK    ms=0.8213 GB/s= 2614.6
+  B-O2-MINB6       O=2  pad=0   KB grid=264   blk/SM(API)=6  resident=2  MINB=6 U=4 reg -> OK    ms=0.6812 GB/s= 3152.4
+  B-O2-MINB4       O=2  pad=0   KB grid=264   blk/SM(API)=5  resident=2  MINB=4 U=4 reg -> OK    ms=0.6790 GB/s= 3162.5
+  B-O2-MINB2       O=2  pad=0   KB grid=264   blk/SM(API)=6  resident=2  MINB=2 U=4 reg -> OK    ms=0.6812 GB/s= 3152.3
+  --- O=4 ---
+  B-O4-MINB8       O=4  pad=0   KB grid=528   blk/SM(API)=8  resident=4  MINB=8 U=4 reg -> OK    ms=0.7012 GB/s= 3062.5
+  B-O4-MINB6       O=4  pad=0   KB grid=528   blk/SM(API)=6  resident=4  MINB=6 U=4 reg -> OK    ms=0.6785 GB/s= 3165.2
+  B-O4-MINB4       O=4  pad=0   KB grid=528   blk/SM(API)=5  resident=4  MINB=4 U=4 reg -> OK    ms=0.6798 GB/s= 3159.1
+  B-O4-MINB2       O=4  pad=0   KB grid=528   blk/SM(API)=6  resident=4  MINB=2 U=4 reg -> OK    ms=0.6788 GB/s= 3163.9
+
+===== §C 固定寄存器预算 MINB，只扫占用率 O（U=4，reg 载体）=====
+  --- MINB=8（regs ≤ 32）---
+  C-MINB8-O1       O=1  pad=0   KB grid=132   blk/SM(API)=8  resident=1  MINB=8 U=4 reg -> OK    ms=1.2856 GB/s= 1670.4
+  C-MINB8-O2       O=2  pad=0   KB grid=264   blk/SM(API)=8  resident=2  MINB=8 U=4 reg -> OK    ms=0.8187 GB/s= 2623.0
+  C-MINB8-O4       O=4  pad=0   KB grid=528   blk/SM(API)=8  resident=4  MINB=8 U=4 reg -> OK    ms=0.7019 GB/s= 3059.7
+  C-MINB8-O8       O=8  pad=0   KB grid=1056  blk/SM(API)=8  resident=8  MINB=8 U=4 reg -> OK    ms=0.6876 GB/s= 3122.9
+  --- MINB=4（regs ≤ 64）---
+  C-MINB4-O1       O=1  pad=0   KB grid=132   blk/SM(API)=5  resident=1  MINB=4 U=4 reg -> OK    ms=0.7551 GB/s= 2843.8
+  C-MINB4-O2       O=2  pad=0   KB grid=264   blk/SM(API)=5  resident=2  MINB=4 U=4 reg -> OK    ms=0.6789 GB/s= 3163.3
+  C-MINB4-O4       O=4  pad=0   KB grid=528   blk/SM(API)=5  resident=4  MINB=4 U=4 reg -> OK    ms=0.6782 GB/s= 3166.4
+  C-MINB4-O8       O=8  pad=0   KB grid=1056  blk/SM(API)=5  resident=5  MINB=4 U=4 reg -> OK    ms=0.6942 GB/s= 3093.6
+
+===== §D 用 SMEM padding 钉占用率（grid=numSM·8 固定）vs §B 的 grid 钉法 =====
+  (MINB=8、U=4、reg 载体；pad 越大 regfile 越富余，但实际驻留块数被 SMEM 限住)
+  D-pad0           O=8  pad=0   KB grid=1056  blk/SM(API)=8  resident=8  MINB=8 U=4 reg -> OK    ms=0.6888 GB/s= 3117.9
+  D-pad24          O=8  pad=24  KB grid=1056  blk/SM(API)=8  resident=8  MINB=8 U=4 reg -> OK    ms=0.7209 GB/s= 2978.8
+  D-pad56          O=8  pad=56  KB grid=1056  blk/SM(API)=3  resident=3  MINB=8 U=4 reg -> OK    ms=0.7570 GB/s= 2836.7
+  D-pad96          O=8  pad=96  KB grid=1056  blk/SM(API)=2  resident=2  MINB=8 U=4 reg -> OK    ms=0.8456 GB/s= 2539.7
+  D-pad160         O=8  pad=160 KB grid=1056  blk/SM(API)=1  resident=1  MINB=8 U=4 reg -> OK    ms=1.3724 GB/s= 1564.8
+
+===== §E 载体交叉验证：ca（cp.async 单缓冲）在固定 O 下扫 MINB =====
+  --- O=2 ---
+  E-O2-MINB8       O=2  pad=0   KB grid=264   blk/SM(API)=6  resident=2  MINB=8 U=1 ca  -> OK    ms=0.6808 GB/s= 3154.5
+  E-O2-MINB4       O=2  pad=0   KB grid=264   blk/SM(API)=6  resident=2  MINB=4 U=1 ca  -> OK    ms=0.6818 GB/s= 3149.8
+  --- O=4 ---
+  E-O4-MINB8       O=4  pad=0   KB grid=528   blk/SM(API)=6  resident=4  MINB=8 U=1 ca  -> OK    ms=0.7014 GB/s= 3061.7
+  E-O4-MINB4       O=4  pad=0   KB grid=528   blk/SM(API)=6  resident=4  MINB=4 U=1 ca  -> OK    ms=0.7016 GB/s= 3061.0
+
+===== §F 函数属性（numRegs / localB）与 occupancy API =====
+  reg U=4 MINB=8         numRegs=32   localB=0   -> blk/SM=8  (req=0)
+  reg U=4 MINB=6         numRegs=40   localB=0   -> blk/SM=6  (req=0)
+  reg U=4 MINB=4         numRegs=44   localB=0   -> blk/SM=5  (req=0)
+  reg U=4 MINB=2         numRegs=40   localB=0   -> blk/SM=6  (req=0)
+  reg U=8 MINB=8         numRegs=32   localB=8   -> blk/SM=8  (req=0)
+  reg U=8 MINB=4         numRegs=64   localB=0   -> blk/SM=4  (req=0)
+  ca  U=1 MINB=8         numRegs=32   localB=0   -> blk/SM=6  (req=32832)
+  ca  U=1 MINB=4         numRegs=31   localB=0   -> blk/SM=6  (req=32832)
+
+########## §68 完成 ##########
