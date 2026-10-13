@@ -3232,6 +3232,31 @@
       **UMMA/tcgen05/UTCCP/2-SM TMA SM100 专属、仅分析**。配套博客
       `content/posts/mega-moe-113-mqa-logits-dense-kernel`（索引页新增第 113 篇）。
 
+### P104 增量（opt-in，补齐第 65 篇只提一句的 DeepEP 语义工具层）
+
+- [x] **P104-1** **DeepEP 的 MoE 语义工具层 `deep_ep/utils/math.py`**
+      （`deep_ep/utils/math.py:5-103`；对照 `deep_gemm/testing/numeric.py:5-27`、
+      `deep_gemm/utils/math.py:19-49`）。第 65 篇拆了 DeepEP `deep_ep/utils/` 的
+      `refs.py`/`gate.py`/`testing.py`，却只顺带提了一句同目录 `math.py`「有个和 DeepGEMM 同名但
+      不同定义的 `calc_diff`」。本篇把这 103 行单独讲透——它装的是 **DeepEP 测试与下游共用的
+      MoE 语义词汇**：判据 `calc_diff`、参考量化器 `per_token_cast_to_fp8/back`、**top-k 专家去重
+      oracle** `inplace_unique`、**group-limited 路由掩码** `create_grouped_scores`、记账
+      `count_bytes`/`hash_tensor(s)`。→ `docs/114-deepep-utils-math.md`（真实行号核对）：
+      `calc_diff:5-9`（`+1` 避 0/0、破尺度不变；余弦式≡平方误差式）、`safe_div:12-19`、
+      `per_token_cast_to_fp8:31-39`（未打包/未 UE8M0/gran 硬编码 128）、
+      `per_token_cast_back:43-56`（int 分支 `:51-53` 的 `view(uint8)<<23`）、
+      `inplace_unique:59-71`（`:66` 按 count 排序是死代码）、`create_grouped_scores:74-79`
+      （DeepSeek-V2/V3 device-limited 路由掩码）、`hash_tensor(s):82-93`、`count_bytes:96-103`。
+      三个函数（`inplace_unique`/`create_grouped_scores`/`hash_tensor`）**公开仓库无调用点**。
+      **`math.py` 只 `import torch`**，按路径 exec 真实源码即可（无需绕过 `check_nccl_so`）；
+      H100 真机 `harness/exp_deepep_utils_math.{py,sh,out.txt}` **33/33 ALL PASS**：
+      A) `calc_diff` 与 DeepGEMM 差 `+1`（`DeepEP(x,y)==DeepGEMM((x+1),(y+1))`）、全零两边 0、
+      缩放 spread `6.6e-3` vs `4.6e-9`；B) scale 逐位相同但 fp8 `10/6400` 差 1、
+      packed-int 解码≡UE8M0 fp32、int 分支≡fp32 分支；C) `inplace_unique`≡独立 oracle、
+      `:66` 死代码、降序（对照 DeepGEMM 升序）；D) `create_grouped_scores`≡向量化复刻、
+      每 token 恰保留 16 专家；E) `count_bytes`≡DeepGEMM、hash/pack 语义全对。配套博客
+      `content/posts/mega-moe-114-deepep-utils-math`（索引页新增第 114 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -3257,8 +3282,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P103 各增量完成（P15-1…P41-1、P42-1…P103-1）。**
-  本轮 P103-1：新建 `docs/113-mqa-logits-dense-kernel.md`
+- 当前进度：**P0~P14 全部完成；P15~P104 各增量完成（P15-1…P41-1、P42-1…P104-1）。**
+  本轮 P104-1：新建 `docs/114-deepep-utils-math.md`
+  （+`harness/exp_deepep_utils_math.{py,sh,out.txt}`）——补齐第 65 篇只提一句的 **DeepEP
+  `deep_ep/utils/math.py`**（103 行）：判据 `calc_diff`/参考量化器 `per_token_cast_to_fp8,back`/
+  **top-k 去重 oracle** `inplace_unique`/**group-limited 路由掩码** `create_grouped_scores`/记账。
+  要点：三组「同名不同契约」跨库对照——`calc_diff` 与 DeepGEMM 只差 `+1`（避 0/0 但破尺度不变）、
+  量化器未打包/未 UE8M0/gran 硬编码 128（scale 逐位同但 fp8 `10/6400` 差 1、int 分支可互喂
+  packed UE8M0）、`count_bytes` 逐字相同；`inplace_unique` 的 `:66` 按 count 排序是死代码；
+  `create_grouped_scores` 即 DeepSeek-V3 device-limited 路由掩码。`math.py` 只 import torch，
+  H100 真机 **33/33 ALL PASS**。索引页新增第 114 篇。
+  上一轮 P103-1：新建 `docs/113-mqa-logits-dense-kernel.md`
   （+`src/mqa_logits_dense_epilogue.cu`、`harness/exp_mqa_logits_dense_epilogue.{sh,out.txt}`）
   ——补齐第 23 篇 §5 对 **SM100 dense MQA logits 主 kernel**（`impls/sm100_mqa_logits.cuh`，
   609 行）只给的「一页摘要」。要点：16 warp 五类角色；`BLOCK_Q=128/num_heads`、`UMMA_M=UMMA_N=128`、
@@ -4429,7 +4463,18 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P102 已完成（最新 **P102-1 DeepEP bucket all_gather 的两个 SM kernel 后端
+- **下一步**：P0~P104 已完成（最新 **P104-1 DeepEP 的 MoE 语义工具层 `deep_ep/utils/math.py`**：
+  第 65 篇只提一句——判据 `calc_diff`、参考量化器 `per_token_cast_to_fp8/back`、top-k 专家去重
+  oracle `inplace_unique`、group-limited 路由掩码 `create_grouped_scores`、记账；三组「同名不同契约」
+  跨库对照（`calc_diff` 差 `+1`、量化器不打包不 UE8M0、`count_bytes` 逐字相同）；发现 `:66` 按 count
+  排序是死代码；`math.py` 只 import torch，H100 33/33 ALL PASS；索引页新增第 114 篇。可继续（均为
+  增量、非承诺）：第 65 篇 §8 已列的 `refs.py` FP8 分支与 `envs.py` 带宽/域解析，或从 P96/P97 的轻微
+  漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P103-1：P0~P103 已完成（最新 **P103-1 SM100 dense MQA logits 主 kernel 逐段精读**：
+  第 23 篇 §5 只给一页摘要——16 warp 五类角色、`kNumTmemStages==3`、五段架构无关逻辑 H100 ALL PASS
+  （`Int<max(1,min(N,BQ))>` 折射 / 16-8-4 头块 / bf16x2 归约 / 分页两生产者均分 / 4×32→32×4 转置）；
+  UMMA/UTCCP SM100 仅分析；索引页新增第 113 篇。详见上）。
+  上一轮 P102-1：P0~P102 已完成（最新 **P102-1 DeepEP bucket all_gather 的两个 SM kernel 后端
   pure-RDMA / hybrid**：第 54 篇只把纯 NVLink copy-engine 路径讲透、第 62 篇补了 all_reduce/reduce_scatter
   三后端，本篇补齐 all_gather 的跨节点两条腿——`launch_all_gather` 三物理域分派、pure-RDMA 每 warp
   一个目标 rank 的 `gin.put`、hybrid 的 SM=目标 RDMA rank / warp=QP 与每 chunk 8-QP 均分、显式代价模型

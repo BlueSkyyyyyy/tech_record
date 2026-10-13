@@ -1,0 +1,61 @@
+NVIDIA H100 80GB HBM3, 9.0
+==============================================================================
+P104-1  DeepEP utils/math.py —— H100 真机语义核验
+==============================================================================
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  cuda 13.2  dev NVIDIA H100 80GB HBM3
+deep_ep/utils/math.py           sha256=ed0dfb4bf98937694a04c162fa1e19fa42df4cd0f92fcb25cb1ec09511eded1f
+deep_gemm/testing/numeric.py    sha256=de92b73f28acb3c5f560fbb942161c88c7e849e6c52bb38fd20c67b8e4d747c7
+deep_gemm/utils/math.py         sha256=9cdecd0c0a0a8b3c64af87107464c91510876110eb80bdb485ff1f74eda8ea0e
+
+Part A — calc_diff: DeepEP 与 DeepGEMM 同名不同定义，以及 +1 位移的后果
+  [PASS] A1 torch.float32 DeepEP calc_diff == 归一化平方误差(x+1,y+1) 8.931014e-01 vs 8.931014e-01
+  [PASS] A1b torch.float32 余弦式 == 平方误差式（代数恒等） 
+  [PASS] A2 torch.float32 DeepEP calc_diff(x,y) == DeepGEMM calc_diff((x+1).double,(y+1).double) 8.931014e-01 vs 8.931014e-01
+  [PASS] A2b torch.float32 但 DeepEP(x,y) != DeepGEMM(x,y)（+1 位移造成差异） DeepEP 8.931014e-01 vs DeepGEMM 9.871227e-01
+  [PASS] A1 torch.bfloat16 DeepEP calc_diff == 归一化平方误差(x+1,y+1) 8.999443e-01 vs 8.999443e-01
+  [PASS] A1b torch.bfloat16 余弦式 == 平方误差式（代数恒等） 
+  [PASS] A2 torch.bfloat16 DeepEP calc_diff(x,y) == DeepGEMM calc_diff((x+1).double,(y+1).double) 8.999443e-01 vs 8.999443e-01
+  [PASS] A2b torch.bfloat16 但 DeepEP(x,y) != DeepGEMM(x,y)（+1 位移造成差异） DeepEP 8.999443e-01 vs DeepGEMM 1.001448e+00
+  A3  全零: DeepEP calc_diff=0.0  (nan=False)   DeepGEMM calc_diff=0.0
+  [PASS] A3 全零张量两边都得 0.0（DeepEP 靠 +1 位移避开 0/0，DeepGEMM 靠显式 guard） 
+  A4  scale c -> (DeepEP, DeepGEMM): c=0.1:(2.1072e-04,6.8707e-03)  c=1:(3.5936e-03,6.8707e-03)  c=10:(6.4290e-03,6.8707e-03)  c=100:(6.8253e-03,6.8707e-03)
+  [PASS] A4 DeepEP calc_diff 随缩放变化（+1 位移破坏尺度不变），DeepGEMM 近似不变 DeepEP spread=6.61e-03 DeepGEMM spread=4.61e-09
+  [PASS] A5 calc_diff 恒 >= 0（200 组随机，含 1e-3~1e3 量级） min=8.695e-07 max=1.123e+00
+
+Part B — per_token_cast_to_fp8 / per_token_cast_back: 与 DeepGEMM 量化器的异同
+  B shape: x_fp8=(64, 100) sf=(64, 1) (torch.float8_e4m3fn, torch.float32)
+  [PASS] B0 输出 shape 保留 (m,n) 与 sf=(m,ceil(n/128)) 
+  B1 反量化回 bf16 relerr=2.6327e-02  dtype=torch.bfloat16
+  [PASS] B1 round-trip relerr 落在 fp8 per-128 量化层 (<4e-2) 
+  B2 vs DeepGEMM(use_ue8m0=False): scale 逐位=True  fp8 不同元素=10/6400
+  [PASS] B2 DeepEP 与 DeepGEMM 的 fp32 scale 逐位一致 
+  [PASS] B2b 但 fp8 有极少量元素差 1（乘子 448/amax vs 1/(amax/448) 的舍入差） 10/6400 = 0.156%
+  B3 int-scale: packed=(64, 1) 解码 scale==UE8M0 fp32 scale? True  cast_back(int)==cast_back(fp32)? True
+  [PASS] B3 packed-int -> (uint8<<23) 解码 == DeepGEMM 的 UE8M0 fp32 scale 
+  [PASS] B3b per_token_cast_back 的 int 分支 (:51-53) 与显式 fp32 scale 路径逐位一致 
+  [PASS] B4 空张量早退 (:44-45) 返回 bf16 且 shape 不变 
+  [PASS] B5 DeepEP 量化器**不做** UE8M0 上取整（scale 非 2 的幂） 
+
+Part C — inplace_unique: top-k 专家去重 oracle（combine 归约的语义规范）
+  [PASS] C1 inplace_unique == 独立 oracle（去重、降序、-1 填充） 
+  [PASS] C1b 每行有效专家集合不变（仅去重/排序） 
+  [PASS] C1c 所有 -1 落在每行尾部（有效位掩码非增） 
+  [PASS] C2 第一次按 count 的排序 (:66) 对最终结果无影响（真正的排序是 :68 按值降序） 
+  [PASS] C3 DeepEP 输出为**降序**（首列 >= 末列），对照 DeepGEMM combine 的升序去重 
+
+Part D — create_grouped_scores: group-limited（device-limited）路由掩码
+  [PASS] D1 create_grouped_scores 仅保留被选中 group 的专家分数 
+  [PASS] D2 每 token 恰好保留 2 组的 16 个专家（未选中组整段清零） min=16 max=16 (期望 16)
+
+Part E — safe_div / hash_tensor(s) / count_bytes
+  [PASS] E1 safe_div(0,0)=0 
+  [PASS] E1b safe_div(3,0) 抛 ZeroDivisionError 
+  [PASS] E1c safe_div(6,3)=2 
+  E2 count_bytes: DeepEP=344  DeepGEMM=344  手算=344
+  [PASS] E2 count_bytes 递归计数（跳过 None；两个库实现逐字相同）与手算一致 
+  [PASS] E3 hash_tensor == int32 view 之和（与元素顺序无关） 
+  [PASS] E3b hash_tensors 递归 XOR 语义 
+
+==============================================================================
+结果: ALL PASS
+==============================================================================
