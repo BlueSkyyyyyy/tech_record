@@ -4665,8 +4665,42 @@
        234.9MB/2048us（114.7 GB/s）。**校正预算**：dispatch FP8 **30.36MB/rank**（第161篇 fp32 的
        **3.87×**）、combine BF16 **57.79MB**（2.00×）、合计 **88.15MB**（2.64×）——与第 144 篇
        独立量到的 **88.1MB/rank 逐 MB 对上**。融合 kernel NVLink 直写/重叠 SM100 专属、仅分析。
-       → `docs/162-ep-comm-bytes.md`。配套博客 `content/posts/mega-moe-162-ep-comm-bytes`
-       （索引页新增第 162 篇）。
+        → `docs/162-ep-comm-bytes.md`。配套博客 `content/posts/mega-moe-162-ep-comm-bytes`
+        （索引页新增第 162 篇）。
+
+### P153 增量（opt-in，补齐官方验收测试 baseline 里从没单独读过的 SwiGLU 算子）
+
+- [x] **P153-1** **TileLang 基线 SwiGLU 算子 `swiglu_apply_weight_to_fp8.py`**（
+       `~/github/DeepGEMM/third-party/tilelang_ops/swiglu_apply_weight_to_fp8.py`（212 行）+
+       `.../tilelang_ops/utils.py`；消费方 `tests/test_mega_moe.py:277-333`；对照
+       `deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh:1066-1205`；
+       `deep_gemm/include/deep_gemm/common/math.cuh:111-147`）。
+       第 41 篇（P41-1）拆了 `tests/test_mega_moe.py` 的端到端逐位判据、第 89 篇（P99-1）用 SM90
+       grouped GEMM 复刻了整条前向流水线，但 baseline 里真正做「SwiGLU + 乘 top-k 权重 + UE8M0 量化」
+       的 **TileLang 算子**（`run_baseline` 的 L1→L2 之间）一直只被顺带引用。本篇把它当 **fused
+       mega-kernel L1 epilogue 的逐位对照物**拆透并真机实测。**host 壳** `:150-213`：`assert
+       fmt=="e4m3"` `:168`、`hidden%(2g)==0` `:169`、`num_sms` 进 JIT 常量 `:170-171`、两输出容器
+       `:173-182`、三个 `pass_configs`（关 warp-specialized/TMA lowering + fast math）`:185-189`、
+       UE8M0 视图 int32 再 `.T[:T]` `:206-212`。**host 公式** `utils.py`：`get_sf_shape:13-30`
+       （UE8M0 每 4 指数打包一 word `:21`；列主序须 TMA 对齐、UE8M0 时 token 维 `×4` `:27-28`）、
+       `get_sf_and_inv:33-47` = **ceil-to-power-of-two**（`exp_scale=exp-127+(man_bits!=0)` `:42`；
+       `sf_inv=2^(127-exp_scale)` `:47`），与 mega 的 `math::get_ue8m0_sf_exp`（整数加法进位
+       `math.cuh:111-135`）语义等价。**设备 kernel** `:10-147`：persistent 调度（`@T.Kernel(num_ctas,
+       1024)` `:136`、`T.pdl_sync()` 等 `avail_tokens` `:138`、尾裁剪 `:144`）、计算 `:78-121`
+       （gate 前半/up 后半、`silu=gate/(1+exp(-gate))`、`*topk_weight` `:84-85`、clamp `up` 双侧/
+       `gate` 单侧 `:88-91`、`T.reduce_absmax` per-`g` amax≥1e-4 `:98-100`、UE8M0 SF、`y*sf_inv`→E4M3、
+       `output_bf16` 旁路 `:119-121`）。**H100(sm90) 真机**（`harness/exp_tilelang_swiglu.{sh,py,out.txt}`
+       + `src/swiglu_mega_epilogue.cu`，真实源码 sha256 `swiglu_apply_weight_to_fp8.py 301783c3…`/
+       `utils.py aab1e230…`/`math.cuh 576e9db1…`）：① 5 组 `get_sf_shape` 逐点一致、SF ==
+       `ceil_to_ue8m0(amax/448)` 指数 **0/2048**；② 真实 tilelang kernel vs 独立 torch oracle——
+       FP8 g=32/128、clamp=8、无权重四组 **FP8 0/1048576、SF 0/32768**（量化 relerr 2.25e-2=E4M3
+       噪声），BF16 g=128 分支仅 **3/1048576** 个 1-ulp 差（max|Δ|1.95e-3）；③ 用真实 `common/math.cuh`
+       复刻 mega L1 epilogue 算术（`get_ue8m0_sf_exp/inv`+`fast_rcp`），`fast=1`（`__expf`+`fast_rcp`）
+       与 `fast=0` **都与 tilelang 逐位相等（FP8 0/524288、SF 0/16384）**——坐实 baseline 与 fused
+       kernel 的 L1 段 **bit-compatible**（官方 `torch.equal` 验收成立的前提）；④ 吞吐
+       **122.2us/686 GB/s**（T=8192,I=2048；带宽受限的元素级融合，mega 把它折进 L1 epilogue 省掉
+       这次 global 往返）。融合 kernel 本体 SM100 专属、仅分析。→ `docs/163-tilelang-swiglu-apply-weight-fp8.md`。
+       配套博客 `content/posts/mega-moe-163-tilelang-swiglu-apply-weight-fp8`（索引页新增第 163 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -4700,8 +4734,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P152 各增量完成（P15-1…P41-1、P42-1…P152-1）。**
-  本轮 P152-1：新建 `docs/162-ep-comm-bytes.md` + `harness/exp_ep_comm_bytes.{py,sh,out.txt}`、
+- 当前进度：**P0~P14 全部完成；P15~P153 各增量完成（P15-1…P41-1、P42-1…P153-1）。**
+  本轮 P153-1：新建 `docs/163-tilelang-swiglu-apply-weight-fp8.md` +
+  `harness/exp_tilelang_swiglu.{py,sh,out.txt}` + `src/swiglu_mega_epilogue.cu`
+  ——补上官方验收测试 `tests/test_mega_moe.py` 的 baseline 里一直没单独读过的 **TileLang SwiGLU
+  算子**（`third-party/tilelang_ops/swiglu_apply_weight_to_fp8.py`，`run_baseline` 的 L1→L2 之间），
+  它是 fused mega-kernel **L1 epilogue（`sm100_fp8_fp4_mega_moe.cuh:1066-1205`）的官方逐位对照物**。
+  host 公式 `get_sf_shape`/`get_sf_and_inv` = UE8M0 打包 + ceil-to-power2；设备 kernel persistent
+  调度 + `T.pdl_sync` + `silu(gate)*up*weight` + per-`g` amax + UE8M0。**H100(sm90) 真机**：
+  ① `get_sf_shape` 5 组逐点一致、SF == `ceil_to_ue8m0(amax/448)` **0/2048**；② 真实 tilelang kernel
+  vs 独立 torch oracle（FP8 g=32/128、clamp、无权重）**FP8 0/1048576、SF 0/32768**（量化 relerr
+  2.25e-2=E4M3 噪声）、BF16 分支 **3/1048576** 个 1-ulp；③ 用真实 `common/math.cuh` 复刻 mega
+  L1 epilogue 算术（`get_ue8m0_sf_exp/inv`+`fast_rcp`），`fast=1`/`fast=0` **都与 tilelang 逐位相等
+  （FP8 0/524288、SF 0/16384）**——坐实 baseline 与 fused kernel L1 段 **bit-compatible**；④ 吞吐
+  **122.2us/686 GB/s**。真实源码 sha256 `301783c3…`/`aab1e230…`/`576e9db1…`。索引页新增第 163 篇。
+  上一轮 P152-1：新建 `docs/162-ep-comm-bytes.md` + `harness/exp_ep_comm_bytes.{py,sh,out.txt}`、
   `src/deepep_token_layout_bytes.cu` + `harness/exp_deepep_token_layout_bytes.{sh,out.txt}`
   ——收口第 161 篇（`docs/161:154/167-168/189`）自认的「通信按 fp32 搬运是保守上界」。
   用 **DeepEP 真实头文件**（`layout/ep/token.cuh:10-82` 的 `TokenLayout`）算权威 per-token 字节：
@@ -6405,14 +6452,15 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P152 已完成（最新 **P152-1 把第 161 篇自认的「fp32 通信保守上界」换成 DeepEP
-  真实字段口径**——收口第 161 篇 `docs/161:154/167-168/189` 点名的 opt-in。用 **DeepEP 真实头文件**
-  `layout/ep/token.cuh:10-82` 的 `TokenLayout` 算权威 per-token 字节：DeepSeek 形状 **dispatch
-  FP8 8160 B / BF16 14432 B / combine BF16 14432 B**（FP8 下 SF 占 11.0%）。8×H100 逐字段 a2a：
-  字节差 **1800 倍**、时间全 ~4.6ms，**5 条独立 a2a 23.3ms vs 打平一条 4.8ms（4.9×）**；dtype
-  fp32→fp8 **字节缩 4× 只省 4.5% 墙钟**（时延主导），平衡锚 139 GB/s。校正预算：dispatch
-  **30.36MB/rank**（3.87×）、combine **57.79MB**（2.00×）、合计 **88.15MB**（2.64×），与第 144 篇
-  **88.1MB/rank 逐 MB 对上**。索引页新增第 162 篇）。
+- **下一步**：P0~P153 已完成（最新 **P153-1 补上官方验收测试 baseline 里从没单独读过的 TileLang
+  SwiGLU 算子**——`third-party/tilelang_ops/swiglu_apply_weight_to_fp8.py`，是 fused mega-kernel
+  L1 epilogue（`sm100_fp8_fp4_mega_moe.cuh:1066-1205`）的官方逐位对照物。host `get_sf_shape`/
+  `get_sf_and_inv` = UE8M0 打包 + ceil-to-power2；设备 kernel persistent + `T.pdl_sync` +
+  `silu(gate)*up*weight` + per-`g` amax + UE8M0。H100(sm90) 真机：真实 tilelang kernel vs 独立
+  torch oracle **FP8 0/1048576、SF 0/32768**（四组配置，量化 relerr 2.25e-2=E4M3 噪声）、BF16
+  分支 3/1048576 个 1-ulp；用真实 `common/math.cuh` 复刻的 mega L1 epilogue 算术（`fast=1`/`fast=0`）
+  与 tilelang **逐位相等（FP8 0/524288、SF 0/16384）**⇒ baseline 与 fused kernel L1 段
+  **bit-compatible**；吞吐 122.2us/686 GB/s。索引页新增第 163 篇）。
   可继续（均为增量、非承诺）：① 把第 141/161 篇的多卡 EP 图**接进真实 DeepEP `EPBuffer.dispatch/combine`**
   （需 NCCL≥2.32.3，见「阻塞」）；② 在**独占卡安静环境**下量「EP 图跨 micro-batch 流水线重叠」
   （dispatch_{i+1} ∥ compute_i），坐实/证伪第 144 篇侧流 NCCL 不重叠的结论（第 161/162 篇已给字节口径）；
