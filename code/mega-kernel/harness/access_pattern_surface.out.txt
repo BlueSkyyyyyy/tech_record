@@ -1,0 +1,83 @@
+########## §71 访存模式 × O·T 合量（P83-1，补 §70.7 尾巴） ##########
+# nvcc -O3 -arch=sm_90a --ptxas-options=-v；DEV=2
+
+===== ptxas -v：pat_m0..m3 各实例的 registers / spill =====
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 15 registers, used 0 barriers
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 28 registers, used 1 barriers, 8192 bytes smem
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 28 registers, used 1 barriers, 8192 bytes smem
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 8192 bytes smem
+    0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+ptxas info    : Used 32 registers, used 1 barriers, 8192 bytes smem
+
+===== 运行 bench（§A 正确性 / §B 每模式扫 O·T / §C 每模式扫 T / §D 汇总）=====
+########################################################################
+# §71 访存模式 × O·T 合量：固定 R=32/U=4，四模式（同一逻辑 1 GiB）下
+#   数据面是否仍只认『每 SM 总线程 O·T』？饱和点/天花板是否随模式移动？
+# 目标卡 H100/sm90a；numSM=132；逻辑总读 1 GiB（uint4 计）；载体 reg U=4；__maxnreg__(32)
+# m1 物理 8×（每 128 B 行用 16 B）；m3 常驻 16 MiB（< L2）；ncu 另跑
+########################################################################
+
+===== §A 正确性（NBLK=8，BP=4096，逻辑元素=32768）：每模式 vs host 参考（XOR）=====
+  coalesced   : sink=3307732323 ref=3307732323 -> OK
+  sparse8x    : sink=3837060379 ref=3837060379 -> OK
+  scalar4B    : sink=3307732323 ref=3307732323 -> OK
+  l2res16M    : sink=0 ref=0 -> OK
+
+===== §B 每模式固定 T=256，扫 O=1/2/4/8（O·T=256..2048）：有用 GB/s =====
+  coalesced   T=256    O=1 (OT=256 )= 2741.6  O=2 (OT=512 )= 2913.7  O=4 (OT=1024)= 3056.0  O=8 (OT=2048)= 3001.6  [blk/SM≤8]
+  sparse8x    T=256    O=1 (OT=256 )=  713.1  O=2 (OT=512 )=  716.9  O=4 (OT=1024)=  711.5  O=8 (OT=2048)=  710.8  [blk/SM≤8]
+  scalar4B    T=256    O=1 (OT=256 )= 1172.4  O=2 (OT=512 )= 2079.3  O=4 (OT=1024)= 2596.9  O=8 (OT=2048)= 2412.6  [blk/SM≤8]
+  l2res16M    T=256    O=1 (OT=256 )= 9215.7  O=2 (OT=512 )=16652.3  O=4 (OT=1024)=23448.2  O=8 (OT=2048)=22060.8  [blk/SM≤8]
+
+===== §C 每模式固定 O·T=1024，扫 T=128/256/512/1024（O=8/4/2/1）：有用 GB/s =====
+  coalesced   T=128    O=8 (OT=1024)= 3041.0  [blk/SM≤16]
+  coalesced   T=256    O=4 (OT=1024)= 3087.7  [blk/SM≤8]
+  coalesced   T=512    O=2 (OT=1024)= 3136.8  [blk/SM≤4]
+  coalesced   T=1024   O=1 (OT=1024)= 3160.1  [blk/SM≤2]
+  sparse8x    T=128    O=8 (OT=1024)=  714.5  [blk/SM≤16]
+  sparse8x    T=256    O=4 (OT=1024)=  715.0  [blk/SM≤8]
+  sparse8x    T=512    O=2 (OT=1024)=  714.4  [blk/SM≤4]
+  sparse8x    T=1024   O=1 (OT=1024)=  713.9  [blk/SM≤2]
+  scalar4B    T=128    O=8 (OT=1024)= 2517.8  [blk/SM≤16]
+  scalar4B    T=256    O=4 (OT=1024)= 2602.5  [blk/SM≤8]
+  scalar4B    T=512    O=2 (OT=1024)= 2898.4  [blk/SM≤4]
+  scalar4B    T=1024   O=1 (OT=1024)= 2903.9  [blk/SM≤2]
+  l2res16M    T=128    O=8 (OT=1024)=22002.9  [blk/SM≤16]
+  l2res16M    T=256    O=4 (OT=1024)=22384.5  [blk/SM≤8]
+  l2res16M    T=512    O=2 (OT=1024)=19784.5  [blk/SM≤4]
+  l2res16M    T=1024   O=1 (OT=1024)=15217.4  [blk/SM≤2]
+
+===== §D 汇总：每模式在 T=256 下的 O·T 标度（以 O·T=256 为 1.00）×，及饱和点 =====
+  pattern        OT256    OT512   OT1024   OT2048   饱和点(≈平台)
+  coalesced       1.00     1.06     1.13     1.09   1024          
+  sparse8x        1.00     1.01     1.00     1.00   256           
+  scalar4B        1.00     1.77     2.22     2.06   1024          
+  l2res16M        1.00     1.81     2.43     2.39   1024          
+
+########## §71 完成 ##########
+
+===== §D ncu 归因：每模式 T=256,O=4（O·T=1024）的 DRAM 读 / L1 sectors =====
+--- pat=0 (coalesced) ---
+==PROF== Profiling "pat_m0": Application replay pass 1
+  pat_m0(const void *, long long, long long, unsigned long long *) (528, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                 Gbyte         1.07
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum      sector     33554400
+--- pat=1 (sparse8x) ---
+==PROF== Profiling "pat_m1": Application replay pass 1
+  pat_m1(const void *, long long, long long, unsigned long long *) (528, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                 Gbyte         4.29
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum      sector     67108800
+--- pat=2 (scalar4B) ---
+==PROF== Profiling "pat_m2": Application replay pass 1
+  pat_m2(const void *, long long, long long, unsigned long long *) (528, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                 Gbyte         1.07
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum      sector     33554400
+--- pat=3 (l2res16M) ---
+==PROF== Profiling "pat_m3": Application replay pass 1
+  pat_m3(const void *, long long, long long, unsigned long long *) (528, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    dram__bytes_read.sum                                 Mbyte         2.04
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum      sector     33554400

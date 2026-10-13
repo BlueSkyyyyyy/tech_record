@@ -2118,6 +2118,39 @@
       二维面，闭合 P80/P81/P82 的寄存器×占用率×线程数链条。P82-1 新留尾巴（§70.7）：`U=4` 固定且与
       寄存器预算耦合、无法测 `O·T>2048`（H100 硬限）、只测连续 `__ldcs` 流、未与 DeepGEMM SM100 对跑。
 
+### P83 实验扩展 62：访存模式 × `O·T` 合量（`docs/04-experiments.md` §71）
+
+- [x] **P83-1** 补掉 P82-1（§70）**§70.7 明文尾巴**「只测**连续/规则**的 `__ldcs` uint4 流，未扫
+      strided / 非对齐 / **L2 命中**等访存模式」：把「数据面只认『每 SM 总线程 `O·T`』」这条合量拿到
+      **四种访存模式**上复检，并把 §70 的二维面推广到访问模式维度。见 `docs/04-experiments.md` **§71**，
+      源码 `src/access_pattern_surface.cu`、脚本 `harness/access_pattern_surface.sh`、原始输出
+      `harness/access_pattern_surface.out.txt`（目标卡 H100/sm90a、**自动选最闲 device（落 device 2）**、
+      nvcc 13.2、`numSM=132`、逻辑总读 1 GiB（uint4 计）、`__maxnreg__(32)`、`U=4`、`reps=3`、min-of-3；
+      四模式 `m0 coalesced`（HBM 流式）/`m1 sparse8x`（每 8 读 1，物理 4×）/`m2 scalar4B`（4 B 无向量）/
+      `m3 l2res16M`（16 MiB 常驻 L2）；同一逻辑字节数）。核心结论：
+      - **§A 四模式折叠 `sink` 逐位对 host 参考**（`OK`）；`ptxas -v`：`m0/m1` 32 regs、`m2/m3` 28 regs、
+        均无 spill。
+      - **§B（Q1/Q2）合量普适、天花板差一个量级**：coalesced/scalar/l2res 吞吐**都在 `O·T≈1024`
+        附近进入平台**（模式无关的通用旋钮），但峰值 `coalesced` **3056** / `scalar4B` **2597** /
+        `l2res16M` **23448** / `sparse8x` 逻辑仅 **713**（等效物理 2848，撞 HBM wall）GB/s；
+        **低 `O·T` 起始效率随模式差很多**（coalesced 在 `O·T=256` 已 90%，scalar/l2 只 39–45%，抬到
+        1024 补 **2.22×/2.43×**）。**`sparse8x` 是唯一例外——从 256 起即平，`O·T` 不是旋钮**（已撞
+        物理流量墙）。
+      - **§C（headline，合量的裂缝）同一 `O·T=1024` 下 `(T,O)` 拆分**：`coalesced` 极差 **1.04×**
+        （复现 §70），但 `l2res16M` **1.47×**（`T=256/O=4` 22385 vs `T=1024/O=1` **15217**）——**L2/
+        延迟受限的模式要「多而小」的 block**（隐藏 L2 延迟），与 coalesced 的「少而大」相反；`scalar4B`
+        也偏大 `T`（1.15×）。**「只认 `O·T`」只对 HBM 带宽受限严格成立**。
+      - **§D `ncu` 归因**（T=256,O=4）：`sparse8x` DRAM 读 **4.29 GB**（物理 4×，128 B 行只用 16 B）；
+        `scalar4B` 的 DRAM 字节/sectors 与 coalesced **完全相同**（低速纯**指令发射**）；
+        `l2res16M` 几无 DRAM（2.04 MB）。三种「非 HBM」约束（物理流量 4×/发射/L2 延迟）被分开。
+      - **含义**：真实 megakernel 的 task 访存模式混杂，「按 `O·T` 铺满机器」是**通用**旋钮但**非万能**
+        ——稀疏 task 先撞物理流量墙（应靠 coalescing/TMA multicast/DSM 降流量，P30-1/P31-1）、L2/延迟
+        受限 task 要「多而小的 block」（影响 worker 划分）、发射受限 task 靠更多 warp——是 megakernel
+        **访存模式异质性**的成本侧约束（与 §8/§10/§14 的资源足迹互补）。
+      判据 **C1–C5 全不满足**（纯数据面微基准）。**本轮新增实验**；P83-1 新留尾巴（§71.7）：合成访问
+      （stride 固定 8 / 16 MiB / 无向量宽度）、未测 `O·T>2048`、未扫非 8 倍数 strided/非对齐、
+      未与 DeepGEMM SM100 对跑。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2163,7 +2196,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P82-1 完成（1/1）**。补掉 P81-1（§69）**§69.7 明文尾巴**「未测 `T` 与 `O` **同时大于 1**
+- 当前进度：**P83-1 完成（1/1）**。补掉 P82-1（§70）**§70.7 明文尾巴**「只测**连续/规则**的
+  `__ldcs` uint4 流，未扫 strided / 非对齐 / **L2 命中**等访存模式」：把「数据面只认『每 SM 总线程
+  `O·T`』」这条合量拿到**四种访存模式**上复检，并把 §70 的二维面推广到**访问模式**维度。见
+  `docs/04-experiments.md` **§71**，源码 `src/access_pattern_surface.cu`、脚本
+  `harness/access_pattern_surface.sh`、原始输出 `harness/access_pattern_surface.out.txt`（目标卡
+  H100/sm90a、自动选最闲 device（落 device 2）、nvcc 13.2、`numSM=132`、逻辑总读 1 GiB、
+  `__maxnreg__(32)`、`U=4`、min-of-3）。核心结论：**(1) §A 四模式折叠 `sink` 逐位对 host 参考**、
+  无 spill；**(2) §B 合量普适但天花板差一个量级**——coalesced/scalar/l2res 都在 `O·T≈1024` 入平台
+  （模式无关的通用旋钮），峰值 3056 / 2597 / 23448 GB/s，`sparse8x` 逻辑仅 713（等效物理 2848，
+  撞 HBM wall）；**(3) §C（headline）合量的裂缝**——同一 `O·T=1024` 下 `coalesced` 极差 1.04×（复现
+  §70），但 `l2res16M` **1.47×**（L2/延迟受限要「多而小」的 block，`T=256/O=4` 22385 vs
+  `T=1024/O=1` 15217），`scalar4B` 偏大 `T` 1.15×；**(4) §D ncu** 把三种非 HBM 约束分开——`sparse`
+  物理流量 4×（DRAM 4.29 GB）、`scalar` DRAM 与 coalesced 相同（纯指令发射）、`l2res` 几无 DRAM
+  （2.04 MB、L2 延迟）。判据 **C1–C5 全不满足**（纯数据面微基准）。**本专题此前 P0–P82 全完成，
+  本轮为其新增的实验增量**；P83-1 新留尾巴见 §71.7（合成访问、未测 `O·T>2048`、未扫非 8 倍数
+  strided/非对齐、未对 SM100）。**P80–P83 的「寄存器预算 × 占用率 × 线程数 × 访存模式」成本侧链条闭合。**
+- 此前：**P82-1 完成（1/1）**。补掉 P81-1（§69）**§69.7 明文尾巴**「未测 `T` 与 `O` **同时大于 1**
   的二维面（`O·T` 联合钉『每 SM 总线程』）」：在**固定每线程寄存器预算** `R`（`__maxnreg__(R)`）下
   同时扫每块线程数 `T` 与每 SM 块数 `O`，检验数据面是否只由**每 SM 总线程 `O·T`** 这个**合量**决定。
   见 `docs/04-experiments.md` **§70**，源码 `src/t_occ_surface.cu`、脚本 `harness/t_occ_surface.sh`、
