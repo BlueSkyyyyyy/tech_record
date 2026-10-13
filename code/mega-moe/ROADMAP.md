@@ -3318,7 +3318,46 @@
       判据 precise **45/45** 满足 vs random **14/45**（坐实断言只在 `if precise:` 分支）；
       分数分离 selected∈`[0.9,1.0]`/bg∈`[0,0.9]`；二分单调命中可行目标、不可行静默饱和；
       同 seed 逐位可复现、不同 seed 不同。配套博客
-      `content/posts/mega-moe-116-deepep-gate-generators`（索引页新增第 116 篇）。
+       `content/posts/mega-moe-116-deepep-gate-generators`（索引页新增第 116 篇）。
+
+### P107 增量（opt-in，补齐每次部署都要碰、却从没单独成篇的「环境变量 / 开关面」）
+
+- [x] **P107-1** **DeepEP 的环境变量 / 开关面**（`csrc/utils/system.hpp:12-29` 的 `get_env<T>`；
+      `setup.py:14-15/63-74` 的 `persistent_env_names` 与生成的 `deep_ep/envs.py`；
+      应用点 `deep_ep/__init__.py:8-16`；引导闸门 `deep_ep/__init__.py:19-41`；以及 11 个运行时
+      `EP_*` 的全部消费点）。前面 116 篇把 kernel / host 编排 / 测试基座几乎拆尽，但 DeepEP 的行为
+      在**四个时间点**被环境变量塑形——`import` 时（引导闸门）、构造 `Context`/`Buffer` 时、
+      **每次 API 调用**时、JIT **编译期**——这层从没单独成篇，与第 38 篇（DeepGEMM 的
+      `DG_*`/`set_*`）成对照。**纯 host / Python + 编译期、架构无关，H100 真机可跑真机实测**。
+      → `docs/117-deepep-env-surface.md`（真实行号核对）：**两句总览**——① 比 DeepGEMM 那套更隐式：
+      `DG_*` 有 pybind 可回读，`EP_*` **全靠 `getenv`、无回读、C++ 与 Python 各解析一遍**；
+      ② **两个通道**：安装期把白名单（7 条）固化进生成的 `deep_ep/envs.py`（`setup.py:63-74` 的
+      `generate_default_envs`），运行时 `__init__.py:8-16` **只补不覆盖**（真实生成物只固化
+      `EP_NCCL_ROOT_DIR=/tmp/nccl229`，坐实「这份 DeepEP 编到哪份 NCCL」）。**`get_env<T>` 的
+      两个陷阱**：① 只支持 `int`/`string`，别的类型走 `EP_HOST_ASSERT(false)` 抛 `EPException`
+      （`system.hpp:27`）；② **畸形/空值返回未初始化值（UB）**——`:22-24` 丢弃 `sscanf` 返回值，
+      `abc`/空串下 `value` 不写、返回**栈垃圾**（既非默认值也非 0），g++ 真跑得 `21925`、哨兵复刻
+      坐实（⇒「默认关」的开关写成 `=yes` 会**时开时关、不可复现**）。**全库清单**：带引号正则
+      （排除裸 `EP_*` 宏）扫两仓库，得**恰好 16 个** = 7 persistent + 9 仅运行时，并集即 **11 条
+      运行时开关**（`EP_SUPPRESS_NCCL_CHECK`/`EP_REUSE_NCCL_COMM`/`EP_DISABLE_GIN`/`EP_*_RDMA_SL`/
+      `EP_BUFFER_DEBUG`/`EP_AVOID_RECORD_STREAM`/`EP_NUM_MAX_LOCAL_RANKS`/`EP_USE_NVIDIA_TOOLS`/
+      `EP_DISABLE_BARRIER_PROFILING`/`EP_GIN_GDAKI_DEBUG`）。**三个真坑**（源码无注释、只能实测发现）：
+      ① **`EP_BUFFER_DEBUG` 跨语言分歧**——C++ `get_env<int>` 把 `"0"` 解析成 **0（关）**，Python
+      `os.environ.get(...,0)`（`buffers/ep.py:309/535`）对非空 `"0"` 恒为 **真（开）**；
+      ② **`EP_NUM_MAX_LOCAL_RANKS` 默认 16 + 显存副作用**——hybrid 下按「本节点 16 卡」预留 RDMA
+      storage（`engram.py:61`），超显存时 `:64-65` **顺手设全局 `os.environ['NCCL_WIN_STRIDE']`**（对齐
+      4 GiB）；③ `EP_SUPPRESS_NCCL_CHECK` 的三把尺子（`__init__.py:24` 抑制 / `:28-32` 重复 libnccl
+      扫描 / `:33-41` `filecmp.cmp(shallow=False)` 逐字节比库；「**加载了才比**」——没加载 libnccl 时
+      `filecmp.cmp(None,…)` 抛 `TypeError` 而非断言，故上游在 `import torch` 后才跑，实验需先
+      `torch.cuda.nccl.version()` 强制加载才复现断言）。另拆 `EP_AVOID_RECORD_STREAM`（源码注释
+      `ep.hpp:162` 点明**只对 V2 API 生效**，V1 仍 `record_stream`）。**与第 38 篇的对照表**（入口
+      pybind vs getenv、单解析 vs 双解析、有无引导闸门、安装期固化）。H100 真机
+      `harness/deepep_env_probe.cpp`（g++ 直接 include 真实 `system.hpp`）+ `harness/exp_deepep_envs.{sh,py,out.txt}`
+      （复用真实生成的 `envs.py` 与真实 `check_nccl_so`）**38 PASS / 0 FAIL**：Part A 9 PASS
+      （真实 `get_env` 五语义 + bool 抛异常 + 畸形哨兵复刻）；Part B 29 PASS（白名单 7 条、真实生成物
+      与「已设不覆盖/未设补上」两例、抑制短路/未抑制断言、全库 16 个带引号 `EP_*`、11 条运行时
+      开关全命中、跨语言真值、`NCCL_WIN_STRIDE` 三例）。配套博客
+      `content/posts/mega-moe-117-deepep-env-surface`（索引页新增第 117 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3345,8 +3384,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P106 各增量完成（P15-1…P41-1、P42-1…P106-1）。**
-  本轮 P106-1：新建 `docs/116-deepep-gate-generators.md`
+- 当前进度：**P0~P14 全部完成；P15~P107 各增量完成（P15-1…P41-1、P42-1…P107-1）。**
+  本轮 P107-1：新建 `docs/117-deepep-env-surface.md`
+  （+`harness/exp_deepep_envs.{py,sh,out.txt}`、`harness/deepep_env_probe.cpp`）——补齐每次部署都要碰、
+  却从没单独成篇的 **DeepEP 环境变量 / 开关面**（与第 38 篇 DeepGEMM `DG_*` 成对照）。
+  要点：两个通道（安装期固化进生成的 `deep_ep/envs.py`，运行时 `__init__.py:8-16` **只补不覆盖**，
+  真实生成物只固化 `EP_NCCL_ROOT_DIR=/tmp/nccl229`）+ `get_env<T>` 两陷阱（只支持 int/string；
+  **畸形/空值返回未初始化栈垃圾**，`abc` 真跑得 `21925`）+ 全库带引号 `EP_*` 恰 **16 个**
+  （7 persistent + 9 仅运行时，并集 11 条运行时开关）+ 三个真坑（**`EP_BUFFER_DEBUG` 跨语言分歧**：
+  C++ `"0"`→关 / Python `"0"`→开；`EP_NUM_MAX_LOCAL_RANKS` 默认 16 且超显存时顺手设
+  `NCCL_WIN_STRIDE`；`check_nccl_so` 的「未加载 libnccl 会 `TypeError` 而非断言」）。H100 真机
+  **38 PASS / 0 FAIL**（g++ 直接 include 真实 `system.hpp` + 复用真实 `envs.py`/`check_nccl_so`）。
+  索引页新增第 117 篇。
+  上一轮 P106-1：新建 `docs/116-deepep-gate-generators.md`
   （+`harness/exp_deepep_gate.{py,sh,out.txt}`）——补齐第 65 篇只概括为「流量生成层」的
   **DeepEP MoE 路由夹具 `deep_ep/utils/gate.py`**（180 行）：为 EP dispatch/combine 测试造
   「某 rank 流量是别人几倍」的可控不均衡。要点：`generate_topk_idx:4-29` 是 `rank_count↔topk_idx`
@@ -4550,12 +4600,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P106 已完成（最新 **P106-1 DeepEP MoE 路由夹具 `deep_ep/utils/gate.py`**：
+- **下一步**：P0~P107 已完成（最新 **P107-1 DeepEP 的环境变量 / 开关面**：
+  persistent envs 只补不覆盖、`get_env<T>` 的未初始化栈垃圾、全库 16 个带引号 `EP_*`（11 条运行时
+  开关）、`EP_BUFFER_DEBUG` 跨语言分歧、`EP_NUM_MAX_LOCAL_RANKS`/`NCCL_WIN_STRIDE`、`check_nccl_so`
+  三把尺子；H100 真机 38 PASS / 0 FAIL；索引页新增第 117 篇。可继续（均为增量、非承诺）：
+  第 65 篇 §8 列出的 `envs.py` 带宽/域解析（第 73/86 篇已部分覆盖；envs.py 的 `init_dist`/`init_seed`/
+  `EnvOverride`/`semantic.py` 仍可再收一网），或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P106-1：P0~P106 已完成（最新 **P106-1 DeepEP MoE 路由夹具 `deep_ep/utils/gate.py`**：
   `generate_topk_idx` 精确逆映射、`generate_rank_count` 用循环重复排列铺普通 rank（precise 均衡）、
   `map_unbalanced_ratio_to_factor` 单标量二分的大 R 阈值开关与不可行静默饱和、可行性闸门只在
   precise 路径；H100 真机 ALL PASS，复刻 test_gate 判据 precise 45/45 vs random 14/45；
-  索引页新增第 116 篇。可继续（均为增量、非承诺）：第 65 篇 §8 列出的 `envs.py` 带宽/域解析
-  （第 73/86 篇已部分覆盖），或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  索引页新增第 116 篇。详见上）。
   上一轮 P105-1：P0~P105 已完成（最新 **P105-1 DeepEP `refs.dispatch` 的 FP8 分支 + 设备端
   `sf_pack_t`/`TokenLayout` SF 布局**：参考 gran-128 契约 vs 设备缓冲 gran-32 上界（4 倍）、
   dispatch 列数取 `sf.size(1)`、union 两成员统一「一列=128 元素」、DeepEP 不打包 UE8M0；
