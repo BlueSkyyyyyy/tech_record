@@ -1,0 +1,90 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+================================================================================================
+Part A: correctness -- CUDA gate dq/dk/dg, bit-id across layouts, vs FLA (tf32 floor)
+================================================================================================
+
+# B8 T2048 H8  grid=(128, 64)
+    dqg vs torch(same raw)   max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.334e+00
+    dkg vs torch(same raw)   max_abs=9.537e-07  max_rel=3.197e-08  ref_max=2.983e+01
+    dg vs torch(same raw)    max_abs=1.431e-06  max_rel=2.170e-07  ref_max=6.593e+00
+    dq vs FLA                max_abs=2.016e-03  max_rel=8.641e-04  ref_max=2.332e+00
+    dk vs FLA                max_abs=2.748e-02  max_rel=9.218e-04  ref_max=2.981e+01
+    dg vs FLA                max_abs=6.247e-03  max_rel=9.482e-04  ref_max=6.588e+00
+    dqg vs gate_tma          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.334e+00
+    dkg vs gate_tma          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.983e+01
+    dg vs gate_tma           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.593e+00
+    dqg vs gate_tma64        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.334e+00
+    dkg vs gate_tma64        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.983e+01
+    dg vs gate_tma64         max_abs=4.768e-07  max_rel=7.233e-08  ref_max=6.593e+00
+
+# B2 T1024 H8  grid=(64, 16)
+    dqg vs torch(same raw)   max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.961e+00
+    dkg vs torch(same raw)   max_abs=9.537e-07  max_rel=3.658e-08  ref_max=2.607e+01
+    dg vs torch(same raw)    max_abs=9.537e-07  max_rel=1.847e-07  ref_max=5.164e+00
+    dq vs FLA                max_abs=1.933e-03  max_rel=9.860e-04  ref_max=1.961e+00
+    dk vs FLA                max_abs=2.466e-02  max_rel=9.466e-04  ref_max=2.605e+01
+    dg vs FLA                max_abs=5.212e-03  max_rel=1.010e-03  ref_max=5.160e+00
+    dqg vs gate_tma          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.961e+00
+    dkg vs gate_tma          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.607e+01
+    dg vs gate_tma           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.164e+00
+    dqg vs gate_tma64        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.961e+00
+    dkg vs gate_tma64        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.607e+01
+    dg vs gate_tma64         max_abs=4.768e-07  max_rel=9.234e-08  ref_max=5.164e+00
+
+# T512 H4  grid=(32, 4)
+    dqg vs torch(same raw)   max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.702e+00
+    dkg vs torch(same raw)   max_abs=9.537e-07  max_rel=3.930e-08  ref_max=2.427e+01
+    dg vs torch(same raw)    max_abs=7.153e-07  max_rel=1.327e-07  ref_max=5.390e+00
+    dq vs FLA                max_abs=1.788e-03  max_rel=1.051e-03  ref_max=1.701e+00
+    dk vs FLA                max_abs=1.932e-02  max_rel=7.967e-04  ref_max=2.425e+01
+    dg vs FLA                max_abs=3.973e-03  max_rel=7.376e-04  ref_max=5.386e+00
+    dqg vs gate_tma          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.702e+00
+    dkg vs gate_tma          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.427e+01
+    dg vs gate_tma           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.390e+00
+    dqg vs gate_tma64        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.702e+00
+    dkg vs gate_tma64        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.427e+01
+    dg vs gate_tma64         max_abs=4.768e-07  max_rel=8.847e-08  ref_max=5.390e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    dqg vs torch(same raw)   max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.770e+00
+    dkg vs torch(same raw)   max_abs=9.537e-07  max_rel=4.333e-08  ref_max=2.201e+01
+    dg vs torch(same raw)    max_abs=9.537e-07  max_rel=2.168e-07  ref_max=4.399e+00
+    dq vs FLA                max_abs=1.704e-03  max_rel=9.635e-04  ref_max=1.768e+00
+    dk vs FLA                max_abs=2.067e-02  max_rel=9.400e-04  ref_max=2.199e+01
+    dg vs FLA                max_abs=3.665e-03  max_rel=8.337e-04  ref_max=4.396e+00
+    dqg vs gate_tma          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.770e+00
+    dkg vs gate_tma          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.201e+01
+    dg vs gate_tma           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.399e+00
+    dqg vs gate_tma64        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.770e+00
+    dkg vs gate_tma64        max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.201e+01
+    dg vs gate_tma64         max_abs=4.768e-07  max_rel=1.084e-07  ref_max=4.399e+00
+
+worst max_rel over all shapes:
+  dqg_torch          0.000e+00
+  dkg_torch          4.333e-08
+  dg_torch           2.170e-07
+  dq_fla             1.051e-03
+  dk_fla             9.466e-04
+  dg_fla             1.010e-03
+  dqg_gate_tma       0.000e+00
+  dkg_gate_tma       0.000e+00
+  dg_gate_tma        0.000e+00
+  dqg_gate_tma64     0.000e+00
+  dkg_gate_tma64     0.000e+00
+  dg_gate_tma64      1.084e-07
+
+================================================================================================
+Part B: timing -- gate segment delta (vs B2M_NODG) and vs full Triton B2
+================================================================================================
+  case               | gate_nodg     gate  gate_tma gate_tma64 |   fullB2 | gate/nodg tma/tma_nodg
+  B8 T2048 H8        |     517.9    673.5     655.2      852.1 |    899.6 |     1.30x        1.27x
+  B2 T1024 H8        |      70.4     95.3      93.8      111.3 |    121.5 |     1.35x        1.33x
+  T512 H4            |       8.7     11.9      11.5       11.2 |     14.6 |     1.37x        1.32x
+  T250 H3 (non-div)  |       7.9     10.9      10.7       10.2 |     13.9 |     1.37x        1.35x
+
+  note: gate_tma/gate_tma64 also include the TMA read-side win (P7-49/P7-51); the
+  gate-segment delta is gate/gate_nodg (both same staging).
+
+DONE

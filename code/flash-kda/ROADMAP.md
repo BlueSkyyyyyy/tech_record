@@ -660,7 +660,7 @@
       655.8→703.5µs（+7.3%）`，bank conflict/占用率/tensor% 全不动。**关键副产物（更正 §57）**：接上 sandwich 对最终
       `dA` 比 FLA 时暴露 §57 的**符号错误**——FLA `b_dw=-b_dw`（`chunk_bwd.py:280`）故第二项是 **`- dw@kg^T`**
       （§57 写成 `+`，其自身参考两侧同号故未现形）；已改正 `.cu`（`dapart=dbpart-dkpart`）与 §57 参考/公式。
-      **边界**：`db` 与门控链仍未落 CUDA（下一步）。
+      **边界**：`db` 已落；门控链当时未落（**已由 P7-57 关闭**）。
 
 - [x] **P7-56** 兑现 §55.6/§56.6/§57.6/§58.6「补非 GEMM 段」**第五刀**——写入门梯度
       `db[o] = Σ_v dvb[o,v]·v[o,v] + Σ_k dkgb[o,k]·kg[o,k]` 落进 K2 形状 CUDA B2（`docs/07` §59）。`dvb`(P7-52 §55)
@@ -678,7 +678,27 @@
       全局读 sector **不变**、占用率/tensor%/带宽都不动（`Duration 742→762µs，+2.7%`，核仍 DRAM/L2 双 bound）。
       **坑（真实踩到）**：harness 起初把 `dw` 输入与 `dw_out` 输出设成**同一张量**（`dw=dv@h` 的 global round-trip），
       流水/落盘覆写致 `dkgb` 大面积错（`max_rel≈2`）；改独立缓冲后 DB build 的 `dkgb` 与 §56 专用 build **逐位相同**
-      ——正是「`dw` 应同 CTA 交接、不走 global」的实证动机。**边界**：门控链仍未落 CUDA（下一步）。
+       ——正是「`dw` 应同 CTA 交接、不走 global」的实证动机。**边界**：门控链当时未落（**已由 P7-57 关闭**）。
+
+- [x] **P7-57** 兑现 §55.6/§56.6/§57.6/§58.6/§59.6「补非 GEMM 段」**第六刀**——**门控链**（最终
+      `dq/dk/dg`）落进 K2 形状 CUDA B2（`docs/07` §60）。把三条 raw GEMM 输出（`accq/acck/acck`）+
+      raw `dgk=[Σ_V h⊙dh]`（§49）+ `dkgb=A@(-dw)`（§56）按门控标定成最终输出：`dq=dq_raw*exp2(g)*scale`、
+      `dk_mid=dk_raw*exp2(gn-g)`、`kdk=k*dk_mid`、`dgk=dgk_raw*exp2(gn)+Σ_t kdk`、
+      `dg=q*dq-kdk+(t==last)*dgk+k*exp2(g)*dkgb*beta`、`dk=dk_mid+dkgb*exp2(g)*beta`。唯一归约是
+      `Σ_t kdk`（chunk 内逐 k-列和，**warp 内 `shfl_xor` over groupID**，因 mma 16 行铺在 8 lane×2 行），
+      `g==0` lane 写 `sdgkt[KD]`、`last` 行读回；symbols `b2gate_launch`。新增 `harness/check_bwd_b2_gate.py`
+      （`check_bwd_b2_gate.out.txt`，空闲卡）+ `harness/ncu_b2_gate_driver.py` / `harness/probe_b2_gate_ncu.sh`
+      （`probe_b2_gate_ncu.out.txt`）。**Part A**：`dq` vs torch（**同一 raw**）**逐位相同（max_abs=0）**、
+      `dk`/`dg` 落 **fp32 序 4.3e-8 / 2.2e-7**、vs FLA 三项全落 **tf32 底噪 1.0e-3**；三布局（非 TMA/TMA@32）
+      `dq`/`dk` **逐位**、`dg` 仅 TMA@64 差 1 ulp（含非整除 T=250）。**Part B**：门控是前五刀**最贵**的一刀
+      `gate/nodg` **1.30–1.38×**（对照 `db` +2~13%）；`gate_tma/B2` **0.73–0.78×**。**ncu**：增量＝**+199 MB
+      输出写（`dqg+dkg+dg`）+ 9.2× global load sector（片元式散读 `q/k/g`）+ `exp2f`（XU 0.20→1.51 M）**，
+      占用/bank conflict/tensor 不动，核仍 DRAM/L2 双 bound。**设计输入**：chunk 内逐列和的落点＝warp 内 `shfl`
+      + 一个 `[KD]` smem tile；门控成本回收杠杆＝**把 `q/k/g` 合流载入 smem**（生产 B2 里 `k/g` 已为 `kg` 载入）。
+      至此 §5.2 的 **B2 六项 `dq/dk/dv2/db/dg/dA` 第一次全部存在于 K2 形状 CUDA 核**。**坑**：`m_last` 项按
+      lane 条件（`g+8==lastrow`）写会让 `g=7` 的行 7/15 都被加——指纹「`dq/dk` 逐位对、`dg` 只在 行%16∈{7,15}
+      错」；改逐行坐标即归零。**边界**：`B2M_GATE` 要求 `B2M_DKGB` 且 standalone（不与 OUT/SAND 组合）、
+      `q/k/g` 片元式 global 读未合流、标量落盘。**下一步＝六项全搬完后收尾/维护**；有需求时再合流 `q/k/g`。
 
 - [x] **P7-32** 兑现 §34.4 的**待验证**：把 B1 的 `dh` 落盘从逐标量 `st.global` 换成 **TMA store**，
       验证能否复现 §34.1「删掉 store」收益的那 33%。给 `b1_tma_probe.cu` 加 `-DB1T_TMADH`：per-warp
@@ -1039,8 +1059,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-56 补测**。
-  - P7-56（本轮）：**兑现 §55.6/§56.6/§57.6/§58.6「补非 GEMM 段」第五刀——写入门梯度
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-57 补测**。
+  - P7-57（本轮）：**兑现 §55.6/§56.6/§57.6/§58.6/§59.6「补非 GEMM 段」第六刀——门控链（最终
+    `dq/dk/dg`）落进 K2 形状 CUDA B2**（`docs/07` §60）。给 `b2_mma_probe.cu` 加 `-DB2M_GATE`（需
+    `-DB2M_DKGB`；诊断 `-DB2M_NODG`；新符号 `b2gate_launch`）。门控标定全在寄存器（warp 拥有 k-列切片，
+    各 mma 片元独立）；唯一归约 `Σ_t kdk` 是 **warp 内 `shfl_xor` over groupID**（mma 16 行 = 8 lane×2 行），
+    `g==0` lane 写 `sdgkt[KD]`、`last` 行读回；`B2M_GATE` 下不再落 raw `dq/dk`（生产形态）。新增
+    `harness/check_bwd_b2_gate.py`（`check_bwd_b2_gate.out.txt`）+ `ncu_b2_gate_driver.py` / `probe_b2_gate_ncu.sh`
+    （`probe_b2_gate_ncu.out.txt`）。**Part A**：`dq` vs torch（同一 raw）**逐位（max_abs=0）**、`dk`/`dg`
+    **fp32 序 4.3e-8/2.2e-7**、vs FLA 三项 **tf32 底噪 1.0e-3**；非 TMA/TMA@32 逐位、TMA@64 仅 `dg` 差 1 ulp
+    （含非整除 T=250）。**Part B**：门控是前五刀**最贵**的一刀（`gate/nodg` **1.30–1.38×**），`gate_tma/B2`
+    **0.73–0.78×**。**ncu**：增量＝+199 MB 输出写 + **9.2× global-load sector（片元式散读 `q/k/g`）** +
+    `exp2f`（XU 0.20→1.51 M）；占用/冲突/tensor 不动、仍 DRAM/L2 双 bound。**至此 B2 六项
+    `dq/dk/dv2/db/dg/dA` 全部进 CUDA**。**坑**：`m_last` 项按 lane 条件写会错加行 7/15，须按行坐标。
+    **下一步＝专题收尾/维护**；有需求时把 `q/k/g` 合流载入 smem 收回门控的 +30%（待验证）。
+  - P7-56（上轮）：**兑现 §55.6/§56.6/§57.6/§58.6「补非 GEMM 段」第五刀——写入门梯度
     `db = Σ_v dvb·v + Σ_k dkgb·kg` 落进 K2 形状 CUDA B2**（`docs/07` §59）。`dvb`(§55)/`dkgb`(§56) 已在同一核、
     相同 warp 列划分下算出，故 `db` 是**纯跨 warp 归约**：给 `b2_mma_probe.cu` 加 `-DB2M_DB`
     （需 `-DB2M_OUT -DB2M_DKGB`；诊断 `-DB2M_NODB`；新符号 `b2db_launch`）；`dvb·v` 项的 `v` 需持久镜像
@@ -1067,7 +1100,7 @@
     **关键副产物**：接上 sandwich 对最终 `dA` 比 FLA 时暴露 §57 的**符号错误**——FLA `b_dw=-b_dw`
     （`chunk_bwd.py:280`）故 `dApre` 第二项是 **`- dw@kg^T`**（§57 写成 `+`，其自身参考两侧同号故未现形）；
     已改正 `.cu`（`dapart=dbpart-dkpart`）与 §57 参考/公式（§57 数值不变，两侧同步翻转）。**边界**：`db` 的
-    `sum_k dkgb·kg`（跨 warp 归约）与门控链仍未落 CUDA。
+    `sum_k dkgb·kg`（跨 warp 归约）已落；门控链当时未落（**已由 P7-57 关闭**）。
   - P7-54（上轮）：**兑现 §55.6/§56.6「补非 GEMM 段」第三刀——`dA` 的两个 GEMM 贡献（sandwich 之前）
     `dApre = Σ_v dv·v + Σ_k dw·kg` 落进 K2 形状 CUDA B2**（`docs/07` §57）。给 `b2_mma_probe.cu` 加
     `-DB2M_DA`（+ `b2da_launch`）：两个收缩维都**不是 `BT`**——base 按 warp 拥有 **V 列**（同输出支路分区）
@@ -1807,7 +1840,17 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-56 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-57 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-57（`docs/07` §60）补非 GEMM 段第六刀——门控链（最终 `dq/dk/dg`）落进 CUDA**：给
+    `b2_mma_probe.cu` 加 `-DB2M_GATE`（需 `-DB2M_DKGB`；诊断 `-DB2M_NODG`；+ `b2gate_launch`）。门控标定全在
+    寄存器，唯一归约 `Σ_t kdk` 是 **warp 内 `shfl_xor` over groupID**，`g==0` lane 写 `sdgkt[KD]`、`last` 行读回；
+    `B2M_GATE` 下不落 raw `dq/dk`。`dq` vs torch（同一 raw）**逐位**、`dk`/`dg` **fp32 序 4.3e-8/2.2e-7**、vs FLA
+    **tf32 底噪 1.0e-3**；非 TMA/TMA@32 逐位、TMA@64 仅 `dg` 差 1 ulp；段 **+30~38%**（前五刀最贵，因片元式散读
+    `q/k/g`：ncu global-load sector **9.2×**、+199 MB 输出写、`exp2f`），`gate_tma/B2` **0.73–0.78×**。**至此 B2 六项
+    `dq/dk/dv2/db/dg/dA` 全搬进 CUDA。** 新增 `harness/check_bwd_b2_gate.py`（`check_bwd_b2_gate.out.txt`）+
+    `harness/ncu_b2_gate_driver.py` / `harness/probe_b2_gate_ncu.sh`（`probe_b2_gate_ncu.out.txt`）。**坑**：`m_last`
+    项按 lane 条件写会错加行 7/15，须按行坐标（`rowrel=(i<2?g:g+8)`）。**后续可选**：把 `q/k/g` 合流载入 smem 收回
+    门控的 +30%（待验证）；把六段叠进单核做完整 K2 形状 CUDA B2。
   - **P7-56（`docs/07` §59）补非 GEMM 段第五刀——写入门梯度 `db = Σ_v dvb·v + Σ_k dkgb·kg` 落进 CUDA**：给
     `b2_mma_probe.cu` 加 `-DB2M_DB`（需 `-DB2M_OUT -DB2M_DKGB`；诊断 `-DB2M_NODB`；+ `b2db_launch`）。`dvb`(§55)/
     `dkgb`(§56) 已在同一核、相同 warp 列划分下算出，故 `db` 是**纯跨 warp 归约**：`dvb·v` 项的 `v` 需持久镜像

@@ -188,6 +188,34 @@ constexpr int BW = 16;    // output columns per warp = KD / NW
 #ifndef B2M_NODB
 #define B2M_NODB 0
 #endif
+//   B2M_NODG : keep the `B2M_GATE` build/signature but skip the gate reduction+stores
+//              (baseline for the isolated gate-segment timing).
+#ifndef B2M_NODG
+#define B2M_NODG 0
+#endif
+// P7-57: the *sixth non-GEMM segment* of B2 in CUDA -- the **gate chain**, i.e. the final
+// `dq/dk/dg` from the raw GEMM outputs (`accq`/`acck`), the raw `dgk=[sum_V h*dh]` (already
+// computed per chunk) and `dkgb=A@(-dw)` (P7-53).  FLA `chunk_bwd.py` /
+// `check_bwd_dqkg_kernel.py:173-189` (`gk_exp=exp2(g)`, `gn=g[last]`, `gb=gk_exp*beta`):
+//   dq = dq_raw * gk_exp * scale
+//   dk = dk_raw * exp2(gn-g) + dkgb*gb
+//   kdk = k * (dk_raw*exp2(gn-g))             (dk *before* the dkgb*gb term)
+//   dgk_tot[k] = dgk_raw[k]*exp2(gn[k]) + sum_t kdk[t,k]
+//   dg = q*dq - kdk + (t==last)*dgk_tot + kg*dkgb*beta
+// Every fragment position of a warp's owned k-column slice is independent; the only reduction
+// is `sum_t kdk` over the chunk's rows (an intra-warp shfl over the mma groupID).  Requires
+// `B2M_DKGB` (for `dkgb`) and the raw `q`/`k`/`g`/`beta`/`scale` inputs.  Outputs the final
+// `dq`,`dk`,`dg` (and keeps `dw`); the raw `dq`/`dk` are *not* stored under `B2M_GATE`
+// (production form -- they live on in registers; the harness reads them from the bare core build).
+#ifndef B2M_GATE
+#define B2M_GATE 0
+#endif
+#if B2M_GATE && !B2M_DKGB
+#error "B2M_GATE requires B2M_DKGB"
+#endif
+#if B2M_GATE && (B2M_OUT || B2M_SAND)
+#error "B2M_GATE is standalone (B2M_DKGB only; no B2M_OUT / B2M_SAND)"
+#endif
 // raw `v` staging (`Stage::vv`) and the `kg` buffer are needed by `B2M_DA` (base dA) and/or `B2M_DB`.
 #define B2M_VV_KG_ON (B2M_DA || B2M_DB)
 constexpr int BVK = B2M_BVK;   // V-tile (contraction) depth staged per pipeline stage
@@ -261,6 +289,11 @@ struct alignas(128) Shared {
     float sA[BT][BT];
     float sbeta[BT];     // beta[o_t] (rows t<T)
     float daB[BT][BT];   // scratch: masked dApre, then the second matmul result
+#endif
+#if B2M_GATE
+    // P7-57: per-chunk `dgk_tot[k] = dgk_raw[k]*exp2(g_last[k]) + sum_t kdk[t,k]`, written by
+    // the `g==0` lanes of each warp (its own k-column slice) and read back for the `m_last` row.
+    float sdgkt[KD];
 #endif
 };
 
@@ -456,6 +489,13 @@ DEV void issue_tma(Stage* st, const CUtensorMap* dom, const CUtensorMap* vnm,
 #else
 #define TMA_VV_ARG
 #endif
+#if B2M_GATE
+// trailing kernel args of the standalone gate build (after `dkgb`): beta + q/k/g + gated outs
+#define GATE_TAIL , (const float*)beta, (const float*)qin, (const float*)kin, \
+                   (const float*)gin, (float*)dqg, (float*)dkg, (float*)dg, scale
+#else
+#define GATE_TAIL
+#endif
 __global__ void __launch_bounds__(NW * 32)
 b2mma_kernel(
 #if B2M_TMA_ON
@@ -489,6 +529,15 @@ b2mma_kernel(
 #endif
 #if B2M_DKGB
              float* __restrict__ dkgb,
+#endif
+#if B2M_GATE
+             const float* __restrict__ beta,
+#endif
+#if B2M_GATE
+             const float* __restrict__ qptr, const float* __restrict__ kraw,
+             const float* __restrict__ graw,
+             float* __restrict__ dqg, float* __restrict__ dkg, float* __restrict__ dg,
+             float scale,
 #endif
 #if B2M_DB
              float* __restrict__ db_out,
@@ -773,23 +822,31 @@ b2mma_kernel(
         const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
         if (tr0 < T) {
 #if B2M_VECST
+  #if !B2M_GATE
             *reinterpret_cast<float2*>(&dq[o0]) = make_float2(accq[nt][0], accq[nt][1]);
             *reinterpret_cast<float2*>(&dk[o0]) = make_float2(acck[nt][0], acck[nt][1]);
+  #endif
             *reinterpret_cast<float2*>(&dw_out[o0]) = make_float2(accw[nt][0], accw[nt][1]);
 #else
+  #if !B2M_GATE
             dq[o0] = accq[nt][0]; dq[o0 + 1] = accq[nt][1];
             dk[o0] = acck[nt][0]; dk[o0 + 1] = acck[nt][1];
+  #endif
             dw_out[o0] = accw[nt][0]; dw_out[o0 + 1] = accw[nt][1];
 #endif
         }
         if (tr1 < T) {
 #if B2M_VECST
+  #if !B2M_GATE
             *reinterpret_cast<float2*>(&dq[o1]) = make_float2(accq[nt][2], accq[nt][3]);
             *reinterpret_cast<float2*>(&dk[o1]) = make_float2(acck[nt][2], acck[nt][3]);
+  #endif
             *reinterpret_cast<float2*>(&dw_out[o1]) = make_float2(accw[nt][2], accw[nt][3]);
 #else
+  #if !B2M_GATE
             dq[o1] = accq[nt][2]; dq[o1 + 1] = accq[nt][3];
             dk[o1] = acck[nt][2]; dk[o1 + 1] = acck[nt][3];
+  #endif
             dw_out[o1] = accw[nt][2]; dw_out[o1 + 1] = accw[nt][3];
 #endif
         }
@@ -843,6 +900,80 @@ b2mma_kernel(
         const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * KD + col;
         if (tr0 < T) { dkgb[o0] = acc3[nt][0]; dkgb[o0 + 1] = acc3[nt][1]; }
         if (tr1 < T) { dkgb[o1] = acc3[nt][2]; dkgb[o1 + 1] = acc3[nt][3]; }
+    }
+#endif
+#if B2M_GATE && !B2M_NODG
+    // ---- P7-57: gate chain -> final `dq`/`dk`/`dg` (FLA `chunk_bwd.py:173-189`) ----
+    __syncthreads();   // raw `dgk` stores visible block-wide before the read-back below
+    {
+        const int last = ((i_t + 1) * BT < T ? (i_t + 1) * BT : T) - 1;
+        const int lastrow = last - t0;                    // relative row of the last valid token
+        const int64_t dgk_base = ((int64_t)(n * NT + i_t) * H + hh) * KD;
+        const int64_t gl_base = ((int64_t)(n * T + last) * H + hh) * KD;
+        float dgv[2][4];
+        #pragma unroll
+        for (int nt = 0; nt < 2; ++nt) {
+            const int cl = nt * 8 + 2 * t;                // column within the warp's owned 16
+            const int c0 = warp * BW + cl, c1 = c0 + 1;
+            const float gl0 = graw[gl_base + c0], gl1 = graw[gl_base + c1];   // g at (last, col)
+            const float f0 = exp2f(gl0), f1 = exp2f(gl1); // exp2(g_last) for dgk_raw
+            const int tr0 = t0 + g, tr1 = t0 + g + 8;
+            float pk0 = 0.f, pk1 = 0.f;
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int row = (i < 2) ? tr0 : tr1;
+                const int col = (i & 1) ? c1 : c0;
+                float qv = 0.f, kv = 0.f, gv = 0.f, bt = 0.f;
+                if (row < T) {
+                    const int64_t off = ((int64_t)(n * T + row) * H + hh) * KD + col;
+                    qv = qptr[off]; kv = kraw[off]; gv = graw[off];
+                    bt = beta[((int64_t)(n * T + row) * H + hh)];
+                }
+                const float gk = exp2f(gv);
+                const float gnm = exp2f(((i & 1) ? gl1 : gl0) - gv);   // exp2(g_last - g)
+                const float dqf = accq[nt][i] * gk * scale;
+                const float dkm = acck[nt][i] * gnm;
+                const float dgb = acc3[nt][i];
+                const float kdk = kv * dkm;
+                dgv[nt][i] = qv * dqf - kdk + kv * gk * dgb * bt;
+                if (row < T) {
+                    const int64_t off = ((int64_t)(n * T + row) * H + hh) * KD + col;
+                    dqg[off] = dqf;
+                    dkg[off] = dkm + dgb * gk * bt;
+                }
+                if (i == 0 || i == 2) pk0 += kdk; else pk1 += kdk;
+            }
+            // `sum_t kdk` over the chunk: reduce over the mma groupID (lane bits 2..4)
+            pk0 += __shfl_xor_sync(0xffffffffu, pk0, 4);
+            pk0 += __shfl_xor_sync(0xffffffffu, pk0, 8);
+            pk0 += __shfl_xor_sync(0xffffffffu, pk0, 16);
+            pk1 += __shfl_xor_sync(0xffffffffu, pk1, 4);
+            pk1 += __shfl_xor_sync(0xffffffffu, pk1, 8);
+            pk1 += __shfl_xor_sync(0xffffffffu, pk1, 16);
+            if (g == 0) {
+                sh->sdgkt[c0] = dgk[dgk_base + c0] * f0 + pk0;
+                sh->sdgkt[c1] = dgk[dgk_base + c1] * f1 + pk1;
+            }
+        }
+        __syncwarp();
+        #pragma unroll
+        for (int nt = 0; nt < 2; ++nt) {
+            const int cl = nt * 8 + 2 * t;
+            const int c0 = warp * BW + cl, c1 = c0 + 1;
+            const float dl0 = sh->sdgkt[c0], dl1 = sh->sdgkt[c1];
+            const int tr0 = t0 + g, tr1 = t0 + g + 8;
+            #pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                const int row = (i < 2) ? tr0 : tr1;
+                const int col = (i & 1) ? c1 : c0;
+                if (row < T) {
+                    const int rowrel = (i < 2) ? g : g + 8;
+                    const float add = (rowrel == lastrow)
+                                          ? ((i & 1) ? dl1 : dl0) : 0.f;
+                    dg[((int64_t)(n * T + row) * H + hh) * KD + col] = dgv[nt][i] + add;
+                }
+            }
+        }
     }
 #endif
 #if B2M_DB && !B2M_NODB
@@ -1021,6 +1152,10 @@ static int b2mma_launch_impl(const void* v, const void* vn, const void* h, const
 #if B2M_DKGB
                              void* dkgb,
 #endif
+#if B2M_GATE
+                             const void* beta, const void* qin, const void* kin,
+                             const void* gin, void* dqg, void* dkg, void* dg, float scale,
+#endif
                              int B, int T, int H, int NT, void* stream) {
     dim3 grid(NT, B * H);
     int smem = (int)sizeof(Shared);
@@ -1046,7 +1181,7 @@ static int b2mma_launch_impl(const void* v, const void* vn, const void* h, const
         (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
         (const float*)dov, (const float*)dvv, (const float*)dwin,
         (float*)dq, (float*)dk, (float*)dw, (float*)dgk,
-        (const float*)A4, (float*)dkgb,
+        (const float*)A4, (float*)dkgb GATE_TAIL,
         B, T, H, NT);
 #else
     b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
@@ -1065,7 +1200,7 @@ static int b2mma_launch_impl(const void* v, const void* vn, const void* h, const
         (const float*)v, (const float*)vn, (const float*)h, (const float*)dh,
         (const float*)dov, (const float*)dvv, (const float*)dwin,
         (float*)dq, (float*)dk, (float*)dw, (float*)dgk,
-        (const float*)A4, (float*)dkgb,
+        (const float*)A4, (float*)dkgb GATE_TAIL,
         B, T, H, NT);
 #else
     b2mma_kernel<<<grid, NW * 32, smem, (cudaStream_t)stream>>>(
@@ -1104,7 +1239,7 @@ extern "C" int b2out_launch(const void* v, const void* vn, const void* h, const 
 }
 #endif
 
-#if B2M_DKGB
+#if B2M_DKGB && !B2M_GATE
 extern "C" int b2dkgb_launch(const void* v, const void* vn, const void* h, const void* dh,
                              const void* dov, const void* dvv, const void* dwin,
                              const void* A4,
@@ -1112,6 +1247,23 @@ extern "C" int b2dkgb_launch(const void* v, const void* vn, const void* h, const
                              int B, int T, int H, int NT, void* stream) {
     return b2mma_launch_impl(v, vn, h, dh, dov, dvv, dwin, dq, dk, dw, dgk,
                              A4, dkgb, B, T, H, NT, stream);
+}
+#endif
+
+#if B2M_GATE
+// P7-57 dedicated launcher (`b2gate_launch`): compiled with `-DB2M_DKGB -DB2M_GATE`
+// (standalone; no B2M_OUT/B2M_SAND).  Emits the raw `dq/dk/dw/dgk/dkgb` plus the gate-chain
+// outputs `dqg/dkg/dg`.
+extern "C" int b2gate_launch(const void* v, const void* vn, const void* h, const void* dh,
+                             const void* dov, const void* dvv, const void* dwin,
+                             const void* A4, const void* beta, const void* qin,
+                             const void* kin, const void* gin,
+                             void* dq, void* dk, void* dw, void* dgk, void* dkgb,
+                             void* dqg, void* dkg, void* dg, float scale,
+                             int B, int T, int H, int NT, void* stream) {
+    return b2mma_launch_impl(v, vn, h, dh, dov, dvv, dwin, dq, dk, dw, dgk,
+                             A4, dkgb, beta, qin, kin, gin, dqg, dkg, dg, scale,
+                             B, T, H, NT, stream);
 }
 #endif
 #endif  // !B2M_DA && !B2M_DB

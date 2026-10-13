@@ -6124,3 +6124,126 @@ CUPTI `dev`（kernel-only，µs；`*_nodb` = 同 build 跳过 `db` 归约）：
   CUDA**——落完后 B2 的六项 `dq/dk/dv2/db/dg/dA` 才算全搬进 CUDA。下一步＝在 `db` 之后补门控链。
 - 只覆盖 `K=V=128`、`BT=16`、fp32；`B2M_DB` 要求 `OUT+DKGB`，未与 `B2M_DA`/`B2M_SAND` 组合；`db` 落盘用
   标量 32-bit（`-DB2M_VECST` 未接）。这些都不影响本节结论（增量机制＝一小块 smem 归约 + 一次落盘）。
+
+## 60. 「K2 形状 CUDA B2」补非 GEMM 段第六刀：**门控链**（最终 `dq/dk/dg`）落进 CUDA——`dq` 逐位、`dg` fp32 序 ~2e-7，整链落 tf32 底噪（P7-57）
+
+§55–§59 把 B2 的 `dv2`/`dkgb`/`dA`/`db` 补进 CUDA 后，六项里只剩**门控链**——即把三条 raw GEMM 输出
+（`dq=[do]@h^T`、`dk=[v_new]@dh^T`，及 §56 已在此核的 `dkgb=A@(-dw)`）与逐 chunk 的 `dgk=[Σ_V h⊙dh]`
+（§49/§50 已在此核）**按门控标定成最终输出**。对应 FLA `chunk_bwd.py` / `check_bwd_dqkg_kernel.py:173-189`：
+
+    gk_exp = exp2(g)                 # g = chunk 内 log2 前缀和（log2 域，≤0）
+    gn     = g[c 的最后一个有效行]      # 逐 chunk 标量行
+    dq     = dq_raw * gk_exp * scale
+    dk_mid = dk_raw * exp2(gn - g)
+    kdk    = k * dk_mid              # 注意：用**加 dkgb·gb 之前**的 dk
+    dgk    = dgk_raw * exp2(gn) + Σ_t kdk          # 逐 (chunk,k) 的标量
+    dg     = q*dq - kdk + (t==last)*dgk + k*gk*dkgb*beta
+    dk     = dk_mid + dkgb*(gk*beta)
+
+这是 B2 的**最后一段**：落完后六项 `dq/dk/dv2/db/dg/dA` 全部第一次同时存在于 K2 形状 CUDA 核里。它与前五刀的
+结构区别是：**没有新的收缩维、没有新的 GEMM**——每个 warp 拥有的 k-列切片上，各 mma 片元位置的门控标定互相
+独立；唯一的归约是 `Σ_t kdk`（chunk 内逐列和，一次 **warp 内 `shfl_xor`**，因为 mma 的 16 行恰好铺在 groupID
+的 8 个 lane × 2 行上）。
+
+证据：`harness/b2_mma_probe.cu`（新增 `-DB2M_GATE`，需 `-DB2M_DKGB`；诊断开关 `-DB2M_NODG`；新符号
+`b2gate_launch`，输出 raw `dw`/`dgk`/`dkgb` + 最终 `dqg`/`dkg`/`dg`）+ `harness/check_bwd_b2_gate.py`
+（`harness/check_bwd_b2_gate.out.txt`，空闲卡）+ `harness/ncu_b2_gate_driver.py` / `harness/probe_b2_gate_ncu.sh`
+（`harness/probe_b2_gate_ncu.out.txt`）。
+
+### 60.1 设计：门控标定全在寄存器，唯一归约是 warp 内列和
+
+- **操作数**：`accq`/`acck`（三条 V-归约 GEMM 的 raw 输出，warp 拥有 k 列 `[w·16, w·16+16)`）、`acc3`（§56 的
+  `dkgb`，同样的 k-列划分）、raw `dgk`（§49 的逐 chunk `Σ_V h⊙dh`，已落 `dgk[B,NT,H,K]`）；输入 `q/k/g/beta`
+  与标量 `scale`。
+- **门控标定**：对每个 mma 片元位置 `(tr0/tr1, c0/c1)` 读 raw `q/k/g`，算 `exp2`、`dq`/`dk_mid`/`kdk`、以及
+  `dg` 的三个非归约项，写 `dqg`/`dkg`。**不新增任何 `[BT,K]` 缓冲**——`q/k/g` 在 post-loop 里按片元地址从
+  global 读（原型形态）。
+- **`Σ_t kdk` 归约**（`b2_mma_probe.cu` 门控段的 `pk0/pk1`）：每 lane 把自己 2 行 × 2 列的 `kdk` 求和，再在
+  groupID 上 `shfl_xor(4/8/16)`（3 步）得到整列和；`g==0` 的 lane 把 `dgk_raw*exp2(gn) + Σ_t kdk` 写进
+  `sh->sdgkt[KD]`，`__syncwarp()` 后 `t==last` 的行读回。全程无新 global 收缩（`dgk` 的读回是**本 CTA 刚写**的
+  地址）。
+- **`m_last` 项**：`dg` 只在 chunk 最后一个有效行加 `dgk`（`lastrow = last - i_t*BT`，行判定用
+  `(i<2? g : g+8) == lastrow`）。**注意这是逐行条件、不是逐 lane**（见 §60.6 的坑）。
+- `-DB2M_GATE` 下**不再落盘 raw `dq`/`dk`**（生产形态：它们只活在寄存器里；harness 的对照从裸核 `core` build
+  取 raw），故门控 build 的写出＝`dw`+`dkgb`+`dqg`+`dkg`+`dg`。
+
+### 60.2 Part A — 正确性：`dq` 逐位，`dk`/`dg` 落 fp32 序，三布局逐位/近逐位
+
+四组 shape（`BT=16`，含非整除 `T=250`）。isolate 门控算术：把 torch 门控作用在**同一份 CUDA raw
+`dq/dk/dgk` + `dkgb`** 上：
+
+| 量（四组最坏 `max_rel`） | 值 |
+|---|---|
+| `dq` vs torch（同一 raw） | **0（逐位相同）** |
+| `dk` vs torch（同一 raw） | **4.3e-8**（fp32 归约序） |
+| `dg` vs torch（同一 raw） | **2.2e-7**（fp32 序，`Σ_t kdk` 加法次序） |
+| `dq` / `dk` / `dg` vs FLA | **1.05e-3 / 9.47e-4 / 1.01e-3**（tf32 底噪） |
+| `dq`/`dk` vs `gate_tma` | **0（逐位相同）** |
+| `dg` vs `gate_tma` / `gate_tma64` | **0 / 1.08e-7**（后者是 `BVK=64` 的 V-累加序） |
+
+三件事被钉死：(1) **`dq` 的门控标定逐位无损**（`dq_raw*gk*scale`，与 torch 同一顺序）；(2) **`dk`/`dg` 只是
+fp32 加法序差（~1e-7）**，无算法偏差——`Σ_t kdk` 的 warp 内归约序与 torch 的整行求和不同；(3) **最终三项 vs FLA
+全落 tf32 底噪 ~1e-3**，与 `dv2`/`dkgb`/`db` 同阶。三种 stage 布局（非 TMA / TMA@32 / TMA@64 atom）对 `dq`/`dk`
+**逐位零影响**，`dg` 仅 `TMA@64` 因 `BVK=64` 的 V 方向累加分组差 1 ulp。
+
+### 60.3 Part B — 计时：门控链是**前五刀里最贵的一刀**（+30~38%），但仍不慢于全 Triton B2
+
+CUPTI `dev`（kernel-only，µs；`gate_nodg` = 同 build 跳过门控归约+落盘）：
+
+| shape | `gate_nodg` | `gate` | `gate_tma` | `gate_tma64` | 全 Triton B2 | `gate/nodg` | `gate_tma/B2` |
+|---|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | 517.9 | 673.3 | **655.1** | 852.3 | 897.7 | 1.30× | **0.73×** |
+| `B2 T1024 H8` | 70.5 | 95.3 | 93.8 | 110.9 | 121.5 | 1.35× | 0.77× |
+| `T512 H4` | 8.7 | 12.0 | 11.5 | 11.2 | 14.7 | 1.38× | 0.78× |
+| `T250 H3`（非整除） | 8.0 | 10.9 | 10.7 | 10.2 | 14.0 | 1.37× | 0.76× |
+
+- **门控链比前五刀都贵**：`db` 只 +2~13%（§59）、输出支路 +12~25%（§55）、`dkgb` +9~13%（§56），而门控
+  **+30~38%**。原因见 §60.4（不是收缩，而是 **raw `q/k/g` 的片元式 global 读**——每个 lane 按 `(row,col)`
+  散读 8 个位置 × 3 张量，未合流）。
+- **K2 形状 CUDA B2（GEMM 核 + `dkgb` + 门控）到全 Triton B2 `gate_tma/B2` = 0.73–0.78×**——即补进门控后仍
+  不慢于全 Triton B2（差 `dv2`/`db`/`dA` 三条已分别落地的支路）。
+- `gate_tma64`（`BVK=64`）如前几刀无正收益（本核 smem/占用约束），取 `BVK=32`。
+
+### 60.4 `ncu` — 增量 = **+199 MB 输出写 + 9× 的 global load sector（非合流 `q/k/g` 读）+ `exp2f`**
+
+`B8 T2048 H8`，同一批 fp32 操作数（`probe_b2_gate_ncu.out.txt`）：
+
+| 变体 | DRAM 读 | DRAM 写 | Duration | L2 bytes | tensor% | occ | bank conflict | shared wavefronts | l1tex 全局读 sectors | srcunit 读 | XU inst |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| `gate_tma_nodg` | 1.35 GB | 135.7 MB | 495.9 µs | 2.35 GB | 2.99% | 24.54% | 9.01 M | 26.31 M | **2.10 M** | 42.22 M | 0.197 M |
+| `gate_tma`（本轮） | 1.56 GB | **334.3 MB** | **655.3 µs** | 3.07 GB | 6.30% | 24.23% | 9.68 M | 39.83 M | **19.40 M** | 48.74 M | **1.507 M** |
+
+- **写出**：`gate` 比 `nodg` 多写 **199 MB = `dqg`+`dkg`+`dg` 三张 `[B,T,H,K]` fp32**（各 67 MB）——门控的
+  三项输出本身就是 B2 的交付物，非额外开销（生产的 B2 只写 `dq/dk/dg` 三张，与裸核写 `dq/dk/dw` 同量）。
+- **读入**：l1tex 全局读 sector `2.10 M→19.40 M`（**9.2×**），srcunit 读 `42.2 M→48.7 M`（+6.5 M）。这
+  17.3 M 新 sector（≈554 MB L1 侧字节）就是 **`q/k/g` 按 mma 片元地址的散读**——每 lane 8 位置 × 3 张量，
+  地址在 warp 内不连续（`row=g/g+8`、`col=2t/2t+1`），合流度差。DRAM 读只 +0.21 GB，说明大头被 L2 吸收，但
+  **L2 仍被推高 +0.72 GB**、L2 SOL 87–88%（核仍 DRAM/L2 双 bound）。
+- **`exp2f`**：`sm__inst_executed_pipe_xu` `0.197 M→1.507 M`（+1.31 M = 门控的 `exp2(g)`/`exp2(gn-g)`/`exp2(gn)`
+  的 MUFU 发射，SASS `MUFU 1→21`）。占用率（24.5%）、bank conflict（9.0→9.7 M，仅 +7%）、tensor%（被稀释）
+  都不构成新瓶颈；`Duration +159 µs（+32%）`与「+199 MB 写（≈80 µs@2.5 TB/s）+ 更差的读合流 + `exp2` 发射」一致。
+
+### 60.5 结论 / 对目标卡的设计输入
+
+- **B2 的门控链在 CUDA 里闭环**：最终 `dq/dk/dg` 从 raw GEMM 输出 + `dgk` + `dkgb` 就地算出，**`dq` 逐位、
+  `dk`/`dg` fp32 序 ~1e-7、整链 vs FLA 落 tf32 底噪**、三布局逐位/近逐位（含非整除 `T=250`）。至此 §5.2 的
+  **B2 六项 `dq/dk/dv2/db/dg/dA` 第一次全部存在于 K2 形状 CUDA 核**。
+- **设计输入（关键）**：门控的 `Σ_t kdk` 这类「chunk 内逐 k-列和」的落点是 **warp 内 `shfl_xor`（groupID
+  3 步）+ 一个 `[KD]` 的 smem tile**，与 `dgk` 的逐 chunk 标量复用——**不要为它另起收缩**。`m_last` 项要按
+  **行坐标**判定（`(i<2?g:g+8)==lastrow`），不能只看 lane。
+- **设计输入（成本）**：门控是本核最贵的非 GEMM 段（+30~38%），成本不在算术而在**raw `q/k/g` 的片元式 global
+  读**（9× 全局 sector）。目标卡应把 `q/k/g` **像 `kg` 一样在 chunk 开头合流载入 smem**（生产 B2 里 `k`/`g`
+  本就为 `kg`/`db`/`dA` 载入，只需多一张 `q`），把散读换成一次合流读——这是把 +30% 收回去的下一个杠杆（待验证）。
+- **整核定位**：K2 形状 CUDA（GEMM 核 + `dkgb` + 门控）已到全 Triton B2 的 **0.73–0.78×**；余下 `dv2`/`db`/`dA`
+  三条支路已分别落地（§55/§56/§59 + §57/§58），把它们叠满即完整 K2 形状 CUDA B2。
+
+### 60.6 坑与边界（诚实）
+
+- **坑（本轮真实踩到，指纹很典型）**：`m_last` 项第一版写成
+  `add = (g == lastrow || g + 8 == lastrow) ? … : 0`，**条件只依赖 lane 的 `g`、不依赖片元行 `i`**。结果
+  lane `g=7`（其 `g+8=15=lastrow`）在**行 `g`（=7）与行 `g+8`（=15）两处**都加了 `dgk`。指纹：`dq`/`dk`
+  逐位对、`dg` 只在 `行%16 ∈ {7,15}` 上错（`max_rel≈1`，`max_abs≈|dgk|`）。改成逐行 `rowrel=(i<2?g:g+8)`
+  即归零。**教训**：mma 片元的「lane 条件」与「行条件」不是一回事，凡按行 mask 必须显式换算行坐标。
+- 本轮只覆盖 `K=V=128`、`BT=16`、fp32；`B2M_GATE` **要求 `B2M_DKGB` 且不与 `B2M_OUT`/`B2M_SAND` 组合**
+  （standalone，编译期 `#error` 拦截）。`q/k/g` 走**片元式 global 读**（未合流，见 §60.4）；`dqg`/`dkg`/`dg`
+  落盘用标量 32-bit（`-DB2M_VECST` 未接）。这些都不影响本节结论（增量机制 = 门控标定 + warp 内列和 + 三次落盘）。
