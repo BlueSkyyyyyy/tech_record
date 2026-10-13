@@ -2860,6 +2860,36 @@
   §8 局限。**纯源码走读（资料分析），本轮无新实验。** 配套博客 post
   `mega-kernel-21-mpk-triton-backend`（weight 22）并更新 `mega-kernel-00-index` 第 21 项。
 
+### P107 MPK 自动路径（Blackwell 版）源码走读（`docs/21-mpk-blackwell-transpiler.md`）
+
+- [x] **P107-1** 补齐 `docs/18`（P104-1）**§8 明留的尾巴**——「Hopper/Blackwell 只给骨架；
+  Blackwell 的 `2sm_mma` / `launch_kernel_on_cluster` 只标出调用点与行号，未逐行走读其内部」
+  （Hopper 的一半已由 `docs/07` 覆盖）。见 `docs/21-mpk-blackwell-transpiler.md`
+  （快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与 `docs/06`–`docs/20` 同快照；
+  CuTe/CUTLASS 引用快照自带的 `deps/cutlass`、本机 `f3fde583`；**纯源码走读、无新实验**——
+  Blackwell/SM100 在目标卡 H100/sm90 不可执行，与 `docs/17` 同口径）：
+  headline——**Blackwell 后端 = Hopper 后端 + 「把计算单元从 1 CTA 扩到 2 CTA」的一整条链**。
+  §1 入口三硬约束（`transpiler_tb_blackwell.cc:368-377`：`target_cc==B200` / warpgroup 数上限 /
+  `num_threads==(consumer+producer)*128`）；§2 集群与 2SM（`cluster_shape :410-416`、
+  `cluster_layout_vmnk`+`elect_one_cta :519-526`、`sm100_make_2sm_trivial_tiled_mma :504-512`，
+  CUTLASS 侧 `sm100_common.inl:373-429` + `static_assert(M==128||256) :377`）；§3 TMEM + MMA mbarrier
+  （`Allocator2Sm` / `arrive_cnt=forloop_range*cluster/2` / `consumer_sync_mask`，
+  `generate_Tmem_mbarrier_init_code :319-345`，SMEM 三类区域 `:428-441`）；§4 输入
+  （`BlackwellAsyncPipeline` = `PipelineTmaUmmaAsync` `blackwell_pipeline.h:15-16`；
+  `InputTMAAsyncCopy_Blackwell` 的 **multicast mask：A 沿 N / B 沿 M**，`input.h:352-360`）；
+  §5 布局（`partition_shape_A/B`+`sm100_smem_selector`+`UMMA::tile_to_mma_shape`，`blackwell_matmul.h:56-88`）；
+  §6 `plan_tb_swizzle_blackwell.cc`（16B chunk 下界 + 128B bank 对齐）；§7 主循环（producer warpgroup 发
+  TMA `:1036-1078`、consumer `:1465-1508`、`elect_one_cta && elect_one_warp` 门 `:1143-1146`、
+  `umma_arrive_multicast_2x1SM`→`tcgen05.commit.cta_group::2...multicast::cluster` `:1202-1204`/CUTLASS
+  `barrier.h:813-828`）；§8 累加器（TMEM `get_mma_tC`/`write_tC_to_sC`、in-reg 写回前
+  `wait_barrier` `:1536`、融合 epilogue `:1083-1121`）；§9 host 侧（host 再定义 `TiledMMA`
+  `transpiler_kn.cc:747-778` + `cutlass::launch_kernel_on_cluster :824-831`，对照 Hopper 朴素 `<<<>>>`
+  `:819-823`）；§10 Hopper↔Blackwell 逐维对照表；§11 论文 §4.2 对照（语义一致、实现升级；2SM 路径
+  **论文未提、快照新增**，同 `docs/17`）；§12 C1–C5（**只贡献 C3**）；§13 局限（未跑 SM100 本体、
+  未逐行展开 CuTe 模板装配、`cluster_dim` 来源未深挖、循环内单 warp 门未验证）。**纯源码走读
+  （资料分析），本轮无新实验。** 配套博客 post `mega-kernel-22-mpk-blackwell-transpiler`（weight 23）
+  并更新 `mega-kernel-00-index` 第 22 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3021,7 +3051,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P106-1 完成（1/1）**。补齐 `docs/19`（P105-1）**§8 明留的尾巴**——「`triton_kernels.py`
+- 当前进度：**P107-1 完成（1/1）**。补齐 `docs/18`（P104-1）**§8 明留的尾巴**——「Hopper/Blackwell
+  只给骨架；Blackwell 的 `2sm_mma` / `launch_kernel_on_cluster` 只标出调用点与行号，未逐行走读其内部」
+  （Hopper 的一半已由 `docs/07` 覆盖）。见 `docs/21-mpk-blackwell-transpiler.md`（快照 `f9eb70c`，
+  CuTe/CUTLASS 用快照自带 `deps/cutlass`、本机 `f3fde583`；**纯源码走读、无新实验**——Blackwell/SM100
+  在目标卡 H100/sm90 不可执行，与 `docs/17` 同口径）。headline——**Blackwell 后端 = Hopper 后端 +
+  「把计算单元从 1 CTA 扩到 2 CTA」的一整条链**：2SM TiledMMA（`sm100_make_2sm_trivial_tiled_mma`，
+  M∈{128,256}）→ cluster 布局 + leader CTA（`elect_one_cta`）→ multicast TMA（A 沿 N / B 沿 M）→
+  **TMEM** 累加（`Allocator2Sm` + `TMemLoadOp`）→ `tcgen05.commit.cta_group::2...multicast::cluster`
+  会合（`umma_arrive_multicast_2x1SM`）→ `cutlass::launch_kernel_on_cluster`；对照 Hopper 单 CTA
+  wgmma + `PipelineTmaAsync` + 朴素 `<<<>>>`。把这套与 `docs/04` §18–§23 的 sm90 实测连接：cluster /
+  `cta_group::2` 从「手写实验/资料里的 PTX」变成「codegen 默认生成的目标」。判据 **C1–C5 只贡献 C3**；
+  2SM 路径**论文未提、快照新增**（同 `docs/17`）。配套博客 post `mega-kernel-22-mpk-blackwell-transpiler`
+  （weight 23）、更新 `mega-kernel-00-index` 第 22 项。
+- 此前：**P106-1 完成（1/1）**。补齐 `docs/19`（P105-1）**§8 明留的尾巴**——「`triton_kernels.py`
   （Python 侧）未走」；顺这条尾巴往上是**一整个平行于 NVCC/CUDA transpiler 的第二条 codegen 后端**。
   见 `docs/20-mpk-triton-backend.md`（快照 `f9eb70c`，纯源码走读无新实验）：把
   `superoptimize(backend="triton")` → `triton_profiler.py`（**每候选图独立子进程** profile）→
