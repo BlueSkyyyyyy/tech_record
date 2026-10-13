@@ -1,0 +1,59 @@
+########## §60 数据面 HBM 饱和 × 控制面争用 ##########
+########################################################################
+# §60 把数据面推到 HBM 饱和：ILP 展开因子 U 与「控制面描述符写是否争带宽」
+# 目标卡 H100/sm90a，DW=88(352B)，K=32，prefix 协议，grid=PS+G，Ps=1..32
+########################################################################
+
+===== §A 正确性（宽松环 CAPp=chunk=6，PS=4，D=2，MD=8192）：U 扫描 =====
+  PS=4   G=100 wpp=25  NB=512   K=32  DW=88  D=2  CAPp=6    CW=0      MD=8192    U=1  grid=104  -> OK     ms=0.4492 descGB/s=12.8 taskGB/s=149.4
+  PS=4   G=100 wpp=25  NB=512   K=32  DW=88  D=2  CAPp=6    CW=0      MD=8192    U=4  grid=104  -> OK     ms=0.4376 descGB/s=13.2 taskGB/s=153.4
+  PS=4   G=100 wpp=25  NB=512   K=32  DW=88  D=2  CAPp=6    CW=0      MD=8192    U=8  grid=104  -> OK     ms=0.4392 descGB/s=13.1 taskGB/s=152.8
+  PS=4   G=100 wpp=25  NB=512   K=32  DW=88  D=2  CAPp=6    CW=0      MD=8192    U=16 grid=104  -> OK     ms=0.4304 descGB/s=13.4 taskGB/s=155.9
+
+===== §B headline：ILP 展开因子 U（G=100，MD=131072=2MB/batch，PS=8，D=2，NB=1000）=====
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=1  grid=108  -> OK     ms=2.2648 descGB/s=5.0 taskGB/s=926.0
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=2  grid=108  -> OK     ms=1.4077 descGB/s=8.0 taskGB/s=1489.8
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=4  grid=108  -> OK     ms=1.3553 descGB/s=8.3 taskGB/s=1547.3
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=108  -> OK     ms=1.4549 descGB/s=7.7 taskGB/s=1441.5
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=16 grid=108  -> OK     ms=0.9457 descGB/s=11.9 taskGB/s=2217.7
+
+===== §C HBM 争用：饱和（T=1024,U=8）× PS，含 mode0「无 producer」天花板（NB=1000）=====
+  --- mode0：无 producer（grid=G，读静态描述符）---
+  PS=1   G=100 wpp=100 NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=101  -> REF    ms=0.7512 descGB/s=15.0 taskGB/s=2791.6
+  --- mode1：per-worker 环 + PS 个 producer ---
+  PS=1   G=100 wpp=100 NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=101  -> OK     ms=2.3409 descGB/s=4.8 taskGB/s=895.9
+  PS=2   G=100 wpp=50  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=102  -> OK     ms=1.2041 descGB/s=9.4 taskGB/s=1741.6
+  PS=4   G=100 wpp=25  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=104  -> OK     ms=0.7806 descGB/s=14.4 taskGB/s=2686.6
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=108  -> OK     ms=0.7393 descGB/s=15.2 taskGB/s=2836.6
+  PS=16  G=100 wpp=7   NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=116  -> OK     ms=0.7436 descGB/s=15.1 taskGB/s=2820.3
+  PS=32  G=100 wpp=4   NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=132  -> OK     ms=0.7590 descGB/s=14.8 taskGB/s=2763.1
+
+===== §D 对照：同 T=1024 但非 ILP（U=1）× PS（NB=1000）=====
+  PS=1   G=100 wpp=100 NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=1  grid=101  -> OK     ms=2.2073 descGB/s=5.1 taskGB/s=950.1
+  PS=2   G=100 wpp=50  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=1  grid=102  -> OK     ms=1.1802 descGB/s=9.5 taskGB/s=1777.0
+  PS=4   G=100 wpp=25  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=1  grid=104  -> OK     ms=0.9094 descGB/s=12.4 taskGB/s=2306.1
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=1  grid=108  -> OK     ms=0.8752 descGB/s=12.9 taskGB/s=2396.2
+  PS=16  G=100 wpp=7   NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=1  grid=116  -> OK     ms=0.8651 descGB/s=13.0 taskGB/s=2424.1
+  PS=32  G=100 wpp=4   NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=1  grid=132  -> OK     ms=0.8655 descGB/s=13.0 taskGB/s=2423.1
+
+===== §E blockDim T × ILP U 矩阵（PS=8，MD=131072，NB=1000）=====
+  --- T=256 ---
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=1  grid=108  -> OK     ms=2.2720 descGB/s=5.0 taskGB/s=923.0
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=2  grid=108  -> OK     ms=1.4074 descGB/s=8.0 taskGB/s=1490.1
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=4  grid=108  -> OK     ms=1.3542 descGB/s=8.3 taskGB/s=1548.6
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=108  -> OK     ms=1.4600 descGB/s=7.7 taskGB/s=1436.4
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=16 grid=108  -> OK     ms=0.9468 descGB/s=11.9 taskGB/s=2215.0
+  --- T=512 ---
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=1  grid=108  -> OK     ms=1.2850 descGB/s=8.8 taskGB/s=1632.0
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=2  grid=108  -> OK     ms=0.8976 descGB/s=12.5 taskGB/s=2336.5
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=4  grid=108  -> OK     ms=0.8764 descGB/s=12.9 taskGB/s=2393.0
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=108  -> OK     ms=0.9250 descGB/s=12.2 taskGB/s=2267.2
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=16 grid=108  -> OK     ms=0.7392 descGB/s=15.2 taskGB/s=2837.2
+  --- T=1024 ---
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=1  grid=108  -> OK     ms=0.8756 descGB/s=12.9 taskGB/s=2395.0
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=2  grid=108  -> OK     ms=0.7438 descGB/s=15.1 taskGB/s=2819.4
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=4  grid=108  -> OK     ms=0.7384 descGB/s=15.3 taskGB/s=2840.3
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=8  grid=108  -> OK     ms=0.7519 descGB/s=15.0 taskGB/s=2789.1
+  PS=8   G=100 wpp=13  NB=1000  K=32  DW=88  D=2  CAPp=10   CW=0      MD=131072  U=16 grid=108  -> UNSUP  ms=1000000000000000019884624838656.0000 descGB/s=0.0 taskGB/s=0.0
+
+########## §60 完成 ##########
