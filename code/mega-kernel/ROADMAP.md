@@ -3335,6 +3335,45 @@
   （§8）：CUTLASS `collective_builder` 侧 QK/PV atom 未展开、`B2B` 宏路径未细究、`docs/35` §9 其余
   尾巴（注意力之外的 SM100 task 家族、`mla_prefill_host.cu` 原型）仍未覆盖。**本轮新增增量。**
 
+### P123 SM100 非 GEMM / 非 MLA task 家族走读（`docs/37-mpk-sm100-misc-tasks.md`）
+
+- [x] **P123-1** 补掉 `docs/35`（P121-1）**§9「局限」明留的相邻尾巴**与 `docs/36`（P122-1）**§8「局限」
+  明留的同一处**——「注意力之外的 SM100 task 家族（`attention_sm100`/`dflash_*`/`inkling_*`/
+  `glm_moe_router_sm100`/`prob_scatter_sm100`/`softmax_gather_sm100`/`topk_*`/`sampling_sm100`/
+  `rotary_embedding_sm100` 等）」。`docs/33`–`docs/36` 把 SM100 的**重算子主线**（FP8 GEMM / group-GEMM /
+  MLA attention）逐段打开；本文把**同一 `tasks/blackwell/` 目录下「轻但必需」的薄 task**逐个走通，并核对
+  它们在 `TaskType`/`graph.cc`/`persistent_kernel.py`/builder 四层的生产布线。见
+  `docs/37-mpk-sm100-misc-tasks.md`（快照 `f9eb70c`，与 `docs/06`–`docs/36` 同快照；**纯源码走读
+  （资料分析），本轮无新实验**——SM100 `sm_100f`/`sm_100a` 在目标卡 H100/sm90 不可执行）。三条 headline：
+  - **(A) 薄 task 是 megakernel 的「调度与数值枢纽」，几乎全是「极简 device 身体 + 静态角色」**：与
+    `docs/33`/`docs/34` 的 FP8（三/四角色 warp 特化 + UTCCP + TMEM）或 `docs/36` 的 2SM MLA（七 warp 五
+    pipeline + cluster）相反，本批是**几十到几百行、朴素 `__syncthreads`/命名屏障、无 TMA/TMEM** 的实现；
+    重 task 决定寄存器/代码足迹**上限**（`docs/04` §8/§10），这些薄 task 是**依赖图关节**（贡献 `TaskType`
+    数与事件扇入/扇出，对上 `docs/08`/`docs/13`）。
+  - **(B) 「一个 task = 一个 CTA」在薄 task 上的常数/几何适配**：`blockIdx.x` 在常驻内核里是 **worker
+    索引**，故 device 身体一律**遍历「本 task 全部 row」而非按 `blockIdx` 取 row**——最直白证据是
+    `per_token_group_quantize_fp8.cuh:87-92` 注释（*"blockIdx.x is the PHYSICAL worker id … Fix: each
+    task processes ALL rows"*），同族于 `docs/32` §5.3 的 `kNumSMs=1` HACK、`docs/34` §3.5 的 TMEM-warp。
+  - **(C) 同一「路由/采样」语义在仓库里有 3–4 份独立实现、由模型家族而非硬件代际决定**：路由有
+    group-aware 向量化 `topk_sigmoid_sm100`（要求专家数 2 的幂）、160 专家标量 `glm_moe_router`
+    （注释自陈不能复用 sigmoid 版）、logsigmoid-softmax `inkling_moe_router`（256 routed+2 shared）三种，
+    却映射到**同一组 `mul_sum_add`/`silu_mul` 下游**；采样有 common 库 `sampling_from_logits_kernel`
+    与 SM100 分块 `sampling_partial`/`sampling_reduce` 两套，且 `register_sampling_sm100_task` 与
+    `register_sampling_reduce_sm100_task` **共用同一 `TASK_SAMPLING_SM100`**（`task_register.cc:2543/2645`）。
+  §1 给四层布线表（`TaskType` 块 230–299 + 家族块 351–353/401 → `graph.cc` op → `persistent_kernel.py`
+  layer → builder 调用）+ 关键事实：**本批每个 task 都有 builder 调用**（glm4_moe/inkling/dflash/
+  deepseek_v3/qwen3/gpt_oss），与 `docs/35`/`docs/36` 的「有实现无生产者」相反；§2 路由三兄弟精读；
+  §3 采样链（argmax partial+reduce 的 64-bit 打包、sampling 两段式与 Gumbel-Max、softmax_gather 不
+  materialize 全分布、prob_scatter/extract 簿记）；§4 SMEM 原地 RoPE/RMSNorm（含 `norm_sm100` 融合 partial
+  RoPE 与「半 CTA 提前 return 静默跳过同步」的正面样板 `:48/112-113`）、`dflash_norm_rope`（寄存器版）、
+  `per_token_group_quantize`（UE8M0 packed）；§5 非 MLA attention（通用 `attention_sm100` 走 **m16n16k16
+  mma**、Q=O SMEM 复用（issue #740）、m-tile 分块跨 warp 归约（#702）、partial RoPE/sliding/sink；
+  DFlash 非因果 ctx+block 的 ref+mma 双实现；Inkling 相对位置 bias + log-scaling）；§6 轻量逐元素/簿记；
+  §7 判据（**只贡献 C3**）+ 生产位置。判据同 `docs/29`–`docs/36`。配套博客 post
+  `mega-kernel-38-mpk-sm100-misc`（weight 39）并更新 `mega-kernel-00-index` 第 38 项。P123-1 新留尾巴
+  （§8）：`sampling_from_logits_kernel` 的 CUB 内部未展开、`mma_m16n16k16` 汇编未逐条、命名屏障 ID 6/7
+  与 `docs/34` §3.5「须 ≥8」的口径张力**并存不判**、`mla_prefill_host.cu` 原型来源仍未走。**本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3566,7 +3605,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P122-1 完成（1/1）**。补掉 `docs/35`（P121-1）**§9「局限」明留的头号尾巴**——
+- 当前进度：**P123-1 完成（1/1）**。补掉 `docs/35`（P121-1）**§9**与 `docs/36`（P122-1）**§8**
+  明留的同一处相邻尾巴——「注意力之外的 SM100 task 家族」，见 `docs/37-mpk-sm100-misc-tasks.md`
+  （快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 在目标卡 H100/sm90 不可执行）。把
+  `tasks/blackwell/` 下「非 GEMM、非 MLA」的薄 task 逐个打开，并核对 `TaskType`/`graph.cc`/
+  `persistent_kernel.py`/builder 四层布线。三条 headline：**(A)** 与 `docs/33`–`docs/36` 的重 task
+  相反，本批是「极简 device 身体 + 静态角色」（几十到几百行、朴素命名屏障、无 TMA/TMEM），是 megakernel 的
+  **调度与数值枢纽**（决定 `TaskType` 数与事件扇入/扇出，对上 `docs/04` §8/§10 成本侧）；**(B)** 因
+  `blockIdx.x == worker id`，薄 task 一律**遍历全 row**（`per_token_group_quantize_fp8.cuh:87-92` 的
+  row-identity 修复，同族于 `docs/32` §5.3 `kNumSMs=1`、`docs/34` §3.5 TMEM-warp）；**(C)** 同一「路由/
+  采样」语义有 3–4 份**由模型家族决定**的实现（`topk_sigmoid`/`glm_moe_router`/`inkling_moe_router` 路由
+  三兄弟映射同一 `mul_sum_add` 下游；采样 common 库版 vs SM100 分块版；`TASK_SAMPLING_SM100` 被
+  `sampling_sm100` 与 `sampling_reduce_sm100` 共用）。**关键事实：本批每个 task 都有真实 builder 调用**
+  （glm4_moe/inkling/dflash/deepseek_v3/qwen3/gpt_oss），与 `docs/35`/`docs/36` 的「有实现无生产者」相反。
+  判据**只贡献 C3**。配套博客 post `mega-kernel-38-mpk-sm100-misc`（weight 39）并更新
+  `mega-kernel-00-index` 第 38 项。P123-1 新留尾巴见 §8（CUB 内部未展开、`mma_m16n16k16` 未逐条、命名
+  屏障 ID 6/7 与 `docs/34` §3.5「须 ≥8」口径**并存不判**、`mla_prefill_host.cu` 原型仍未走）。
+- 此前：**P122-1 完成（1/1）**。补掉 `docs/35`（P121-1）**§9「局限」明留的头号尾巴**——
   `mla_sm100_2sm.cuh`（3165 行，2SM 协作 attention）未逐行，见 `docs/36-mpk-sm100-mla-2sm.md`
   （快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：**(A)** 它是 MLA 家族里唯一的「整颗
   CUTLASS kernel」形态——`device::MLA::run()` 用 `ClusterLauncher::launch` 自持发 `(2,1,1)` cluster
