@@ -3618,6 +3618,44 @@
   `rms_norm_sm100`/`rotary_embedding_hopper`/`smem_row` 内部未逐行、sink 数值影响未实测、
   grid 第二轴与 task 粒度映射系静态推断、未构建。**本轮新增增量。**
 
+### P131 归一化 / 位置编码 task 家族跨代走读（`docs/45-mpk-norm-rope-tasks.md`）
+
+- [x] **P131-1** 补掉 `docs/37` §4（P123-1 对 SM100 norm/rope 只给**摘要**）、`docs/07` §3.1
+  （只走 `rms_norm_hopper_impl`）与 `docs/44` §10（P130-1 明留「`rms_norm_sm100`/
+  `rotary_embedding_hopper` 内部未逐行」）三处空白：把「每个 Transformer 层出现两次的薄算子」
+  norm/rope 当成**一个跨 Ampere/Hopper/Blackwell 三代演化的 task 家族**逐行打开。见
+  `docs/45-mpk-norm-rope-tasks.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，
+  与 `docs/06`–`docs/44` 同快照；**纯源码走读（资料分析），本轮无新实验**；SM100 本机不可执行）。
+  三条 headline：
+  - **(A) 三层形态与「谁没有独立 task」**：形态 A「独立 global-memory norm task」两条身体——
+    `ampere/rmsnorm.cuh` 的 `rms_norm_impl`（`TASK_RMS_NORM`=119，硬断言 `BATCH_SIZE==1`
+    `:24`、128/64/32-bit `cp.async` 双缓冲 `:29-100`、三段式蝶形归约 `:102-118`）与
+    `hopper/rmsnorm_hopper.cuh` 的 `rms_norm_hopper_impl`（`TASK_RMS_NORM_HOPPER`=154，
+    **注释掉单 batch 断言** `:24` + 支持多 batch `:75` + `EVEN_SPLIT`/短尾 tile `:29-48,110-115`）；
+    Python 前端按 `target_cc>=90` 二选一（`persistent_kernel.py:881`），**目标卡 H100/sm90 走 Hopper
+    那条**——即 `docs/09` §7–§8 真机实测的 test_mode RMSNorm（36.4–39.1 µs）本体。形态 B/C 是
+    「调用方 SMEM 视图上的融合 norm / 纯 RoPE」，**从不落 HBM、被 attention 内联调用**。
+  - **(B) 融合边界 + 死代码发现**：全仓**没有 `TASK_ROTARY`/`TASK_ROPE`**——RoPE 要么折进 attention
+    的 QK-norm 段，要么折进 DFlash 独立 task；**同一种数学、两种融合边界**取决于下游消费 SMEM 还是
+    全局张量（`dflash_norm_rope_sm100` 一线程一 `(token,head)` 是唯一独立的 norm+rope）。**发现并修正
+    `docs/37` §4.2 的静态事实错误**：`rotary_embedding_sm100.cuh` 仅被 `attention_sm100.cuh:23`
+    `#include`、**全仓（含 `tests/`）零调用者**，`attention_sm100` 在 `qk_norm=false,rope=true` 分支
+    实际调用的是 **`rotary_embedding_hopper`**（`:435/:455`）——又一处「按文件/名字推断哪份在跑会错」
+    （同 `docs/16`/`docs/20`/`docs/32`/`docs/33`/`docs/38` 死代码族）。
+  - **(C) 同步机制与线程数口径的「百家争鸣」**：三代融合 norm/rope 分别用 cooperative groups
+    （Ampere，`:37-41`）、`wg_sync`=`bar.sync`（Hopper，`utils.cuh:30-36`）、cutlass `NamedBarrier`
+    （Blackwell，ID 6/7）三套同步；`NUM_THREADS` 有**四种来源并存**（全局 `worker_config.h:18`=128、
+    hopper-rmsnorm 模板默认 256、hopper-rope 模板默认 128、hopper SMEM-rmsnorm 显式模板参），
+    barrier ID 用 6/7/9（对上 `docs/34` §3.5「须 ≥8」张力，只记不判）；**partial RoPE 三代不对称**
+    （Ampere 全家族不支持、Hopper/Blackwell 才有 `ROTARY_DIM`，解释 GLM-4.6 只能走 cc≥90）。
+  §6 给五层布线总表（`TaskType 119/154/297` / `task_register.cc:91/1551/185` /
+  `graph.cc:449-452/462-466/571-574` / 前端 / builder `dflash/builder.py:261/318/320`）。
+  判据**只贡献 C3**，与 `docs/11`/`docs/29`–`docs/44` 同口径。配套博客 post
+  `mega-kernel-46-mpk-norm-rope`（weight 47）并更新 `mega-kernel-00-index` 第 46 项。
+  P131-1 新留尾巴（§8）：本家族其它身体未构建/未运行（复用 `docs/09` 数字）、死代码定性系静态推断、
+  `smem_row`/`norm_linear_hopper` 未重复走读、barrier ID 张力不判、`WORKER_NUM_THREADS` 运行期值未取。
+  **本轮新增增量。**
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3877,10 +3915,38 @@
   `blockIdx.x` 是 **worker 索引**（同 `docs/32` §5.3 的 `kNumSMs=1`、`docs/34` §3.5 TMEM-warp、
   `docs/37` §2 薄 task「遍历全 row」）。写/移植设备端投机/采样 task 时，凡按 `batch`/`req` 索引
   全局缓冲，一律走 `task_metadata.request_id`。
+- **「被 `#include`」≠「被调用」：RoPE/norm 也有一枚同族死代码**（P131-1/`docs/45` §3.3）：
+  `tasks/blackwell/rotary_embedding_sm100.cuh` 只被 `attention_sm100.cuh:23` `#include`、
+  **全仓（含 `tests/`）零函数调用**；`attention_sm100` 在 `qk_norm=false, rope=true` 分支实际调的是
+  **`rotary_embedding_hopper`**（`:435`/`:455`）。**勘误 `docs/37` §4.2**（原称 attention_sm100
+  「选它」）。这是「按文件/名字/`#include` 推断哪份 device 代码在跑会错」的又一实例（同 `docs/32` §3、
+  `docs/33` §9.4、`docs/38`、`docs/16`/`docs/20`）——判 rope 走哪条必须追 `attention_sm100` 的
+  **实际调用符号**。同族口径坑还有：本家族 `NUM_THREADS` 有四种来源（全局 128 / hopper-rmsnorm 模板
+  默认 256 / hopper-rope 默认 128 / hopper SMEM-rmsnorm 显式模板参）并存，barrier ID 用 6/7/9。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P130-1 完成（1/1）**。补掉三条明留的尾巴——`docs/37` §5.1（只给 750 行摘要）、
+- 当前进度：**P131-1 完成（1/1）**。补掉 `docs/37` §4（P123-1 对 SM100 norm/rope 只给摘要）、
+  `docs/07` §3.1（只走 `rms_norm_hopper_impl`）与 `docs/44` §10（P130-1 明留「`rms_norm_sm100`/
+  `rotary_embedding_hopper` 内部未逐行」）三处空白：把 norm/rope 当成**跨 Ampere/Hopper/Blackwell
+  三代演化的 task 家族**逐行打开，见 `docs/45-mpk-norm-rope-tasks.md`（快照 `f9eb70c`，
+  **纯源码走读、无新实验**；SM100 专属、本机不可执行）。三条 headline：
+  **(A)** 三层形态——两条独立 global-memory norm 身体（Ampere `rms_norm_impl` 断言 `BATCH_SIZE==1`、
+  Hopper `rms_norm_hopper_impl` 放开多 batch + 短尾 tile；前端按 `target_cc>=90` 二选一，
+  **H100/sm90 走 Hopper**，即 `docs/09` 真机测过的 test_mode RMSNorm 本体）vs 被 attention 内联的
+  SMEM 融合 norm/rope；
+  **(B) 融合边界 + 死代码**：全仓无 `TASK_ROTARY`/`TASK_ROPE`（RoPE 要么折进 attention、要么折进
+  DFlash 独立 task，**同数学两边界**）；**修正 `docs/37` §4.2 静态事实错误**——`rotary_embedding_sm100`
+  全仓零调用者，`attention_sm100` 实调 `rotary_embedding_hopper`（`:435/:455`）；
+  **(C) 同步/线程数口径百家争鸣**：cooperative groups / `wg_sync` / cutlass `NamedBarrier` 三套同步、
+  `NUM_THREADS` 四种来源、barrier ID 6/7/9、partial RoPE 三代不对称（Ampere 不支持 → GLM-4.6 只能
+  cc≥90）。判据只贡献 C3。配套博客 post `mega-kernel-46-mpk-norm-rope`（weight 47）并更新
+  `mega-kernel-00-index` 第 46 项。P131-1 新留尾巴见 §8（未构建、死代码定性系推断等）。
+- 下一步候选：可继续走其一——`eagle3_commit` 的 K>1「proper mbt-parallel chain」缺口（源码注释
+  `eagle3_ops.cuh:217` 自陈未实现）的静态追述；或 `docs/35` §9 遗留的其它未走读相邻层
+  （`mla_prefill_host.cu` 原型、CUTLASS `collective_builder` 侧 QK/PV atom）；或 `docs/44` §10 仍余的
+  `smem_row` 内部与 `docs/07` §3.3 的 `norm_linear_hopper` 之外的融合层。
+- 此前：**P130-1 完成（1/1）**。补掉三条明留的尾巴——`docs/37` §5.1（只给 750 行摘要）、
   `docs/39` §6.3、`docs/43` §9 头号（「`paged_attention_sm100` 内部未逐行」）。把 MPK 唯一的
   通用 paged GQA attention device 身体逐行打开，见 `docs/44-mpk-paged-attention-sm100.md`
   （快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 专属、本机不可执行）。三条 headline：
@@ -3895,10 +3961,6 @@
   并校正「`-inf` NaN 传播」已被 `:591-595`/`:651-652` 两处守卫覆盖。判据只贡献 C1+C3。配套博客
   post `mega-kernel-45-mpk-paged-attention-sm100`（weight 46）并更新 `mega-kernel-00-index` 第 45 项。
   P130-1 新留尾巴见 §10（slot-0 分歧未独立复现、命名屏障 ID 6/7 只记不判、未构建等）。
-- 下一步候选：可继续走其一——`eagle3_commit` 的 K>1「proper mbt-parallel chain」缺口（源码注释
-  `eagle3_ops.cuh:217` 自陈未实现）的静态追述；或 `docs/35` §9 遗留的其它未走读相邻层
-  （`mla_prefill_host.cu` 原型、CUTLASS `collective_builder` 侧 QK/PV atom）；或把本次新留的
-  `rms_norm_sm100`（`norm_sm100.cuh`）/`rotary_embedding_hopper` 内部逐行（此前只引调用点）。
 - 此前：**P129-1 完成（1/1）**。补掉 `docs/39`（P125-1）**§9「未展开的更深层」**明留的尾巴
   「`eagle3_commit_kernel` 的 device 身体（`eagle3_ops.cuh:157-315`）与 `accept_hist` 调试历史」。
   见 `docs/43-mpk-eagle3-commit.md`（快照 `f9eb70c`，**纯源码走读、无新实验**；SM100 专属）。

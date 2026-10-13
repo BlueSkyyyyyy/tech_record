@@ -72,4 +72,6 @@ categories: ["算子开发"]
 
 45. [MPK 通用 paged attention device 身体走读：`attention_sm100.cuh`]({{< relref "mega-kernel-45-mpk-paged-attention-sm100" >}}) —— 把 MPK 唯一的「通用 paged GQA attention」750 行 device 身体逐行打开：packed QKV → NHD 页缓存、`m16n16k16` 手写 `mma.sync`（QK^T `1x4x1` 切 key、PV `1x1x4` 切 p）、per-token 在线 softmax、按 MMA m-tile 分块的跨 warp 归约、partial RoPE / sliding window / attention sink / QK-norm 融合，以及为压进 Blackwell SMEM 上限而生的两处让步（O 复用 Q 段、m/d/o buffer 只存一个 tile），并把 `MAX_TOKENS=3` slot-0 分歧的因果（`if(m>0) continue` workaround → `"+f"` in-place 累加器修复）钉回源码级
 
+46. [MPK 归一化 / 位置编码 task 家族走读：Ampere/Hopper/Blackwell 三代 norm/rope]({{< relref "mega-kernel-46-mpk-norm-rope" >}}) —— 把每个 Transformer 层出现两次、却常被折进 attention 身体的薄算子摊开：三条「独立 global-memory norm task」身体（Ampere `rms_norm_impl` 单 batch、Hopper `rms_norm_hopper_impl` 多 batch+短尾 tile、DFlash `dflash_norm_rope_sm100` 一线程一 (token,head)）、三条「调用方 SMEM 上融合 norm」（cooperative groups / `wg_sync` / cutlass `NamedBarrier`，partial RoPE 的三代不对称）、三条纯 RoPE（其中 `rotary_embedding_sm100` 是「被 include 却零调用者」的死代码——并修正 `docs/37` §4.2 的静态事实错误），以及本家族三种 `NUM_THREADS` 口径与 barrier ID 6/7/9 的「百家争鸣」，最后用「同一种数学、两种融合边界」收口 megakernel 的融合层次选择
+>
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
