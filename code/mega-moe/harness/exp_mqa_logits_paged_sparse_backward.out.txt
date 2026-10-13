@@ -1,0 +1,55 @@
+== 内核源码 ==
+1e929dbf23cef1ab4244226e2c05fae74804fc694edb4d40a036a569f5186a68  ~/proj/tech_record/code/mega-moe/src/mqa_indexer_backward_paged_sparse.cu
+
+== 编译（sm_90）==
+  built /tmp/mqa_indexer_backward_paged_sparse
+
+== 设备端自带报告（src/mqa_indexer_backward_paged_sparse.cu，单进程）==
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+== [A] 正确性：分页稀疏 indexer 反向 CUDA vs host fp64（support + 页表逆映射 + 别名累加）==
+  dq        relerr = 5.813e-08
+  dw        relerr = 6.899e-08
+  dkv       relerr = 5.059e-08
+  dkv_scale relerr = 5.750e-08
+  (对照) 若用「写」而非 scatter-accumulate，dkv 与正确值 relerr = 9.221e-01
+  => [A] ALL PASS
+
+== [B] 吞吐（support + 页表逆映射 + scatter 原子归约，受争用下界）==
+  S=64,N=1,H=32,D=128,sel=2048,blk=64         0.723 ms/call  ~2.97 GFLOP/s
+  S=64,N=4,H=32,D=128,sel=2048,blk=64         1.462 ms/call  ~5.87 GFLOP/s
+  S=256,N=1,H=32,D=128,sel=2048,blk=64        1.463 ms/call  ~5.87 GFLOP/s
+  注：分页稀疏把 dkv 的 scatter 量降到 O(sum_r selected_tokens_r)，但目标按**物理槽**聚合，
+      跨请求共享页让同一物理槽被更多 (r,h) 累加 -> 原子争用比纯稀疏更高。
+
+== 总判定：ALL PASS ==
+
+== Python：支持集选择语义 + 页表逆映射 + 解析反向 + 两层别名 + 真实 kernel 锚 ==
+================================================================================
+P150-1 分页稀疏 MQA indexer 前向的反向（页表逆映射 x 支持集散播，H100 真机）
+================================================================================
+Part A  分页稀疏「支持集 logits」== 官方 ref_paged_mqa_logits 在选中 logical 位置的取值
+  [PASS] 支持集内 可微分分页稀疏 == 官方 ref 在 logical 位置取值                          relerr=1.571e-08
+  [PASS] 支持集是窗口的严格子集（跳过未选中块）                                            有效项=640 / 窗口=7040
+Part B  页表逆映射恒等式 + 与 metadata kernel 物理块公式等价
+  [PASS] 逐 token 页表映射 == metadata kernel 按块映射（200 随机点）                  mismatch=0
+  [PASS] 物理槽落在页池范围内                                                     phys∈[176,4095], pool=4096
+Part C  支持集内 KL 蒸馏梯度 dL/dI = softmax_support(I) - p
+  [PASS] dL/dI 解析(softmax-p) vs autograd                                relerr=2.847e-16
+  [PASS] 支持集内行和 = 0                                                     max=2.9e-16
+  [PASS] 支持集外梯度恒 0                                                      max=0.0e+00
+Part D  分页稀疏打分算子反向（dL/dw,dq,dkv,dscale）vs autograd（物理池 scatter-add）
+  [PASS] dq        解析 vs autograd                                       relerr=0.000e+00
+  [PASS] dw        解析 vs autograd                                       relerr=0.000e+00
+  [PASS] dkv       解析 vs autograd（页表逆映射 + 别名）                           relerr=5.701e-18
+  [PASS] dscale    解析 vs autograd                                       relerr=7.843e-17
+  [PASS] dkv 中心差分（2 个物理槽条目）                                             最差 relerr=0.000e+00
+Part E  两层别名（next_n 前缀重叠 + 跨请求共享页）：scatter-add vs 「写」
+    支持集：960 个 (r,c) 引用 -> 240 个物理槽；被多引用槽 240 个、最大共享度 9
+  [PASS] naive「写」在被共享物理槽上丢贡献                                            共享槽最大绝对差=2.477e+00
+  [PASS] naive「写」相对正确累加全局 relerr 显著 >0                                  relerr=8.934e-01
+  [PASS] 两层别名用例：dkv 解析 == autograd                                      relerr=2.523e-17
+Part F  真实 SM90 fp8_fp4_paged_mqa_logits 稠密前向锚 + 分页稀疏压缩=选择
+  [PASS] 真实分页 kernel 压缩输出 == 模拟参考压缩输出（支持集内）                             relerr=1.176e-03
+  [PASS] 压缩支持集是窗口的严格子集                                                  有效项=5120 / 窗口=45056
+--------------------------------------------------------------------------------
+PASS=17  FAIL=0

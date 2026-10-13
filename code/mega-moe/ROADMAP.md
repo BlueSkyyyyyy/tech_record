@@ -4585,6 +4585,35 @@
       `O(Σ_r selected_tokens_r)`，但瓶颈仍是 `dkv` 跨 `(r,h)` scatter 归约。配套博客
       `content/posts/mega-moe-159-indexer-sparse-backward`（索引页新增第 159 篇）。
 
+### P150 增量（opt-in，收口 indexer 反向 2×2 矩阵的最后一格：分页 × 稀疏）
+
+- [x] **P150-1** **分页稀疏（块选择）MQA logits（lightning indexer）前向的反向**（
+      `csrc/apis/attention.hpp:306-441`；`tests/test_attention.py:442-672`；
+      `deep_gemm/include/deep_gemm/scheduler/sm100_sparse_mqa_logits_metadata.cuh:373-386`；
+      `deep_gemm/include/deep_gemm/impls/sm100_sparse_mqa_logits.cuh:627-633`；
+      `deep_gemm/include/deep_gemm/layout/sparse_mqa_logits.cuh:63-71`）。
+      第 157 篇（P147-1）连续稠密、第 158 篇（P148-1）分页稠密、第 159 篇（P149-1）连续稀疏，
+      本篇补 **分页 × 稀疏**——生产 long-context 训练真正跑的形态（物理页池 + block table 间接
+      寻址 + 选中块打分 + 压缩输出），前向 `fp8_fp4_paged_sparse_mqa_logits` **SM100 专属、只输出
+      logits**，反向一直没人讲。**核心**：反向是**两个伴随的复合**——① 支持集选择的伴随 = scatter
+      （第 159 篇）；② 页表逆映射把 logical token 落到物理槽（第 158 篇）。合起来要**依次**做两级
+      逆映射 `support → logical KV token →（页表）→ physical slot`，`dq/dw` 同构、`dkv/dscale`
+      只是落地地址变成物理槽。**页表公式**（metadata kernel `:379-383` 的按块版
+      `physical_kv_block_idx = block_table[...]*(PAGE/SB) + logical_block%(PAGE/SB)`）与逐 token 版
+      `phys = block_table[row, token//PAGE]*PAGE + token%PAGE` **严格等价**（200 随机点 mismatch=0）；
+      压缩列 `impls:631` `output_col_idx=(base+slot)*SB+token_in_kv_block`。**两层别名都必须累加**
+      （next_n 前缀重叠 + 跨请求共享物理页，实测 960 引用→240 物理槽、全部多引用、最大共享度 9）；
+      「块选择」stop-gradient。**H100(sm90) 真机** `harness/exp_mqa_logits_paged_sparse_backward.{py,sh,out.txt}`
+      + `src/mqa_indexer_backward_paged_sparse.cu`（sha256 `1e929dbf…`）：CUDA 后端 `[A] ALL PASS`
+      （dq 5.81e-8/dw 6.90e-8/dkv 5.06e-8/dscale 5.75e-8，对照「写」0.922）、`[B]` 吞吐 2.97–5.87 GFLOP/s
+      （受争用下界，瓶颈仍是 dkv 物理槽 scatter 原子归约）；Python **PASS=17 / FAIL=0**：支持集 logits
+      == 官方 `ref_paged_mqa_logits` 选中位置 **1.571e-08**、页表恒等式、KL 梯度 **2.847e-16**、
+      四路反向 **0/0/5.70e-18/7.84e-17**、中心差分 0.0、两层别名「写」relerr **8.934e-01** vs
+      scatter-add **2.52e-17**、**真实 SM90 分页稠密 kernel 前向锚 1.176e-03**。至此 indexer 反向
+      2×2 矩阵闭合。主 kernel 与四个 host 入口 SM100 专属、仅分析。
+      → `docs/160-indexer-paged-sparse-backward.md`。配套博客
+      `content/posts/mega-moe-160-indexer-paged-sparse-backward`（索引页新增第 160 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -4617,8 +4646,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P149 各增量完成（P15-1…P41-1、P42-1…P149-1）。**
-  本轮 P149-1：新建 `docs/159-indexer-sparse-backward.md`（+`src/mqa_indexer_backward_sparse.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P150 各增量完成（P15-1…P41-1、P42-1…P150-1）。**
+  本轮 P150-1：新建 `docs/160-indexer-paged-sparse-backward.md`
+  （+`src/mqa_indexer_backward_paged_sparse.cu`、`harness/exp_mqa_logits_paged_sparse_backward.{py,sh,out.txt}`）
+  ——承接 P147-1/P148-1/P149-1，收口 indexer 反向 **2×2 矩阵（连续/分页 × 稠密/稀疏）的最后一格：
+  分页 × 稀疏**（生产 long-context 训练真正跑的形态：物理页池 + block table 间接寻址 + 选中块打分 +
+  压缩输出，前向 `fp8_fp4_paged_sparse_mqa_logits` **SM100 专属**）。**核心**：反向是**两个伴随的复合**
+  ——① 支持集选择的伴随 = scatter（P149）；② 页表逆映射把 logical token 落到物理槽（P148）。合起来要
+  **依次**做两级逆映射 `support → logical KV token →（页表）→ physical slot`，`dq/dw` 同构、`dkv/dscale`
+  只是落地地址变成物理槽。**页表公式**（metadata kernel `scheduler/sm100_sparse_mqa_logits_metadata.cuh:379-383`
+  按块版）与逐 token 版 `block_table[row, token//PAGE]*PAGE + token%PAGE` **严格等价（200 随机点
+  mismatch=0）**；两层别名（next_n 前缀重叠 + 跨请求共享物理页，960 引用→240 物理槽、最大共享度 9）
+  都必须 scatter-add，「块选择」stop-gradient。H100(sm90) 真机 **PASS=17 / 0 FAIL** + CUDA 后端
+  `[A] ALL PASS`（dq 5.81e-8/dw 6.90e-8/dkv 5.06e-8/dscale 5.75e-8，对照「写」0.922）：支持集 logits ==
+  官方 `ref_paged_mqa_logits` 选中位置 **1.571e-08**、KL 梯度 **2.847e-16**、四路反向 **0/0/5.70e-18/7.84e-17**、
+  中心差分 0.0、两层别名「写」relerr **8.934e-01** vs scatter-add **2.52e-17**、**真实 SM90 分页稠密 kernel
+  前向锚 1.176e-03**。索引页新增第 160 篇。
+  上一轮 P149-1：新建 `docs/159-indexer-sparse-backward.md`（+`src/mqa_indexer_backward_sparse.cu`、
   `harness/exp_mqa_logits_sparse_backward.{py,sh,out.txt}`）——承接 P147-1/P148-1，把 indexer 反向从
   连续/分页推进到生产用的**稀疏（块选择）**形态：只用选中的一小撮 KV 块打分、输出**压缩**成
   `[T, num_max_sparse_blocks·SB]`。**核心**是「压缩输出 = 对 dense logits 的**选择**（gather），其伴随
@@ -6290,16 +6334,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P149 已完成（最新 **P149-1 把 indexer 反向推进到生产用的「稀疏（块选择）」形态**
-  ——只在一小撮选中 KV 块内打分、输出压缩 `[T, num_max_sparse_blocks·SB]`；反向核心是「**压缩 = 对 dense
-  logits 的选择（gather），其伴随是 scatter**」：`dI_full=scatter(dG)`、未选中位置梯度恒 0，四路梯度收窄到
-  支持集、`dkv/dscale` scatter-add，「块选择」stop-gradient。H100(sm90) **16 PASS/0 FAIL** + CUDA 稀疏后端
-  `[A] ALL PASS`（对照「写」0.887），真实 SM90 dense kernel 锚「压缩=选择」gather relerr 8.37e-04、
-  支持集 5120/32768。索引页新增第 159 篇）。
-  可继续（均为增量、非承诺）：① 把已弃用/未跑的 indexer 稀疏反向**端到端接进真实稀疏前向 kernel**
-  （需目标卡 SM100，仅分析）+ 分页稀疏（`fp8_fp4_paged_sparse_mqa_logits`）的页表逆映射专门复核；
-  ② 对 P96/P97/P123 的轻微漂移清单关键路径定点复核；③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境
-  （见「阻塞」）；④ 或选 DeepGEMM/DeepEP `csrc/utils/` 剩余小角落 / indexer 的 **varlen（SM100）**变体做定点复核。
+- **下一步**：P0~P150 已完成（最新 **P150-1 收口 indexer 反向 2×2 矩阵的最后一格：分页 × 稀疏**
+  ——生产 long-context 训练真正跑的形态：物理页池 + block table 间接寻址 + 选中块打分 + 压缩输出，
+  前向 `fp8_fp4_paged_sparse_mqa_logits` **SM100 专属**。反向是**两个伴随的复合**（支持集选择 scatter +
+  页表逆映射），要**依次**做两级逆映射 `support → logical KV token →（页表）→ physical slot`；页表公式与
+  metadata kernel 逐字等价（200 点 mismatch=0），两层别名（next_n + 跨请求共享页，最大共享度 9）都必须
+  scatter-add。H100(sm90) **PASS=17/0 FAIL** + CUDA 后端 `[A] ALL PASS`（对照「写」0.922），支持集 logits
+  == 官方 ref 1.571e-08、四路反向 ≤7.84e-17、真实 SM90 分页稠密 kernel 前向锚 1.176e-03。索引页新增第 160 篇）。
+  可继续（均为增量、非承诺）：① 把 indexer 反向（连续/分页/稀疏/分页稀疏）**端到端接进真实前向 kernel**
+  （需目标卡 SM100，仅分析）+ indexer 的 **varlen（SM100）**变体做定点复核；② 对 P96/P97/P123 的轻微漂移
+  清单关键路径定点复核；③ 把空出的 DeepEP 端到端留给 NCCL≥2.32.3 环境（见「阻塞」）；④ 或选
+  DeepGEMM/DeepEP `csrc/utils/` 剩余小角落做定点复核。
   详见上。
   上一轮 P146-1：把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」推到契约层——数值可行（真实
   `math.cuh` store 分支逐位复现，FP8 0/16777216、SF 0/524288），但契约是「单输出 + 无逐元素索引 + 无状态」，
