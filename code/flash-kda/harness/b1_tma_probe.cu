@@ -38,6 +38,14 @@ constexpr int BW = BV / NW;   // V columns per warp (== 16)
 
 constexpr int BWS = BW + 8;   // per-warp sdh/sdu row stride (kept padded; written by warp)
 
+// P7-38: output-store buffer depth (default 2 == the `dho[2]`/`duo[2]` double buffer of
+// §35/§36).  Deeper depths change the *write->store* timing (a tile is only reused after
+// `B1T_SDEPTH-1` bulk groups retire) — exactly the perturbation §40.6 flagged as the open
+// boundary for the store-side `fence.proxy.async`.  Compile with -DB1T_SDEPTH=N to stress it.
+#ifndef B1T_SDEPTH
+#define B1T_SDEPTH 2
+#endif
+
 DEV float b2f(bf16 x) { return __bfloat162float(x); }
 DEV bf16  f2b(float x) { return __float2bfloat16(x); }
 DEV uint32_t saddr(const void* p) { return (uint32_t)__cvta_generic_to_shared(p); }
@@ -215,12 +223,12 @@ struct alignas(1024) Shared {
     bf16 sdh[NW][KD][BWS];
     bf16 sdu[NW][BT][BWS];
 #ifdef B1T_TMADH
-    // double-buffered per-warp `dh` store tile, unpadded [KD,BW] (TMA needs exact stride)
-    alignas(1024) bf16 dho[2][NW][KD][BW];
+    // per-warp `dh` store tile, unpadded [KD,BW] (TMA needs exact stride); `B1T_SDEPTH`-deep
+    alignas(1024) bf16 dho[B1T_SDEPTH][NW][KD][BW];
 #endif
 #ifdef B1T_TMADV
-    // double-buffered per-warp `dv2` store tile, unpadded [BT,BW] (token-major output)
-    alignas(1024) bf16 duo[2][NW][BT][BW];
+    // per-warp `dv2` store tile, unpadded [BT,BW] (token-major output); `B1T_SDEPTH`-deep
+    alignas(1024) bf16 duo[B1T_SDEPTH][NW][BT][BW];
 #endif
     alignas(8) uint64_t full[NSTAGE];
     alignas(8) uint64_t empty[NSTAGE];
@@ -364,11 +372,11 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
             // ---- publish S: per-warp bf16 mirror (+ `dh` store: scalar or TMA) ----
             {
 #if defined(B1T_TMADH) || defined(B1T_TMADV)
-                // P7-33: free the double buffer before either store tile is (re)written.
-                if (i >= 2 && l == 0) tma_store_wait_read<1>();
+                // P7-33: free the store buffer before either store tile is (re)written.
+                if (i >= B1T_SDEPTH && l == 0) tma_store_wait_read<B1T_SDEPTH - 1>();
 #endif
 #if defined(B1T_TMADH)
-                bf16 (*dho)[BW] = sh->dho[i & 1][warp];
+                bf16 (*dho)[BW] = sh->dho[i % B1T_SDEPTH][warp];
                 __syncwarp();
 #elif !defined(B1T_NODH)
                 const int64_t base = ((int64_t)(n * NT + c) * H + h) * KD * VD;
@@ -404,7 +412,7 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 #endif
 #ifdef B1T_TMADH
             if (l == 0) {
-                tma5d_store(&dhmap, &sh->dho[i & 1][warp][0][0], vbase, 0, h, c, n);
+                tma5d_store(&dhmap, &sh->dho[i % B1T_SDEPTH][warp][0][0], vbase, 0, h, c, n);
 #ifndef B1T_TMADV
                 // P7-33: when the `dv2` store is also TMA, both are committed together
                 // at the end of the chunk (one bulk group per chunk keeps the wait<1>).
@@ -455,8 +463,8 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
                         // P7-33: stage into the per-warp [BT,BW] tile; lane 0 issues the
                         // TMA store after the loop.  Rows with tr>=T are written too but
                         // TMA clips them against the tensor bound (dim1 == T).
-                        sh->duo[i & 1][warp][r0][cc] = b0; sh->duo[i & 1][warp][r0][cc + 1] = b1;
-                        sh->duo[i & 1][warp][r1][cc] = b2; sh->duo[i & 1][warp][r1][cc + 1] = b3;
+                        sh->duo[i % B1T_SDEPTH][warp][r0][cc] = b0; sh->duo[i % B1T_SDEPTH][warp][r0][cc + 1] = b1;
+                        sh->duo[i % B1T_SDEPTH][warp][r1][cc] = b2; sh->duo[i % B1T_SDEPTH][warp][r1][cc + 1] = b3;
 #elif !defined(B1T_NODV2)
                         if (tr0 < T) {
                             int64_t o0 = ((int64_t)(n * T + tr0) * H + h) * VD + vbase + cc;
@@ -475,7 +483,7 @@ b1_tma_kernel(const __grid_constant__ CUtensorMap qmap,
 #endif
 #ifdef B1T_TMADV
             if (l == 0) {
-                tma4d_store(&dv2map, &sh->duo[i & 1][warp][0][0], vbase, c * BT, h, n);
+                tma4d_store(&dv2map, &sh->duo[i % B1T_SDEPTH][warp][0][0], vbase, c * BT, h, n);
                 tma_store_commit();
             }
 #endif
@@ -687,17 +695,21 @@ extern "C" int b1t_launch(int BT, int NSTAGE, void* q, void* k, void* w, void* d
         if (NSTAGE == 1) return launch_impl<32, 1>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
         if (NSTAGE == 2) return launch_impl<32, 2>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
         if (NSTAGE == 3) return launch_impl<32, 3>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
+        if (NSTAGE == 4) return launch_impl<32, 4>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
     } else if (BT == 16) {
         if (NSTAGE == 1) return launch_impl<16, 1>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
         if (NSTAGE == 2) return launch_impl<16, 2>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
         if (NSTAGE == 3) return launch_impl<16, 3>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
+        if (NSTAGE == 4) return launch_impl<16, 4>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
+        if (NSTAGE == 5) return launch_impl<16, 5>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
+        if (NSTAGE == 6) return launch_impl<16, 6>(q, k, w, do_, dv, etot, dh, dh0, dv2, B, T, H, NT, scale, s);
     }
     return -1;
 }
 
 extern "C" int b1t_smem_bytes(int BT, int NSTAGE) {
     if (BT == 64) { if (NSTAGE == 1) return sizeof(Shared<64,1>); if (NSTAGE == 2) return sizeof(Shared<64,2>); }
-    if (BT == 32) { if (NSTAGE == 1) return sizeof(Shared<32,1>); if (NSTAGE == 2) return sizeof(Shared<32,2>); if (NSTAGE == 3) return sizeof(Shared<32,3>); }
-    if (BT == 16) { if (NSTAGE == 1) return sizeof(Shared<16,1>); if (NSTAGE == 2) return sizeof(Shared<16,2>); if (NSTAGE == 3) return sizeof(Shared<16,3>); }
+    if (BT == 32) { if (NSTAGE == 1) return sizeof(Shared<32,1>); if (NSTAGE == 2) return sizeof(Shared<32,2>); if (NSTAGE == 3) return sizeof(Shared<32,3>); if (NSTAGE == 4) return sizeof(Shared<32,4>); }
+    if (BT == 16) { if (NSTAGE == 1) return sizeof(Shared<16,1>); if (NSTAGE == 2) return sizeof(Shared<16,2>); if (NSTAGE == 3) return sizeof(Shared<16,3>); if (NSTAGE == 4) return sizeof(Shared<16,4>); if (NSTAGE == 5) return sizeof(Shared<16,5>); if (NSTAGE == 6) return sizeof(Shared<16,6>); }
     return -1;
 }

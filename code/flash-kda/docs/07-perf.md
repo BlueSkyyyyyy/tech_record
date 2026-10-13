@@ -4081,3 +4081,76 @@ smem tile、`__syncwarp()` 之后、lane 0 发 `tma5d_store`/`tma4d_store` 之�
   §39 的「输入侧已定位、输出侧待验证」收口为「输出侧同需要 fence、但探针观测不到」，并留下唯一
   边界**待验证**：若换用更深 pipeline 或不同 store tile 形状（改变写→store 的时序），输出侧竞态的
   可观测性可能变化，届时仍以 `tma2_full` 为准。
+
+## 41. 关闭 §40.6 的「更深 pipeline / 更深 store 缓冲」边界：输出侧 RAW 在本探针仍不可观测（P7-38）
+
+§40.6 把 P7-37 收口后只留了一条边界**待验证**：「若换用更深 pipeline 或不同 store tile 形状
+（改变写→store 的时序），输出侧竞态的可观测性可能变化」。本轮把**两个旋钮都推到探针上限**再扫一遍
+确定性，回答这条边界。新增 `harness/check_bwd_b1_deep_ns.py`（`check_bwd_b1_deep_ns.out.txt`，
+空闲卡）与 `b1_tma_probe.cu` 的两处参数化。
+
+### 41.1 实现：`NSTAGE` 加深到 6、输出缓冲深度 `B1T_SDEPTH` 参数化
+
+- **更深 pipeline**：`b1_tma_probe.cu` 的 `b1t_launch`/`b1t_smem_bytes` 新增 `NSTAGE=4`（BT=32/16）、
+  `5,6`（BT=16）的实例化。§39 的输入侧 WAR 发生在 producer 用 `cp.async.bulk.tensor` 覆写
+  `st->e`（`i>=NSTAGE` 才复用 stage，`b1_tma_probe.cu:287`），`NSTAGE` 越大、覆写窗口越靠后，
+  是对该 WAR 的直接加压。
+- **不同 store 时序**：新增宏 `B1T_SDEPTH`（默认 2，即 §35/§36 的 `dho[2]`/`duo[2]` 双缓冲），
+  把输出 tile 缓冲改成 `B1T_SDEPTH` 深、按 `i % B1T_SDEPTH` 索引复用、由
+  `cp.async.bulk.wait_group.read B1T_SDEPTH-1` 释放（`b1_tma_probe.cu:366-407/454-478`）。
+  `SDEPTH=1` 单缓冲（每个 chunk 全排空，序列化）、`SDEPTH=3/4` 让若干 tile 的 generic 写与
+  async-`cp.async.bulk.tensor` 读同时在飞——这正是 §40 输出侧 RAW（写 tile → TMA 读出去）与
+  缓冲复用的 WAR（读未完成即覆写）最容易暴露的窗口。
+
+### 41.2 Part A：`scalar` 复现 racy，而 **`tma2` 全族在 NS≤6 / SDEPTH≤4 仍 0/80**
+
+同一 kernel 连跑 `NR=80` 次逐次比 `dh`（`B8T2048H8`，§38/§39 的失败 regime），覆盖
+`BT∈{16,32}` × `NS`（16:1–6 / 32:1–4）× `SDEPTH∈{1,2,3,4}` × 变体
+{`scalar`(仅 `-DB1T_ETMA`，已知输入侧 racy)、`scalar_p`(§39 输入侧 fence)、
+`tma2`(无 fence)、`tma2_full`(部署，两侧 fence)}：
+
+- **对照有效**：`scalar`（无 fence）在 `BT=16 NS=2/3/4` 稳定 **79/80 racy**、`BT=32 NS=3` **79/80**，
+  换 `NS=1` 即 0/80（与 §38/§39 的「`NSTAGE≥2` 才触发」指纹一致）。`scalar_p` **全 0/80**——
+  证明扫描有检出竞态的功率。
+- **`tma2` 全族（含两侧都没 fence 的 `tma2_sd2`）在全部 60 个 `(BT,NS,SDEPTH)` 组合上 0/80**：
+  pipeline 加深到 `NS=6`、store 缓冲加深到 `SDEPTH=4`、甚至单缓冲 `SDEPTH=1`，都**观测不到**
+  输入侧 WAR（`st->e`）或输出侧 RAW/WAR（`dh`/`dv2` tile）。`tma2_full` 同样全 0/80。
+- **一个值得记的细节**：`scalar` 的 racy 概率随 `NS` 变化（`NS=2/3/4`≈79/80 → `NS=5` 18/80 →
+  `NS=6` 6/80），说明「更深 pipeline」并未单调放大该竞态窗口，反而把时序拱出敏感区。这提示
+  §38/§39 的「racy/clean」是**强时序相关**的观测，任何单一配置的 clean 都不能外推。
+
+### 41.3 Part B：加深后仍**逐位无损**（fence 与深度都只改定序）
+
+`tma2_full`（BT=16 `NS=3,SDEPTH=3`；BT=64 `NS=2,SDEPTH=2`）vs `scalar_p`：`dh/dv2/dh0`
+**逐位相同（max_abs=0，含非整除 `T=250`、`B1T512H4`）**；vs 直接 bf16 FLA `dhu` 在 `BT=64` 仍
+**1 ulp**（`dh/dv2` = 4.88e-4/2.44e-4）。`BT=16` 的 `dv2` vs FLA 为 4.1e-3~7.0e-3——这是 **16 vs 64
+的 chunk 粒度差**（FLA 前向 chunk 只支持 32/64），非本轮深度引入，与 §37.3 的部署粒度结论一致。
+
+### 41.4 Part C：BT=16/32 上**更深 pipeline 确实更快**（与 §24 的 BT=64 结论相反）
+
+部署配置 `tma2_full`、CUPTI `us/call`：`B8T2048H8` 上 BT=16 `NS=1→4` 从 **300.7→177.8µs**（1.69×，
+`NS=5/6` 回到 ~188，最优 `NS=4`）；BT=32 `NS=1→3` 从 **203.4→124.6µs**（1.63×，`NS=4` 略回落）。
+`B2T1024H8` 同趋势（BT=16 `NS=1→6` 140→75µs）。**`SDEPTH∈{1,2,3}` 在本 shape 上无差别**（同 `NS`
+下差异 ≤3%＝噪声），即输出缓冲深度**不是**性能旋钮。对照 §24：那里 BT=64 + 标量 `dh` store 时
+「最优回到 `NS=1`」，本轮换成 TMA store 且 BT=16/32 后深 pipeline 有正收益——说明「最优 stage
+深度」取决于 **store 路径与 BT**，不可跨配置外推。
+
+### 41.5 Part D：深 NS/SDEPTH 与 `NS=1` 基线**逐位相同**
+
+`tma2_full`（`SDEPTH=3`）`NS=6`（BT=16）/`NS=4`（BT=32）vs 同库 `NS=1`：`dh` **max_abs=0**（四组
+shape）。即加深 pipeline/缓冲只改时序、不改数值（与 `SDEPTH` 无关、与 `NS` 无关）。
+
+### 41.6 结论 / 对目标卡的设计输入
+
+- **§40.6 的边界关闭（答案：本探针仍不可观测）**：把 pipeline 加深到 `NS=6`、store 缓冲加深到
+  `SDEPTH=4`（含单缓冲 `SDEPTH=1` 的极端复用）后，`tma2` 全族在 60 个组合上**仍 0/80**——更深
+  pipeline / 不同 store 时序**没有**让输出侧（或 TMA 形状下的输入侧）竞态变得可观测。而**标量
+  store 基线的输入侧竞态**在同一扫描里稳定复现（79/80），证明扫描有功率。故上一轮的判断不变，
+  且更强：**在这条探针里，两侧 `fence.proxy.async` 都是「编程模型必需、但观测不到」**；部署继续取
+  `-DB1T_EPROXY -DB1T_SPROXY`（免费、逐位无损），无需再为「更深的 pipeline」保留不确定项。
+- **新增正面数据**：TMA store + `BT=16/32` 上，**`NS=4` 是明确的免费加速**（`B8T2048H8` 1.6–1.7×），
+  输出 buffer 深度 `SDEPTH` 取 2 即可（3/4 无收益、且 `SDEPTH=4` 在 BT=32 `NS=4` 已超 smem）。
+  目标卡 CUDA B1 的 `NSTAGE` 建议 ≥4（不再是 §24 的「回到 1」，那是 BT=64/标量 store 的结论）。
+- **方法学（补充 §38.3/§40.6）**：(1) 确定性扫描的 `NR` 要足够大且覆盖**部署最强变体本身**；
+  (2) 「更深/更极端」不必然放大竞态窗口（`scalar` 在 `NS=5/6` racy 概率反降），故 clean 的
+  观测**只在被扫过的配置上**成立；(3) 性能旋钮（`NSTAGE`）的最优值依赖 store 路径 + BT，须实测。

@@ -595,6 +595,25 @@
       更深 pipeline / 不同 store tile 形状改变写→store 时序时，输出侧可观测性可能变化，届时仍以
       `tma2_full` 为准。
 
+- [x] **P7-38** 关闭 P7-37（§40.6）留下的**唯一边界**：把 pipeline 加深、store 时序推极端，看
+      输出侧（及 TMA 形状下输入侧）`fence.proxy.async` 竞态是否变得可观测。给 `b1_tma_probe.cu`
+      新增 `NSTAGE=4/5/6` 实例化（BT=16/32）与输出缓冲深度宏 `B1T_SDEPTH`（`dho`/`duo` 按
+      `i % SDEPTH` 复用、`cp.async.bulk.wait_group.read SDEPTH-1` 释放；`SDEPTH=1` 单缓冲极端）。新增
+      `harness/check_bwd_b1_deep_ns.py`（`check_bwd_b1_deep_ns.out.txt`，空闲卡）+ `docs/07` §41。
+      **Part A（关键）**：`NR=80` 确定性扫描 `B8T2048H8`，覆盖 `BT`×`NS`（16:1–6/32:1–4）×
+      `SDEPTH∈{1,2,3,4}` × 4 变体——标量对照 `scalar` 稳定复现输入侧竞态（`BT16 NS2/3/4`=**79/80**、
+      `BT32 NS3`=**79/80**，`NS=1` 免疫），而 **`tma2` 全族（含两侧都没 fence 的）在全部 60 个组合上
+      **0/80**。**答案：更深 pipeline / 不同 store 时序仍观测不到**（扫有功率，故非盲点）。细节：
+      `scalar` 的 racy 概率随 `NS` **反降**（`NS=2/3/4`79/80→`NS=5`18/80→`NS=6`6/80）＝强时序相关，
+      单一配置的 clean 不能外推。**Part B**：`tma2_full` 深配置 vs `scalar_p` `dh/dv2/dh0` **逐位
+      相同（含非整除 T=250）**、vs bf16 FLA `dhu` `BT=64` 仍 1 ulp。**Part C（新正面数据）**：TMA
+      store + `BT=16/32` 上**深 pipeline 有正收益**——`B8T2048H8` BT16 `NS=1→4` 300.7→177.8µs
+      （1.69×）、BT32 `NS=1→3` 203.4→124.6µs（1.63×）；`SDEPTH` 非旋钮（≤3%）。**Part D**：深
+      `NS/SDEPTH` vs `NS=1` `dh` 逐位相同。**对目标卡的设计输入**(1)两侧 fence 保留（免费、逐位
+      无损、本探针观测不到，无需再留不确定项）；(2)`NSTAGE` 建议 ≥4（**修正 §24「回到 NS=1」**，那是
+      BT=64/标量 store 的结论）。**方法学**：clean 只在被扫过的配置上成立；性能旋钮最优值依赖
+      store 路径 + BT。
+
 ### P8 小结 / 一页纸
 
 - [x] **P8-1** `docs/08-summary.md`：公式、结构、误差、性能、反向要点一页纸汇总
@@ -637,11 +656,33 @@
   共用同一块 smem，都要显式 fence。部署取 `-DB1T_EPROXY -DB1T_SPROXY`（代价噪声内、数值逐位不变）。
   诚实边界：输出侧 RAW 在 `X_FLASHKDA` 探针 **`NR=40` 观测不到**（`tma2` 全族 0/40），只有输入侧在
   标量 store 基线可复现——「观测 clean≠有保证 clean」（§38.3）。
+- **竞态的「racy/clean」是强时序相关的**（P7-38，§41.2）：标量基线 racy 概率随 `NS` **反降**
+  （`BT16 NS=2/3/4`≈79/80 → `NS=5` 18/80 → `NS=6` 6/80），且 `tma2` 全族在 `NS≤6`/`SDEPTH≤4`
+  仍 0/80。故 **clean 只在被扫过的配置上成立、不可外推**；确定性扫描要 `NR` 足够大 + 覆盖部署最强
+  变体本身。
+- **`NSTAGE` 最优值依赖 store 路径 + BT**（P7-38，§41.4）：§24 在 BT=64/标量 `dh` store 上得
+  「最优回到 `NS=1`」；换成 TMA store + `BT=16/32` 后 **深 pipeline 有正收益**（`B8T2048H8`
+  1.6–1.7×，`NS=4` 附近最优）。跨配置不可外推，须实测。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-37 补测**。
-  - P7-37（本轮）：**关闭 §39.5 的 `tma2` store 侧待验证**——给 `b1_tma_probe.cu` 加
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-38 补测**。
+  - P7-38（本轮）：**关闭 P7-37（§40.6）留下的唯一边界**——把 pipeline 加深（`NSTAGE` 到 6）、
+    store 时序推极端（新增 `-DB1T_SDEPTH=N`，输出 tile 缓冲 1–4 深 / `i % SDEPTH` 复用），看
+    输出侧（及 TMA 形状下输入侧）`fence.proxy.async` 竞态是否变得可观测。新增
+    `harness/check_bwd_b1_deep_ns.py`（`check_bwd_b1_deep_ns.out.txt`，空闲卡）+ `docs/07` §41。
+    **Part A（关键）**：`NR=80` 确定性扫描 `B8T2048H8`，覆盖 `BT`×`NS`（16:1–6/32:1–4）×
+    `SDEPTH∈{1,2,3,4}` × 4 变体——标量对照 `scalar` 稳定复现输入侧竞态（`BT16 NS2/3/4`=**79/80**、
+    `BT32 NS3`=**79/80**，`NS=1` 免疫），**`tma2` 全族（含两侧都没 fence 的）在全部 60 个组合上
+    **0/80**。**答案：更深 pipeline / 不同 store 时序仍观测不到**（扫描有功率，非盲点）。细节：
+    `scalar` racy 概率随 `NS` **反降**（`NS=5`18/80、`NS=6`6/80）＝强时序相关，单一配置 clean 不可外推。
+    **Part B**：`tma2_full` 深配置 vs `scalar_p` `dh/dv2/dh0` **逐位相同（含非整除 T=250）**、vs
+    bf16 FLA `dhu` `BT=64` 仍 1 ulp。**Part C（新正面数据）**：TMA store + `BT=16/32` 上**深 pipeline
+    有正收益**（`B8T2048H8` BT16 `NS=1→4` 300.7→177.8µs=1.69×、BT32 `NS=1→3` 203.4→124.6µs=1.63×；
+    `SDEPTH` 非旋钮）。**Part D**：深 `NS/SDEPTH` vs `NS=1` `dh` 逐位相同。**结论**：两侧 fence 保留
+    （免费、逐位无损、本探针观测不到，不再留不确定项）；**`NSTAGE` 建议 ≥4（修正 §24 的「回到 NS=1」**，
+    那是 BT=64/标量 store 的结论）。
+  - P7-37（上轮）：**关闭 §39.5 的 `tma2` store 侧待验证**——给 `b1_tma_probe.cu` 加
     `-DB1T_SPROXY`（写完 `dh`/`dv2` tile 后、`cp.async.bulk.tensor` store 前一条
     `fence.proxy.async`，与 §39 输入侧对称）。新增 `harness/check_bwd_b1_tma2_race.py`
     （`check_bwd_b1_tma2_race.out.txt`，空闲卡）+ `docs/07` §40。**Part A（关键/诚实）**：`NR=40`
@@ -1150,10 +1191,12 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-36 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
-  - **P7-36 的边界（待验证）**：`tma2`（`+TMADH/+TMADV`）的 TMA store 侧复用握手（`dho`/`duo`
-    双缓冲 + `cp.async.bulk` store + `bulk_group`）本轮**未**做同样的确定性扫描修复；按 P7-36 的
-    根因，store 侧「读 smem → TMA store → 覆写」的握手同样应补 `fence.proxy.async`（**待验证**）。
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-38 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **~~P7-36 的边界（待验证）~~（已解决）**：`tma2` 的 TMA store 侧复用握手（`dho`/`duo` + `cp.async.bulk`
+    store + `bulk_group`）**已由 P7-37 补 `-DB1T_SPROXY`、并由 P7-38（`docs/07` §41）关闭边界**——把
+    pipeline 加深到 `NS=6`、输出缓冲加深到 `SDEPTH=4`（含单缓冲极端）后，`tma2` 全族在 60 个配置上仍
+    **0/80**（标量对照稳定 racy），即两侧 `fence.proxy.async` 在本探针**观测不到但编程模型必需**，
+    部署保留、免费、逐位无损；且 TMA store + `BT=16/32` 上深 pipeline 有正收益（`NSTAGE≥4`）。
   - **P7-34（`docs/07` §37）澄清两个 FLA `dhu` baseline 并更正 §25**：同一条
     `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64` 的 ~23µs（bf16 直接调用）与 ~137µs（fp32 链内）
     差的是 **operand dtype**（fp32 载入 2× + `tl.dot` 落 tf32，实测 fp32/bf16 = 4.0–5.5×），非 direct/chain。

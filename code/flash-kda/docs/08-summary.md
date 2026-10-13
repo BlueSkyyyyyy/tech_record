@@ -322,3 +322,13 @@ V-slice 跨连续若干 chunk**（WAR 指纹）。`proxy/base`=**0.96–1.02（�
 `dh/dv2/dh0` **逐位相同（含非整除 T=250）**、vs bf16 FLA 1 ulp；`full/tma2`=**0.997–1.081（噪声内，免费）**；
 `tma2_full` `NS=2/3` vs `NS=1` 逐位相同。**部署配置**＝`-DB1T_ETMA -DB1T_TMADH -DB1T_TMADV -DB1T_EPROXY
 -DB1T_SPROXY`（`NSTAGE` 可 >1）；「输入/输出两个方向的 TMA 复用缓冲都需 `fence.proxy.async`」收口。
+
+**P7-38（`docs/07` §41）**：关闭上条的**唯一边界（更深 pipeline / 不同 store 时序）**——给探针加
+`NSTAGE=4/5/6` 与输出缓冲深度宏 `-DB1T_SDEPTH`（输出 tile 缓冲 1–4 深、`i % SDEPTH` 复用）。`NR=80`
+确定性扫描覆盖 `BT`×`NS`(≤6)×`SDEPTH`(≤4)×4 变体：标量对照稳定复现输入侧竞态（`BT16 NS2/3/4`=79/80），
+而 **`tma2` 全族（含无 fence 的）在全部 60 个组合上仍 0/80**——**加深 pipeline / 推极端 store 时序仍
+观测不到**两侧 `fence.proxy.async`（扫描有功率）。细节：`scalar` 的 racy 概率随 `NS` **反降**（强时序
+相关，clean 不可外推）。**新正面数据**：TMA store + `BT=16/32` 上深 pipeline 有正收益（`B8T2048H8`
+BT16 `NS=1→4` 1.69×、BT32 `NS=1→3` 1.63×），**`NSTAGE` 建议 ≥4（修正 §24 的「回到 NS=1」**，那是
+BT=64/标量 store 的结论）；`SDEPTH` 非旋钮。数值深配置与 `NS=1`/`scalar_p` **逐位相同**、vs bf16
+FLA 仍 1 ulp。
