@@ -14944,3 +14944,179 @@ cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes          
   计时取 min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；未做 ncu 归因（结论二
   的「省 arrive/fence」是「资源同档 + 单变量改变」的对照推断，未用 `gpu__time_duration` 拆分单次
   mbarrier 往返与 TMA 交付各自占比）；未测 `tensormap` 版 multicast/`cta_group::2`。
+
+## 99. 占用率上界的 ncu `achieved occupancy` 交叉验证 + cluster 每槽握手的指令级归因（P174-1）
+
+本节补掉 §93.8 / §97.9 / §98.9 明留的**同一条尾巴**——「占用率用
+`cudaOccupancyMaxActiveBlocksPerMultiprocessor` 的**静态**上界，未用 ncu 的 achieved occupancy
+交叉验证」「未做 ncu 归因」。§86–§98 的 cluster 微基准与 §93 的 load-path 微基准**全程**用
+`occ`（occupancy API 的 blocks/SM 上界）与 `eff = min(occ, grid/numSM)` 解释吞吐，但从没让
+**hardware counter 报出的真正驻留 warp 数**去对过账；§97/§98 的「省 arrive/fence」也只用
+「资源同档 + 单变量改变」推断，没用 ncu 数**指令**。本节把这两笔账都实测。
+
+### 99.1 问题
+
+- **Q1（§A/§B）**：§93 的 `occ`/`eff` 是**静态**上界——ncu 的 achieved occupancy 是否与之相符？
+  两种口径（grid 轴、SMEM-pad 轴）都验。
+- **Q2（§B）**：§93 headline「delivery 在 `eff≈4–6` 饱和后**回落**」——回落时 achieved occupancy
+  是**更高还是更低**？（若更高，则证明回落**不是**占用率不足，而是资源争用。）
+- **Q3（§C）**：achieved occupancy 的偏差（若 `achieved < eff`）是**短工作尾波**还是**稳态墙**？
+  用极短 `R=1` vs 长 `R=300` 分离。
+- **Q4（§D）**：§97/§98 的跨 SM 载体（`mbar`/`mtex`/`mtex2`/`ring1`）在 `C=2, grid=264` 下
+  achieved occupancy 是否都落在 `eff=2`（静态 occ=3）？
+- **Q5（§E）**：ncu **指令计数**能否把 §97/§98 的「省 256 次远端 arrive + fence」量出来？
+
+### 99.2 方法
+
+**复用**既有源码、不改语义：`src/multicast_occupancy.cu`（§93 load-path kernel `mcast_nat`）、
+`src/cluster_concurrency.cu`（§87–§98 的跨 SM 交换载体）。新增脚本
+`harness/occupancy_ncu_crosscheck.sh`、原始输出 `harness/occupancy_ncu_crosscheck.out.txt`
+（目标卡 H100 / sm90a、**固定空闲 device 6**、nvcc 13.2、每配置独立进程以避免 sticky context）。
+
+ncu 指标：占用率口径取 `sm__warps_active.avg.pct_of_peak_sustained_active`
+（% × 64 warps/SM ÷ 每块 warp 数 = 驻留块/SM）、四个静态上界项
+`launch__occupancy_limit_{blocks,registers,shared_mem,warps}` 与 `launch__waves_per_multiprocessor`；
+指令口径取 `smsp__inst_executed.sum` / `..._op_shared_ld.sum` / `..._op_shared_st.sum` /
+`..._op_global_st.sum`。**H100 每 SM 上限 64 warps**；`multicast_occupancy` 的 `TH=128`（4 warp/块）、
+`cluster_concurrency` 的 `TH=256`（8 warp/块），故「驻留块/SM = achieved% × 64 / warps_per_block / 100」。
+
+### 99.3 §A（Q1a）grid 轴：achieved ≈ `eff`，但 `eff` 越大越滞后
+
+`mcast_nat`（`L=2`→16KB SMEM、`pad=0`），`C=4`，`mode0`，`R=300`，扫 `grid = 132·O`：
+
+```
+  O  grid  静态occ  eff   achieved%  驻留块/SM  deliver GB/s
+ --- ----- ------- ----- ---------- ---------- ------------
+  1   132    13      1      6.87       1.10       2691.1
+  2   264    13      2     13.30       2.13       4548.9
+  4   528    13      4     26.56       4.25       7006.7
+  8  1056    13      8     41.88       6.70       6666.3
+```
+
+- 四个静态上界项恒为 `blocks=32, registers=32, shared_mem=13, warps=16` → **静态 occ=13 由 SMEM
+  封顶**，与 §93.3 一致。
+- `O≤4` 时 **achieved ≈ eff（1.10/2.13/4.25 对 1/2/4）**，误差 ~6%（achieved 略高，见 §99.7 口径
+  caveat）。⇒ §93 §B 用 `eff` 解释吞吐**有硬件计数背书**。
+- **`O=8` 时 achieved 只 6.70 块/SM < eff=8**——静态上界（非 cluster 语义）**高估了**。这是
+  §93 从未暴露的一笔：occupancy API 的 `occ` **不建模 cluster 放置约束**（`C=4` 的 cluster 必须落在
+  同一 GPC 的连续 SM 组，`grid=1056`=264 个 cluster 在 132 SM 上存在放置碎片）。
+
+### 99.4 §B（Q1b/Q2）SMEM-pad 轴：achieved 紧贴静态 occ；且「回落」发生时 achieved 更高
+
+`grid=1056`，`L=2`，用 `pad` 改每块 SMEM 钉静态 occ：
+
+```
+  pad   smem/块  静态occ  waves   achieved%  驻留块/SM  deliver GB/s
+ ---- ------- ------- ----- ---------- ---------- ------------
+    0    16KB    13     0.62     43.41       6.95       6653.9
+   16    32KB     6     1.33     32.52       5.20       7170.7
+   48    64KB     3     2.67     18.35       2.94       5831.2
+   96   112KB     2     4.00     12.49       2.00       4271.6
+  144   160KB     1     8.00      6.25       1.00       2468.3
+  200   216KB     1     8.00      6.25       1.00       2468.6
+```
+
+- **achieved 紧贴静态 occ**：`occ=6→5.20`、`occ=3→2.94`、`occ=2→2.00`、`occ=1→1.00`——SMEM-pad
+  口径的静态上界被硬件计数**逐档证实**（`occ=13/6` 因 grid/nsm=8 请求少于 occ、且 cluster 放置碎片，
+  落在 6.95/5.20）。
+- **headline（回答 Q2）**：delivery 峰值在 `pad=16`（occ=6、achieved **5.20 块/SM**=7171 GB/s），
+  而 `pad=0`（occ=13、achieved **6.95 块/SM**）只有 6654 GB/s——**驻留块更多、吞吐反而更低**。
+  ⇒ §93「delivery 在 `eff≈4–6` 饱和后回落」**不是占用率不足**，achieved occupancy 在回落点**更高**；
+  回落只能是**共享资源争用**（L2→SMEM 聚合带宽 / TMA 引擎）。这把 §93 的结论从「静态 eff 推断」
+  升级为「achieved 与 throughput 反向」的**硬件计数直接证据**。
+
+### 99.5 §C（Q3）偏差是稳态墙、不是短工作尾波
+
+`grid=1056`，`pad=0`，`C=4`，`mode0`：
+
+```
+  R      achieved%  驻留块/SM  deliver GB/s
+ ---- ---------- ---------- ------------
+   300   41.88       6.70       6666.3
+     1   42.07       6.73       2495.6
+```
+
+`R=1`（6.9 µs 极短）与 `R=300`（779 µs）的 achieved occupancy **几乎相同（42.07 vs 41.88）**。
+⇒ `achieved < eff` 的缺口**不是** kernel 起止的 ramp/drain（尾波），而是**稳态**：即便长跑，
+`grid=1056` 的 `C=4` cluster kernel 也稳定只驻留 ~6.7 块/SM，达不到请求的 8。这与 §99.3 的
+「cluster 放置约束」解释一致——ncu 的 achieved 是**真实并发的稳态值**，静态 API 的 `eff` 是**忽略
+cluster 语义的乐观上界**。
+
+### 99.6 §D（Q4）§97/§98 的四个载体：achieved 全部精确落在 `eff=2`
+
+`C=2`、`grid=264`（=2 块/SM）、`U=8`、`sb=32KB`（静态 occ=3）：
+
+```
+  载体    静态occ  eff  achieved%  驻留块/SM  deliver GB/s
+ ------- ------- ---- ---------- ---------- ------------
+  mbar      3      2     24.90       1.99       1086.5
+  mtex      3      2     24.95       2.00       1233.7
+  mtex2     3      2     24.93       1.99       1324.8
+  ring1     3      2     24.80       1.98       1606.8
+```
+
+四个载体的静态上界项**逐档相同**（`registers=8, shared_mem=3, warps=8`；`ring1` 的 `regs=32` 使寄存器
+上限也 ≥3、不 binding），achieved occupancy **全部 = 2.00 块/SM = `eff`**（`TH=256`→8 warp/块）。
+
+⇒ (1) §97/§98 的「同占用率、单变量改握手」前提**被硬件计数证实**（achieved 逐位同档）；
+(2) 但四载体吞吐光谱 `ring1 > mtex2 > mtex > mbar`（1607/1325/1234/1087 GB/s）在 **achieved
+occupancy 完全相同时**成立——**性能差来自每 round 的同步/交付机制，不来自占用率**。这与 §93 §B
+（occupancy 是 load-path 的一阶旋钮）形成对照：**cluster 跨 SM 握手是延迟受限**（occupancy 已在
+`eff=2` 钉住），故载体的每步成本直接决定吞吐。
+
+### 99.7 §E（Q5）指令级归因：`mbar→mtex` 把总指令降到 1/1.45、shared load 砍半
+
+`C=2, grid=264, U=8, sb=32KB`（同 §D）：
+
+```
+  载体      inst_executed    shared_ld    shared_st  global_st
+ ------- --------------- ------------ ----------- ---------
+  mbar      18,166,368      2,162,688      67,584      264
+  mtex      12,528,384      1,081,344      67,584      264
+  mtex2     13,993,056      1,081,344      67,584      264
+  ring1     14,857,128      2,162,688      69,696      264
+```
+
+- **`mbar` 的总指令是 `mtex` 的 1.45×、shared load 是 2.00×**——把「每槽 done/back-pressure 用
+  **全 block 每线程远端 arrive**」换成「**TMA 事务计数 `expect_tx`**」后，`shared_ld` 精确减半
+  （`2,162,688 → 1,081,344`，差 `1,081,344 = 264 块 × 4096`）。这正是 §97/§98「省 arrive」的
+  **指令级证据**（此前只有吞吐差）。
+- **`mtex2`（双向全 TMA）比 `mtex` 多 1,464,672 条指令**（`13,993,056 vs 12,528,384`，+11.7%，来自
+  ack 方向的 `__syncthreads` 会合 + 16 B TMA issue），却**更快**（1325 vs 1234 GB/s）——量化证实
+  §98 的结论：**「一次块内会合 + 一笔 16 B TMA」的指令开销，小于「256 次远端 arrive + fence」**；
+  指令多 ≠ 慢，因为慢的那部分是**跨 SM 内存往返**而非发射。
+- `ring1` 的 `shared_ld=2,162,688` 与 `mbar` 同档，但总指令最低档之一（14.86M）、且最快——它的省在
+  **每 round 只有一次 `cluster.sync`**（§88/§89），不是省 load。
+
+### 99.8 结论、判据与局限
+
+- **结论一（headline，Q1）**：**静态上界被硬件计数逐档证实**——`cudaOccupancyMaxActiveBlocksPerMultiprocessor`
+  的 `occ` 与 ncu `achieved occupancy` 在 §93 的 SMEM-pad 轴（`occ=6→5.2`、`3→2.9`、`2→2.0`、`1→1.0`）
+  与 §97/§98 的四个载体（**全部 = `eff=2`，2.00 块/SM**）上**逐档吻合**。§86–§98 用 `occ`/`eff`
+  解释吞吐**成立**；`TE=256` 的 cluster 载体 achieved 精确 = `eff`。
+- **结论二（headline，Q2）**：**`occ` 在 cluster kernel 上会高估 `eff`**——`C=4, grid=1056` 时
+  achieved 稳定只 **6.7–6.95 块/SM**（42–43%），低于请求的 8（50%）与静态 occ 13；且 `R=1` 与
+  `R=300` 同值 ⇒ 是**稳态放置墙**（occupancy API 不建模 cluster 的 GPC 连续放置），非尾波。
+  故 §93 的 `eff=8` 应读作**乐观上界**，真实并发约 `eff≈7`。
+- **结论三（headline，Q2）**：**delivery 回落点 achieved 更高**——`pad=0`（achieved 6.95 块）6654 GB/s
+  **低于** `pad=16`（achieved 5.20 块）7171 GB/s。⇒ 「~7 TB/s 饱和后回落」**不是占用率不足**而是
+  **共享资源争用**（L2→SMEM/TMA 引擎），用 achieved occupancy 与 throughput **反向**给出直接证据。
+- **结论四（Q5）**：**指令计数坐实 §97/§98 的「省 arrive」**——`mbar→mtex` 总指令 ×1.45、shared load ×2.00；
+  `mtex2` 比 `mtex` 多 11.7% 指令但更快，量化「跨 SM 往返比发射贵」。
+- **对生产的印证**：megakernel 里**同一 kernel 的 task 类型越多，occupancy API 越不可信**（cluster
+  放置、warp 特化、动态 SMEM 都会让 achieved 偏离静态上界）；DeepGEMM mega 家族让每个重 task 自己
+  在 `__launch_bounds__` 下管 SMEM/寄存器（`docs/02` §1.2/§1.5）、MPK 用 paged SMEM（§5.3），
+  本质上都是**把「静态可预测的占用率」当成调度输入**——本节给这条实践以「静态上界 vs achieved
+  的偏差在 cluster/多 task 下有多大」的量化校准。
+- **判据（C1–C5，`docs/00` §3）**：本节是对既有 cluster/load-path 微基准的**计量学交叉验证**，
+  不改任何机制；`mcast_nat`/`mbar`/`mtex`/`mtex2`/`ring1` 的判据与 §18–§23/§86–§98 同档
+  （C1+C2+C3，`cluster.sync`/mbarrier/TMA 细化 C4，**非 C5**）。
+- **局限（诚实标注）**：(1) ncu 的 `sm__warps_active.avg.pct_of_peak_sustained_active` 相对
+  **peak warps** 计，本机取 64/SM；`O≤4` 的 achieved 比 `eff` **系统性高 ~6%**（1.10 vs 1.00、
+  2.13 vs 2.00、4.25 vs 4.00），可能来自 peak 参考口径或 kernel 起止边界，故**只采信同族相对值与
+  「大 grid 滞后」的方向**，绝对驻留块数按 `eff` 校准；(2) ncu 串行化并抬高绝对时间，§A/§B 的
+  deliver 取**未 profile 的计时行**（与 §93 同档：2691/4549/7007/6666）；(3) achieved occupancy 是
+  **时间平均**，未做逐 SM/逐波时间线；(4) 只测 H100/sm90a、单一 cluster 尺寸 `C=4`（未扫 `C` 对
+  放置墙的影响）；(5) 指令归因只取 4 个 aggregate counter，未把 `MBARRIER.ARRIVE` 单列
+  （`smsp__inst_executed_op_shared_atom.sum=0`，故 arrive 不计入 shared atom），故「省 arrive」
+  以 `shared_ld` 减半 + 总指令 ×1.45 为代理证据。

@@ -4954,6 +4954,31 @@
       新留尾巴（§98.9）：ack 只搬 16 B token、S2S 只搬连续段、未测 tensor/2D/`cta_group::2`、
       未做 ncu 归因。
 
+### P174 实验扩展 75：占用率上界的 ncu `achieved occupancy` 交叉验证 + cluster 每槽握手指令归因（`docs/04-experiments.md` §99）
+
+- [x] **P174-1** 补掉 §93.8/§97.9/§98.9 明留的**同一条尾巴**——「占用率用 `cudaOccupancyMax…`
+  的**静态**上界，未用 ncu 的 achieved occupancy 交叉验证」「未做 ncu 归因」。见
+  `docs/04-experiments.md` **§99**，**复用**既有源码 `src/multicast_occupancy.cu`（§93 load-path
+  kernel `mcast_nat`）与 `src/cluster_concurrency.cu`（§87–§98 跨 SM 载体，**不改语义**）、脚本
+  `harness/occupancy_ncu_crosscheck.sh`、原始输出 `harness/occupancy_ncu_crosscheck.out.txt`
+  （目标卡 H100/sm90a、**固定空闲 device 6**、nvcc 13.2、每配置独立进程）。ncu 指标：
+  `sm__warps_active.avg.pct_of_peak_sustained_active`（×64 warp/SM÷每块 warp = 驻留块/SM）、
+  `launch__occupancy_limit_{blocks,registers,shared_mem,warps}`、
+  `smsp__inst_executed{,_op_shared_ld,_op_shared_st,_op_global_st}.sum`。核心结论：
+  - **§A/§B（Q1）静态上界被硬件计数逐档证实**：§93 SMEM-pad 轴 achieved 紧贴静态 occ
+    （`occ=6→5.20`、`3→2.94`、`2→2.00`、`1→1.00` 块/SM）；§93 grid 轴 `O≤4` achieved≈eff
+    （1.10/2.13/4.25 对 1/2/4）；§D 的四个 cluster 载体 **achieved 全部 = eff=2（2.00 块/SM）**。
+  - **§A/§C（Q2）`occ` 在 cluster kernel 上高估 `eff`**：`C=4, grid=1056` achieved 稳定只
+    **6.7–6.95 块/SM（42–43%）**，低于请求 8 与静态 occ 13；`R=1` 与 `R=300` 同值 ⇒ 是
+    **稳态放置墙**（occupancy API 不建模 cluster 的 GPC 连续放置），非尾波。
+  - **§B headline**：**delivery 回落点 achieved 更高**——`pad=0`（6.95 块）6654 GB/s **低于**
+    `pad=16`（5.20 块）7171 GB/s ⇒ 「~7 TB/s 饱和后回落」**不是占用率不足**而是共享资源争用。
+  - **§E（Q5）指令级归因坐实 §97/§98「省 arrive」**：`mbar→mtex` 总指令 ×1.45、`shared_ld` ×2.00
+    （2,162,688→1,081,344）；`mtex2` 比 `mtex` 多 11.7% 指令却更快——量化「跨 SM 往返比发射贵」。
+  判据不变（cluster C1+C2+C3、细化 C4、**非 C5**）。**本轮新增实验**；新留尾巴（§99.8）：
+  achieved 是时间平均（未逐 SM/逐波）、只测 `C=4`、`O≤4` achieved 比 eff 系统性高 ~6%（只采信
+  相对值与方向）、未把 `MBARRIER.ARRIVE` 单列。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -5504,11 +5529,41 @@
   **跨 launch 漂移**。故 megakernel 里两笔 multicast 打到重叠接收集时**必须逐字节同 payload**，否则
   要让每槽单一写者或分槽。另：**重叠写同一槽不额外花星、也不去重**——投递成本只认**发送笔数 N**
   （`idem`/`race`/`nslot1` 墙钟 <0.5% 内重合），真正的差在**读回几槽**（读回 N 槽多 ~8%）。设计时别把
-  「逻辑 delivered 字节」当物理 SMEM 写带宽（同槽多写会把它虚增 N 倍）。
+   「逻辑 delivered 字节」当物理 SMEM 写带宽（同槽多写会把它虚增 N 倍）。
+- **`cudaOccupancyMaxActiveBlocksPerMultiprocessor` 不建模 cluster 放置，cluster kernel 上会高估
+  `eff`**（P174-1/§99）：ncu `sm__warps_active` 显示 `C=4, grid=1056` 的 cluster kernel 稳态只驻留
+  **~6.7–6.95 块/SM（42–43%）**，低于请求的 8（=静态 occ 上限内的 8）与 SMEM 上限 13——因 cluster
+  必须落在同一 GPC 的连续 SM 组，存在放置碎片。故写 cluster 微基准时，静态 `occ`/`eff` 应读作
+  **乐观上界**；要真值用 ncu achieved occupancy（或按 `~7·min(occ, grid/nsm)/8` 归一）。且该偏差是
+  **稳态**（`R=1` 与 `R=300` 同值），不是尾波。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P173-1 完成（1/1）**。补掉 §97.9 明留的尾巴——`mtex`（§97）只把 **ready 方向**的
+- 当前进度：**P174-1 完成（1/1）**。补掉 §93.8/§97.9/§98.9 明留的**同一条尾巴**——「占用率用
+  `cudaOccupancyMaxActiveBlocksPerMultiprocessor` 的**静态**上界，未用 ncu 的 achieved occupancy
+  交叉验证」「未做 ncu 归因」。见 `docs/04-experiments.md` **§99**，**复用**既有源码
+  `src/multicast_occupancy.cu`（§93 `mcast_nat`）与 `src/cluster_concurrency.cu`（§87–§98 跨 SM
+  载体，**不改语义**）、脚本 `harness/occupancy_ncu_crosscheck.sh`、原始输出
+  `harness/occupancy_ncu_crosscheck.out.txt`（目标卡 H100/sm90a、**固定空闲 device 6**、nvcc 13.2、
+  每配置独立进程）。三条 headline：**(1)** 静态上界被 hardware counter **逐档证实**——§93 SMEM-pad
+  轴 achieved 紧贴静态 occ（`occ=6→5.20`、`3→2.94`、`2→2.00`、`1→1.00` 块/SM）、§D 四个 cluster
+  载体 **achieved 全部=eff=2（2.00 块/SM）**；**(2)（修正）`occ` 在 cluster kernel 上高估 `eff`**——
+  `C=4, grid=1056` achieved 稳定只 **6.7–6.95 块/SM（42–43%）**（低于请求 8 与静态 occ 13），
+  `R=1`/`R=300` 同值 ⇒ **稳态放置墙**（API 不建模 cluster 的 GPC 连续放置），非尾波；且
+  **delivery 回落点 achieved 更高**（`pad=0` 6.95 块 6654 GB/s **<** `pad=16` 5.20 块 7171 GB/s）
+  ⇒ §93「~7 TB/s 饱和后回落」**不是占用率不足**而是资源共享争用；**(3)** 指令级归因坐实 §97/§98
+  「省 arrive」——`mbar→mtex` 总指令 ×1.45、`shared_ld` ×2.00，`mtex2` 比 `mtex` 多 11.7% 指令却
+  更快（跨 SM 往返比发射贵）。判据不变（cluster C1+C2+C3、细化 C4、**非 C5**）。**本轮新增实验**；
+  新留尾巴（§99.8）：achieved 为时间平均、只测 `C=4`、`O≤4` achieved 比 eff 系统性高 ~6%、
+  未单列 `MBARRIER.ARRIVE`。**构建验证**：`hugo --gc --minify` 本专题内容零 ERROR。
+- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §99）——如 **S2S bulk 的
+  tensor/2D 非连续搬运**（§97/§98 只搬连续段）、**multicast × 2SM（`cta_group::2`）**、
+  **2D/3D cluster × 重叠/非连续掩码**、**cluster × 端到端骨架**（把 §62/§74 的骨架放进 cluster）、
+  或 **占用率放置墙的细化**（§99 只测 `C=4`，可扫 `C`/逐 SM 时间线/ncu achieved 到 `MBARRIER.ARRIVE`
+  单列）；也可回到源码走读主线（`docs/35` §9 余的「`bf16` 之外 SM100 task 家族未逐一走读」）。
+  **其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft attention（已核零命中、**不可走读**，
+  仅供静态落差记录）。
+- 此前：**P173-1 完成（1/1）**。补掉 §97.9 明留的尾巴——`mtex`（§97）只把 **ready 方向**的
   「数据交付 + done」交给 TMA 引擎，**ack（背压）方向仍是软件 arrive**（全 block 每线程远端 arrive
   上游 `ackBar`，`count=TH`）。本节把 **ack 方向也改成 TMA 事务计数**（`mtex2`，双向全 TMA）。见
   `docs/04-experiments.md` **§98**，源码复用 `src/cluster_concurrency.cu`（**新增载体 `mtex2`/

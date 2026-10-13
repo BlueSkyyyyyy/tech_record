@@ -1,0 +1,211 @@
+########## §99 占用率上界的 ncu cross-check（P174-1） ##########
+# DEV=6  nvcc -O3 -arch=sm_90a  (CUDA 13.2)
+
+===== 编译 =====
+ok: /tmp/mcast_occ_ncu /tmp/cluster_cc_ncu
+# numSM=132
+
+===== §A §93 grid 轴：静态 occ=13（L=2,16KB），grid=numSM·O，mode0；timing + ncu achieved occ =====
+$ MULTICAST_OCC B 4 132 8 300 0 2 0 0
+B C= 4 grid= 132 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 1 waves=1.00 |  241.093 us | deliver  2691.1 GB/s | per-blk   20.4 GB/s | src-read  2691.1 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 132 8 300 0 2 0 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (132, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block           13
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                      0.08
+        sm__warps_active.avg.pct_of_peak_sustained_active           %         6.87
+$ MULTICAST_OCC B 4 264 8 300 0 2 0 0
+B C= 4 grid= 264 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 2 waves=1.00 |  285.258 us | deliver  4548.9 GB/s | per-blk   17.2 GB/s | src-read  4548.9 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 264 8 300 0 2 0 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (264, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block           13
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                      0.15
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        13.30
+$ MULTICAST_OCC B 4 528 8 300 0 2 0 0
+B C= 4 grid= 528 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 4 waves=1.00 |  370.390 us | deliver  7006.7 GB/s | per-blk   13.3 GB/s | src-read  7006.7 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 528 8 300 0 2 0 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (528, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block           13
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                      0.31
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        26.56
+$ MULTICAST_OCC B 4 1056 8 300 0 2 0 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  778.611 us | deliver  6666.3 GB/s | per-blk    6.3 GB/s | src-read  6666.3 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 1056 8 300 0 2 0 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (1056, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block           13
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                      0.62
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        41.88
+
+===== §B §93 SMEM-pad 轴：grid=numSM·8，L=2，pad 改静态 occ；timing + ncu achieved occ =====
+$ MULTICAST_OCC B 4 1056 8 300 0 2 0 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |  780.064 us | deliver  6653.9 GB/s | per-blk    6.3 GB/s | src-read  6653.9 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 1056 8 300 0 2 0 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (1056, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block           13
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                      0.62
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        43.41
+$ MULTICAST_OCC B 4 1056 8 300 0 2 16 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad= 16KB maxr=  0 mode=0 | regs= 10 occ= 6 eff= 6 waves=1.33 |  723.846 us | deliver  7170.7 GB/s | per-blk    6.8 GB/s | src-read  7170.7 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 1056 8 300 0 2 16 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (1056, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block            6
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                      1.33
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        32.52
+$ MULTICAST_OCC B 4 1056 8 300 0 2 48 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad= 48KB maxr=  0 mode=0 | regs= 10 occ= 3 eff= 3 waves=2.67 |  890.123 us | deliver  5831.2 GB/s | per-blk    5.5 GB/s | src-read  5831.2 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 1056 8 300 0 2 48 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (1056, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block            3
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                      2.67
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        18.35
+$ MULTICAST_OCC B 4 1056 8 300 0 2 96 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad= 96KB maxr=  0 mode=0 | regs= 10 occ= 2 eff= 2 waves=4.00 | 1215.120 us | deliver  4271.6 GB/s | per-blk    4.0 GB/s | src-read  4271.6 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 1056 8 300 0 2 96 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (1056, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block            2
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                         4
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        12.49
+$ MULTICAST_OCC B 4 1056 8 300 0 2 144 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad=144KB maxr=  0 mode=0 | regs= 10 occ= 1 eff= 1 waves=8.00 | 2102.861 us | deliver  2468.3 GB/s | per-blk    2.3 GB/s | src-read  2468.3 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 1056 8 300 0 2 144 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (1056, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block            1
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                         8
+        sm__warps_active.avg.pct_of_peak_sustained_active           %         6.25
+$ MULTICAST_OCC B 4 1056 8 300 0 2 200 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad=200KB maxr=  0 mode=0 | regs= 10 occ= 1 eff= 1 waves=8.00 | 2102.621 us | deliver  2468.6 GB/s | per-blk    2.3 GB/s | src-read  2468.6 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 1056 8 300 0 2 200 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (1056, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block            1
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                         8
+        sm__warps_active.avg.pct_of_peak_sustained_active           %         6.25
+
+===== §C 短工作尾波：grid=numSM·8，pad=0，R=1（极短）vs R=300（长）；achieved occ 之差即尾波 =====
+$ MULTICAST_OCC B 4 1056 8 1 0 2 0 0
+B C= 4 grid=1056 chunk= 8KB L= 2 pad=  0KB maxr=  0 mode=0 | regs= 10 occ=13 eff= 8 waves=1.00 |    6.933 us | deliver  2495.6 GB/s | per-blk    2.4 GB/s | src-read  2495.6 GB/s | maxerr 0.00000
+$ ncu -k mcast_nat --metrics {occ/inst} /tmp/mcast_occ_ncu B 4 1056 8 1 0 2 0 0
+      mcast_nat(CUtensorMap_st, float *, int, int, int, int) (1056, 1, 1)x(128, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block           32
+        launch__occupancy_limit_shared_mem                      block           13
+        launch__occupancy_limit_warps                           block           16
+        launch__waves_per_multiprocessor                                      0.62
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        42.07
+
+===== §D §97/§98 跨 SM 载体：C=2 grid=264（=2 块/SM）U=8；静态 occ=3，ncu achieved occ（应≈eff=2） =====
+$ CLUSTER_CONCURRENCY B 2 264 32 64 8
+B C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   127.392 us |   1086.5 GB/s(远端) | 1990.500 ns/lap
+$ ncu -k mbar_8 --metrics {occ/inst} /tmp/cluster_cc_ncu B 2 264 32 64 8
+      mbar_8(float *, int, int, int) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block            8
+        launch__occupancy_limit_shared_mem                      block            3
+        launch__occupancy_limit_warps                           block            8
+        launch__waves_per_multiprocessor                                      0.67
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        24.90
+$ CLUSTER_CONCURRENCY D 2 264 32 64 8
+D C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   112.192 us |   1233.7 GB/s(远端) | 1753.000 ns/lap
+$ ncu -k mtex_8 --metrics {occ/inst} /tmp/cluster_cc_ncu D 2 264 32 64 8
+      mtex_8(float *, int, int, int) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block            8
+        launch__occupancy_limit_shared_mem                      block            3
+        launch__occupancy_limit_warps                           block            8
+        launch__waves_per_multiprocessor                                      0.67
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        24.95
+$ CLUSTER_CONCURRENCY I 2 264 32 64 8
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   104.480 us |   1324.8 GB/s(远端) | 1632.500 ns/lap
+$ ncu -k mtex2_8 --metrics {occ/inst} /tmp/cluster_cc_ncu I 2 264 32 64 8
+      mtex2_8(float *, int, int, int) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block            8
+        launch__occupancy_limit_shared_mem                      block            3
+        launch__occupancy_limit_warps                           block            8
+        launch__waves_per_multiprocessor                                      0.67
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        24.93
+$ CLUSTER_CONCURRENCY M 2 264 32 64 8
+M C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    86.144 us |   1606.8 GB/s(远端) | 1346.000 ns/lap
+$ ncu -k ring1_8 --metrics {occ/inst} /tmp/cluster_cc_ncu M 2 264 32 64 8
+      ring1_8(float *, int, int) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                                       Metric Unit Metric Value
+        launch__occupancy_limit_blocks                          block           32
+        launch__occupancy_limit_registers                       block            8
+        launch__occupancy_limit_shared_mem                      block            3
+        launch__occupancy_limit_warps                           block            8
+        launch__waves_per_multiprocessor                                      0.67
+        sm__warps_active.avg.pct_of_peak_sustained_active           %        24.80
+
+===== §E 指令级归因：同配置，mbar/mtex/mtex2/ring1 的 inst_executed 与 shared ld/st（验证 §97/§98「省 arrive」） =====
+$ ncu -k mbar_8 --metrics {occ/inst} /tmp/cluster_cc_ncu B 2 264 32 64 8
+      mbar_8(float *, int, int, int) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                          Metric Unit Metric Value
+        smsp__inst_executed.sum                     inst     18166368
+        smsp__inst_executed_op_global_st.sum        inst          264
+        smsp__inst_executed_op_shared_ld.sum        inst      2162688
+        smsp__inst_executed_op_shared_st.sum        inst        67584
+$ ncu -k mtex_8 --metrics {occ/inst} /tmp/cluster_cc_ncu D 2 264 32 64 8
+      mtex_8(float *, int, int, int) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                          Metric Unit Metric Value
+        smsp__inst_executed.sum                     inst     12528384
+        smsp__inst_executed_op_global_st.sum        inst          264
+        smsp__inst_executed_op_shared_ld.sum        inst      1081344
+        smsp__inst_executed_op_shared_st.sum        inst        67584
+$ ncu -k mtex2_8 --metrics {occ/inst} /tmp/cluster_cc_ncu I 2 264 32 64 8
+      mtex2_8(float *, int, int, int) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                          Metric Unit Metric Value
+        smsp__inst_executed.sum                     inst     13993056
+        smsp__inst_executed_op_global_st.sum        inst          264
+        smsp__inst_executed_op_shared_ld.sum        inst      1081344
+        smsp__inst_executed_op_shared_st.sum        inst        67584
+$ ncu -k ring1_8 --metrics {occ/inst} /tmp/cluster_cc_ncu M 2 264 32 64 8
+      ring1_8(float *, int, int) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+        Metric Name                          Metric Unit Metric Value
+        smsp__inst_executed.sum                     inst     14857128
+        smsp__inst_executed_op_global_st.sum        inst          264
+        smsp__inst_executed_op_shared_ld.sum        inst      2162688
+        smsp__inst_executed_op_shared_st.sum        inst        69696
+
+########## 完 ##########
