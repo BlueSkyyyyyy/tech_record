@@ -64,4 +64,6 @@ categories: ["算子开发"]
 
 41. [MPK 退役实现走读：`tasks/deprecated/paged_attention.cuh`]({{< relref "mega-kernel-41-mpk-deprecated-paged-attention" >}}) —— 打开仓库里唯一归档在 `deprecated/` 下的 task：一套自包含「paged attention + 新 token K/V 写回页缓存 + 融合 QK-norm/RoPE」的单 CTA FA2 手写实现（m16n16k16 mma 的 1x4x1/1x1x4 warp 布局、在线 softmax、双缓冲 64-key tile、warp0 跨 warp 合并），与今天「只读 attention + 独立 KV store + 独立 norm/rope」的拆分解法并置对比，并坐实它「连同接线尝试一起被归档」的彻底孤儿状态（无 include、`DEPRECATED_TESTS` 未定义、`using`/`m.def` 全被注释）
 
+42. [MPK 概率簿记 task 走读：`softmax_gather` / `prob_scatter` / `prob_extract`]({{< relref "mega-kernel-42-mpk-prob-bookkeeping" >}}) —— 把全仓最小的 device 身体（三个函数共 193 行、SM100 专属簿记 task）逐行打开：`softmax_gather` 的两趟全词表归约（`__expf` + `smem_max[8]/smem_sum[8]` 两级蝶形、越界取 `-1e30`）与「Grid/Block 注释、`log_sum` 写法、单 block 串行 batch」三方落差，`prob_scatter` 的单线程编译期/运行期槽号写（越界静默）与 `prob_extract` 的 `offset+1` 运行期切片（越界补 0），并核对五层生产布线（`TaskType` 282/284/286、`register`/`graph.cc`/前端/builder）与概率 MTP 旁路「device 全实现、builder 仍留 TODO」的半实现状态
+
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
