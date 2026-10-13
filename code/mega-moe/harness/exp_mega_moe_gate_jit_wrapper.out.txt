@@ -1,0 +1,184 @@
+== 环境坐标 ==
+057ca59 Public release 26/09/30 (#462)
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+sm100_fp8_fp4_mega_moe.hpp
+sm100_bf16_mega_gate.hpp
+mega_moe.hpp
+mega_gate.hpp
+mega_gate.cuh
+Build cuda_13.2.r13.2/compiler.37668154_0
+
+== 编译（nvcc 直接 include 真实头文件 + torch）==
+build OK
+
+== 主实验 ==
+== P86-1: FP8 Mega MoE + Mega Gate JIT launch wrappers (host side) ==
+
+== Part 1: Mega MoE config derivation (get_mega_moe_config) ==
+[deepseek-v3-like/FP8] FP8: MegaMoEConfig(block_m=240, block_n=128, block_k=128, load_block_m=120, load_block_n=128, store_block_m_l1=24, store_block_m_l2=8, sf_block_m=256, sf_block_n=128, num_ring_tokens=1920, num_sf_ring_tokens=61440, swizzle_acts_mode=128, swizzle_weights_mode=128, num_stages=5, smem_size=203380, num_dispatch_threads=128, num_non_epilogue_threads=128, num_epilogue_threads=256, num_bytes_per_pull=7168)
+  PASS  deepseek-v3-like/FP8 block_k == 128/elem_bytes
+  PASS  deepseek-v3-like/FP8 block_n == 128
+  PASS  deepseek-v3-like/FP8 load_block_m == block_m/2 (multicast A)
+  PASS  deepseek-v3-like/FP8 thread split 128/128/256
+  PASS  deepseek-v3-like/FP8 swizzle acts/weights == 128
+  PASS  deepseek-v3-like/FP8 num_ring_tokens == ring
+  PASS  deepseek-v3-like/FP8 SF blocks UTCCP-aligned (align(block_m,128),128)
+  PASS  deepseek-v3-like/FP8 store_block_m ladder (24/8)
+  PASS  deepseek-v3-like/FP8 num_bytes_per_pull == 7168
+  PASS  deepseek-v3-like/FP8 smem fits (203380 <= 232448) and stages>=2
+[deepseek-v3-like/BF16] BF16: MegaMoEConfig(block_m=240, block_n=128, block_k=64, load_block_m=120, load_block_n=128, store_block_m_l1=40, store_block_m_l2=40, sf_block_m=0, sf_block_n=0, num_ring_tokens=1920, num_sf_ring_tokens=0, swizzle_acts_mode=128, swizzle_weights_mode=128, num_stages=6, smem_size=226692, num_dispatch_threads=128, num_non_epilogue_threads=128, num_epilogue_threads=256, num_bytes_per_pull=3584)
+  PASS  deepseek-v3-like/BF16 block_k == 128/elem_bytes
+  PASS  deepseek-v3-like/BF16 block_n == 128
+  PASS  deepseek-v3-like/BF16 load_block_m == block_m/2 (multicast A)
+  PASS  deepseek-v3-like/BF16 thread split 128/128/256
+  PASS  deepseek-v3-like/BF16 swizzle acts/weights == 128
+  PASS  deepseek-v3-like/BF16 num_ring_tokens == ring
+  PASS  deepseek-v3-like/BF16 has no SF (sf_block_m/n==0, sf_ring==0)
+  PASS  deepseek-v3-like/BF16 store_block_m ladder (40/40)
+  PASS  deepseek-v3-like/BF16 num_bytes_per_pull == 3584
+  PASS  deepseek-v3-like/BF16 smem fits (226692 <= 232448) and stages>=2
+[inter=1536/topk8/FP8] FP8: MegaMoEConfig(block_m=240, block_n=128, block_k=128, load_block_m=120, load_block_n=128, store_block_m_l1=24, store_block_m_l2=8, sf_block_m=256, sf_block_n=128, num_ring_tokens=1920, num_sf_ring_tokens=61440, swizzle_acts_mode=128, swizzle_weights_mode=128, num_stages=5, smem_size=203380, num_dispatch_threads=128, num_non_epilogue_threads=128, num_epilogue_threads=256, num_bytes_per_pull=7168)
+  PASS  inter=1536/topk8/FP8 block_k == 128/elem_bytes
+  PASS  inter=1536/topk8/FP8 block_n == 128
+  PASS  inter=1536/topk8/FP8 load_block_m == block_m/2 (multicast A)
+  PASS  inter=1536/topk8/FP8 thread split 128/128/256
+  PASS  inter=1536/topk8/FP8 swizzle acts/weights == 128
+  PASS  inter=1536/topk8/FP8 num_ring_tokens == ring
+  PASS  inter=1536/topk8/FP8 SF blocks UTCCP-aligned (align(block_m,128),128)
+  PASS  inter=1536/topk8/FP8 store_block_m ladder (24/8)
+  PASS  inter=1536/topk8/FP8 num_bytes_per_pull == 7168
+  PASS  inter=1536/topk8/FP8 smem fits (203380 <= 232448) and stages>=2
+[inter=1536/topk8/BF16] BF16: MegaMoEConfig(block_m=240, block_n=128, block_k=64, load_block_m=120, load_block_n=128, store_block_m_l1=40, store_block_m_l2=40, sf_block_m=0, sf_block_n=0, num_ring_tokens=1920, num_sf_ring_tokens=0, swizzle_acts_mode=128, swizzle_weights_mode=128, num_stages=6, smem_size=226692, num_dispatch_threads=128, num_non_epilogue_threads=128, num_epilogue_threads=256, num_bytes_per_pull=3584)
+  PASS  inter=1536/topk8/BF16 block_k == 128/elem_bytes
+  PASS  inter=1536/topk8/BF16 block_n == 128
+  PASS  inter=1536/topk8/BF16 load_block_m == block_m/2 (multicast A)
+  PASS  inter=1536/topk8/BF16 thread split 128/128/256
+  PASS  inter=1536/topk8/BF16 swizzle acts/weights == 128
+  PASS  inter=1536/topk8/BF16 num_ring_tokens == ring
+  PASS  inter=1536/topk8/BF16 has no SF (sf_block_m/n==0, sf_ring==0)
+  PASS  inter=1536/topk8/BF16 store_block_m ladder (40/40)
+  PASS  inter=1536/topk8/BF16 num_bytes_per_pull == 3584
+  PASS  inter=1536/topk8/BF16 smem fits (226692 <= 232448) and stages>=2
+[few-local-experts/FP8] FP8: MegaMoEConfig(block_m=240, block_n=128, block_k=128, load_block_m=120, load_block_n=128, store_block_m_l1=24, store_block_m_l2=8, sf_block_m=256, sf_block_n=128, num_ring_tokens=1920, num_sf_ring_tokens=61440, swizzle_acts_mode=128, swizzle_weights_mode=128, num_stages=5, smem_size=203380, num_dispatch_threads=128, num_non_epilogue_threads=128, num_epilogue_threads=256, num_bytes_per_pull=7168)
+  PASS  few-local-experts/FP8 block_k == 128/elem_bytes
+  PASS  few-local-experts/FP8 block_n == 128
+  PASS  few-local-experts/FP8 load_block_m == block_m/2 (multicast A)
+  PASS  few-local-experts/FP8 thread split 128/128/256
+  PASS  few-local-experts/FP8 swizzle acts/weights == 128
+  PASS  few-local-experts/FP8 num_ring_tokens == ring
+  PASS  few-local-experts/FP8 SF blocks UTCCP-aligned (align(block_m,128),128)
+  PASS  few-local-experts/FP8 store_block_m ladder (24/8)
+  PASS  few-local-experts/FP8 num_bytes_per_pull == 7168
+  PASS  few-local-experts/FP8 smem fits (203380 <= 232448) and stages>=2
+[few-local-experts/BF16] BF16: MegaMoEConfig(block_m=240, block_n=128, block_k=64, load_block_m=120, load_block_n=128, store_block_m_l1=40, store_block_m_l2=40, sf_block_m=0, sf_block_n=0, num_ring_tokens=1920, num_sf_ring_tokens=0, swizzle_acts_mode=128, swizzle_weights_mode=128, num_stages=6, smem_size=226692, num_dispatch_threads=128, num_non_epilogue_threads=128, num_epilogue_threads=256, num_bytes_per_pull=3584)
+  PASS  few-local-experts/BF16 block_k == 128/elem_bytes
+  PASS  few-local-experts/BF16 block_n == 128
+  PASS  few-local-experts/BF16 load_block_m == block_m/2 (multicast A)
+  PASS  few-local-experts/BF16 thread split 128/128/256
+  PASS  few-local-experts/BF16 swizzle acts/weights == 128
+  PASS  few-local-experts/BF16 num_ring_tokens == ring
+  PASS  few-local-experts/BF16 has no SF (sf_block_m/n==0, sf_ring==0)
+  PASS  few-local-experts/BF16 store_block_m ladder (40/40)
+  PASS  few-local-experts/BF16 num_bytes_per_pull == 3584
+  PASS  few-local-experts/BF16 smem fits (226692 <= 232448) and stages>=2
+[single-rank-small/FP8] FP8: MegaMoEConfig(block_m=64, block_n=128, block_k=128, load_block_m=32, load_block_n=128, store_block_m_l1=16, store_block_m_l2=16, sf_block_m=128, sf_block_n=128, num_ring_tokens=1920, num_sf_ring_tokens=61440, swizzle_acts_mode=128, swizzle_weights_mode=128, num_stages=9, smem_size=232372, num_dispatch_threads=128, num_non_epilogue_threads=128, num_epilogue_threads=256, num_bytes_per_pull=7168)
+  PASS  single-rank-small/FP8 block_k == 128/elem_bytes
+  PASS  single-rank-small/FP8 block_n == 128
+  PASS  single-rank-small/FP8 load_block_m == block_m/2 (multicast A)
+  PASS  single-rank-small/FP8 thread split 128/128/256
+  PASS  single-rank-small/FP8 swizzle acts/weights == 128
+  PASS  single-rank-small/FP8 num_ring_tokens == ring
+  PASS  single-rank-small/FP8 SF blocks UTCCP-aligned (align(block_m,128),128)
+  PASS  single-rank-small/FP8 store_block_m ladder (16/16)
+  PASS  single-rank-small/FP8 num_bytes_per_pull == 7168
+  PASS  single-rank-small/FP8 smem fits (232372 <= 232448) and stages>=2
+[single-rank-small/BF16] BF16: MegaMoEConfig(block_m=64, block_n=128, block_k=64, load_block_m=32, load_block_n=128, store_block_m_l1=16, store_block_m_l2=16, sf_block_m=0, sf_block_n=0, num_ring_tokens=1920, num_sf_ring_tokens=0, swizzle_acts_mode=128, swizzle_weights_mode=128, num_stages=10, smem_size=228804, num_dispatch_threads=128, num_non_epilogue_threads=128, num_epilogue_threads=256, num_bytes_per_pull=3584)
+  PASS  single-rank-small/BF16 block_k == 128/elem_bytes
+  PASS  single-rank-small/BF16 block_n == 128
+  PASS  single-rank-small/BF16 load_block_m == block_m/2 (multicast A)
+  PASS  single-rank-small/BF16 thread split 128/128/256
+  PASS  single-rank-small/BF16 swizzle acts/weights == 128
+  PASS  single-rank-small/BF16 num_ring_tokens == ring
+  PASS  single-rank-small/BF16 has no SF (sf_block_m/n==0, sf_ring==0)
+  PASS  single-rank-small/BF16 store_block_m ladder (16/16)
+  PASS  single-rank-small/BF16 num_bytes_per_pull == 3584
+  PASS  single-rank-small/BF16 smem fits (228804 <= 232448) and stages>=2
+
+== Part 2: FP8 Mega MoE TMA descriptor composition + shared fallback ==
+  PASS  sf_smem_outer_dim == block_k/(gran_k*4) == 1 for FP8
+  PASS  num_shared==0 -> shared_l1_acts aliases routed (byte-equal)
+  PASS  num_shared==0 -> shared_l1_weights aliases routed
+  PASS  num_shared==0 -> shared_l2_acts_sf aliases routed
+  PASS  num_shared==0 -> shared_l2_weights aliases routed
+  PASS  FP8 l1_acts == independent encode (hidden, ring, sw128)
+  PASS  FP8 shared_l2_acts == independent encode (sh_inter, T)
+  PASS  FP8 l1_acts_sf == independent encode (M-major, no swizzle)
+  INFO  FP8 descriptor count = 18 (9 routed + 9 shared); BF16 = 10 (5 + 5)
+  PASS  FP8 template arity from source == 25 (got 25)
+  PASS  BF16 template arity from source == 20 (got 20)
+  PASS  Gate template arity from source == 15 (got 15)
+
+== Part 3: Mega Gate config / constants / RoutingArgs ABI ==
+  PASS  gate BLOCK_K==64, kSwizzleMode==128
+  PASS  gate thread/blocks constants (128/256/16)
+  PASS  gate alignment/logical-ctas/stages constants (128/64/32)
+  PASS  gate kNumExpertsPerWave == kExpertAlignment
+  PASS  sizeof(RoutingArgs) == 72
+  PASS  RoutingArgs ptr block @0..40
+  PASS  RoutingArgs int/uint block @48..64
+  INFO  sizeof(SharedStorage)=4656 kStageDataOffset=5120
+  PASS  kStageDataOffset 1024-aligned
+  PASS  Workspace scratch bytes == nb*split*block_tokens*E*4
+  PASS  caches_logical_count(no bias,map)=true
+  PASS  caches_logical_count(bias+image,map) matches 4KiB budget
+  PASS  caches_logical_count(no map)=false
+[gate/T=4096,H=7168,E=256 det=0] MegaGateConfig(num_expert_groups=1, num_mma_ctas=2, num_split_k=1, num_logical_ctas=2, block_tokens=64, load_block_m=32, load_block_n=128, num_worker_groups=64, num_launch_sms=128, num_waves=1, num_token_cols=56, num_gate_threads=512, num_stages=11, smem_size=230400)
+  PASS  gate/T=4096,H=7168,E=256 det=0 load blocks (32/128)
+  PASS  gate/T=4096,H=7168,E=256 det=0 launch sms/waves
+  PASS  gate/T=4096,H=7168,E=256 det=0 gate threads multiple of 128 and <=7 warpgroup
+  PASS  gate/T=4096,H=7168,E=256 det=0 smem/stages
+  PASS  gate/T=4096,H=7168,E=256 det=0 split_k==1 under determinism
+[gate/T=4096,H=7168,E=256 det=1] MegaGateConfig(num_expert_groups=1, num_mma_ctas=2, num_split_k=1, num_logical_ctas=2, block_tokens=64, load_block_m=32, load_block_n=128, num_worker_groups=64, num_launch_sms=128, num_waves=1, num_token_cols=56, num_gate_threads=512, num_stages=11, smem_size=230400)
+  PASS  gate/T=4096,H=7168,E=256 det=1 load blocks (32/128)
+  PASS  gate/T=4096,H=7168,E=256 det=1 launch sms/waves
+  PASS  gate/T=4096,H=7168,E=256 det=1 gate threads multiple of 128 and <=7 warpgroup
+  PASS  gate/T=4096,H=7168,E=256 det=1 smem/stages
+  PASS  gate/T=4096,H=7168,E=256 det=1 split_k==1 under determinism
+[gate/T=64,H=7168,E=256 det=0] MegaGateConfig(num_expert_groups=2, num_mma_ctas=1, num_split_k=8, num_logical_ctas=16, block_tokens=16, load_block_m=16, load_block_n=128, num_worker_groups=4, num_launch_sms=64, num_waves=1, num_token_cols=16, num_gate_threads=256, num_stages=12, smem_size=226304)
+  PASS  gate/T=64,H=7168,E=256 det=0 load blocks (16/128)
+  PASS  gate/T=64,H=7168,E=256 det=0 launch sms/waves
+  PASS  gate/T=64,H=7168,E=256 det=0 gate threads multiple of 128 and <=7 warpgroup
+  PASS  gate/T=64,H=7168,E=256 det=0 smem/stages
+  PASS  gate/T=64,H=7168,E=256 det=0 split_k==1 under determinism
+[gate/T=64,H=7168,E=256 det=1] MegaGateConfig(num_expert_groups=1, num_mma_ctas=2, num_split_k=1, num_logical_ctas=2, block_tokens=16, load_block_m=8, load_block_n=128, num_worker_groups=4, num_launch_sms=8, num_waves=1, num_token_cols=16, num_gate_threads=256, num_stages=13, smem_size=231424)
+  PASS  gate/T=64,H=7168,E=256 det=1 load blocks (8/128)
+  PASS  gate/T=64,H=7168,E=256 det=1 launch sms/waves
+  PASS  gate/T=64,H=7168,E=256 det=1 gate threads multiple of 128 and <=7 warpgroup
+  PASS  gate/T=64,H=7168,E=256 det=1 smem/stages
+  PASS  gate/T=64,H=7168,E=256 det=1 split_k==1 under determinism
+[gate/T=32768,H=4096,E=128 det=0] MegaGateConfig(num_expert_groups=1, num_mma_ctas=2, num_split_k=1, num_logical_ctas=2, block_tokens=256, load_block_m=128, load_block_n=64, num_worker_groups=66, num_launch_sms=132, num_waves=2, num_token_cols=56, num_gate_threads=896, num_stages=9, smem_size=226304)
+  PASS  gate/T=32768,H=4096,E=128 det=0 load blocks (128/64)
+  PASS  gate/T=32768,H=4096,E=128 det=0 launch sms/waves
+  PASS  gate/T=32768,H=4096,E=128 det=0 gate threads multiple of 128 and <=7 warpgroup
+  PASS  gate/T=32768,H=4096,E=128 det=0 smem/stages
+  PASS  gate/T=32768,H=4096,E=128 det=0 split_k==1 under determinism
+[gate/T=32768,H=4096,E=128 det=1] MegaGateConfig(num_expert_groups=1, num_mma_ctas=2, num_split_k=1, num_logical_ctas=2, block_tokens=256, load_block_m=128, load_block_n=64, num_worker_groups=66, num_launch_sms=132, num_waves=2, num_token_cols=56, num_gate_threads=896, num_stages=9, smem_size=226304)
+  PASS  gate/T=32768,H=4096,E=128 det=1 load blocks (128/64)
+  PASS  gate/T=32768,H=4096,E=128 det=1 launch sms/waves
+  PASS  gate/T=32768,H=4096,E=128 det=1 gate threads multiple of 128 and <=7 warpgroup
+  PASS  gate/T=32768,H=4096,E=128 det=1 smem/stages
+  PASS  gate/T=32768,H=4096,E=128 det=1 split_k==1 under determinism
+[gate/T=1024,H=7168,E=384 det=0] MegaGateConfig(num_expert_groups=3, num_mma_ctas=2, num_split_k=4, num_logical_ctas=24, block_tokens=208, load_block_m=104, load_block_n=64, num_worker_groups=5, num_launch_sms=120, num_waves=1, num_token_cols=56, num_gate_threads=896, num_stages=10, smem_size=220160)
+  PASS  gate/T=1024,H=7168,E=384 det=0 load blocks (104/64)
+  PASS  gate/T=1024,H=7168,E=384 det=0 launch sms/waves
+  PASS  gate/T=1024,H=7168,E=384 det=0 gate threads multiple of 128 and <=7 warpgroup
+  PASS  gate/T=1024,H=7168,E=384 det=0 smem/stages
+  PASS  gate/T=1024,H=7168,E=384 det=0 split_k==1 under determinism
+[gate/T=1024,H=7168,E=384 det=1] MegaGateConfig(num_expert_groups=3, num_mma_ctas=2, num_split_k=1, num_logical_ctas=6, block_tokens=48, load_block_m=24, load_block_n=64, num_worker_groups=22, num_launch_sms=132, num_waves=1, num_token_cols=24, num_gate_threads=384, num_stages=20, smem_size=230400)
+  PASS  gate/T=1024,H=7168,E=384 det=1 load blocks (24/64)
+  PASS  gate/T=1024,H=7168,E=384 det=1 launch sms/waves
+  PASS  gate/T=1024,H=7168,E=384 det=1 gate threads multiple of 128 and <=7 warpgroup
+  PASS  gate/T=1024,H=7168,E=384 det=1 smem/stages
+  PASS  gate/T=1024,H=7168,E=384 det=1 split_k==1 under determinism
+
+==== TOTAL: PASS=143 FAIL=0 ====

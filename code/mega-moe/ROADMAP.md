@@ -2667,8 +2667,39 @@
       Part B **8×H100 真机 NCCL 用真实 `refs.dispatch`**（`all_to_all_single`）跨 rank 验伴随
       `<D(x),g>==<x,Dᵀ(g)>`（100.3833/100.3833）、`<G(w),gw>==<w,Gᵀ(gw)>`（−18.4716/−18.4716）、
       复制语义 `Σrecv_w==degree·w`（平均 degree 3.328）。配套博客
-      `content/posts/mega-moe-95-ep-backward-adjoint`（索引页新增第 95 篇）。
+       `content/posts/mega-moe-95-ep-backward-adjoint`（索引页新增第 95 篇）。
 
+### P86 增量（opt-in，补齐 P79 只对照未拆的两个 mega 家族 JIT 启动包装层）
+
+- [x] **P86-1** **FP8/FP4 Mega MoE + Mega Gate 的 JIT 启动包装层**
+      （`csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp` 224 行 /
+      `sm100_bf16_mega_gate.hpp` 92 行；`csrc/jit_kernels/heuristics/mega_moe.hpp` /
+      `mega_gate.hpp`；`deep_gemm/include/deep_gemm/layout/mega_gate.cuh`；
+      `csrc/apis/mega_gate.hpp`；`sm100_fp8_fp4_mega_moe.cuh` / `sm100_bf16_mega_gate.cuh`）。
+      第 89 篇（P79-1）拆了 BF16 Mega MoE 与 mHC 的包装层、只把 FP8 Mega MoE 当「对照」数了描述符
+      （且计数有误），Mega Gate 的包装层从未被单独读过。本篇补齐，凑齐
+      `sm100_{fp8_fp4_mega_moe, bf16_mega_moe, bf16_mega_gate, mega_mhc}.hpp` 四个包装层。
+      **主体 kernel 全 SM100 专属，仅分析**；包装层纯 host，H100 真机实测。
+      → `docs/96-mega-moe-gate-jit-wrappers.md`（真实行号核对）。**FP8 Mega MoE 要点**：
+      host 派生 `:37-41`（多取 `num_sf_ring_tokens`）；`sf_smem_outer_dim = block_k/(kGranK*4)` `:51-52`；
+      **18 个描述符**（9 routed + 9 shared，`:53-139`，更正第 89 篇的「20」），9 个 SF 全
+      `Major::MN` + 无 swizzle（`make_tma_sf_desc` 断言 `:393/396`，`get_tma_aligned_size` `:398`）；
+      共享专家 `E_s` 折叠（L1 N / L2 K 乘 `S`，`:94-139`，对第 44 篇 `SHARED_L1_SHAPE_N = L1_SHAPE_N·E_s`）
+      且共享权重走 2D 描述符；模板 25 实参 `:174-189`（比 BF16 多 `STORE_BLOCK_M_L2`/`SF_BLOCK_M/N`/
+      `kNumSFRingTokens`/`to_string(weight_dtype)`）；launch `:192-221`（grid=num_sms、block=512、cluster=2）。
+      **Mega Gate 要点**：8 个模板 bool 全由指针/选项空值推出 `:63-65`；两描述符用 `make_tma_a/b_desc`
+      （K-major、BLOCK_K=64）`:36-41`；`RoutingArgs` POD ABI（`sizeof=72`，offset 48 交界）`layout:31-43`；
+      scratch `:30-34` + 按 stream 缓存 score barrier（capture 前 warm-up，`csrc/apis/mega_gate.hpp:13-26`）；
+      配置搜索 `heuristics/mega_gate.hpp:114-166`（三维枚举 + deterministic 禁 split-K `:110-111`）；
+      launch `:69-89`（grid 可不足整卡、cluster=num_mma_ctas）。H100 实测
+      `src/mega_moe_gate_jit_wrapper.cu` + `harness/exp_mega_moe_gate_jit_wrapper.{sh,out.txt}`：
+      **143 PASS / 0 FAIL**——4 形状 × 2 MmaKind 的 10 条配置不变量（DeepSeek-V3 规模：FP8
+      `block_m=240/block_k=128/store_l1=24,store_l2=8/sf=256x128`、BF16 `block_k=64/store=40,40/sf=0`）；
+      `num_shared==0` 时 4 个共享描述符与 routed **128 字节逐字节相等**；独立 `cuTensorMapEncodeTiled`
+      编码器对 `l1_acts`/`shared_l2_acts`/`l1_acts_sf` **逐字节互证**；模板占位符计数 25/20/15；
+      Gate 常量 + `RoutingArgs` offset + scratch 公式 + `caches_logical_count` 真值表；4 形状 ×
+      deterministic 开关 config（`T=64` 关确定性 `splitK=8`、开确定性 `1`）。配套博客
+      `content/posts/mega-moe-96-mega-moe-gate-jit-wrappers`（索引页新增第 96 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2695,8 +2726,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P85 各增量完成（P15-1…P41-1、P42-1…P85-1）。**
-  本轮 P85-1：新建 `docs/95-ep-backward-adjoint.md`（+`harness/exp_ep_backward_adjoint.{sh,py,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P86 各增量完成（P15-1…P41-1、P42-1…P86-1）。**
+  本轮 P86-1：新建 `docs/96-mega-moe-gate-jit-wrappers.md`
+  （+`src/mega_moe_gate_jit_wrapper.cu`、`harness/exp_mega_moe_gate_jit_wrapper.{sh,out.txt}`）——
+  补齐第 89 篇（P79-1）**只当对照数了描述符、没拆**的两个 mega 家族 JIT 启动包装层：
+  `sm100_fp8_fp4_mega_moe.hpp`（FP8/FP4 Mega MoE 满配版）与 `sm100_bf16_mega_gate.hpp`（Mega Gate），
+  凑齐 `sm100_{fp8_fp4_mega_moe, bf16_mega_moe, bf16_mega_gate, mega_mhc}.hpp` 四个包装层。
+  **FP8 Mega MoE 三个非平凡点**：① **18 个描述符**（9 routed + 9 shared；更正第 89 篇的「20」计数），
+  9 个 SF 全 `Major::MN`+无 swizzle、`sf_smem_outer_dim=block_k/(gran_k*4)`，对齐契约来自 host 把 SF 造成
+  「M 连续、末维 stride=M」的 MN-major 列主序；② 共享专家 `E_s` 折叠（L1 N / L2 K 乘 `S`，共享权重走 2D
+  描述符），对第 44 篇 `SHARED_L1_SHAPE_N = L1_SHAPE_N·E_s`；③ 模板 25 实参（比 BF16 多
+  `STORE_BLOCK_M_L2`/`SF_BLOCK_M/N`/`kNumSFRingTokens`/`to_string(weight_dtype)`）。
+  **Mega Gate 三个非平凡点**：① **8 个模板 bool 全由指针/选项空值推出**，与 kernel `if constexpr` 天然一致；
+  ② `RoutingArgs` POD ABI（`sizeof=72`，`unmapped_topk_idx_stride` 后 4B padding → offset 48 交界）；
+  ③ 任务分解三维枚举 + deterministic 禁 split-K、grid 可不足整卡、cluster 随 `num_mma_ctas` 变，另自管
+  score scratch 与按 stream 缓存的 score barrier（CUDA Graph capture 前必须 warm-up）。**主 kernel 全
+  SM100 专属、仅分析**；包装层纯 host，H100(sm90) 直接 include 真实头文件 **143 PASS / 0 FAIL**：
+  4 形状 × 2 MmaKind 配置不变量、`num_shared==0` 时 4 个共享描述符与 routed **128B 逐字节相等**、
+  独立 `cuTensorMapEncodeTiled` 编码器对 3 个描述符**逐字节互证**、模板占位符计数 25/20/15、
+  Gate 常量/ABI/scratch/`caches_logical_count` 真值表、4 形状 × deterministic 开关 config
+  （`T=64` 关确定性 `splitK=8`、开确定性退回 `1`）。索引页新增第 96 篇。
+  上一轮 P85-1：新建 `docs/95-ep-backward-adjoint.md`（+`harness/exp_ep_backward_adjoint.{sh,py,out.txt}`）
   ——补齐 EP 通信一直缺席的**反向侧**：MoE dispatch / combine 的**伴随恒等式**与**路由权重梯度**。
   把 dispatch 看成复制/置换算子 `D`、combine 的 token 求和看成 `Dᵀ`，**两原语互为转置**，于是反向不需要
   新通信 kernel——`dispatch_backward`（`README.md:204-220`）就是 `combine(grad_recv_x, topk_weights=
