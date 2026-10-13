@@ -2002,6 +2002,33 @@
       **235 TFLOPS（m=4096,n=7168,k=7168）/ 413 TFLOPS（方阵）**——**18 PASS / 0 FAIL**。
       配套博客 `content/posts/mega-moe-74-dense-gemm-test-oracle`（索引页新增第 74 篇）。
 
+### P65 增量（opt-in，补齐「通信—计算重叠」的 Python / host 调度地基）
+
+- [x] **P65-1** **DeepEP 的通信—计算重叠「Python 调度地基」**：`deep_ep/utils/event.py`
+      （`EventOverlap`）、`deep_ep/comm/stream.py`（`get_comm_stream`）、`deep_ep/buffers/base.py`
+      （`BufferBase`），以及 C++ 孪生 `csrc/utils/event.hpp`（`EventHandle`）、
+      `csrc/comm/stream.hpp`（通信流 / `stream_wait`）、`csrc/buffers/base.hpp`，与真正的交接点
+      `csrc/buffers/ep.hpp:122-181`（`stream_control_prologue/_epilogue`）。前面第 2/9/11/63/71/73
+      篇从 kernel 侧讲重叠，本篇补**谁把通信发到独立 stream、谁让计算流只在必要处等**这一层。
+      **纯 host / Python，H100 真机可跑**（`deep_ep._C` 用 sys.modules 桩注入，按文件路径 exec 真实
+      Python；`EventHandle` 用 `TorchEventHandle` 逐行镜像后驱动真实 `torch.cuda.Event/Stream`；
+      另编译 CUDA 程序镜像 `get_comm_stream`/`stream_wait` 语义）。
+      → `docs/75-deepep-stream-event-overlap.md`（真实行号核对）：通信流三要点（`static` 单例 /
+      `getStreamFromPool(true)` 高优先级 / Python 薄包装同 `stream_id`）；`stream_wait` 两重载 +
+      自等待断言（`stream.hpp:20-23`）；`EventHandle` 只暴露默认构造 + `current_stream_wait`
+      （`event.hpp:32-36`）、`tensors_to_record` 替代 `record_stream`（`EP_AVOID_RECORD_STREAM`）；
+      `EventOverlap` 状态机八条（`_release_handle_by_call` / `hook_after_wait` 一次性 /
+      `__call__` 返回 self / `__exit__` 无视异常）；交接点 prologue（通信流等 `previous_event` 或
+      计算流 + `allocate_on_comm_stream` 切账）与 epilogue（`async_with_compute_stream` 二选一 +
+      双流 `record_stream`）；`BufferBase` 生命周期（`main_context` 转发 / `destroy` 契约）。
+      H100 实测 `harness/exp_deepep_stream_event_overlap.{sh,py,out.txt}` + `src/deepep_stream_event.cu`：
+      **21 PASS / 0 FAIL**——`EventOverlap` 8/8、`get_comm_stream` 3/3、`BufferBase` 4/4、
+      事件/流/`stream_wait` 真机断言全过；**重叠两必要条件实测**：全卡通信 + 全卡计算**不重叠**
+      （512MB copy 0.392ms ∥ FFMA 7.79ms → 串行 8.173 / 重叠 8.263 / **0.989×**），
+      通信腿缩到 1/4 SM（33 blocks）则**真重叠**（2.025ms ∥ 7.79ms → 串行 14.534 / 重叠 8.186 /
+      **1.776×**）——正面坐实第 63 篇「半卡 SM 上限」的必要性。配套博客
+      `content/posts/mega-moe-75-deepep-stream-event-overlap`（索引页新增第 75 篇）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -2026,8 +2053,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P64 各增量完成（P15-1…P41-1、P42-1…P64-1）。**
-  本轮 P64-1：新建 `docs/74-dense-gemm-test-oracle.md`（+`harness/exp_dense_gemm_test_oracle.{sh,py,out.txt}`）
+- 当前进度：**P0~P14 全部完成；P15~P65 各增量完成（P15-1…P41-1、P42-1…P65-1）。**
+  本轮 P65-1：新建 `docs/75-deepep-stream-event-overlap.md`
+  （+`harness/exp_deepep_stream_event_overlap.{sh,py,out.txt}`、`src/deepep_stream_event.cu`）
+  ——补上「通信—计算重叠」一直缺席的 **Python / host 调度地基**：`EventOverlap`
+  （`deep_ep/utils/event.py:8-106`）、`get_comm_stream`（通信流 static 单例 + 高优先级 +
+  Python 薄包装同 `stream_id`）、`BufferBase`（`main_context` / `destroy` 契约），以及 C++ 孪生
+  `EventHandle`（`csrc/utils/event.hpp:13-30`，只暴露默认构造 + `current_stream_wait`，
+  `tensors_to_record` 替代 `record_stream`）与 `stream_wait` 两重载（`csrc/comm/stream.hpp:14-27`，
+  自等待断言），真正的交接点 `stream_control_prologue/_epilogue`（`csrc/buffers/ep.hpp:122-181`，
+  `async_with_compute_stream` / `allocate_on_comm_stream` / 双流 `record_stream`）。**纯 host / Python、
+  H100 真机**：`deep_ep._C` 桩注入 + 按文件路径 exec 真实 Python；`EventHandle` 用 `TorchEventHandle`
+  逐行镜像驱动真实事件/流；另编译 CUDA 程序镜像流原语——**21 PASS / 0 FAIL**。**核心实测**：
+  全卡通信 + 全卡计算**不重叠**（0.989×），通信腿缩到 1/4 SM 则**真重叠 1.776×**——正面坐实第 63 篇
+  「半卡 SM 上限」是重叠的必要条件。配套博客
+  `content/posts/mega-moe-75-deepep-stream-event-overlap`（索引页新增第 75 篇）。
+  上一轮 P64-1：新建 `docs/74-dense-gemm-test-oracle.md`（+`harness/exp_dense_gemm_test_oracle.{sh,py,out.txt}`）
   ——补上整条测试栈最基础的**顶层规格**：`tests/test_fp8_fp4.py` / `tests/test_bf16.py`。前面拆过基座
   （第 40 篇）、生成器（第 41 篇）、逐位断言（第 43 篇）与四个 mega 算子的端到端测试（第 41/47/50/57 篇），
   唯独这两个最先跑的文件一直只被顺带引用。本篇把它当「稠密 GEMM 算什么对」的可执行规格：
@@ -2767,11 +2808,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P64 已完成（最新 **P64-1 稠密 GEMM 的验收测试即正确性规范**：
-  `tests/test_fp8_fp4.py` / `tests/test_bf16.py` 作为整条测试栈的顶层规格——`__main__`/arch 门控矩阵
-  （H100 枚举 252 用例）、逐函数「从松到严」判据链（`calc_diff`→20× 逐位→direct==累积→随机舍入哈希→
-  FP4==FP8→SF K-stride padding→PSUM 零填充），并实证 `calc_diff` 的两处盲区；H100 真机直接跑真实测试体
-  **18 PASS / 0 FAIL**；详见上）。
+- **下一步**：P0~P65 已完成（最新 **P65-1 DeepEP 的通信—计算重叠「Python 调度地基」**：
+  `EventOverlap` / `get_comm_stream` / `BufferBase` + C++ 孪生 `EventHandle` / `stream_wait` +
+  交接点 `stream_control_prologue/_epilogue`；纯 host/Python，H100 真机 exec 真实代码 **21 PASS / 0 FAIL**；
+  核心实测：全卡通信+全卡计算**不重叠**（0.989×）、通信缩到 1/4 SM 则 **1.776×**，坐实第 63 篇半卡上限；
+  详见上）。
+  上一轮 P64-1：**稠密 GEMM 的验收测试即正确性规范**：
+  `tests/test_fp8_fp4.py` / `tests/test_bf16.py`——`__main__`/arch 门控矩阵（H100 枚举 252 用例）、
+  逐函数「从松到严」判据链、`calc_diff` 两处盲区；H100 真机 18 PASS / 0 FAIL；详见上）。
   上一轮 P63-1：**DeepEP dispatch/combine 的自动 SM/QP 选择模型 + 带宽探测层**：
   host 侧解析式 roofline（四本每 token 流量账 + 期望命中组数 + 瓶颈链路标尺 + 每 SM HBM 带宽换算），
   纯 host、H100 真机 ast 抽取真实方法体跑 **16 PASS / 0 FAIL**；详见上）。
