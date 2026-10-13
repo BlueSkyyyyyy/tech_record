@@ -758,6 +758,24 @@
       DKGB 主导段里 7–9%。**判据（新）**：省字节前先问「这笔访存是否本就被流水藏住」。`dv2`/`v` 喂 `db`
       与 `dApre` 入 sandwich 早已是核内（P7-55/P7-56），故本轮只动 `dw`；至此 B2 六段的中间量**要么本就
       核内、要么可核内**，K2 形状 CUDA 化在**结构上闭合**。
+- [x] **P7-62** 兑现 §60.5 点名的 K2 形状 CUDA 化**最后一条**结构项——**B3 `intra` 折进 K2 形状**：
+      部署 `BT=BC=CHUNK=16 ⟹ NC=1` 下 B3 只剩对角 Parts B/D（§27.1），本轮把 §27 的**对角 MMA 恒等式**
+      从 Triton 搬进 CUDA，做成 **K2 形状**核（`grid (NT,B*H)`、8 warp、warp `w` 拥有输出 k 列
+      `[w*16,w*16+16)`），四个 `[BT,BT]@[BT,KD]` 走 `mma.sync.m16n8k8.tf32` + fp32 门控。新增
+      `harness/b3_intra_probe.cu` + `harness/check_bwd_b3_intra_cuda.py`（`check_bwd_b3_intra_cuda.out.txt`，
+      空闲卡）+ `harness/ncu_b3_intra_cuda_driver.py` / `harness/probe_b3_intra_cuda_ncu.sh`
+      （`probe_b3_intra_cuda_ncu.out.txt`）+ `docs/07` §65。**Part A**：5 组 shape（含非整除 `T=250`、
+      单 chunk `T=64`、`g=0`）CUDA vs Triton MMA B3 四项 `dq/dk/db/dg` 最坏 `max_rel` **1.2–1.5e-3**
+      （=§27 记录 tf32 底噪）、CUDA vs torch golden 更紧 **≤6.4e-4**（CUDA 的 `beta`/门控走 fp32 标量、
+      只有矩阵乘落 tf32）。**Part B**：孤立 `dev` 比 Triton MMA B3 快 **1.3–1.45×**（`B8T2048H8` 240.2 vs
+      349.5µs=`0.69×`、`T512H4` 6.6 vs 9.5=`0.70×`）。**Part C**：smem 26.6KB、8 blocks/SM 上限。
+      **Part D（ncu）**：`B8T2048H8` Duration 295.6→**239.4µs（0.81×）**、DRAM 61.3→**50.4%**、L1 命中
+      18.5→**51.4%**、`long_sb` 19.89→**11.37**、regs 72→59——优势在**访存侧**（`q/k/g` 一次合流 smem、
+      8 warp 共享），两核都非 tensor/core bound（对角 intra 部署粒度总量小）。**结论**：结构闭合 +
+      比 Triton 版快 1.3–1.45×。**坑**：门控循环漏乘 `dk2` 的 `2^{g}`（指纹＝只 `dq` 对、`dk/db/dg` 同比例
+      偏大）。**下一步（未做）**＝并进生产 launch（在 `-DB2M_PROD` 里用核内 `dA`+`dAqk`+已 staging 的
+      `q/k/g` 把对角贡献加到门控段最终 `dq/dk/dg` 并进 `db`），须处理寄存器/smem 峰值与累加器共享；
+      不改本轮已证代数。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1147,11 +1165,26 @@
   里 staging 无从隐藏，交接才净赚 **7–9%**。故「省字节」除要看是否落最紧 pipe（§51.6）外，还要看该
   访存是否在关键路径上——**同一改动在隔离段与整核里可以反号**。另：此类改动 ncu `Duration` 与
   CUPTI/wall 可**反向**（ncu 清 L2 使被藏的读变成真 DRAM 读，同 §63.5/§25.5），口径仍取 CUPTI/wall。
+- **把 B3 对角 intra 的四个 `tl.dot` 手工翻译成 CUDA `mma` 时，逐支路的 `2^{±g}` 门控别漏乘**（P7-62，
+  §65.3）：`dq2`/`dk2` 共享同一 B 操作数（`KG`）与同一门控因子 `2^{g}`，`dkt` 用 `2^{-g}`——第一版只在
+  门控循环里写了 `adq *= 2^{g}` 而漏了 `adk *= 2^{g}`。指纹＝**同一 B 操作数、同一门控下只有 `dq` 对、
+  `dk`/`db`/`dg` 同比例偏大**（误差随 `g` 幅度放大，因 `db` 也取自 `dk2`）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-61 补测**。
-  - P7-61（本轮）：**兑现 §49.7/§63.6 最后一条真结构项——同 CTA `dw` 交接**（`-DB2M_HDW`）。给
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-62 补测**。
+  - P7-62（本轮）：**兑现 §60.5 的 K2 形状 CUDA 化最后一条结构项——B3 `intra` 折进 K2 形状**。部署
+    `NC=1` 下 B3 只剩对角（§27.1），把 §27 的对角 MMA 恒等式搬进 CUDA、做成 K2 形状核（`grid (NT,B*H)`、
+    warp-per-k-column、四个 `mma.sync.tf32` + fp32 门控）。新增 `harness/b3_intra_probe.cu` +
+    `harness/check_bwd_b3_intra_cuda.py`（`check_bwd_b3_intra_cuda.out.txt`）+ `ncu_b3_intra_cuda_driver.py`
+    / `probe_b3_intra_cuda_ncu.sh`（`probe_b3_intra_cuda_ncu.out.txt`）+ `docs/07` §65。**Part A**：5 组
+    shape（含非整除 `T=250`/单 chunk/`g=0`）vs Triton MMA B3 四项 `max_rel` **1.2–1.5e-3**（tf32 底噪）、
+    vs torch golden **≤6.4e-4**。**Part B**：孤立 `dev` 快 **1.3–1.45×**。**Part D（ncu）**：
+    Duration 295.6→239.4µs、DRAM 61.3→50.4%、L1 命中 18.5→51.4%、`long_sb` 19.9→11.4。**结论**：
+    结构闭合 + 比 Triton 快 1.3–1.45×。**下一步（未做）**＝并进 `-DB2M_PROD` 生产 launch（用核内
+    `dA`+`dAqk`+已 staging 的 `q/k/g` 加到门控段最终 `dq/dk/dg`、进 `db`），须处理寄存器/smem 峰值与
+    累加器共享；不改本轮已证代数。
+  - P7-61（上轮）：**兑现 §49.7/§63.6 最后一条真结构项——同 CTA `dw` 交接**（`-DB2M_HDW`）。给
     `b2_mma_probe.cu` 加 `-DB2M_HDW`（需 `B2M_DKGB`）：核心的 `dw`（`accw`）留在核内、镜像进 `swall`，
     DKGB 的 mma 改在 it-loop 之后从镜像读（`accw` 须全部 V-tile 累加完才完整，故后移）；`Stage::dwm` /
     `prefetch` cp16 / TMA `dwm` 图 / 核心 `dw_out` store 条件关掉，`swall` 分配由 `B2M_DA` 扩到
@@ -1993,7 +2026,11 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-61 补测**，进入收尾/维护。
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-62 补测**，进入收尾/维护。
+  **P7-62 已兑现 §60.5 的 K2 形状 CUDA 化最后一条结构项（B3 intra 折进 K2 形状）**：新增 K2 形状 CUDA
+  核 `b3_intra_probe.cu`，vs Triton MMA B3 落 tf32 底噪（含非整除 T、g=0）、孤立 `dev` 快 1.3–1.45×；
+  **唯一剩下的工程步**＝把它并进 `-DB2M_PROD` 生产 launch（核内 `dA`+`dAqk`+已 staging `q/k/g` → 加到
+  门控段最终 `dq/dk/dg` 并进 `db`），须处理寄存器/smem 峰值与累加器共享——本轮已证代数、不做数值改动。
   **P7-61 已收口 §49.7/§63.6 的最后一条真结构项（同 CTA `dw` 交接）**：`prod_hdw` 十项输出 vs `prod`
   逐位相同、`dw` 从生产 ABI 消失、隔离段快 7–9% 但六段生产核里 wash；B2 六段的中间量至此**要么本就核内、
   要么可核内**，K2 形状 CUDA 化在**结构上闭合**（剩余头寸＝tensor 3% 的标量/发射受限，不在中间量搬运上）。

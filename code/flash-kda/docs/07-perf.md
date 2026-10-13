@@ -6653,3 +6653,119 @@ k 列，而其余 stage 还在跑），交接迫使 DKGB 后移成**串行尾巴
   故本轮只动了 `dw` 一项；`dApre`/`dA` 在 P7-55 起也不落盘即入 sandwich。至此六段的中间量**要么本就
   核内、要么可核内**，且六段能一次 launch 产出（P7-60）——B2 的 K2 形状 CUDA 化在**结构上闭合**，
   剩余头寸（tensor 3%、标量/发射受限）不在这些中间量的搬运上。
+
+## 65. B3 `intra` 折进 **K2 形状**（CUDA）：部署粒度下 B3 只剩对角，做成 `grid (NT, B*H)` / warp-per-k-column 的核，比 Triton MMA B3 快 1.3–1.45×（P7-62）
+
+`ROADMAP`/§60.5 把「另一条「B3 intra 折进 K2 形状」仍待」列为 K2 形状 CUDA 化**最后一条**结构项。
+本轮兑现它：`harness/b3_intra_probe.cu`（K2 形状）+ `harness/check_bwd_b3_intra_cuda.py`
+（`harness/check_bwd_b3_intra_cuda.out.txt`）+ `harness/ncu_b3_intra_cuda_driver.py` /
+`harness/probe_b3_intra_cuda_ncu.sh`（`harness/probe_b3_intra_cuda_ncu.out.txt`）。
+
+### 65.1 为什么部署粒度下 B3 只是「两块对角 GEMM」
+
+由 §27.1：B3 的 grid 是 `(NK*NC, NT, B*H)`、`NC=ceil(BT/BC)`。部署 `BT=BC=CHUNK=16 ⟹ NC=1 ⟹ i_i≡0`，
+Part A（`i_i>0`）与 Part C（`i_i<NC_eff-1`）**永不进入**——B3 每 program 执行的全部计算就是 Parts B/D
+那两个对角循环。§27 已证它们等价于两个 `tl.dot`（FLA `SAFE_GATE=True` 分支早已如此），并把 Triton
+默认路径 MMA 化。本轮把这个**对角 MMA 恒等式**从 Triton 搬到 CUDA、并放进 **K2 形状**。
+
+### 65.2 设计：K2 形状 + 四个 `[BT,BT]@[BT,KD]` 的 `mma.sync.tf32`
+
+`grid (NT, B*H)`，一块管一个 chunk；8 warp，warp `w` 拥有输出 k 列 `[w*16, w*16+16)`（与 B2
+`b2_mma_probe.cu` 核心的 warp/累加器分片**逐字同构**）。每 chunk 把 `q/k/g` `[BT,KD]`、`beta` `[BT]`
+与两块对角伴随矩阵（`dAqk` 来自 `dAv`，`dAkk` = B2 落盘的 sandwich `dA`）`[BT,BT]` 合流进 smem，然后
+（`NC=1`，全部为**对角**工作）：
+
+```
+Mq = tril(dAqk),  Mk = tril(dAkk),  Sq = triu(dAqk^T),  Sk = triu(dAkk^T)      [BT,BT]
+KG = k·2^{-g},    QG = q·2^{g},     KGd = k·beta·2^{g}                        [BT,KD]
+dq2 = 2^{g} ⊙ (Mq @ KG)                      (Part B, query 支路)
+dk2 = 2^{g} ⊙ (Mk @ KG)                      (Part B, key 支路)
+db += Σ_k dk2·k ;   dk2 *= beta              (写入门伴随)
+dg  = q ⊙ dq2                                (衰减链：\bar g += \bar q^dec ⊙ q)
+dkt = 2^{-g} ⊙ (Sq @ QG + Sk @ KGd)          (Part D)
+dg += (dk2 - dkt) ⊙ k ;   dk2 += dkt
+```
+
+四个 `[16,16]@[16,16]`（warp 切片）矩阵乘走 `mma.sync.m16n8k8.tf32`（匹配 `tl.dot` 默认 tf32）；
+门控 `2^{±g}` 在**累加器片元布局**里逐元素做（行 `grp/grp+8`、列 `nt*8+2t+(i&1)`）。`Mq` 的 A 片元直接
+按 `sAqk[grp/grp+8][j]` 读；`Sq` 是 `dAqk` 的**转置**，A 片元按 `sAqk[j][grp/grp+8]` 读（转置被
+`mma` 的 A 行主序代数「吃掉」，无需 smem 转置）。`db` 是先按 warp 拥有列求和、再跨 8 warp 归约
+（与 P7-56 的 `db` 段同构）。**纯 fp32 的 `beta` 缩放与门控在核内**，只有四个矩阵乘落 tf32。
+
+这一版是**独立可核验**的（自带输入/输出，不依赖 B2 核心的其它段），故能与 Triton MMA B3 在同一份
+`dAqk/dAkk` 上**位级对拍**。
+
+### 65.3 Part A：正确性——四项全落 tf32 底噪（含非整除 T、g=0）
+
+`check_bwd_b3_intra_cuda.out.txt`，5 组 shape（`T=512/1024/2048`、`T=250` 非整除、`T=64` 单 chunk）。
+CUDA K2 核 vs Triton MMA B3（同操作数）、vs per-chunk torch golden 的**最坏 `max_rel`**：
+
+| 对比 | `dq` | `dk` | `db` | `dg` |
+|---|---|---|---|---|
+| CUDA vs Triton MMA | 1.27e-3 | 1.48e-3 | 1.22e-3 | 1.42e-3 |
+| CUDA vs torch golden | 5.0e-4 | 6.4e-4 | 4.4e-4 | 5.3e-4 |
+| Triton MMA vs torch golden | 1.13e-3 | 1.21e-3 | 1.13e-3 | 1.06e-3 |
+
+CUDA 与 Triton 都在 §27 记录的 **tf32 底噪 ~1e-3** 上；CUDA vs torch golden 甚至更紧（≤6.4e-4，因为
+**CUDA 的 `beta` 缩放/门控走 fp32 标量、只有矩阵乘落 tf32**，而 torch golden 是纯 fp32）。`g=0`（无衰减，
+§27.2 说这是移出指数因子的稳定极限）下 CUDA vs Triton 仍 `dq 1.06e-3 / dk 1.05e-3 / db 1.03e-3 /
+dg 1.18e-3`——**恒等式在 CUDA 上复现**。
+
+> **踩到的坑**：第一版 `dq` 对（`Mq@KG` 门控对）而 `dk/db/dg` 全错到 O(10)。根因＝门控循环里只写了
+> `adq *= 2^{g}` **漏了 `adk *= 2^{g}`**——`dk2` 的 `2^{g}` 因子没乘，误差随 `g` 幅度（可达 2^-8）放大。
+> 指纹＝「同一 B 操作数/同一门控下，只 `dq` 对、`dk/db/dg` 同比例偏大」。
+
+### 65.4 Part B：孤立计时——比 Triton MMA B3 快 **1.3–1.45×**
+
+`check_bwd_b3_intra_cuda.out.txt`（CUPTI `dev` + event-pair `wall`，均值；Triton 取 `nw∈{2,4}` 最优）：
+
+| case | CUDA dev (µs) | Triton dev (µs) | CUDA/Triton |
+|---|---|---|---|
+| `T=512 H=4` | 6.6 | 9.5 | **0.70×** |
+| `B2 T=1024 H=8` | 35.0 | 44.6 | **0.79×** |
+| `B8 T=2048 H=8` | 240.2 | 349.5 | **0.69×** |
+| `T=250 H=3`（非整除） | 6.1 | 8.9 | **0.69×** |
+| `T=64 H=1`（单 chunk） | 5.7 | 7.7 | **0.75×** |
+
+全 shape 一致快 **1.3–1.45×**。机制见 Part D：Triton 的对角平铺 `[BC,BC]` 加载局部性差
+（L1 命中 18.5%），CUDA K2 把 `q/k/g` 一次合流进 smem、8 个 warp 共享（L1 命中 51.4%）。
+
+### 65.5 Part C/D：`ncu`——CUDA 侧 L1 局部性更好、DRAM 反更低、发射等待更短
+
+`probe_b3_intra_cuda_ncu.out.txt`，`B8 T2048 H8 BT=16`：
+
+| 指标 | Triton MMA B3 | **K2 CUDA intra** |
+|---|---|---|
+| Duration | 295.6 µs | **239.4 µs** |
+| DRAM Throughput | 61.3% | **50.4%** |
+| L1/TEX Throughput | 43.1% | **66.4%** |
+| L1/TEX Hit Rate | 18.5% | **51.4%** |
+| `tensor` pipe | 2.26% | 2.83% |
+| `fma` pipe | 7.07% | 11.87% |
+| Compute (SM) | 20.7% | 31.2% |
+| `stall long_sb` | 19.89 | **11.37** |
+| Registers/thread | 72 | **59** |
+| Achieved occupancy | 42.6% | 48.3% |
+| Memory throughput | 2.05 TB/s | 1.69 TB/s |
+
+读法：两个核都**不是** tensor/core bound——对角 intra 在部署粒度下**总量太小**（`tensor` 2–3%、`fma`
+7–12%）。CUDA 优势来自**访存侧**：`q/k/g` **一次合流入 smem 并被 8 warp 共享**（L1 命中 18.5%→51.4%），
+故 `long_scoreboard` 近腰斩（19.9→11.4）、DRAM% 更低（61.3→50.4%），Duration 随之 **0.81×**（ncu 口径；
+CUPTI Part B 为 0.69×，两窗口不同源，方向一致，同 §25.5/§63.5）。寄存器也更省（72→59）、占用率略高。
+**注意**：B3 在部署粒度是「小的对角尾巴」，因此**它的绝对头寸有限**——把它做成 K2 形状的价值主要是
+（a）结构闭合（B2/B3 都成 K2 形状、共享 warp 分片与 staging 约定）、（b）比 Triton 版快 1.3–1.45×。
+
+### 65.6 结论与下一步
+
+- **§60.5 最后一条结构项兑现**：B3 的对角 intra 现在是 **K2 形状的 CUDA 核**（`grid (NT, B*H)`、
+  warp-per-k-column、四个 `mma.sync.tf32` + fp32 门控），与 Triton MMA B3 在 tf32 底噪上一致
+  （含非整除 T、g=0），孤立计时快 **1.3–1.45×**。
+- **还没做（下一步）**：把它**并进生产 launch**——即在 `b2_mma_probe.cu` 的 `-DB2M_PROD` 里，用同一块
+  chunk 的 `dA`（`B2M_SAND` 的核内结果）、`dAqk` 输入与已 staging 的 `q/k/g` 算出对角贡献，**加到门控
+  段最终的 `dq/dk/dg` 上**、并进 `db`（`B2M_DB`）。这需要处理**寄存器/smem 峰值**（prod 已是 129–134 KB
+  smem / 110–140 regs、1 block/SM）与**累加器共享**（本轮的 `adq/adk/adt` 是独立的 `[2][4]`×3），是本
+  轮的后续工程步，不改本轮已证的代数。做成后 B2/B3 就不再是两个 kernel、`dA` 也不必落盘（与 §33 的
+  Triton 融合对应）。
+- **产物**：`harness/b3_intra_probe.cu` + `harness/check_bwd_b3_intra_cuda.py`
+  （`check_bwd_b3_intra_cuda.out.txt`）+ `harness/ncu_b3_intra_cuda_driver.py` /
+  `harness/probe_b3_intra_cuda_ncu.sh`（`probe_b3_intra_cuda_ncu.out.txt`）。
