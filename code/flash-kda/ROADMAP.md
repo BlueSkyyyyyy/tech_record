@@ -531,7 +531,20 @@
       （490.7→416.2 / 85.8→75.5，−52% vs base）、tensor **15.48/16.89%**。**坑**：4D 张量图 `globalStrides`
       按 **dim 从 1** 起算，首版把 T/H 两维 stride 写反——`H==1` 全对、只有 `H>1` 时 `dv2` 错（`dh/dh0` 仍逐位），
       指纹=「仅 `dv2` 错且仅多 head 错」。**结论**：§35.5 答案=**能且逐位无损**——`dh`+`dv2` 全改 TMA 后
-      `lg_throttle` 归零、恢复全删上界 75%，B1 下一块瓶颈只剩每 warp 发射效率（`wait` 1.40 / tensor 15.5%）。
+       `lg_throttle` 归零、恢复全删上界 75%，B1 下一块瓶颈只剩每 warp 发射效率（`wait` 1.40 / tensor 15.5%）。
+- [x] **P7-34** 复核 `docs/07` 里**两个 FLA `dhu` baseline**（同一条
+      `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64`，`B2T1024H8` 一处报 ~23µs、一处报 ~137µs）
+      并更正 §25。新增 `harness/check_bwd_fla_dhu_baseline.py`（`..._baseline.out.txt`，空闲卡）+
+      `docs/07` §37。**根因＝operand dtype 而非 direct/chain**：直接调用 FLA `dhu` bf16 = **13.1/23.3/120.0µs**、
+      fp32 = **53.0/127.6/525.4µs**（`B1T512H4/B2T1024H8/B8T2048H8`，fp32/bf16 = **4.0–5.5×**）；链内 fp32
+      `dhu`（54.0/137.5/571.8）与直接 fp32 逐一对上、改 bf16 重跑同链即回 ~23µs。机制＝fp32 载入 2× 字节
+      + `tl.dot` 落 **tf32**（`chunk_delta_h.py:359-671` 的操作数都 `.to(b_k.dtype)`）。整条 FLA 反向链
+      **bf16 dev 只有 fp32 的 0.54–0.58×**。**更正 §25**：与 FLA **matched bf16** 下，部署粒度 BT=16 的
+      bf16 B1（NS3 34.9/61.9/318.9）比 FLA `dhu` **慢 2.3–2.5×**（非旧写的反超 1.46–2.2×）、整链 `dev/FLA`
+      **0.86–0.95×**（非 0.48–0.54×）——与 §22–24 CUDA 原型的 1.7–3.8× 自洽（差距＝**16 块粒度**，孤立
+      BT=64 时 ours≈FLA）。诚实定位＝**与 FLA 反向同档（~0.9×）且省掉 FLA 的前向状态重算**；工程重点
+      （B1 粒度 + store、B2/B3 融合）不变。**注意**：§10/§11 当时我方 B1 亦为 fp32（fair）、§17–24/§34–36
+      两侧均 bf16（fair），只有 §25 跨 dtype。
 
 ### P8 小结 / 一页纸
 
@@ -557,14 +570,29 @@
 - workspace：分配（`get_workspace_size`）恒用**上界** `ceil(T/16)+N`，而非 varlen launch 用**精确**
   `N·ceil(T_seq/16)`（更小）；`ws_tile_prefix` 偏移按 launch 的 total_tiles 算，勿按分配上界猜。
 - 容器 workdir 是 `code/kernel-opt`，`docker exec` 跑脚本要用**绝对路径**。
+- **跨实现的 `xFLA` 必须对齐 dtype/chunk/归因窗口三者**：FLA `dhu` 的 fp32 operands 比 bf16 慢
+  **4.0–5.5×**（fp32 载入 2× + `tl.dot` 落 tf32；`chunk_delta_h.py:359-671` 操作数 `.to(b_k.dtype)`），
+  整条 FLA 反向链 bf16 只有 fp32 的 0.54–0.58×。`docs/07` §25 曾拿 **bf16 我方** 比 **fp32 FLA** 得出
+  错的「反超」；正确口径见 §37（P7-34）。
 - workspace 字段是 head-major `[H, total_tiles, CHUNK, D]`；展平到 FLA 的 token-major
   `[B,T,H,D]` 必须 `permute(0,1,3,2,4)`（按 `(NT,CHUNK,H)`），直接 reshape 会交错 head/chunk 轴
   （指纹：`qg/kg` 相对误差≈1.0）。`INV` 即 $P[o_t,o_A]$，不需转置。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-33 补测**。
-  - P7-33（本轮）：兑现 §35.5 的**待验证**——把 TMA store 从 `dh` 推广到同一逐标量循环里的 **`dv2`**
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-34 补测**。
+  - P7-34（本轮）：**测量学复核**——澄清 `docs/07` 里两个 FLA `dhu` baseline 并更正 §25（P7-22）的
+    计时结论。同一条 `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64` 在 §17–36 报 ~23µs（**bf16 直接
+    调用**）、在 §10/§11/§25 报 ~137µs（**fp32 链内**）。新增 `harness/check_bwd_fla_dhu_baseline.py`
+    （`check_bwd_fla_dhu_baseline.out.txt`，空闲卡）+ `docs/07` §37。**根因＝operand dtype**：直接调用
+    FLA `dhu` bf16 = **13.1/23.3/120.0µs**、fp32 = **53.0/127.6/525.4µs**（fp32/bf16 **4.0–5.5×**）；
+    链内 fp32 `dhu` 与直接 fp32 逐一对上、同链改 bf16 即回 ~23µs；机制＝fp32 载入 2× 字节 + `tl.dot`
+    落 **tf32**。整条 FLA 反向链 **bf16 dev 只有 fp32 的 0.54–0.58×**。**更正 §25**：与 FLA matched bf16
+    下，部署粒度 BT=16 的 bf16 B1（NS3 34.9/61.9/318.9）**慢 FLA `dhu` 2.3–2.5×**（非「反超 1.46–2.2×」）、
+    整链 `dev/FLA` **0.86–0.95×**（非 0.48–0.54×）。诚实定位＝**与 FLA 反向同档（~0.9×）且省掉其前向
+    重算**；工程重点（B1 粒度+store、B2/B3 融合）不变。§10/§11（两侧同 fp32）与 §17–24/§34–36（两侧同
+    bf16）仍 fair，只有 §25 跨 dtype。
+  - P7-33（上轮）：兑现 §35.5 的**待验证**——把 TMA store 从 `dh` 推广到同一逐标量循环里的 **`dv2`**
     （`-DB1T_TMADV`：per-warp `[BT,BW]` tile + 双缓冲 `duo` + `cp.async.bulk.tensor.4d`，与 `dh` 共用一个
     bulk group）。`dh/dv2/dh0` 与 scalar **逐位相同**（16 组，含非整除 `T=250`）；`tma2/tma` =
     **0.84–0.95（均值 ~0.89，全为正）**、`tma2/base` **0.39–0.71**、对「两条 store 全删」上界恢复
@@ -1024,7 +1052,16 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-33 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-34 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-34（`docs/07` §37）澄清两个 FLA `dhu` baseline 并更正 §25**：同一条
+    `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64` 的 ~23µs（bf16 直接调用）与 ~137µs（fp32 链内）
+    差的是 **operand dtype**（fp32 载入 2× + `tl.dot` 落 tf32，实测 fp32/bf16 = 4.0–5.5×），非 direct/chain。
+    与 FLA **matched bf16** 下：bt16 B1 **慢 FLA `dhu` 2.3–2.5×**、整链 `dev/FLA` **0.86–0.95×**（更正
+    §25 的「反超」与 0.48–0.54×）。诚实定位＝**与 FLA 反向同档（~0.9×）且省掉 FLA 前向状态重算**；
+    工程重点（B1 粒度+store、B2/B3 融合）不变。**惯例（新增）**：`docs/07` 的 `xFLA` 此后一律
+    matched-dtype（引 FLA 绝对时间必标 dtype）。新增 `harness/check_bwd_fla_dhu_baseline.py`
+    （`check_bwd_fla_dhu_baseline.out.txt`）。**下一步**：审计 `docs/07` §26–33 是否还有别的跨 dtype
+    计时（已查：均为链内部分比或正确性，暂未发现）。
   - **P7-33（`docs/07` §36）把 TMA store 从 `dh` 推广到 `dv2`**：`-DB1T_TMADV`（per-warp `[BT,BW]` tile +
     双缓冲 `duo` + `cp.async.bulk.tensor.4d`，与 `dh` 共用一个 bulk group，OOB 尾行由 TMA 按 `T` 裁）。
     `dh/dv2/dh0` 与 scalar **逐位相同**（16 组，含非整除 `T=250`）；`tma2/tma` = **0.84–0.95（均值 ~0.89，
