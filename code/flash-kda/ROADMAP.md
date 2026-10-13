@@ -1143,6 +1143,28 @@
         **结论**：§85.4 两条交叉全关、逐位无损、可叠加；目标卡 CUDA B2 的 K≠V 研究形态现同时支持 bf16
         与 intra 折叠。见 `docs/07` §86。**边界**＝`K` 固定 128、只 `BT=16/BVK=32/HDW`、未测 `BF16_VDW`
         叠 K≠V、未做 ncu。默认部署仍 §45 的 `cf`。
+- [x] **P7-85** 关闭 §87.5（P7-84）点名的下一个可选增量——`K≠V` 上**四个剩余生产旋钮**的
+        `ncu` 归因：`-DB2M_BF16MMA` / `-DB2M_DAMMA` / `-DB2M_BF16_VDW` / `-DB2M_TMA`（§86/§87
+        只核验过 correctness 或只在 `K=V` 量过性能）。新增 `harness/ncu_b2_kv2_driver.py` +
+        `harness/probe_b2_kv2_ncu.sh`（`harness/probe_b2_kv2_ncu.out.txt`，空闲卡）+
+        `harness/check_bwd_b2_kv2_timing.py`（`harness/check_bwd_b2_kv2_timing.out.txt`）；
+        **`b2_mma_probe.cu` 一行未改**。`K=128`、`V∈{64,128,256}`、`B8T2048H8`，六 build
+        （`prod`/`bf16` 锚 + 四旋钮）；`prod`/`bf16` **逐值复现 §87**。**四个机制各自 V 不变**：
+        **`bf16mma`**＝`bf16` 归因 + 原生 mma 密度（read/sector 比 0.995–0.998/1.000、regs/占用
+        一字不变，`tens%` 下降是 k16 vs k8 的口径产物），`dur/bf16` 0.956→0.930→**0.895**（随 V）；
+        **`damma`**＝bank-conflict 比 **0.745/0.738/0.733**（三档恒定）+ regs 113/112/144→80/99/124、
+        **字节中性**（read/L2/sector 均 ≈1.000），`dur` 0.973/0.945/0.926；**`vdw`**＝bf16 之上再砍
+        raw-`v` 的 V 轴字节（read/bf16 0.969→0.955、sector 0.987→0.975、regs 与 bf16 相同），
+        `dur/bf16` **0.997/1.018/1.077**——**不是** §83 的 1.4–1.5×（因 §83 的 `prod_bf16_vdw`
+        **未开 `HDW`**、连带动了 `dwm` staging 使 regs 128→140；K≠V 生产必须 `HDW`、`dwm` 不
+        staging）；**`tma`**（fp32 线）＝把 V 轴 LSU/L1 加载整块搬走——global-ld sector 比
+        **0.535/0.374/0.243**、绝对量 **27.1/28.2/30.3 M ≈V 无关**（只剩 gate/`dAqk`/`beta`）、
+        L2 比 0.916→0.813，但 `dur` **0.681/1.086/1.078**：`V=64` 提占用到 2 block/SM 而胜、
+        `V≥128` smem 压回 1 block/SM 成净负。**Part B**：CUDA event 口径（包 100 次取均值）**方向
+        与 ncu 一致**、绝对差 <3%。**两条新判据**：`BF16_VDW` 的代价取决于是否连带动 `dwm`
+        （是否 `!HDW`）；TMA 的收益要先过「smem 占用台阶」。**边界**＝一个 shape、未测 `bf16tma`/
+        `BF16MMA×TMA`/`DAMMA×TMA` 交叉；`vdw@V=256` 的 bconf 反升（1.18×）待验证。默认部署仍
+        §45 的 `cf`。见 `docs/07` §88。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1649,8 +1671,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-84 补测 + P8-3**。
-  - P7-84（本轮）：**兑现 §86.5（P7-83）点名的下一个可选增量——`K≠V` 的 `ncu` pipe 归因**。此前
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-85 补测 + P8-3**。
+  - P7-85（本轮）：**关闭 §87.5（P7-84）点名的下一个可选增量——`K≠V` 上四个剩余生产旋钮的
+    `ncu` 归因**（`BF16MMA`/`DAMMA`/`BF16_VDW`/`TMA`；§86/§87 只核验过 correctness 或只在
+    `K=V` 量过）。新增 `harness/ncu_b2_kv2_driver.py` + `harness/probe_b2_kv2_ncu.sh`
+    （`harness/probe_b2_kv2_ncu.out.txt`）+ `harness/check_bwd_b2_kv2_timing.py`
+    （`harness/check_bwd_b2_kv2_timing.out.txt`，空闲卡）；**`b2_mma_probe.cu` 一行未改**。
+    `K=128`、`V∈{64,128,256}`、`B8T2048H8`，六 build；`prod`/`bf16` **逐值复现 §87**。四机制各自
+    **V 不变（方向）**：`bf16mma`＝`bf16` 归因 + 原生 mma 密度（read/sector 比 ~1、regs/占用不变，
+    `dur/bf16` 0.956→0.895 随 V）、`damma`＝bank-conflict 比 **0.745/0.738/0.733 恒定** + regs 降、
+    字节中性、`vdw`＝bf16 上再砍 raw-`v` 字节（`dur/bf16` 0.997/1.018/1.077，**非** §83 的 1.4–1.5×
+    ——因 §83 未开 `HDW` 而连带动 `dwm` staging）、`tma`＝搬走 V 轴 LSU 加载（sector 比 0.535→0.243、
+    绝对量 27–30 M≈V 无关）+ L2 比 0.916→0.813，但 `dur` 0.681/1.086/1.078（`V≥128` smem 压占用成
+    净负）。**Part B**：event 口径复核方向一致（差 <3%）。**两条新判据**：`BF16_VDW` 代价取决于是否
+    带动 `dwm`（`!HDW`）；TMA 收益要先过「smem 占用台阶」。见 `docs/07` §88。**边界**＝一个 shape、
+    未测 `bf16tma`/`BF16MMA×TMA`/`DAMMA×TMA` 交叉、`vdw@V=256` bconf 反升待验证。**下一步**：专题
+    维持维护态——§45 的 `cf` 仍是目标卡反向默认；CUDA B2 研究形态的 K≠V × 全部生产旋钮交叉至此
+    全部有 `ncu` 归因；有明确新需求（`bf16tma`/双旋钮叠 K≠V 的 ncu、`K≠128` 的 lane 布局重写、
+    真落目标卡 CUDA）再动。
+  - P7-84（上轮）：**兑现 §86.5（P7-83）点名的下一个可选增量——`K≠V` 的 `ncu` pipe 归因**。此前
     bf16 入口（§78/§79）与 `intra` 折叠（§66/§86）的 `ncu` 归因只在 `K=V=128` 量过。新增
     `harness/ncu_b2_kv_driver.py` + `harness/probe_b2_kv_ncu.sh`（`..._kv_ncu.out.txt`，空闲卡）；
     **`b2_mma_probe.cu` 一行未改**。三 tag（`fp32`/`bf16`/`intra`）× `V∈{64,128,256}` × 两 shape。
