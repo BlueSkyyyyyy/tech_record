@@ -865,6 +865,24 @@
        反号成慢 8–12%（per-stage `mbar_wait+__syncthreads` 成净负）；再次印证「同一旋钮在孤立核与整核
        可反号」（§61/§64）、「省字节要落最紧 pipe」（§51.6）。**待验证**：TMA × `-DB2M_DAMMA`、
        TMA 版落 P7-64 整链（`pci` 变体）未做端到端。
+- [x] **P7-68** 关闭 §70.6（P7-67）记录的两条**待验证**——(1) `-DB2M_TMA × -DB2M_DAMMA` 在生产核里
+       组合、(2) TMA 折叠版落 P7-64 整链（`pci` 变体）——并**修正 §70.5 对 TMA 生产代价的归因**。
+       新增 `harness/check_bwd_b2_tma_damma.py`（`check_bwd_b2_tma_damma.out.txt`，空闲卡）+
+       `harness/probe_b2_td_ncu.sh`（`probe_b2_td_ncu.out.txt`）+ `docs/07` §71。四个生产变体
+       `sc / sc_tma / mma / mma_tma`（全部 `-DB2M_PROD -DB2M_HDW`；**`-DB2M_HDW` 下 `dw` 是 scratch，
+       逐位比对须排除**）。**Part A**：`*_tma` vs 其非 TMA 双胞胎 **8 项输出全逐位（max_abs=0）**；
+       `mma* vs sc*` 非 DA 8 项逐位、只 `dApre/dA` 落 tf32 底噪（1.2–1.9e-3）；6 组含非整除 T=250/单
+       chunk。**Part B（关键）**：`sc_tma/sc` **1.039–1.057**（TMA 仍慢 4–6%），但 `mma_tma/mma`
+       **0.978–1.006**（`B8T2048H8` = **1.000**）——**DAMMA 把 TMA 的符号从 +4~6% 拨回 ~0%**。
+       **Part C**：`pci_tma` vs `pci` 六项梯度**逐位**、vs FLA 与 §67.2 同阶；链级 `pci_tma/pci`
+       **1.006–1.024**；`pci/cf` **1.6–1.7×** 复核 §67.3。**`ncu`（机制）**：TMA 两列 L2 字节都低
+       ~0.67 GB，但 bank conflict 行为分叉——**标量 DA 下 TMA 把冲突 23.46M→28.31M（+4.85M）、mma DA
+       下 TMA 一动不动（17.30M 两列相同）**（`sc` 23.46M / `mma` 17.30M 与 §69 逐值吻合）。**结论**：
+       生产核 TMA 的代价**本体就是标量 DA 段多出的 4.85M bank conflict**（非 per-stage 同步开销，
+       修正 §70.5）；DAMMA 打开后 TMA 免费且省 L2 → 设计输入由「默认非 TMA」更新为「**随 DA 实现
+       切换**：mma DA 可同时开 TMA，标量 DA 则非 TMA」。**新判据**：`ncu` 的 bank-conflict 增量要
+       按段实现形态读（同开关在标量/mma 段一负一零）。**边界/待验证**：链级只测到 `pci_tma`（标量
+       DA 折叠版），`pci_mma/_tma`（DAMMA 进链）未做端到端。
 - [x] **P7-59** 收口 §51.6「向量化 store 一律做」在 **B2 非 GEMM 四段**上留下的边界（P7-52/53/56/57 每轮
       边界都写着「本段 store 未接 `-DB2M_VECST`」）：给 `b2_mma_probe.cu` 加一个 `st2()` 成对 store 助手
       （`:96`；`B2M_VECST` 下一条 `STG.E.64`，否则两条标量），落到输出支路 `dv2/dvb`（`:934-940`）、
@@ -1283,8 +1301,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-67 补测**。
-  - P7-67（本轮）：**关闭 §67.4（P7-64）记录的边界「`B2M_TMA` 与 `B2M_INTRA` 未打通」**。根因＝
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-68 补测**。
+  - P7-68（本轮）：**关闭 §70.6 的两条待验证（TMA × DAMMA 生产态、TMA 折叠版落整链）并修正 §70.5
+    对 TMA 生产代价的归因**。新增 `harness/check_bwd_b2_tma_damma.py`（`check_bwd_b2_tma_damma.out.txt`，
+    空闲卡）+ `harness/probe_b2_td_ncu.sh`（`probe_b2_td_ncu.out.txt`）+ `docs/07` §71。四变体
+    `sc/sc_tma/mma/mma_tma`（`-DB2M_PROD -DB2M_HDW`；HDW 下 `dw` 是 scratch 须排除）。**Part A**：
+    `*_tma` vs 非 TMA 双胞胎 **8 项全逐位**、`mma* vs sc*` 只 `dApre/dA` 落 tf32（1.2–1.9e-3）。
+    **Part B（关键）**：`sc_tma/sc` **1.039–1.057**（TMA 仍慢 4–6%），`mma_tma/mma` **0.978–1.006**
+    （`B8` = **1.000**）——**DAMMA 把 TMA 的符号拨回 ~0%**。**Part C**：`pci_tma` vs `pci` 逐位、
+    链级 `pci_tma/pci` **1.006–1.024**、`pci/cf` **1.6–1.7×** 复核 §67.3。**`ncu`**：TMA 两列 L2 都
+    低 ~0.67 GB，但 bank conflict **标量 DA 下 23.46M→28.31M（+4.85M）、mma DA 下不动（17.30M）**
+    （与 §69 逐值吻合）→ **生产核 TMA 的代价本体就是标量 DA 的 bank conflict**；设计输入更新为
+    「**随 DA 实现切换**：mma DA 可同时开 TMA，标量 DA 则非 TMA」。**新判据**：bank-conflict 增量按
+    段实现形态读。**边界/待验证**：`pci_mma/_tma`（DAMMA 进链）未做端到端。
+  - P7-67（上轮）：**关闭 §67.4（P7-64）记录的边界「`B2M_TMA` 与 `B2M_INTRA` 未打通」**。根因＝
     `b2prod_launch_impl` 的 `#if B2M_TMA_ON` 分支漏传内核签名末尾的 `dAqk`（`:707-709`），
     `-DB2M_TMA -DB2M_INTRA` 编不过（删修复后 `error: too few arguments`）。修复＝TMA 分支补
     `#if B2M_INTRA (const float*)dAqk_in, #endif`（算术一字未动）；宿主 launcher 本就 TMA-agnostic。
@@ -2191,8 +2221,14 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-67 补测**，进入收尾/维护。
-  **P7-67（本轮）已关闭 §67.4 的「`B2M_TMA` 与 `B2M_INTRA` 未打通」边界**：根因＝生产 launch 的
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-68 补测**，进入收尾/维护。
+  **P7-68（本轮）已关闭 §70.6（P7-67）的两条待验证（TMA × DAMMA 生产态、TMA 折叠版落整链），并
+  修正 §70.5 的归因**：`sc_tma/sc` 仍 1.039–1.057，但 `mma_tma/mma` 0.978–1.006——`ncu` 证 TMA 的
+  生产代价本体是**标量 DA 段多出的 4.85M bank conflict**（标量 23.46M→28.31M、mma 17.30M 不动，与
+  §69 逐值吻合），DAMMA 打开后 TMA 免费且省 L2；设计输入由「默认非 TMA」更新为「**随 DA 实现切换**」。
+  链级 `pci_tma/pci` 1.006–1.024、六项逐位。**唯一遗留（低优先）**：`pci_mma/_tma`（DAMMA 进链）未做
+  端到端；按机制预计 ~1%。
+  **P7-67（上轮）已关闭 §67.4 的「`B2M_TMA` 与 `B2M_INTRA` 未打通」边界**：根因＝生产 launch 的
   `#if B2M_TMA_ON` 分支漏传内核末尾的 `dAqk`（`b2_mma_probe.cu:707-709`），`-DB2M_TMA -DB2M_INTRA`
   编不过（删修复后 `error: too few arguments`）。修复＝TMA 分支补同款 `#if B2M_INTRA` 守卫（算术一字
   未动）；宿主 launcher 本就 TMA-agnostic。新增 `harness/check_bwd_b2_intra_tma.py`
