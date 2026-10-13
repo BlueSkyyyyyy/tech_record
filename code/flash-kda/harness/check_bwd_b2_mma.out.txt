@@ -1,0 +1,96 @@
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2_mma.so
+============================================================================================
+Part A: correctness -- K2-mma CUDA vs torch(fp32) / vs identical-op Triton core
+============================================================================================
+
+# B8 T2048 H8  grid=(128, 64)
+    cuda dq vs torch         max_abs=1.059e-02  max_rel=3.178e-04  ref_max=3.333e+01
+    trit dq vs torch         max_abs=2.547e-02  max_rel=7.641e-04  ref_max=3.333e+01
+    cuda dq vs trit          max_abs=2.918e-02  max_rel=8.760e-04  ref_max=3.331e+01
+    cuda dk vs torch         max_abs=1.014e-02  max_rel=2.608e-04  ref_max=3.888e+01
+    trit dk vs torch         max_abs=2.555e-02  max_rel=6.571e-04  ref_max=3.888e+01
+    cuda dk vs trit          max_abs=2.992e-02  max_rel=7.700e-04  ref_max=3.885e+01
+    cuda dw vs torch         max_abs=1.020e-03  max_rel=3.408e-04  ref_max=2.993e+00
+    trit dw vs torch         max_abs=2.503e-03  max_rel=8.363e-04  ref_max=2.993e+00
+    cuda dw vs trit          max_abs=2.933e-03  max_rel=9.804e-04  ref_max=2.992e+00
+    cuda dgk vs torch        max_abs=1.907e-06  max_rel=1.311e-07  ref_max=1.455e+01
+    trit dgk vs torch        max_abs=1.907e-06  max_rel=1.311e-07  ref_max=1.455e+01
+    cuda dgk vs trit         max_abs=1.907e-06  max_rel=1.311e-07  ref_max=1.455e+01
+
+# B2 T1024 H8  grid=(64, 16)
+    cuda dq vs torch         max_abs=9.860e-03  max_rel=3.292e-04  ref_max=2.995e+01
+    trit dq vs torch         max_abs=2.472e-02  max_rel=8.255e-04  ref_max=2.995e+01
+    cuda dq vs trit          max_abs=2.823e-02  max_rel=9.433e-04  ref_max=2.993e+01
+    cuda dk vs torch         max_abs=9.924e-03  max_rel=3.281e-04  ref_max=3.025e+01
+    trit dk vs torch         max_abs=2.474e-02  max_rel=8.179e-04  ref_max=3.025e+01
+    cuda dk vs trit          max_abs=2.680e-02  max_rel=8.865e-04  ref_max=3.023e+01
+    cuda dw vs torch         max_abs=8.987e-04  max_rel=3.025e-04  ref_max=2.971e+00
+    trit dw vs torch         max_abs=2.407e-03  max_rel=8.102e-04  ref_max=2.971e+00
+    cuda dw vs trit          max_abs=2.791e-03  max_rel=9.401e-04  ref_max=2.969e+00
+    cuda dgk vs torch        max_abs=1.907e-06  max_rel=1.335e-07  ref_max=1.429e+01
+    trit dgk vs torch        max_abs=1.907e-06  max_rel=1.335e-07  ref_max=1.429e+01
+    cuda dgk vs trit         max_abs=1.907e-06  max_rel=1.335e-07  ref_max=1.429e+01
+
+# T512 H4  grid=(32, 4)
+    cuda dq vs torch         max_abs=8.778e-03  max_rel=3.225e-04  ref_max=2.722e+01
+    trit dq vs torch         max_abs=2.440e-02  max_rel=8.967e-04  ref_max=2.722e+01
+    cuda dq vs trit          max_abs=2.594e-02  max_rel=9.541e-04  ref_max=2.719e+01
+    cuda dk vs torch         max_abs=8.017e-03  max_rel=3.092e-04  ref_max=2.592e+01
+    trit dk vs torch         max_abs=2.243e-02  max_rel=8.654e-04  ref_max=2.592e+01
+    cuda dk vs trit          max_abs=2.447e-02  max_rel=9.446e-04  ref_max=2.591e+01
+    cuda dw vs torch         max_abs=8.188e-04  max_rel=2.940e-04  ref_max=2.785e+00
+    trit dw vs torch         max_abs=2.042e-03  max_rel=7.331e-04  ref_max=2.785e+00
+    cuda dw vs trit          max_abs=2.489e-03  max_rel=8.945e-04  ref_max=2.783e+00
+    cuda dgk vs torch        max_abs=1.907e-06  max_rel=1.480e-07  ref_max=1.288e+01
+    trit dgk vs torch        max_abs=1.431e-06  max_rel=1.110e-07  ref_max=1.288e+01
+    cuda dgk vs trit         max_abs=1.907e-06  max_rel=1.480e-07  ref_max=1.288e+01
+
+# T250 H3 (non-div)  grid=(16, 3)
+    cuda dq vs torch         max_abs=8.778e-03  max_rel=3.583e-04  ref_max=2.449e+01
+    trit dq vs torch         max_abs=2.058e-02  max_rel=8.401e-04  ref_max=2.449e+01
+    cuda dq vs trit          max_abs=2.411e-02  max_rel=9.851e-04  ref_max=2.447e+01
+    cuda dk vs torch         max_abs=8.287e-03  max_rel=2.903e-04  ref_max=2.855e+01
+    trit dk vs torch         max_abs=2.157e-02  max_rel=7.556e-04  ref_max=2.855e+01
+    cuda dk vs trit          max_abs=2.210e-02  max_rel=7.747e-04  ref_max=2.853e+01
+    cuda dw vs torch         max_abs=7.644e-04  max_rel=2.941e-04  ref_max=2.599e+00
+    trit dw vs torch         max_abs=2.005e-03  max_rel=7.713e-04  ref_max=2.599e+00
+    cuda dw vs trit          max_abs=2.405e-03  max_rel=9.259e-04  ref_max=2.597e+00
+    cuda dgk vs torch        max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+    trit dgk vs torch        max_abs=9.537e-07  max_rel=8.138e-08  ref_max=1.172e+01
+    cuda dgk vs trit         max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+
+worst max_rel:
+  dq    cuda/torch 3.583e-04   trit/torch 8.967e-04   cuda/trit 9.851e-04
+  dk    cuda/torch 3.281e-04   trit/torch 8.654e-04   cuda/trit 9.446e-04
+  dw    cuda/torch 3.408e-04   trit/torch 8.363e-04   cuda/trit 9.804e-04
+  dgk   cuda/torch 1.628e-07   trit/torch 1.335e-07   cuda/trit 1.628e-07
+
+============================================================================================
+Part B: head-to-head identical-op kernel-only timing -- K2-mma CUDA vs Triton core
+============================================================================================
+  case               |  CUDA dev CUDA wall |  trit nw4  trit nw8 | CUDA/trit
+  B8 T2048 H8        |     517.8     519.7 |    1440.1     551.3 |     0.94x
+  B2 T1024 H8        |      71.2      73.2 |     187.5      81.7 |     0.87x
+  T512 H4            |       9.5      29.6 |      22.7       6.8 |     1.40x
+  T250 H3 (non-div)  |       8.5      29.8 |      92.4       5.8 |     1.46x
+
+============================================================================================
+Part C: context -- K2-mma core vs full Triton B2 and full fused B2/B3
+============================================================================================
+  case               |  CUDAcore  TritCore    fullB2  fusedB2B3 | GF/s(core)
+  B8 T2048 H8        |     517.3     554.1     899.5     1053.1 |    24908.6
+  B2 T1024 H8        |      71.3      82.5     122.1      145.1 |    22576.9
+  T512 H4            |       9.6       6.9      15.7       13.4 |    21027.6
+  T250 H3 (non-div)  |       8.8       6.0      14.3       10.9 |     8396.3
+
+============================================================================================
+Part D: static cost
+============================================================================================
+  K2-mma CUDA smem = 87552 B (85.5 KB), block = 256 threads (8 warps)
+  smem-limited blocks/SM (228KB/(85.5KB+1KB)) ~ 2
+  triton core nw=8 : regs=226 spills=0 smem=152.0KB
+
+DONE

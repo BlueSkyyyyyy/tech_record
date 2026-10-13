@@ -4909,3 +4909,151 @@ Triton 核的 552 µs 对照它的**同字节 DRAM 地板** `(1.28+0.20)GB / 3.3
 - **下一步（真正工程化）**与 §47.6 相同：建**保留 `mma.sync` 的 K2 形状 B2/B3**；但本轮把「怎么做」钉得更
   具体——**首位动作＝把大操作数（尤其 `h/dh`）从寄存器保活里拿掉、只留 warp 分片的小累加器**，
   并用「省字节 vs 省保活」判据逐项验证；`h/dh` bf16 不作为独立杠杆。
+
+## 49. 「K2 形状 CUDA 化」的第二刀：B2 GEMM 核保留 `mma.sync` + 流式操作数——**首次正面**（P7-46）
+
+§47（P7-44）把 §46.6 的「累加器按 warp 分片常驻寄存器」读法 (b)（**放弃 `tl.dot` 改 SIMT**）试掉并
+证伪（慢 3–5×）；§48（P7-45）又把融合核的 ~1.9× 头寸定位到「**大操作数（`h/dh`）常驻寄存器 → spill/
+发射饥饿**」，并给出首位动作：**「把大操作数从寄存器保活里拿掉、只留 warp 分片的小累加器」**。本轮
+兑现这个首位动作——在**保留 `mma.sync` tensor core** 的前提下，把 B2 的 V-归约 GEMM 核写成 **K2 形状**
+（操作数经 smem 流式喂入、寄存器里只剩每 warp 的小累加器），并在同一份操作数上与 P7-44 的 SIMT 核、
+P7-44 的 identical-op Triton 核头对头。**这是本专题第一个跑赢 Triton 同 op 核的 CUDA 反向核。**
+
+证据：`harness/b2_mma_probe.cu`（`b2mma_launch`）+ `harness/check_bwd_b2_mma.py`
+（`harness/check_bwd_b2_mma.out.txt`，空闲卡）+ 调度器段 `harness/probe_b2_mma_ncu.sh` /
+`harness/ncu_b2_mma_driver.py`（`harness/probe_b2_mma_ncu.out.txt`）。
+
+### 49.1 设计：K2 形状落在 B2 的 V-归约 GEMM 上
+
+被隔离的对象与 P7-44 **完全相同**（同一份 `dq/dk/dw/dgk` 四条 op、同一批 fp32 操作数、`K=V=128`、
+部署 `BT=16`）：
+
+```
+dq[t,k] = Σ_v do[t,v]·h[k,v]      dk[t,k] = Σ_v v_new[t,v]·dh[k,v]
+dw[t,k] = Σ_v dv[t,v]·h[k,v]      dgk[k]  = Σ_v h[k,v]·dh[k,v]
+```
+
+K2 形状（`b2_mma_probe.cu`）：
+
+- **grid `(NT, B·H)`，block = 8 warp**；warp `w` 固定拥有**输出列（K 维）**`[w·16, w·16+16)`
+  （即 N 分片），故每 warp 只背 `dq/dk/dw` 各 `[16,16]` 的 fp32 累加器（`accq/ak/aw[2][4]`，
+  `b2_mma_probe.cu:131`）+ 一个 `dgk` 标量（`:136`）——**大操作数一个都不常驻**。
+- `h/dh/do/vn/dv` **按 V（收缩维）分块 `BVK`、经 `cp.async` 双缓冲流水**搬进 smem
+  （`prefetch` `:85-113`，`__pipeline_memcpy_async` `:99-112`），寄存器里流过即用即弃。
+- 收缩用裸 `mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32`（`mma8` `:75-82`，与 `tl.dot` 默认
+  tf32 同精度），A/B 片段**直接从 smem 按 mma 布局读**（`:158-177`），不用 `ldmatrix`（tf32 无 16-bit
+  ldmatrix；代价是下面 `ncu` 里的 bank conflict）。
+- 非整除 `/ T` 的尾块 token 行在 `prefetch` 里直接写 0（`:102-104`）；`h/dh` 是 chunk 粒度、无需 mask。
+
+与 §48.4 的判据对表：**这个改动减的是「寄存器保活」不是「字节」**——`h/dh` 一个字节没省（仍 fp32、
+仍读 1.07 GB），但 `[V,K]` 的整块不再进寄存器。
+
+### 49.2 Part A — 正确性：K2-mma 核落 **tf32 底噪**（与 Triton 同精度档）
+
+同操作数（四组 shape 含非整除 `T=250`；torch 参考关 tf32 走真 fp32）：
+
+| 量 | CUDA(tf32) vs torch(fp32) | Triton(tf32) vs torch | CUDA vs Triton |
+|---|---|---|---|
+| `dq` | 3.58e-4 | 8.97e-4 | 9.85e-4 |
+| `dk` | 3.28e-4 | 8.65e-4 | 9.45e-4 |
+| `dw` | 3.41e-4 | 8.36e-4 | 9.80e-4 |
+| `dgk` | 1.63e-7 | 1.34e-7 | 1.63e-7 |
+
+四个量全部落 **tf32 底噪**；CUDA 与 Triton 互差 ~1e-3（都 tf32、累加序不同），`dgk`（纯 fp32 列归约）
+~1.6e-7。**CUDA 侧甚至比 Triton 更贴近 fp32**（3.4e-4 vs 8.4e-4）——因为 `cvt.rna.tf32` 四舍五入而非
+截断（`to_tf32` `:69-73`）。代数无误，形式与 P7-44 逐字对应。
+
+### 49.3 Part B/C — 头对头：**大 shape 首次跑赢**同 op Triton 核
+
+同操作数、只比这四条 op 的 kernel-only `dev`（CUPTI），默认 `BVK=32/NS=2`：
+
+| shape | K2-mma CUDA `dev` | Triton 核 `dev` (nw=8) | **CUDA/Triton** | 全 Triton B2 | 融合 B2/B3 | 地板 |
+|---|---|---|---|---|---|---|
+| `B8 T2048 H8` | **517.3 µs** | 554.4 µs | **0.93×** | 899.5 | 1053.1 | 442 |
+| `B2 T1024 H8` | **71.8 µs** | 82.7 µs | **0.87×** | 122.1 | 145.1 | — |
+| `T512 H4` | 9.5 µs | **6.8 µs** | 1.40× | 15.7 | 13.4 | — |
+| `T250 H3 (非整除)` | 8.6 µs | **5.9 µs** | 1.47× | 14.3 | 10.9 | — |
+
+- **部署主 shape `B8 T2048 H8`：0.93×**（517 vs 554），且比 §47 的地板 **442 µs** 只高 **1.17×**
+  （Triton 核是 1.25×）——**第一次把「K2 形状」变成一个正收益的 GEMM 核**，与 §47.5「GEMM 段已 1.25×
+  贴地板、重写收益上界 25%」自洽：本轮吃回了那 25% 里的约 1/3。
+- **小 shape 反而慢 1.4×**（`T512 H4`/`T250 H3`）：这两种 shape 的 grid 只有 128/48 个 CTA、单核 ~6–10µs，
+  是**延迟/固定开销主导**（K2 核有 `cudaFuncSetAttribute` 后的绑定 smem + `cp.async` prologue 的固定段），
+  Triton 的短核更贴合小 grid。故**核的选择应随 shape 切换**（与 §42.3 的 B1 结论同构）。
+- 与 §47 的 SIMT 核并看：SIMT 1728 µs → 本轮 517 µs，**同一批 op 提速 3.3×**；对 `dq/dk/dw` 的计算
+  吞吐 ~24.9 TFLOP/s（SIMT 只 7.4）——**tensor core 是量级项**（§47.5 点 1 再次坐实）。
+
+### 49.4 Part D / `ncu`（`B8 T2048 H8`）——为什么它贴住 DRAM 地板
+
+三个核读写字节几乎相同（DRAM 读 1.28 GB、写 ~200 MB，干净对照）：
+
+| 指标 | **K2-mma CUDA** | P7-44 SIMT CUDA | Triton 同 op 核 (nw=8) |
+|---|---|---|---|
+| Duration | **520 µs** | 1730 µs | 551 µs |
+| DRAM SOL / 带宽 | **84.6% / 2.84 TB/s** | 25.5% / 0.85 TB/s | 79.9% / 2.68 TB/s |
+| L1/TEX SOL | 46.0% | **89.6%** | 41.0% |
+| L2 SOL | 88.8% | 30.4% | 77.8% |
+| Compute(SM) SOL | 31.0% | 24.6% | 14.8% |
+| tensor / fma SOL | 7.76% / 9.00% | 0.01% / 14.3% | 7.34% / 2.28% |
+| regs/thread | **70** | 84 | 226 |
+| Block Limit Reg / smem | **3 / 2** | 2 / 3 | 1 / 1 |
+| achieved occ | **24.6%** | 24.9% | 12.4% |
+| `long_scoreboard` | 3.09 | **9.46** | 4.11 |
+| `short_scoreboard` | **1.01** | 1.38 | 2.89 |
+| `wait` | 1.29 | 0.89 | 1.49 |
+| `mio_throttle` | 2.37 | 0.81 | 2.11 |
+| smem bank conflict | 8.81 M | 0.15 M | **0** |
+| L2 字节 | 3.03 GB | 2.25 GB | 2.24 GB |
+
+读法：
+
+1. **移出「大操作数常驻」直接兑现**：寄存器 **226→70**（Triton→CUDA），`Block Limit Registers 1→3`、
+   achieved 占用 **12.4%→24.6%**，`long_scoreboard` 4.11→**3.09**；而 SIMT 核（无 tensor core）则撞
+   **L1/TEX 89.6%**、`long_sb` 9.46。**「寄存器保活」是一阶量（§48.4）在这里被独立复现。**
+2. **新核贴 DRAM 地板**：DRAM **84.6% SOL（2.84 TB/s）**、L2 88.8%（两个最高 pipe）——比 Triton 核的
+   79.9% 更饿带宽，这就是 0.93× 的来源；tensor 7.76% / fma 9% 都低（**不是算力受限**）。
+3. **残差重定位到 L2 流量 + smem 冲突**：(a) 本核 L2 字节 **3.03 GB 比 Triton 的 2.24 GB 高 35%**
+   （DRAM 读字节相同）——`cp.async` 16B 粒度的 A/B 操作数请求放大到 32B sector；(b) 直接从 smem 读
+   mma 片段（tf32 无 `ldmatrix`）产生 **8.81M bank conflict**（Triton 的 swizzle+`ldmatrix` 为 0），
+   表现为 `mio_throttle` 2.37 偏高。**L2 88.8% 已是本核最高 pipe → 下一杠杆是降 L2 流量
+   （XOR swizzle/`ldmatrix` 消冲突 + 更粗 cp.async），而不是再加 mma 密度。**
+
+### 49.5 编译期旋钮扫描（`BVK`×`NS`）
+
+同源重编译六档（`B2MM_CFLAGS`），`B8 T2048 H8` / 小 shape：
+
+| `BVK`/`NS` | `B8 T2048 H8` | `B2 T1024 H8` | `T512 H4` | `T250 H3` |
+|---|---|---|---|---|
+| 32/2（默认） | 517.3 | 71.8 | 9.5 | 8.6 |
+| 32/3 | **505.7** | 72.5 | **9.1** | **8.1** |
+| 64/2 | **499.1** | 72.6 | 9.4 | 7.8 |
+| 16/3 | 718.3 | 93.4 | 10.1 | 10.0 |
+| 16/4 | 706.3 | 94.5 | 9.7 | 9.6 |
+| 128/1 | 524.4 | 81.4 | 9.9 | 8.4 |
+
+大 shape 最优 `BVK=64/NS=2`（0.90×）或 `BVK=32/NS=3`（0.91×）；`BVK=16`（细收缩、多 stage）**明显变慢**
+（718 µs，cp.async 请求过碎）。小 shape 在 8–10 µs 之间对旋钮不敏感（固定开销主导）。默认取 `BVK=32/NS=2`。
+
+### 49.6 结论 / 对目标卡的设计输入
+
+- **§48.4 的首位动作方向正确且可兑现**：在**保留 tensor core**前提下，把 `h/dh` 从寄存器保活里移出、
+  只留 warp 分片小累加器，使 CUDA B2 GEMM 核在部署主 shape 上**首次跑赢** identical-op Triton 核
+  （0.93×，且离 DRAM 地板 1.17×），寄存器 226→70、占用 12.4%→24.6%。**与 §47 的 SIMT 反例合起来**，
+  K2 形状被双向钉死：**必须 tensor core + 流式操作数 + 小累加器分片**，三件缺一不可。
+- **收益上界仍受限**：GEMM 段本就 1.25× 贴地板（§47.5），本轮吃到 1.17×，**剩余头寸确实在非 GEMM 段**
+  （finalize/`dA`/`dv2`/`db` 与 intra 折叠，§47.6）——B2 全核 899 µs 里本核只 517 µs，另 ~380 µs 是 GEMM
+  之外。故下一步仍是 §47.6 的「非 GEMM 段进 CUDA + 同 CTA 交接」，本核可直接作为其中的 GEMM 段基座。
+- **核按 shape 切换**：大 shape 用 K2-mma CUDA 核（0.90–0.93×），小 shape 仍交给 Triton 短核
+  （CUDA 慢 1.3–1.5×，固定开销）；部署时按 grid/`T` 选。
+- **本核自身下一杠杆 = 降 L2 流量**：当前 L2 88.8% 成最高 pipe 且 L2 字节比 Triton 高 35%——用 XOR
+  swizzle/`ldmatrix` 消 8.81M bank conflict、把 `cp.async` 放宽到 32B/128B，可把 DRAM SOL 从 84.6% 再抬。
+
+### 49.7 边界 / 下一步（诚实）
+
+- 本核只隔离 B2 的**三条 V-归约 GEMM + `dgk` 列归约**；finalize（门链、`dkgb=A@dw`、`dA=dv@v^T`）、
+  `dv2`/`db` 与 intra 对角折叠**未**进 CUDA（同 §47.6）。故「B2 全核」对照里另 ~380 µs 未覆盖。
+- 未做 TMA（用 `cp.async`）；未做 `ldmatrix`/XOR swizzle（tf32 无 16-bit ldmatrix，需 CUTLASS 式手工重排）。
+- 未做 bf16 变体：本轮刻意保持部署的 fp32/tf32 mix，以与 §47 的 identical-op Triton 核**同 dtype** 对照
+  （§48.4 已证 `h/dh` bf16 在本结构下非独立杠杆）。
+- **下一步（真正工程化）**：把本核作为 GEMM 段基座，向其中补非 GEMM 段（同 CTA 内交接 `dA`/`dv2`/`db`），
+  并把 L2 流量/bank conflict 收口；同时验证小 shape 是否值得单独维护一个短核。

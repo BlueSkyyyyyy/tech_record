@@ -754,6 +754,22 @@
        **坑**：第一版「关 `tl.dot`＋秩-1 归约替身」触发 Triton 跨 lane 布局转换 → `no_post` **4964 spills
        /32 regs/慢 50×**（编译器病态，非测量），故改「只渡字节」；`bf16_hdh` 的 `dev/wall` 含 harness
        `h/dh.to(bf16)` 税（同 §26.5/§29.1），干净口径取 `ncu Duration`；`no_all` 的 `ncu` 记录为空（卡住）。
+- [x] **P7-46** 兑现 §47.6/§48.4 的首位动作：在**保留 `mma.sync` tensor core** 前提下，把 B2 的 V-归约
+       GEMM 核写成 **K2 形状**（`h/dh/do/vn/dv` 按 V 分块经 `cp.async` 流式喂 smem、寄存器里只剩每 warp
+       `[16,16]` 的小累加器）。新增 `harness/b2_mma_probe.cu`（`b2mma_launch`，`mma.sync.m16n8k8.tf32`）+
+       `harness/check_bwd_b2_mma.py`（`harness/check_bwd_b2_mma.out.txt`，空闲卡）+ `harness/probe_b2_mma_ncu.sh`
+       / `harness/ncu_b2_mma_driver.py`（`harness/probe_b2_mma_ncu.out.txt`）+ `docs/07` §49。**Part A**：四量
+       落 tf32 底噪（vs torch `dq 3.6e-4…dw 3.4e-4/dgk 1.6e-7`），且 CUDA(tf32) 比 Triton(tf32) 更贴 fp32。
+       **Part B/C（关键/正面）**：同 op、同 fp32 操作数，`B8T2048H8` **CUDA 517µs vs Triton `dev` 554µs＝
+       0.93×**（离 §47 地板 442µs **1.17×**，Triton 是 1.25×）、`B2T1024H8` 0.87×——**本专题第一个跑赢
+       identical-op Triton 核的 CUDA 反向核**；小 shape（`T512H4`/`T250H3`，grid 128/48）反慢 1.4×（固定
+       开销主导，核应随 shape 切换）。**`ncu`**：regs **226→70**、Block Limit Reg **1→3**、occ **12.4→24.6%**、
+       `long_sb` 4.11→**3.09**、DRAM **79.9→84.6% SOL（2.68→2.84 TB/s）**、L2 成最高 pipe（88.8%）——
+       坐实「移出大操作数常驻」是一阶量（§48.4），新核贴 DRAM 地板。**残差**：L2 字节比 Triton **高 35%**
+       （cp.async 16B 粒度放大）+ 直接 smem 读 mma 片段致 **8.81M bank conflict**（Triton swizzle/`ldmatrix`
+       为 0）→ 下一杠杆＝降 L2 流量/消冲突。**扫描**：`BVK/NS` 六档，大 shape 最优 `64/2`（0.90×）。**结论**：
+       §48.4 首位动作方向正确且首次兑现正收益；K2 形状三要素（tensor core + 流式操作数 + 小累加器分片）
+       被 §47 反例与本轮正例双向钉死；剩余头寸仍在非 GEMM 段，本核可作其 GEMM 段基座。
 
 ### P8 小结 / 一页纸
 
@@ -823,11 +839,32 @@
 - **同一个「h/dh 换 bf16」实验，`wall`/CUPTI `dev` 与 `ncu Duration` 会差一个数量级**（P7-45）：若
   harness 在计时闭包里做 `.to(bf16)`（本专题 `check_bwd_b2b3_seg.py`、§26.5/§29.1 亦然），两个 elementwise
   kernel 被算进 `dev`，把「wash」夸大成「1.49× 慢」。**核内改 dtype 的干净口径一律取 `ncu Duration`**。
+- **tf32 的 mma 片段没有 16-bit `ldmatrix` 可走**（P7-46）：`mma.sync.*.tf32` 的操作数是 32-bit，
+  `ldmatrix` 只支持 `.b16`，故手写 tf32 K2 核只能**直接从 smem 按 fragment 布局读**——本专题
+  `b2_mma_probe.cu` 因此有 **8.81M shared-load bank conflict**（Triton 的 swizzle+`ldmatrix` 为 0）。
+  要消它须走 CUTLASS 式手工 smem 重排（或改 bf16 用 `ldmatrix`），不能只靠 padding（§20 已证 padding
+  反噬占用率）。
+- **`cp.async` 16B 粒度会让 L2 字节放大**（P7-46）：`b2_mma_probe.cu` 的 A/B 操作数按 16B 拷、每请求落
+  32B sector，实测 **L2 3.03GB vs Triton 同 op 核 2.24GB（+35%）**（DRAM 读字节相同）；大 shape 上 L2
+  88.8% 成最高 pipe。放宽 `cp.async` 到 32B/128B 或按行整拷是下一杠杆。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-45 补测**。
-  - P7-45（本轮）：**把融合 B2/B3 的「头寸在字节还是发射」问清楚**——受控**字节消融**（同核只把选定
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-46 补测**。
+  - P7-46（本轮）：**「K2 形状 CUDA 化」第二刀＝B2 GEMM 核保留 `mma.sync` + 流式操作数，首次正面**。
+    在**保留 tensor core** 前提下把 B2 的 V-归约 GEMM 核写成 K2 形状（`h/dh/do/vn/dv` 按 V 分块经
+    `cp.async` 流式喂 smem、寄存器只留每 warp `[16,16]` 小累加器）。新增 `harness/b2_mma_probe.cu`
+    （`b2mma_launch`，`mma.sync.m16n8k8.tf32`）+ `harness/check_bwd_b2_mma.py`（`..._b2_mma.out.txt`）+
+    `harness/probe_b2_mma_ncu.sh` / `ncu_b2_mma_driver.py`（`..._b2_mma_ncu.out.txt`）+ `docs/07` §49。
+    **Part A**：四量落 tf32 底噪（vs torch `dq 3.6e-4/dgk 1.6e-7`），CUDA(tf32) 比 Triton 更贴 fp32。
+    **Part B/C（关键）**：同 op 同 fp32 操作数，`B8T2048H8` **517µs vs Triton 同 op 核 554µs＝0.93×**
+    （离地板 442µs **1.17×**，Triton 1.25×）、`B2T1024H8` 0.87×——**本专题首个跑赢 identical-op Triton 的
+    CUDA 反向核**；小 shape 反慢 1.4×（固定开销、按 shape 切换）。**ncu**：regs **226→70**、occ **12.4→
+    24.6%**、`long_sb` 4.11→**3.09**、DRAM **79.9→84.6% SOL**、L2 88.8% 成最高 pipe——坐实「移出大操作数
+    常驻」是一阶量；残差＝L2 字节高 35% + **8.81M bank conflict**（Triton 为 0）。**扫描**：大 shape 最优
+    `BVK=64/NS=2`（0.90×）。**结论**：K2 形状（tensor core + 流式操作数 + 小累加器分片）三要素由 §47 反例
+    与本轮正例双向钉死；剩余头寸仍在非 GEMM 段，本核可作其 GEMM 段基座。
+  - P7-45（上轮）：**把融合 B2/B3 的「头寸在字节还是发射」问清楚**——受控**字节消融**（同核只把选定
     输入 `tl.load` 换 `tl.zeros`，`tl.dot`/store/形状不动）。新增 `harness/check_bwd_b2b3_seg.py`
     （`harness/check_bwd_b2b3_seg.out.txt`）+ `harness/probe_b2b3_seg_ncu.sh` / `ncu_b2b3_seg_driver.py`
     （`harness/probe_b2b3_seg_ncu.out.txt`）+ `docs/07` §48。变体 `full`/`no_hdh`/`bf16_hdh`/`no_qkg`/
@@ -1452,7 +1489,15 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-45 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-46 补测**，进入收尾/维护。后续可选（有明确需求时再做）：
+  - **P7-46（`docs/07` §49）「K2 形状 CUDA 化」第二刀＝B2 GEMM 核保留 `mma.sync` + 流式操作数，首次正面**：
+    保留 tensor core，把 `h/dh/do/vn/dv` 按 V 分块经 `cp.async` 流式喂 smem、寄存器只留每 warp `[16,16]`
+    小累加器。`B8T2048H8` **517µs vs identical-op Triton 554µs＝0.93×**（离地板 1.17×、Triton 1.25×）、
+    `B2T1024H8` 0.87×（小 shape 反慢 1.4×，按 shape 切换）；ncu regs 226→70、occ 12.4→24.6%、DRAM 79.9→
+    84.6% SOL。残差＝L2 字节高 35% + 8.81M bank conflict。**下一步（真正工程化）**：把本核作 GEMM 段基座，
+    向其中补非 GEMM 段（同 CTA 交接 `dA`/`dv2`/`db`）+ 降 L2 流量/消冲突；验证小 shape 是否需单独短核。
+    新增 `harness/b2_mma_probe.cu` + `harness/check_bwd_b2_mma.py`（`..._b2_mma.out.txt`）+
+    `harness/probe_b2_mma_ncu.sh` / `ncu_b2_mma_driver.py`（`..._b2_mma_ncu.out.txt`）。
   - **P7-45（`docs/07` §48）把融合 B2/B3 的「头寸在字节还是发射」用受控字节消融问清楚**：同核只把
     选定输入 `tl.load` 换 `tl.zeros`（`tl.dot`/store/形状不动）。`full` 1051µs、`no_hdh`（−1074MB）
     **590µs=0.56×**、`bf16_hdh`（h/dh 砍半）**1.04ms=wash**、`no_qkg`（−201MB）**0.73×**、`no_all`
