@@ -1,0 +1,91 @@
+DeepEP refs.dispatch 的 FP8 分支 + 设备端 token SF 布局 —— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 nccl (2, 29, 7)
+DeepEP 源码：93eb6eb
+
+=== C++: include layout/ep/token.cuh 真实头文件、host 调用 TokenLayout ===
+CONST sizeof_sf_pack_t=4 kNumAlignedSFPacks=4 kNumTMAAlignmentBytes=32 kNumRDMAAlignmentBytes=64
+UNION roundtrip=16909060 (expect 16909060 == 0x01020304)
+LAYOUT hidden=2048 topk=8 md=1 hidden_sf=16 num_sf_bytes=64 sf_off=2048 md_off=2112 bytes_no_mb=2240 bytes_mb=2272
+LAYOUT hidden=4096 topk=8 md=1 hidden_sf=32 num_sf_bytes=128 sf_off=4096 md_off=4224 bytes_no_mb=4352 bytes_mb=4384
+LAYOUT hidden=7168 topk=8 md=1 hidden_sf=56 num_sf_bytes=224 sf_off=7168 md_off=7392 bytes_no_mb=7552 bytes_mb=7584
+LAYOUT hidden=8192 topk=4 md=1 hidden_sf=64 num_sf_bytes=256 sf_off=8192 md_off=8448 bytes_no_mb=8512 bytes_mb=8544
+LAYOUT hidden=512 topk=2 md=1 hidden_sf=4 num_sf_bytes=16 sf_off=512 md_off=544 bytes_no_mb=576 bytes_mb=608
+LAYOUT hidden=4096 topk=0 md=1 hidden_sf=32 num_sf_bytes=128 sf_off=4096 md_off=4224 bytes_no_mb=4288 bytes_mb=4320
+LAYOUT hidden=4096 topk=8 md=0 hidden_sf=32 num_sf_bytes=128 sf_off=4096 md_off=4224 bytes_no_mb=4288 bytes_mb=4320
+BF16 hidden=2048 num_sf_bytes=0 sf_off=4096 num_bytes_no_mb=4224
+BF16 hidden=7168 num_sf_bytes=0 sf_off=14336 num_bytes_no_mb=14464
+BUFFER per_token=7584 per_rank=7766016 total=62128128
+
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  world=8
+DeepEP refs.dispatch 的 FP8 分支 + 设备端 token SF 布局 —— H100 真机
+================================================================================================
+### Part A：真实源码加载（sha256）
+  refs.py sha256=c5f551b49e55b448…  math.py sha256=ed0dfb4bf9893769…  DeepEP@DeepEP
+
+### Part B：refs.dispatch 的 FP8 分支（8×H100 NCCL all_to_all，T=512, H=512, E=32, k=4）
+  本 rank 收到 1765 行；recv_sf (1765, 4) torch.float32；hidden_sf = ceil_div(512,128) = 4
+  每来源 rank 计数 = [208, 224, 222, 218, 216, 231, 221, 225]
+  [PASS] recv_x 是 (x, sf) 元组
+  [PASS] recv_sf 形状 == [nrecv, ceil_div(H,128)]
+  [PASS] recv_sf dtype 原样保留(fp32)
+  [PASS] recv_src == oracle
+  [PASS] recv_topk_idx == oracle
+  [PASS] recv_x(fp8) == oracle（逐位）
+  [PASS] recv_sf == oracle（逐位）
+  [PASS] num_recv_tokens_per_rank == oracle
+  [PASS] hidden_sf != ceil_div(H,128) 被 assert 拒绝
+  [PASS] per_token_cast_back(recv) == oracle 反量化 (rel=0.00e+00)
+
+### Part C：设备端 token 缓冲 SF 布局（`layout/ep/token.cuh`，host 调用真实头文件）
+  --- C++ 真实头文件输出 ---
+  CONST sizeof_sf_pack_t=4 kNumAlignedSFPacks=4 kNumTMAAlignmentBytes=32 kNumRDMAAlignmentBytes=64
+  UNION roundtrip=16909060 (expect 16909060 == 0x01020304)
+  LAYOUT hidden=2048 topk=8 md=1 hidden_sf=16 num_sf_bytes=64 sf_off=2048 md_off=2112 bytes_no_mb=2240 bytes_mb=2272
+  LAYOUT hidden=4096 topk=8 md=1 hidden_sf=32 num_sf_bytes=128 sf_off=4096 md_off=4224 bytes_no_mb=4352 bytes_mb=4384
+  LAYOUT hidden=7168 topk=8 md=1 hidden_sf=56 num_sf_bytes=224 sf_off=7168 md_off=7392 bytes_no_mb=7552 bytes_mb=7584
+  LAYOUT hidden=8192 topk=4 md=1 hidden_sf=64 num_sf_bytes=256 sf_off=8192 md_off=8448 bytes_no_mb=8512 bytes_mb=8544
+  LAYOUT hidden=512 topk=2 md=1 hidden_sf=4 num_sf_bytes=16 sf_off=512 md_off=544 bytes_no_mb=576 bytes_mb=608
+  LAYOUT hidden=4096 topk=0 md=1 hidden_sf=32 num_sf_bytes=128 sf_off=4096 md_off=4224 bytes_no_mb=4288 bytes_mb=4320
+  LAYOUT hidden=4096 topk=8 md=0 hidden_sf=32 num_sf_bytes=128 sf_off=4096 md_off=4224 bytes_no_mb=4288 bytes_mb=4320
+  BF16 hidden=2048 num_sf_bytes=0 sf_off=4096 num_bytes_no_mb=4224
+  BF16 hidden=7168 num_sf_bytes=0 sf_off=14336 num_bytes_no_mb=14464
+  BUFFER per_token=7584 per_rank=7766016 total=62128128
+  --- 独立 Python 公式复刻对拍 ---
+  [PASS] sizeof_sf_pack_t=4 (expect 4)
+  [PASS] kNumAlignedSFPacks=4 (expect 4)
+  [PASS] kNumTMAAlignmentBytes=32 (expect 32)
+  [PASS] kNumRDMAAlignmentBytes=64 (expect 64)
+  [PASS] LAYOUT hidden=2048 topk=8 md=1: {'hidden_sf': (16, 16), 'num_sf_bytes': (64, 64), 'sf_off': (2048, 2048), 'md_off': (2112, 2112), 'bytes_no_mb': (2240, 2240)}
+  [PASS] LAYOUT hidden=4096 topk=8 md=1: {'hidden_sf': (32, 32), 'num_sf_bytes': (128, 128), 'sf_off': (4096, 4096), 'md_off': (4224, 4224), 'bytes_no_mb': (4352, 4352)}
+  [PASS] LAYOUT hidden=7168 topk=8 md=1: {'hidden_sf': (56, 56), 'num_sf_bytes': (224, 224), 'sf_off': (7168, 7168), 'md_off': (7392, 7392), 'bytes_no_mb': (7552, 7552)}
+  [PASS] LAYOUT hidden=8192 topk=4 md=1: {'hidden_sf': (64, 64), 'num_sf_bytes': (256, 256), 'sf_off': (8192, 8192), 'md_off': (8448, 8448), 'bytes_no_mb': (8512, 8512)}
+  [PASS] LAYOUT hidden=512 topk=2 md=1: {'hidden_sf': (4, 4), 'num_sf_bytes': (16, 16), 'sf_off': (512, 512), 'md_off': (544, 544), 'bytes_no_mb': (576, 576)}
+  [PASS] LAYOUT hidden=4096 topk=0 md=1: {'hidden_sf': (32, 32), 'num_sf_bytes': (128, 128), 'sf_off': (4096, 4096), 'md_off': (4224, 4224), 'bytes_no_mb': (4288, 4288)}
+  [PASS] LAYOUT hidden=4096 topk=8 md=0: {'hidden_sf': (32, 32), 'num_sf_bytes': (128, 128), 'sf_off': (4096, 4096), 'md_off': (4224, 4224), 'bytes_no_mb': (4288, 4288)}
+  → Part C: 11/11 PASS
+
+### Part D：SF 字节开销 / 参考契约 vs 设备缓冲上界 / combine 无 FP8 变体
+  hidden  | ref: ceil(H,128) | dev buf upper: ceil(H,32) | ratio | 4*ceil(H,32)<=H
+     2048 |               16 |                     64 |   4.0 | True
+     4096 |               32 |                    128 |   4.0 | True
+     7168 |               56 |                    224 |   4.0 | True
+     8192 |               64 |                    256 |   4.0 | True
+    16384 |              128 |                    512 |   4.0 | True
+  [PASS] 参考 gran128 是设备缓冲上界(gran32)的 1/4，且最坏 SF 字节 <= 主数据（逐形状）
+  hidden  |  data/token | sf/token(ref) | sf% of data | 设备上界 sf% of data
+     2048 |       2048 |            64 |      3.125% |         12.500%
+     4096 |       4096 |           128 |      3.125% |         12.500%
+     7168 |       7168 |           224 |      3.125% |         12.500%
+     8192 |       8192 |           256 |      3.125% |         12.500%
+    16384 |      16384 |           512 |      3.125% |         12.500%
+  [PASS] 参考 gran128 无 padding 时 SF/数据 = 4/128 = 3.125%
+  [PASS] dispatch 用 sf.size(1)（ep.hpp:356）作为实际列数
+  [PASS] 输出 SF 可选 TMA 列主序（ep.hpp:689-690）
+  [PASS] refs.combine 签名无 sf/元组分支：(y: torch.Tensor, topk_idx: torch.Tensor, num_scaleout_ranks: int, num_scaleup_ranks: int, num_experts: int, bias: Union[Tuple[torch.Tensor, torch.Tensor], torch.Tensor, NoneType], reduce_in_local: bool, reduce_in_scaleup: bool) -> torch.Tensor
+  [PASS] generate_pre_combine_data 恒返回 bf16（`:153`）
+  → Part D: 6/6 PASS
+
+================================================================================================
+ALL DONE  PartB=True PartC=True PartD=True
+NCCL version 2.29.7+cuda13.2

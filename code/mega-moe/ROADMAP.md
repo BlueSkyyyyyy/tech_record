@@ -3255,7 +3255,36 @@
       packed-int 解码≡UE8M0 fp32、int 分支≡fp32 分支；C) `inplace_unique`≡独立 oracle、
       `:66` 死代码、降序（对照 DeepGEMM 升序）；D) `create_grouped_scores`≡向量化复刻、
       每 token 恰保留 16 专家；E) `count_bytes`≡DeepGEMM、hash/pack 语义全对。配套博客
-      `content/posts/mega-moe-114-deepep-utils-math`（索引页新增第 114 篇）。
+       `content/posts/mega-moe-114-deepep-utils-math`（索引页新增第 114 篇）。
+
+### P105 增量（opt-in，P104 延伸：`refs.dispatch` 的 FP8 分支）
+
+- [x] **P105-1** **DeepEP `refs.dispatch` 的 FP8 分支 + 设备端 `sf_pack_t`/`TokenLayout` SF 布局**
+      （`deep_ep/utils/refs.py:10-123`、`deep_ep/utils/math.py:30-56`；
+      `deep_ep/include/deep_ep/{common/compiled.cuh:59-68,layout/ep/token.cuh:10-143,
+      impls/ep/dispatch.cuh:262/293-309,impls/ep/dispatch_copy_epilogue.cuh:146-178}`；
+      host 编排 `csrc/buffers/ep.hpp:257/269/351-356/689-690`、`csrc/kernels/ep/dispatch.hpp:26-28`；
+      `tests/engram/test_engram.py:19`）。第 65 篇只点了一句 `refs.py:46-49` 的
+      `hidden_sf==ceil_div(hidden,128)`、第 114 篇拆了参考量化器返回 fp32；本篇补上 `(x, sf)`
+      元组通路到设备端布局的接缝。→ `docs/115-deepep-refs-fp8-dispatch.md`（真实行号核对）：
+      参考侧 `use_fp8=isinstance(x,tuple):39`、SF 列数契约 `:49`、逐 rank 选 token 时 SF 同下标
+      `:73`、SF **单独一次** `all_to_all_single` 但同计数 `:107`、接收侧只掩码索引不碰 SF `:112-117`、
+      打包回元组 `:120`；设备侧 `sf_pack_t` union（`compiled.cuh:59-62`，**全仓唯一 `ue8m0`
+      字样**）、`TokenLayout` 三段布局 + `get_sf_ptr`/`get_metadata_ptr`（`token.cuh:34-37/55-60`）、
+      kernel `cp.async` 搬 SF（`dispatch.cuh:299-307`）、epilogue 写回（`dispatch_copy_epilogue:146-178`）、
+      BF16 `if constexpr` 消除（`:147`）。**关键发现（同名不同契约）**：参考固定 gran-128
+      （SF 税 3.125%），设备 **dispatch 列数取 `sf.size(1)`**（`ep.hpp:356`，每单位 4 字节 `:355`、
+      `:351` 注释）、**缓冲**按 gran-32 上界 `ceil_div(hidden,32)` 预留（`:269`，配 `:257` 断言
+      `4*ceil(H,32)<=H`）恰是参考的 **4 倍**、输出可切 **TMA 列主序**（`:689-690`）。「一列=一
+      `sf_pack_t`=128 元素」的统一解释 union 两成员（fp32 gran128 / UE8M0 gran32 打包），
+      DeepEP 从不解释这 4 字节。H100 真机两项验证 `harness/exp_deepep_refs_fp8.{py,sh,out.txt}`
+      + `src/deepep_token_layout_sf.cu`：① **8×H100 NCCL all_to_all**（T=512,H=512,E=32,k=4）
+      `(x,sf)` 分支四项与**独立 oracle 逐位相等**、`per_token_cast_back` 反量化 rel=0、
+      `hidden_sf` 不符被 assert 拒；② include 真实 `layout/ep/token.cuh`、**host 调用真实
+      `TokenLayout`/`BufferLayout`**，7 组 `(hidden,topk,md)` 5 字段与 Python 独立公式**逐字段 0 不符**
+      （Part C 11/11、Part D 6/6）。`combine` 无 FP8 变体（签名无 `(y,sf)`、pre_combine 恒 bf16）。
+      端到端 `dispatch.cuh` 仍需 NCCL≥2.32.3（阻塞）。配套博客
+      `content/posts/mega-moe-115-deepep-refs-fp8-dispatch`（索引页新增第 115 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3282,8 +3311,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P104 各增量完成（P15-1…P41-1、P42-1…P104-1）。**
-  本轮 P104-1：新建 `docs/114-deepep-utils-math.md`
+- 当前进度：**P0~P14 全部完成；P15~P105 各增量完成（P15-1…P41-1、P42-1…P105-1）。**
+  本轮 P105-1：新建 `docs/115-deepep-refs-fp8-dispatch.md`
+  （+`harness/exp_deepep_refs_fp8.{py,sh,out.txt}`、`src/deepep_token_layout_sf.cu`）——补齐第 65 篇
+  只点一句、第 114 篇只碰一半的 **DeepEP `refs.dispatch` 的 FP8 分支**：`(x, sf)` 元组通路（参考侧）
+  到设备端 `sf_pack_t`/`TokenLayout` SF 布局（设备侧）的接缝。要点：参考固定 **gran-128**
+  （`hidden_sf==ceil_div(H,128)`，SF 税 3.125%）、SF 逐 token 同行同掩码、单独一次 all_to_all（同计数）；
+  设备 **dispatch 列数取 `sf.size(1)`**（`ep.hpp:356`）、**缓冲**按 gran-32 上界 `ceil_div(H,32)`
+  预留（`:269`，是参考的 4 倍）、输出可切 TMA 列主序（`:689-690`）；union 两成员解释「一列=一
+  `sf_pack_t`=128 元素」；DeepEP 不打包 UE8M0（全仓唯一 `ue8m0` 字样在 `compiled.cuh:61`/`ep.hpp:351`）。
+  H100 真机：8×H100 NCCL all_to_all `(x,sf)` 分支四项 vs 独立 oracle **逐位相等**、
+  `per_token_cast_back` rel=0、`hidden_sf` 不符被 assert 拒；include 真实 `layout/ep/token.cuh`
+  **host 调用真实 `TokenLayout`/`BufferLayout`** 7 组形状 5 字段 **逐字段 0 不符**（C 11/11、D 6/6）。
+  `combine` 无 FP8 变体。端到端 `dispatch.cuh` 仍需 NCCL≥2.32.3（阻塞）。索引页新增第 115 篇。
+  上一轮 P104-1：新建 `docs/114-deepep-utils-math.md`
   （+`harness/exp_deepep_utils_math.{py,sh,out.txt}`）——补齐第 65 篇只提一句的 **DeepEP
   `deep_ep/utils/math.py`**（103 行）：判据 `calc_diff`/参考量化器 `per_token_cast_to_fp8,back`/
   **top-k 去重 oracle** `inplace_unique`/**group-limited 路由掩码** `create_grouped_scores`/记账。
@@ -4463,7 +4504,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P104 已完成（最新 **P104-1 DeepEP 的 MoE 语义工具层 `deep_ep/utils/math.py`**：
+- **下一步**：P0~P105 已完成（最新 **P105-1 DeepEP `refs.dispatch` 的 FP8 分支 + 设备端
+  `sf_pack_t`/`TokenLayout` SF 布局**：参考 gran-128 契约 vs 设备缓冲 gran-32 上界（4 倍）、
+  dispatch 列数取 `sf.size(1)`、union 两成员统一「一列=128 元素」、DeepEP 不打包 UE8M0；
+  H100 真机 8 卡 all_to_all 逐位 + host 调真实 `TokenLayout` 逐字段 0 不符；`combine` 无 FP8 变体；
+  索引页新增第 115 篇。可继续（均为增量、非承诺）：第 65 篇 §8 列出的 `envs.py` 带宽/域解析
+  （第 73/86 篇已部分覆盖），或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P104-1：P0~P104 已完成（最新 **P104-1 DeepEP 的 MoE 语义工具层 `deep_ep/utils/math.py`**：
   第 65 篇只提一句——判据 `calc_diff`、参考量化器 `per_token_cast_to_fp8/back`、top-k 专家去重
   oracle `inplace_unique`、group-limited 路由掩码 `create_grouped_scores`、记账；三组「同名不同契约」
   跨库对照（`calc_diff` 差 `+1`、量化器不打包不 UE8M0、`count_bytes` 逐字相同）；发现 `:66` 按 count
