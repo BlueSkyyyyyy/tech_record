@@ -1,0 +1,81 @@
+DeepEP 屏障的验收基准与「通信 kernel 精确测时」方法论 —— H100 真机
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 nccl (2, 29, 7)
+DeepEP 源码：93eb6eb
+
+torch 2.12.0a0+0291f960b6.nv26.04.48445190  world=8  nccl=(2, 29, 7)
+DeepEP 屏障的验收基准与「通信 kernel 精确测时」方法论 —— H100 真机
+================================================================================================
+### Part A：真实源码加载（sha256，`~/github/DeepEP@93eb6eb`）
+  testing.py           sha256=9a6f140744f53dc8…
+  handle.py            sha256=24f555020247b358…
+  barrier.py           sha256=706bef5123370813…
+  test_barrier.py      sha256=307f062297d26958…
+  test_barrier.py 顶层函数 = ['test_barrier', 'test_loop']
+  testing.bench_kineto 存在 = True
+  comm.barrier 形参 = ['buffer', 'wait_comm_stream', 'with_cpu_sync', 'sequential', 'context_idx']
+
+### Part B：验收基准的驱动逻辑 oracle（原样 exec `tests/comm/test_barrier.py`）
+  [PASS] argparse 面 = ['--allow-hybrid-mode', '--do-pressure-test', '--num-allocated-qps', '--num-processes']
+        --num-processes        type=Name     default=8 action=None
+        --allow-hybrid-mode    type=Name     default=1 action=None
+        --num-allocated-qps    type=Name     default=8 action=None
+        --do-pressure-test     type=None     default=None action=store_true
+Profiling barrier:
+Config:
+ > Ranks: 2 x 4
+ > #QPs: 8
+
+ > EP:   0/  8, barrier time: 123.456 us
+
+  [PASS] test_barrier → bench_kineto(kernel_names='barrier', barrier_comm_profiling=True, barrier=buffer.barrier(False))
+        loop_barrier 在 profile 里连续调用 buffer.barrier()；本 rank barrier 次数 = 0（bench_kineto 被替换，故 0 次真实调用）
+  [PASS] test_loop 单次：EPBuffer((1073741824, 1, 8, True))、destroy×1
+  [PASS] 域恒等式 `rdma*nvl==num_ranks` 被 assert 拒绝（伪造 3×4 vs 8）
+  → Part B: 4/4 PASS
+
+### Part C：域尺寸语义 oracle（复刻 `context.cpp:52-63`）
+  [PASS] ranks= 8 nvl= 8 → physical=(rdma=1, nvl=8)  hybrid=(scaleout=1, scaleup=8)  flat=(1, 8)
+  [PASS] ranks= 8 nvl= 4 → physical=(rdma=2, nvl=4)  hybrid=(scaleout=2, scaleup=4)  flat=(1, 8)
+  [PASS] ranks=16 nvl= 8 → physical=(rdma=2, nvl=8)  hybrid=(scaleout=2, scaleup=8)  flat=(1, 16)
+  [PASS] ranks=32 nvl= 4 → physical=(rdma=8, nvl=4)  hybrid=(scaleout=8, scaleup=4)  flat=(1, 32)
+  [PASS] ranks= 8 nvl= 1 → physical=(rdma=8, nvl=1)  hybrid=(scaleout=8, scaleup=1)  flat=(1, 8)
+  [PASS] allow_hybrid_mode=False → 单级域 (1, num_ranks)=(1, 16)（`--allow-hybrid-mode 0` 的语义）
+  → Part C: 6/6 PASS
+
+### Part D：`launch_barrier` host 启动公式（复刻 `kernels/comm/barrier.hpp:25-41`）
+  [PASS] sequential=1 scaleout=2 → num_sms=1（期望 1） template=(False, 1, 512, 2, 4, 1000000000, True, True)
+  [PASS] sequential=1 scaleout=1 → num_sms=1（期望 1） template=(False, 1, 512, 1, 8, 1000000000, True, True)
+  [PASS] sequential=0 scaleout=2 → num_sms=2（期望 2） template=(False, 2, 512, 2, 4, 1000000000, True, False)
+  [PASS] sequential=0 scaleout=1 → num_sms=1（期望 1） template=(False, 1, 512, 1, 8, 1000000000, True, False)
+  [PASS] sequential=0 scaleout=4 → num_sms=2（期望 2） template=(True, 2, 512, 4, 8, 1000000000, False, False)
+  → Part D: 5/5 PASS
+
+### Part E：Python `deep_ep/comm/barrier.py` 的参数转发（stub `_C`）
+  [PASS] barrier(buffer) → _C.barrier(ctx0, False, True, True)（context=context_idx=None→buffer.context）
+  [PASS] barrier(with_cpu_sync=True, sequential=False, context_idx=2) → _C.barrier(ctx2, True, False, False)（context=buffer.contexts[2]）
+  [PASS] get_logical_domain_size(buffer) → (2, 4)（有 context，直接问 context）
+  [PASS] get_logical_domain_size(group, allow_hybrid_mode=False) → (1, 8)（无 context → _C.get_logical_domain_size(comm, False)）
+  → Part E: 4/4 PASS
+
+### Part F：真实 `bench_kineto` 的 barrier 测时路径（8×H100 NCCL + DeepGEMM FP8 kernel）
+  kernel = sm90_fp8_gemm_1d2d（M=N=K=4096）；每次 bench_kineto 15 tests × 2 批，重复 3 次
+  torch.cuda._sleep(2e7) 墙钟 = 13.47 ms（注释标 ~10ms，用大 kernel 削发射抖动）
+  模式                     dur[us] 三次                            min      max   spread
+  no-barrier             [99.8, 99.7, 99.8]                   99.7     99.8     0.1%
+  barrier=all_reduce     [101.1, 101.1, 100.9]               100.9    101.1     0.2%
+  barrier=custom         [101.5, 101.5, 101.5]               101.5    101.5     0.1%
+  disabled(env)          [99.0, 98.7, 98.6]                   98.6     99.0     0.4%
+  中位数：no-barrier=99.8us  all_reduce=101.1us  custom=101.5us
+  disabled(env) 中位数 = 98.7us → 应与 no-barrier 同区间（barrier_comm_profiling 被环境变量置 0）
+  **event 计时参考**（flush 在 start event 之前，不计入）：min=104.7us med=106.0us
+  ⇒ 真实 kernel 时长 ≈ 106us（快档）。将所有「无 sleep」测量（no-barrier + disabled(env) + sleep=0 扫描）合并看：这些样本横跨 98–419us，呈**双峰**（快档 ~100us、慢档 ~417us，≈4×）；而三种 barrier 模式每次都落在快档且 spread <0.3%。
+  裸 profiler 扫 sleep 长度（其余同 bench_kineto）：
+        sleep=        0 cycles → profiler 报告的 kernel 时长 = 98.345us
+        sleep=  1000000 cycles → profiler 报告的 kernel 时长 = 100.384us
+        sleep=  4000000 cycles → profiler 报告的 kernel 时长 = 418.927us
+        sleep= 10000000 cycles → profiler 报告的 kernel 时长 = 101.346us
+        sleep= 20000000 cycles → profiler 报告的 kernel 时长 = 101.451us
+  持续负载（背靠背，无间隔）：纯 GEMM 0.338 ms/iter、flush+GEMM 0.659 ms/iter（对照隔离 event 的 0.106 ms/iter）
+
+NCCL version 2.29.7+cuda13.2

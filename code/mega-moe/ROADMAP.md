@@ -2822,8 +2822,54 @@
       `torch.equal`、期望值与独立复刻逐位相等；全量仿真 10 载荷 × 2 轮 × 8 rank push **920 槽
       0 不符**、11 hidden × 2 轮 × 8 rank pull **176 组 0 不符**；带宽关键路径 prefetch 与 reduce
       **完全一致**（本机 NVLink 上限 430.3 GB/s、`random` `[2,5,6,8,9,10,4,3]` → critical path
-      671 MB、下限 ~1560 us）。`tests/*.py` sha256 已认证。配套博客
-      `content/posts/mega-moe-100-deepep-eplb-test-oracle`（索引页新增第 100 篇）。
+       671 MB、下限 ~1560 us）。`tests/*.py` sha256 已认证。配套博客
+       `content/posts/mega-moe-100-deepep-eplb-test-oracle`（索引页新增第 100 篇）。
+
+### P91 增量（opt-in，补齐 DeepEP 测试套件里最后一份未覆盖的验收测试）
+
+- [x] **P91-1** **DeepEP 屏障的验收基准与「通信 kernel 精确测时」方法论**
+      （`tests/comm/test_barrier.py` 66 行；`deep_ep/utils/testing.py:113-221`；
+      `deep_ep/comm/barrier.py:6-11`；`deep_ep/comm/handle.py:80-95`；
+      `deep_ep/buffers/ep.py:237-240`；`csrc/comm/handle.hpp:16-22`、`csrc/comm/barrier.hpp:9-42`、
+      `csrc/kernels/comm/barrier.hpp:17-54`、`csrc/kernels/comm/context.cpp:52-63`、
+      `deep_ep/include/deep_ep/impls/comm/barrier.cuh:11-41`、
+      `deep_ep/include/deep_ep/layout/common/barrier.cuh:11-23`）。
+      第 53 篇（P53-1）拆了屏障**设备协议**、第 86 篇（P76-1）拆了**host 编排**，但
+      **「什么叫这个屏障是对的/够快」的唯一规范** `tests/comm/test_barrier.py`（DeepEP 测试套件里
+      `tests/{ep,bucket,pp,engram,utils,buffer,comm}` 最后一份未被单独读过的文件）一直缺席。
+      **它不看数值、只测单次屏障耗时**。**设备 kernel（`barrier_impl`/`gpu_barrier`）走 NCCL GIN
+      设备 API，本机 NCCL 2.29.7 无该 API（同「阻塞」）→ 端到端仅分析**；域语义/host 启动/Python
+      转发/`bench_kineto(barrier_comm_profiling=...)` 测时路径**全在纯 host/Python + torch profiler**
+      里，8×H100 真机复刻。
+      → `docs/101-deepep-barrier-test-oracle.md`（真实行号核对）：`test_barrier:10-26`
+      （`loop_barrier` 连打 1000 次 `:19-21`、`bench_kineto(..., 'barrier', barrier_comm_profiling=True,
+      barrier=buffer.barrier)` `:23`——**把 profiler 的削峰屏障换成被测对象自己**，因 ring 实现的
+      `all_reduce` 有额外 RTT `testing.py:169`）；`test_loop:30-52`（两条**域恒等式**断言
+      `rdma*nvl==num_ranks` `:35` / `scaleout*scaleup==num_ranks` `:36`；`--do-pressure-test` 反复
+      建/毁 `EPBuffer(explicitly_destroy=True)` `:38-51`；argparse 四参 `:55-66`）。**域语义**
+      `context.cpp:52-63`：物理域来自 NCCL 拓扑（`ncclTeamWorld`/`ncclTeamLsa`），逻辑域由
+      `allow_hybrid_mode` 决定 —— `True`→`(rdma, nvl)` 两级、`False`→`(1, num_ranks)` 单级。
+      **host 链路**：`EPBuffer.barrier = comm.barrier`（`ep.py:237`）→ Python `barrier(context_idx)`
+      选通信域并**重排参数**转发 `_C.barrier(context, with_cpu_sync, sequential, wait_comm_stream)`
+      （`barrier.py:10-11`）→ pybind lambda `csrc/comm/handle.hpp:16-22`（`barrier_signals!=nullptr`
+      断言、`flush_stores` 硬编 `true`、当前流）→ `barrier()` 的 CPU-sync/comm-stream **双向对齐**
+      （`csrc/comm/barrier.hpp:17-41`）→ `launch_barrier` 的 `kNumThreads=512` `:26`、
+      `num_sms=(not sequential and num_scaleout_ranks>1)?2:1` `:30`（只有**并行混合且跨节点**才 2 SM）、
+      8 模板实参 `.cooperative=true` `:36-49`。**设备 kernel**：`kSequential` 先 scaleout（仅
+      `kNumScaleoutRanks>1`）再 scaleup 且**要 flush scaleout 的 RDMA 请求** `:23-34`；并行时两 SM 各跑
+      `gpu_barrier`；`BarrierSignals` 的 `nvl_barrier_signals[2]` 双相位槽 `layout:11-23`（第 53 篇协议）。
+      **测时方法论发现**：`bench_kineto` 的 `barrier_comm_profiling` 每轮插 `torch.cuda._sleep(2e7)`
+      （实测墙钟 **13.47ms**）+ 屏障（`testing.py:154/166-173`）、`EP_DISABLE_BARRIER_PROFILING=1`
+      就地置 0 `:154`。H100 实测 `harness/exp_deepep_barrier_profiling.{py,sh,out.txt}`（真实源码
+      路径 exec + stub `_C`/`envs`、真实 DeepGEMM `sm90_fp8_gemm_1d2d` M=N=K=4096、8×H100 NCCL）：
+      **Part B 4/4、C 6/6、D 5/5、E 4/4 PASS**；**Part F**：`no-barrier`/`disabled(env)`（无 sleep）
+      的 profiler 数字在多次测量里呈**双峰**（快档 ~98–101us / 慢档 ~417–419us，≈**4×**），而
+      `barrier=all_reduce`/`barrier=custom` 每轮都落在快档、spread **<0.3%**；event 计时参考
+      ~104.7/106.0us。**慢档是真实 GPU 行为**：直接量持续负载（背靠背、无间隔）同一 GEMM
+      **隔离 0.106 ms/iter vs 纯 GEMM 0.34 / flush+GEMM 0.66 ms/iter（3–6×）**，坐实 **H100 持续满载
+      降频**（呼应第 15 篇「单次 vs 持续 ≈2×」、第 36 篇「降载不抬频」），13.5ms 空闲让频率恢复
+      ——`barrier_comm_profiling` 的真实作用比 docstring「削 CPU 发射抖动」多一层「避降频」。
+      配套博客 `content/posts/mega-moe-101-deepep-barrier-test-oracle`（索引页新增第 101 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2850,8 +2896,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P90 各增量完成（P15-1…P41-1、P42-1…P90-1）。**
-  本轮 P90-1：新建 `docs/100-deepep-eplb-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P91 各增量完成（P15-1…P41-1、P42-1…P91-1）。**
+  本轮 P91-1：新建 `docs/101-deepep-barrier-test-oracle.md`
+  （+`harness/exp_deepep_barrier_profiling.{py,sh,out.txt}`）——补齐 DeepEP 测试套件里**最后一份
+  未覆盖的验收测试** `tests/comm/test_barrier.py` 与它暴露的**通信 kernel 精确测时方法论**。
+  `test_barrier` 只测单次屏障耗时（`loop_barrier` ×1000、`bench_kineto(..., barrier_comm_profiling=True,
+  barrier=buffer.barrier)`）；`test_loop` 有两条域恒等式断言 + pressure 建/毁循环。域语义由
+  `allow_hybrid_mode` 决定（两级 `(rdma,nvl)` vs 单级 `(1,num_ranks)`）；host 链路
+  `EPBuffer.barrier→comm.barrier→_C.barrier→barrier()→launch_barrier`（`flush_stores=true`、
+  512 线程、`num_sms=(not sequential and scaleout>1)?2:1`）；设备 kernel sequential 两级 vs 并行。
+  **设备 kernel 走 NCCL GIN → 端到端仅分析**；**H100 真机 Part B/C/D/E 全 PASS**（4/6/5/4）。
+  **Part F 关键发现**：无 `_sleep(2e7)` 时 `bench_kineto` 报告的 kernel 时长呈**双峰**（快档 ~100us /
+  慢档 ~417us，≈4×），`barrier_comm_profiling` 每轮落快档、spread<0.3%；直接量持续负载坐实慢档
+  =**H100 持续满载降频**（隔离 0.106ms vs 背靠背 0.34–0.66ms）→ `barrier_comm_profiling` 兼具
+  「削发射抖动 + 避降频」两重作用。索引页新增第 101 篇。
+  上一轮 P90-1：新建 `docs/100-deepep-eplb-test-oracle.md`
   （+`harness/exp_deepep_eplb_test_oracle.{py,sh,out.txt}`）——补齐 EPLB 两个原语一直缺席的
   **验收测试即正确性规范**。前向 blob=唯一 key 的确定性 ramp（`make_blob`，错专家/错载荷每字节暴露）、
   `SENTINEL=0xa5` 哨兵、映射表 **own-expert 排除**；反向 blob=小整数精确 fp32（`make_pattern`，
@@ -3888,7 +3947,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P90 已完成（最新 **P90-1 DeepEP EPLB 冗余权重的验收测试即正确性规范**：
+- **下一步**：P0~P91 已完成（最新 **P91-1 DeepEP 屏障的验收基准与「通信 kernel 精确测时」方法论**：
+  `tests/comm/test_barrier.py`（测试套件里最后一份未覆盖文件）+ `bench_kineto(barrier_comm_profiling=...)`
+  路径——域 `allow_hybrid_mode` 语义、host 链路、`launch_barrier` 公式、设备 sequential/并行内核；
+  设备 kernel 走 NCCL GIN 仅分析；H100 真机 Part B/C/D/E 全 PASS；**Part F 发现 profiler 测时双峰
+  （无 sleep 时快档 ~100us / 慢档 ~417us ≈4×，barrier 稳定落快档）且坐实为持续满载降频**；详见上）。
+  上一轮 P90-1：P0~P90 已完成（最新 **P90-1 DeepEP EPLB 冗余权重的验收测试即正确性规范**：
   `tests/ep/test_prefetch_weights.py` + `test_reduce_grads.py`——前向 blob 唯一 key ramp + 哨兵、
   映射表 own-expert 排除；反向小整数精确 fp32 使原子加顺序无关、`torch.equal` 免容差；设备路径
   NCCL GIN 仅分析，H100 真机 37/37 ALL PASS（push 920 槽 / pull 176 组 0 不符、关键路径 671 MB /
