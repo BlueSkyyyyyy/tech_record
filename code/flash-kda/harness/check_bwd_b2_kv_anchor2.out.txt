@@ -1,0 +1,1211 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+========================================================================================================
+Part A: staging variants of the production kernel at K!=V -- EXTERNAL anchor + bit-identity
+========================================================================================================
+
+#### K = 64, V = 256   smem prod=92032 tma=85888 bf16=69504 bf16mma=69504 ####
+
+# B2 T1024 H8  grid=(64, 16)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=9.537e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=7.153e-07  [DIFF]
+    mma.db vs bf16                       max_abs=1.569e-04  [DIFF]
+    mma.dkgb vs bf16                     max_abs=1.953e-03  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=9.537e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=2.601e-04  [DIFF]
+    mma.dg vs bf16                       max_abs=5.345e-05  [DIFF]
+    prod.dqg vs torch                    max_abs=1.014e-03  max_rel=3.245e-04  ref_max=3.124e+00
+    prod.dqg vs FLA                      max_abs=2.549e-03  max_rel=8.167e-04  ref_max=3.122e+00
+    prod.dkg vs torch                    max_abs=1.156e-02  max_rel=2.974e-04  ref_max=3.887e+01
+    prod.dkg vs FLA                      max_abs=3.337e-02  max_rel=8.592e-04  ref_max=3.885e+01
+    prod.dg vs torch                     max_abs=3.681e-03  max_rel=3.319e-04  ref_max=1.109e+01
+    prod.dg vs FLA                       max_abs=1.051e-02  max_rel=9.482e-04  ref_max=1.108e+01
+    prod.db vs torch                     max_abs=1.771e-03  max_rel=2.681e-04  ref_max=6.606e+00
+    prod.db vs FLA                       max_abs=3.663e-03  max_rel=5.546e-04  ref_max=6.604e+00
+    prod.dA vs torch                     max_abs=5.789e-04  max_rel=9.663e-05  ref_max=5.991e+00
+    prod.dA vs FLA                       max_abs=1.103e-02  max_rel=1.844e-03  ref_max=5.983e+00
+    tma.dqg vs torch                     max_abs=1.014e-03  max_rel=3.245e-04  ref_max=3.124e+00
+    tma.dqg vs FLA                       max_abs=2.549e-03  max_rel=8.167e-04  ref_max=3.122e+00
+    tma.dkg vs torch                     max_abs=1.156e-02  max_rel=2.974e-04  ref_max=3.887e+01
+    tma.dkg vs FLA                       max_abs=3.337e-02  max_rel=8.592e-04  ref_max=3.885e+01
+    tma.dg vs torch                      max_abs=3.681e-03  max_rel=3.319e-04  ref_max=1.109e+01
+    tma.dg vs FLA                        max_abs=1.051e-02  max_rel=9.482e-04  ref_max=1.108e+01
+    tma.db vs torch                      max_abs=1.771e-03  max_rel=2.681e-04  ref_max=6.606e+00
+    tma.db vs FLA                        max_abs=3.663e-03  max_rel=5.546e-04  ref_max=6.604e+00
+    tma.dA vs torch                      max_abs=5.789e-04  max_rel=9.663e-05  ref_max=5.991e+00
+    tma.dA vs FLA                        max_abs=1.103e-02  max_rel=1.844e-03  ref_max=5.983e+00
+    bf16.dqg vs torch                    max_abs=1.669e-06  max_rel=5.341e-07  ref_max=3.125e+00
+    bf16.dqg vs FLA                      max_abs=3.038e-03  max_rel=9.723e-04  ref_max=3.124e+00
+    bf16.dkg vs torch                    max_abs=7.579e-04  max_rel=1.950e-05  ref_max=3.886e+01
+    bf16.dkg vs FLA                      max_abs=4.320e-01  max_rel=1.112e-02  ref_max=3.886e+01
+    bf16.dg vs torch                     max_abs=2.210e-04  max_rel=1.992e-05  ref_max=1.110e+01
+    bf16.dg vs FLA                       max_abs=1.361e-01  max_rel=1.232e-02  ref_max=1.105e+01
+    bf16.db vs torch                     max_abs=4.613e-04  max_rel=6.984e-05  ref_max=6.606e+00
+    bf16.db vs FLA                       max_abs=1.277e-02  max_rel=1.933e-03  ref_max=6.606e+00
+    bf16.dA vs torch                     max_abs=4.768e-06  max_rel=7.960e-07  ref_max=5.991e+00
+    bf16.dA vs FLA                       max_abs=2.994e-02  max_rel=5.001e-03  ref_max=5.988e+00
+    bf16mma.dqg vs torch                 max_abs=1.192e-06  max_rel=3.815e-07  ref_max=3.125e+00
+    bf16mma.dqg vs FLA                   max_abs=3.037e-03  max_rel=9.723e-04  ref_max=3.124e+00
+    bf16mma.dkg vs torch                 max_abs=7.579e-04  max_rel=1.950e-05  ref_max=3.886e+01
+    bf16mma.dkg vs FLA                   max_abs=4.320e-01  max_rel=1.112e-02  ref_max=3.886e+01
+    bf16mma.dg vs torch                  max_abs=2.210e-04  max_rel=1.992e-05  ref_max=1.110e+01
+    bf16mma.dg vs FLA                    max_abs=1.361e-01  max_rel=1.232e-02  ref_max=1.105e+01
+    bf16mma.db vs torch                  max_abs=4.613e-04  max_rel=6.984e-05  ref_max=6.606e+00
+    bf16mma.db vs FLA                    max_abs=1.277e-02  max_rel=1.933e-03  ref_max=6.606e+00
+    bf16mma.dA vs torch                  max_abs=4.768e-06  max_rel=7.960e-07  ref_max=5.991e+00
+    bf16mma.dA vs FLA                    max_abs=2.994e-02  max_rel=5.001e-03  ref_max=5.988e+00
+
+# T512 H4  grid=(32, 4)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=9.537e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=7.153e-07  [DIFF]
+    mma.db vs bf16                       max_abs=1.752e-05  [DIFF]
+    mma.dkgb vs bf16                     max_abs=9.766e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=5.960e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=6.184e-05  [DIFF]
+    mma.dg vs bf16                       max_abs=1.234e-05  [DIFF]
+    prod.dqg vs torch                    max_abs=6.902e-04  max_rel=2.739e-04  ref_max=2.520e+00
+    prod.dqg vs FLA                      max_abs=1.922e-03  max_rel=7.632e-04  ref_max=2.519e+00
+    prod.dkg vs torch                    max_abs=9.391e-03  max_rel=2.489e-04  ref_max=3.773e+01
+    prod.dkg vs FLA                      max_abs=2.975e-02  max_rel=7.891e-04  ref_max=3.771e+01
+    prod.dg vs torch                     max_abs=2.699e-03  max_rel=3.286e-04  ref_max=8.214e+00
+    prod.dg vs FLA                       max_abs=7.618e-03  max_rel=9.280e-04  ref_max=8.209e+00
+    prod.db vs torch                     max_abs=1.290e-03  max_rel=2.273e-04  ref_max=5.677e+00
+    prod.db vs FLA                       max_abs=3.303e-03  max_rel=5.820e-04  ref_max=5.675e+00
+    prod.dA vs torch                     max_abs=5.423e-04  max_rel=1.088e-04  ref_max=4.983e+00
+    prod.dA vs FLA                       max_abs=9.775e-03  max_rel=1.964e-03  ref_max=4.978e+00
+    tma.dqg vs torch                     max_abs=6.902e-04  max_rel=2.739e-04  ref_max=2.520e+00
+    tma.dqg vs FLA                       max_abs=1.922e-03  max_rel=7.632e-04  ref_max=2.519e+00
+    tma.dkg vs torch                     max_abs=9.391e-03  max_rel=2.489e-04  ref_max=3.773e+01
+    tma.dkg vs FLA                       max_abs=2.975e-02  max_rel=7.891e-04  ref_max=3.771e+01
+    tma.dg vs torch                      max_abs=2.699e-03  max_rel=3.286e-04  ref_max=8.214e+00
+    tma.dg vs FLA                        max_abs=7.618e-03  max_rel=9.280e-04  ref_max=8.209e+00
+    tma.db vs torch                      max_abs=1.290e-03  max_rel=2.273e-04  ref_max=5.677e+00
+    tma.db vs FLA                        max_abs=3.303e-03  max_rel=5.820e-04  ref_max=5.675e+00
+    tma.dA vs torch                      max_abs=5.423e-04  max_rel=1.088e-04  ref_max=4.983e+00
+    tma.dA vs FLA                        max_abs=9.775e-03  max_rel=1.964e-03  ref_max=4.978e+00
+    bf16.dqg vs torch                    max_abs=1.550e-06  max_rel=6.154e-07  ref_max=2.518e+00
+    bf16.dqg vs FLA                      max_abs=2.788e-03  max_rel=1.107e-03  ref_max=2.518e+00
+    bf16.dkg vs torch                    max_abs=6.974e-04  max_rel=1.849e-05  ref_max=3.772e+01
+    bf16.dkg vs FLA                      max_abs=3.654e-01  max_rel=9.756e-03  ref_max=3.745e+01
+    bf16.dg vs torch                     max_abs=1.452e-04  max_rel=1.767e-05  ref_max=8.215e+00
+    bf16.dg vs FLA                       max_abs=8.737e-02  max_rel=1.058e-02  ref_max=8.256e+00
+    bf16.db vs torch                     max_abs=4.208e-04  max_rel=7.410e-05  ref_max=5.679e+00
+    bf16.db vs FLA                       max_abs=1.085e-02  max_rel=1.911e-03  ref_max=5.678e+00
+    bf16.dA vs torch                     max_abs=2.861e-06  max_rel=5.743e-07  ref_max=4.982e+00
+    bf16.dA vs FLA                       max_abs=2.748e-02  max_rel=5.521e-03  ref_max=4.978e+00
+    bf16mma.dqg vs torch                 max_abs=1.431e-06  max_rel=5.681e-07  ref_max=2.518e+00
+    bf16mma.dqg vs FLA                   max_abs=2.788e-03  max_rel=1.107e-03  ref_max=2.518e+00
+    bf16mma.dkg vs torch                 max_abs=6.976e-04  max_rel=1.849e-05  ref_max=3.772e+01
+    bf16mma.dkg vs FLA                   max_abs=3.654e-01  max_rel=9.756e-03  ref_max=3.745e+01
+    bf16mma.dg vs torch                  max_abs=1.452e-04  max_rel=1.767e-05  ref_max=8.215e+00
+    bf16mma.dg vs FLA                    max_abs=8.737e-02  max_rel=1.058e-02  ref_max=8.256e+00
+    bf16mma.db vs torch                  max_abs=4.199e-04  max_rel=7.393e-05  ref_max=5.679e+00
+    bf16mma.db vs FLA                    max_abs=1.085e-02  max_rel=1.911e-03  ref_max=5.678e+00
+    bf16mma.dA vs torch                  max_abs=2.861e-06  max_rel=5.743e-07  ref_max=4.982e+00
+    bf16mma.dA vs FLA                    max_abs=2.748e-02  max_rel=5.521e-03  ref_max=4.978e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=9.537e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=4.917e-07  [DIFF]
+    mma.db vs bf16                       max_abs=6.950e-05  [DIFF]
+    mma.dkgb vs bf16                     max_abs=9.766e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=7.153e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=2.953e-04  [DIFF]
+    mma.dg vs bf16                       max_abs=3.699e-05  [DIFF]
+    prod.dqg vs FLA                      max_abs=2.004e-03  max_rel=7.629e-04  ref_max=2.627e+00
+    prod.dkg vs FLA                      max_abs=2.571e-02  max_rel=8.794e-04  ref_max=2.923e+01
+    prod.dg vs FLA                       max_abs=6.841e-03  max_rel=7.751e-04  ref_max=8.827e+00
+    prod.db vs FLA                       max_abs=2.723e-03  max_rel=5.114e-04  ref_max=5.324e+00
+    prod.dA vs FLA                       max_abs=6.392e-03  max_rel=1.240e-03  ref_max=5.155e+00
+    tma.dqg vs FLA                       max_abs=2.004e-03  max_rel=7.629e-04  ref_max=2.627e+00
+    tma.dkg vs FLA                       max_abs=2.571e-02  max_rel=8.794e-04  ref_max=2.923e+01
+    tma.dg vs FLA                        max_abs=6.841e-03  max_rel=7.751e-04  ref_max=8.827e+00
+    tma.db vs FLA                        max_abs=2.723e-03  max_rel=5.114e-04  ref_max=5.324e+00
+    tma.dA vs FLA                        max_abs=6.392e-03  max_rel=1.240e-03  ref_max=5.155e+00
+    bf16.dqg vs FLA                      max_abs=2.783e-03  max_rel=1.059e-03  ref_max=2.628e+00
+    bf16.dkg vs FLA                      max_abs=3.770e-01  max_rel=1.291e-02  ref_max=2.920e+01
+    bf16.dg vs FLA                       max_abs=6.220e-02  max_rel=7.036e-03  ref_max=8.840e+00
+    bf16.db vs FLA                       max_abs=1.098e-02  max_rel=2.060e-03  ref_max=5.331e+00
+    bf16.dA vs FLA                       max_abs=1.723e-02  max_rel=3.340e-03  ref_max=5.159e+00
+    bf16mma.dqg vs FLA                   max_abs=2.783e-03  max_rel=1.059e-03  ref_max=2.628e+00
+    bf16mma.dkg vs FLA                   max_abs=3.770e-01  max_rel=1.291e-02  ref_max=2.920e+01
+    bf16mma.dg vs FLA                    max_abs=6.220e-02  max_rel=7.036e-03  ref_max=8.840e+00
+    bf16mma.db vs FLA                    max_abs=1.098e-02  max_rel=2.060e-03  ref_max=5.331e+00
+    bf16mma.dA vs FLA                    max_abs=1.723e-02  max_rel=3.340e-03  ref_max=5.159e+00
+
+#### K = 256, V = 64   smem prod=215680 tma=197248 bf16=144000 bf16mma=144000 ####
+
+# B2 T1024 H8  grid=(64, 16)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=4.768e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=4.768e-07  [DIFF]
+    mma.db vs bf16                       max_abs=2.494e-05  [DIFF]
+    mma.dkgb vs bf16                     max_abs=4.883e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=2.384e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=2.386e-04  [DIFF]
+    mma.dg vs bf16                       max_abs=9.665e-06  [DIFF]
+    prod.dqg vs torch                    max_abs=5.825e-04  max_rel=3.554e-04  ref_max=1.639e+00
+    prod.dqg vs FLA                      max_abs=1.441e-03  max_rel=8.801e-04  ref_max=1.638e+00
+    prod.dkg vs torch                    max_abs=6.565e-03  max_rel=3.229e-04  ref_max=2.033e+01
+    prod.dkg vs FLA                      max_abs=1.998e-02  max_rel=9.832e-04  ref_max=2.032e+01
+    prod.dg vs torch                     max_abs=1.105e-03  max_rel=3.365e-04  ref_max=3.283e+00
+    prod.dg vs FLA                       max_abs=2.678e-03  max_rel=8.162e-04  ref_max=3.281e+00
+    prod.db vs torch                     max_abs=7.799e-04  max_rel=2.344e-04  ref_max=3.327e+00
+    prod.db vs FLA                       max_abs=2.323e-03  max_rel=6.983e-04  ref_max=3.326e+00
+    prod.dA vs torch                     max_abs=3.643e-04  max_rel=1.202e-04  ref_max=3.032e+00
+    prod.dA vs FLA                       max_abs=6.133e-03  max_rel=2.027e-03  ref_max=3.026e+00
+    tma.dqg vs torch                     max_abs=5.825e-04  max_rel=3.554e-04  ref_max=1.639e+00
+    tma.dqg vs FLA                       max_abs=1.441e-03  max_rel=8.801e-04  ref_max=1.638e+00
+    tma.dkg vs torch                     max_abs=6.565e-03  max_rel=3.229e-04  ref_max=2.033e+01
+    tma.dkg vs FLA                       max_abs=1.998e-02  max_rel=9.832e-04  ref_max=2.032e+01
+    tma.dg vs torch                      max_abs=1.105e-03  max_rel=3.365e-04  ref_max=3.283e+00
+    tma.dg vs FLA                        max_abs=2.678e-03  max_rel=8.162e-04  ref_max=3.281e+00
+    tma.db vs torch                      max_abs=7.799e-04  max_rel=2.344e-04  ref_max=3.327e+00
+    tma.db vs FLA                        max_abs=2.323e-03  max_rel=6.983e-04  ref_max=3.326e+00
+    tma.dA vs torch                      max_abs=3.643e-04  max_rel=1.202e-04  ref_max=3.032e+00
+    tma.dA vs FLA                        max_abs=6.133e-03  max_rel=2.027e-03  ref_max=3.026e+00
+    bf16.dqg vs torch                    max_abs=3.576e-07  max_rel=2.181e-07  ref_max=1.640e+00
+    bf16.dqg vs FLA                      max_abs=1.939e-03  max_rel=1.183e-03  ref_max=1.640e+00
+    bf16.dkg vs torch                    max_abs=4.206e-04  max_rel=2.068e-05  ref_max=2.034e+01
+    bf16.dkg vs FLA                      max_abs=2.598e-01  max_rel=1.277e-02  ref_max=2.034e+01
+    bf16.dg vs torch                     max_abs=6.949e-05  max_rel=2.119e-05  ref_max=3.279e+00
+    bf16.dg vs FLA                       max_abs=3.011e-02  max_rel=9.124e-03  ref_max=3.300e+00
+    bf16.db vs torch                     max_abs=2.996e-04  max_rel=9.000e-05  ref_max=3.328e+00
+    bf16.db vs FLA                       max_abs=6.726e-03  max_rel=2.020e-03  ref_max=3.329e+00
+    bf16.dA vs torch                     max_abs=9.537e-07  max_rel=3.145e-07  ref_max=3.032e+00
+    bf16.dA vs FLA                       max_abs=1.466e-02  max_rel=4.849e-03  ref_max=3.024e+00
+    bf16mma.dqg vs torch                 max_abs=3.576e-07  max_rel=2.181e-07  ref_max=1.640e+00
+    bf16mma.dqg vs FLA                   max_abs=1.939e-03  max_rel=1.183e-03  ref_max=1.640e+00
+    bf16mma.dkg vs torch                 max_abs=4.206e-04  max_rel=2.068e-05  ref_max=2.034e+01
+    bf16mma.dkg vs FLA                   max_abs=2.598e-01  max_rel=1.277e-02  ref_max=2.034e+01
+    bf16mma.dg vs torch                  max_abs=6.949e-05  max_rel=2.119e-05  ref_max=3.279e+00
+    bf16mma.dg vs FLA                    max_abs=3.011e-02  max_rel=9.124e-03  ref_max=3.300e+00
+    bf16mma.db vs torch                  max_abs=2.996e-04  max_rel=9.000e-05  ref_max=3.328e+00
+    bf16mma.db vs FLA                    max_abs=6.726e-03  max_rel=2.020e-03  ref_max=3.329e+00
+    bf16mma.dA vs torch                  max_abs=9.537e-07  max_rel=3.145e-07  ref_max=3.032e+00
+    bf16mma.dA vs FLA                    max_abs=1.466e-02  max_rel=4.849e-03  ref_max=3.024e+00
+
+# T512 H4  grid=(32, 4)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=4.768e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=2.384e-07  [DIFF]
+    mma.db vs bf16                       max_abs=6.914e-06  [DIFF]
+    mma.dkgb vs bf16                     max_abs=4.883e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=1.788e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=2.217e-05  [DIFF]
+    mma.dg vs bf16                       max_abs=3.576e-06  [DIFF]
+    prod.dqg vs torch                    max_abs=4.458e-04  max_rel=3.110e-04  ref_max=1.433e+00
+    prod.dqg vs FLA                      max_abs=1.266e-03  max_rel=8.835e-04  ref_max=1.432e+00
+    prod.dkg vs torch                    max_abs=6.405e-03  max_rel=3.703e-04  ref_max=1.730e+01
+    prod.dkg vs FLA                      max_abs=1.664e-02  max_rel=9.628e-04  ref_max=1.728e+01
+    prod.dg vs torch                     max_abs=6.626e-04  max_rel=2.571e-04  ref_max=2.577e+00
+    prod.dg vs FLA                       max_abs=2.582e-03  max_rel=1.003e-03  ref_max=2.575e+00
+    prod.db vs torch                     max_abs=6.730e-04  max_rel=2.028e-04  ref_max=3.319e+00
+    prod.db vs FLA                       max_abs=1.935e-03  max_rel=5.833e-04  ref_max=3.318e+00
+    prod.dA vs torch                     max_abs=2.369e-04  max_rel=9.654e-05  ref_max=2.453e+00
+    prod.dA vs FLA                       max_abs=4.468e-03  max_rel=1.824e-03  ref_max=2.449e+00
+    tma.dqg vs torch                     max_abs=4.458e-04  max_rel=3.110e-04  ref_max=1.433e+00
+    tma.dqg vs FLA                       max_abs=1.266e-03  max_rel=8.835e-04  ref_max=1.432e+00
+    tma.dkg vs torch                     max_abs=6.405e-03  max_rel=3.703e-04  ref_max=1.730e+01
+    tma.dkg vs FLA                       max_abs=1.664e-02  max_rel=9.628e-04  ref_max=1.728e+01
+    tma.dg vs torch                      max_abs=6.626e-04  max_rel=2.571e-04  ref_max=2.577e+00
+    tma.dg vs FLA                        max_abs=2.582e-03  max_rel=1.003e-03  ref_max=2.575e+00
+    tma.db vs torch                      max_abs=6.730e-04  max_rel=2.028e-04  ref_max=3.319e+00
+    tma.db vs FLA                        max_abs=1.935e-03  max_rel=5.833e-04  ref_max=3.318e+00
+    tma.dA vs torch                      max_abs=2.369e-04  max_rel=9.654e-05  ref_max=2.453e+00
+    tma.dA vs FLA                        max_abs=4.468e-03  max_rel=1.824e-03  ref_max=2.449e+00
+    bf16.dqg vs torch                    max_abs=3.576e-07  max_rel=2.499e-07  ref_max=1.431e+00
+    bf16.dqg vs FLA                      max_abs=1.650e-03  max_rel=1.153e-03  ref_max=1.431e+00
+    bf16.dkg vs torch                    max_abs=3.783e-04  max_rel=2.185e-05  ref_max=1.731e+01
+    bf16.dkg vs FLA                      max_abs=1.994e-01  max_rel=1.152e-02  ref_max=1.731e+01
+    bf16.dg vs torch                     max_abs=3.802e-05  max_rel=1.475e-05  ref_max=2.577e+00
+    bf16.dg vs FLA                       max_abs=2.928e-02  max_rel=1.131e-02  ref_max=2.589e+00
+    bf16.db vs torch                     max_abs=1.938e-04  max_rel=5.835e-05  ref_max=3.322e+00
+    bf16.db vs FLA                       max_abs=4.863e-03  max_rel=1.464e-03  ref_max=3.323e+00
+    bf16.dA vs torch                     max_abs=7.153e-07  max_rel=2.913e-07  ref_max=2.455e+00
+    bf16.dA vs FLA                       max_abs=1.239e-02  max_rel=5.054e-03  ref_max=2.451e+00
+    bf16mma.dqg vs torch                 max_abs=2.980e-07  max_rel=2.082e-07  ref_max=1.431e+00
+    bf16mma.dqg vs FLA                   max_abs=1.650e-03  max_rel=1.153e-03  ref_max=1.431e+00
+    bf16mma.dkg vs torch                 max_abs=3.783e-04  max_rel=2.185e-05  ref_max=1.731e+01
+    bf16mma.dkg vs FLA                   max_abs=1.994e-01  max_rel=1.152e-02  ref_max=1.731e+01
+    bf16mma.dg vs torch                  max_abs=3.802e-05  max_rel=1.475e-05  ref_max=2.577e+00
+    bf16mma.dg vs FLA                    max_abs=2.928e-02  max_rel=1.131e-02  ref_max=2.589e+00
+    bf16mma.db vs torch                  max_abs=1.938e-04  max_rel=5.835e-05  ref_max=3.322e+00
+    bf16mma.db vs FLA                    max_abs=4.863e-03  max_rel=1.464e-03  ref_max=3.323e+00
+    bf16mma.dA vs torch                  max_abs=7.153e-07  max_rel=2.913e-07  ref_max=2.455e+00
+    bf16mma.dA vs FLA                    max_abs=1.239e-02  max_rel=5.054e-03  ref_max=2.451e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=4.768e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=4.768e-07  [DIFF]
+    mma.db vs bf16                       max_abs=6.795e-06  [DIFF]
+    mma.dkgb vs bf16                     max_abs=4.883e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=1.788e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=1.724e-04  [DIFF]
+    mma.dg vs bf16                       max_abs=4.426e-06  [DIFF]
+    prod.dqg vs FLA                      max_abs=1.266e-03  max_rel=8.917e-04  ref_max=1.419e+00
+    prod.dkg vs FLA                      max_abs=1.650e-02  max_rel=9.596e-04  ref_max=1.719e+01
+    prod.dg vs FLA                       max_abs=1.945e-03  max_rel=7.672e-04  ref_max=2.536e+00
+    prod.db vs FLA                       max_abs=1.690e-03  max_rel=5.793e-04  ref_max=2.918e+00
+    prod.dA vs FLA                       max_abs=3.959e-03  max_rel=1.652e-03  ref_max=2.397e+00
+    tma.dqg vs FLA                       max_abs=1.266e-03  max_rel=8.917e-04  ref_max=1.419e+00
+    tma.dkg vs FLA                       max_abs=1.650e-02  max_rel=9.596e-04  ref_max=1.719e+01
+    tma.dg vs FLA                        max_abs=1.945e-03  max_rel=7.672e-04  ref_max=2.536e+00
+    tma.db vs FLA                        max_abs=1.690e-03  max_rel=5.793e-04  ref_max=2.918e+00
+    tma.dA vs FLA                        max_abs=3.959e-03  max_rel=1.652e-03  ref_max=2.397e+00
+    bf16.dqg vs FLA                      max_abs=1.877e-03  max_rel=1.320e-03  ref_max=1.422e+00
+    bf16.dkg vs FLA                      max_abs=2.480e-01  max_rel=1.440e-02  ref_max=1.723e+01
+    bf16.dg vs FLA                       max_abs=2.061e-02  max_rel=8.096e-03  ref_max=2.545e+00
+    bf16.db vs FLA                       max_abs=5.181e-03  max_rel=1.777e-03  ref_max=2.915e+00
+    bf16.dA vs FLA                       max_abs=1.232e-02  max_rel=5.152e-03  ref_max=2.391e+00
+    bf16mma.dqg vs FLA                   max_abs=1.877e-03  max_rel=1.320e-03  ref_max=1.422e+00
+    bf16mma.dkg vs FLA                   max_abs=2.480e-01  max_rel=1.440e-02  ref_max=1.723e+01
+    bf16mma.dg vs FLA                    max_abs=2.061e-02  max_rel=8.096e-03  ref_max=2.545e+00
+    bf16mma.db vs FLA                    max_abs=5.181e-03  max_rel=1.777e-03  ref_max=2.915e+00
+    bf16mma.dA vs FLA                    max_abs=1.232e-02  max_rel=5.152e-03  ref_max=2.391e+00
+
+#### K = 64, V = 128   smem prod=83840 tma=77696 bf16=61312 bf16mma=61312 ####
+
+# B2 T1024 H8  grid=(64, 16)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=7.153e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=4.768e-07  [DIFF]
+    mma.db vs bf16                       max_abs=6.533e-05  [DIFF]
+    mma.dkgb vs bf16                     max_abs=9.766e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=3.576e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=2.944e-04  [DIFF]
+    mma.dg vs bf16                       max_abs=4.233e-05  [DIFF]
+    prod.dqg vs torch                    max_abs=5.763e-04  max_rel=2.735e-04  ref_max=2.107e+00
+    prod.dqg vs FLA                      max_abs=2.133e-03  max_rel=1.013e-03  ref_max=2.106e+00
+    prod.dkg vs torch                    max_abs=8.145e-03  max_rel=2.960e-04  ref_max=2.752e+01
+    prod.dkg vs FLA                      max_abs=2.278e-02  max_rel=8.282e-04  ref_max=2.750e+01
+    prod.dg vs torch                     max_abs=2.205e-03  max_rel=3.034e-04  ref_max=7.268e+00
+    prod.dg vs FLA                       max_abs=6.680e-03  max_rel=9.198e-04  ref_max=7.263e+00
+    prod.db vs torch                     max_abs=1.044e-03  max_rel=2.067e-04  ref_max=5.053e+00
+    prod.db vs FLA                       max_abs=3.439e-03  max_rel=6.810e-04  ref_max=5.050e+00
+    prod.dA vs torch                     max_abs=4.272e-04  max_rel=1.053e-04  ref_max=4.056e+00
+    prod.dA vs FLA                       max_abs=8.841e-03  max_rel=2.185e-03  ref_max=4.047e+00
+    tma.dqg vs torch                     max_abs=5.763e-04  max_rel=2.735e-04  ref_max=2.107e+00
+    tma.dqg vs FLA                       max_abs=2.133e-03  max_rel=1.013e-03  ref_max=2.106e+00
+    tma.dkg vs torch                     max_abs=8.145e-03  max_rel=2.960e-04  ref_max=2.752e+01
+    tma.dkg vs FLA                       max_abs=2.278e-02  max_rel=8.282e-04  ref_max=2.750e+01
+    tma.dg vs torch                      max_abs=2.205e-03  max_rel=3.034e-04  ref_max=7.268e+00
+    tma.dg vs FLA                        max_abs=6.680e-03  max_rel=9.198e-04  ref_max=7.263e+00
+    tma.db vs torch                      max_abs=1.044e-03  max_rel=2.067e-04  ref_max=5.053e+00
+    tma.db vs FLA                        max_abs=3.439e-03  max_rel=6.810e-04  ref_max=5.050e+00
+    tma.dA vs torch                      max_abs=4.272e-04  max_rel=1.053e-04  ref_max=4.056e+00
+    tma.dA vs FLA                        max_abs=8.841e-03  max_rel=2.185e-03  ref_max=4.047e+00
+    bf16.dqg vs torch                    max_abs=7.153e-07  max_rel=3.393e-07  ref_max=2.108e+00
+    bf16.dqg vs FLA                      max_abs=2.415e-03  max_rel=1.145e-03  ref_max=2.109e+00
+    bf16.dkg vs torch                    max_abs=4.871e-04  max_rel=1.771e-05  ref_max=2.751e+01
+    bf16.dkg vs FLA                      max_abs=3.713e-01  max_rel=1.351e-02  ref_max=2.748e+01
+    bf16.dg vs torch                     max_abs=1.464e-04  max_rel=2.015e-05  ref_max=7.267e+00
+    bf16.dg vs FLA                       max_abs=6.737e-02  max_rel=9.255e-03  ref_max=7.279e+00
+    bf16.db vs torch                     max_abs=3.452e-04  max_rel=6.827e-05  ref_max=5.057e+00
+    bf16.db vs FLA                       max_abs=9.684e-03  max_rel=1.915e-03  ref_max=5.057e+00
+    bf16.dA vs torch                     max_abs=1.669e-06  max_rel=4.112e-07  ref_max=4.059e+00
+    bf16.dA vs FLA                       max_abs=2.051e-02  max_rel=5.048e-03  ref_max=4.062e+00
+    bf16mma.dqg vs torch                 max_abs=5.960e-07  max_rel=2.827e-07  ref_max=2.108e+00
+    bf16mma.dqg vs FLA                   max_abs=2.415e-03  max_rel=1.145e-03  ref_max=2.109e+00
+    bf16mma.dkg vs torch                 max_abs=4.871e-04  max_rel=1.771e-05  ref_max=2.751e+01
+    bf16mma.dkg vs FLA                   max_abs=3.713e-01  max_rel=1.351e-02  ref_max=2.748e+01
+    bf16mma.dg vs torch                  max_abs=1.464e-04  max_rel=2.015e-05  ref_max=7.267e+00
+    bf16mma.dg vs FLA                    max_abs=6.737e-02  max_rel=9.255e-03  ref_max=7.279e+00
+    bf16mma.db vs torch                  max_abs=3.452e-04  max_rel=6.827e-05  ref_max=5.057e+00
+    bf16mma.db vs FLA                    max_abs=9.684e-03  max_rel=1.915e-03  ref_max=5.057e+00
+    bf16mma.dA vs torch                  max_abs=1.669e-06  max_rel=4.112e-07  ref_max=4.059e+00
+    bf16mma.dA vs FLA                    max_abs=2.051e-02  max_rel=5.048e-03  ref_max=4.062e+00
+
+# T512 H4  grid=(32, 4)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=9.537e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=4.768e-07  [DIFF]
+    mma.db vs bf16                       max_abs=2.429e-05  [DIFF]
+    mma.dkgb vs bf16                     max_abs=2.441e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=2.980e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=5.388e-05  [DIFF]
+    mma.dg vs bf16                       max_abs=5.039e-06  [DIFF]
+    prod.dqg vs torch                    max_abs=5.946e-04  max_rel=3.335e-04  ref_max=1.783e+00
+    prod.dqg vs FLA                      max_abs=1.720e-03  max_rel=9.653e-04  ref_max=1.782e+00
+    prod.dkg vs torch                    max_abs=7.122e-03  max_rel=2.797e-04  ref_max=2.546e+01
+    prod.dkg vs FLA                      max_abs=1.994e-02  max_rel=7.837e-04  ref_max=2.545e+01
+    prod.dg vs torch                     max_abs=1.693e-03  max_rel=2.125e-04  ref_max=7.967e+00
+    prod.dg vs FLA                       max_abs=5.314e-03  max_rel=6.675e-04  ref_max=7.962e+00
+    prod.db vs torch                     max_abs=8.316e-04  max_rel=2.097e-04  ref_max=3.965e+00
+    prod.db vs FLA                       max_abs=2.381e-03  max_rel=6.007e-04  ref_max=3.963e+00
+    prod.dA vs torch                     max_abs=3.105e-04  max_rel=6.738e-05  ref_max=4.608e+00
+    prod.dA vs FLA                       max_abs=6.315e-03  max_rel=1.372e-03  ref_max=4.602e+00
+    tma.dqg vs torch                     max_abs=5.946e-04  max_rel=3.335e-04  ref_max=1.783e+00
+    tma.dqg vs FLA                       max_abs=1.720e-03  max_rel=9.653e-04  ref_max=1.782e+00
+    tma.dkg vs torch                     max_abs=7.122e-03  max_rel=2.797e-04  ref_max=2.546e+01
+    tma.dkg vs FLA                       max_abs=1.994e-02  max_rel=7.837e-04  ref_max=2.545e+01
+    tma.dg vs torch                      max_abs=1.693e-03  max_rel=2.125e-04  ref_max=7.967e+00
+    tma.dg vs FLA                        max_abs=5.314e-03  max_rel=6.675e-04  ref_max=7.962e+00
+    tma.db vs torch                      max_abs=8.316e-04  max_rel=2.097e-04  ref_max=3.965e+00
+    tma.db vs FLA                        max_abs=2.381e-03  max_rel=6.007e-04  ref_max=3.963e+00
+    tma.dA vs torch                      max_abs=3.105e-04  max_rel=6.738e-05  ref_max=4.608e+00
+    tma.dA vs FLA                        max_abs=6.315e-03  max_rel=1.372e-03  ref_max=4.602e+00
+    bf16.dqg vs torch                    max_abs=5.960e-07  max_rel=3.338e-07  ref_max=1.786e+00
+    bf16.dqg vs FLA                      max_abs=1.993e-03  max_rel=1.116e-03  ref_max=1.786e+00
+    bf16.dkg vs torch                    max_abs=5.268e-04  max_rel=2.071e-05  ref_max=2.544e+01
+    bf16.dkg vs FLA                      max_abs=2.681e-01  max_rel=1.054e-02  ref_max=2.544e+01
+    bf16.dg vs torch                     max_abs=9.909e-05  max_rel=1.243e-05  ref_max=7.969e+00
+    bf16.dg vs FLA                       max_abs=6.341e-02  max_rel=7.924e-03  ref_max=8.002e+00
+    bf16.db vs torch                     max_abs=3.155e-04  max_rel=7.963e-05  ref_max=3.962e+00
+    bf16.db vs FLA                       max_abs=7.756e-03  max_rel=1.957e-03  ref_max=3.962e+00
+    bf16.dA vs torch                     max_abs=1.192e-06  max_rel=2.586e-07  ref_max=4.610e+00
+    bf16.dA vs FLA                       max_abs=2.139e-02  max_rel=4.633e-03  ref_max=4.618e+00
+    bf16mma.dqg vs torch                 max_abs=5.364e-07  max_rel=3.004e-07  ref_max=1.786e+00
+    bf16mma.dqg vs FLA                   max_abs=1.993e-03  max_rel=1.116e-03  ref_max=1.786e+00
+    bf16mma.dkg vs torch                 max_abs=5.268e-04  max_rel=2.071e-05  ref_max=2.544e+01
+    bf16mma.dkg vs FLA                   max_abs=2.681e-01  max_rel=1.054e-02  ref_max=2.544e+01
+    bf16mma.dg vs torch                  max_abs=9.909e-05  max_rel=1.243e-05  ref_max=7.969e+00
+    bf16mma.dg vs FLA                    max_abs=6.341e-02  max_rel=7.924e-03  ref_max=8.002e+00
+    bf16mma.db vs torch                  max_abs=3.155e-04  max_rel=7.963e-05  ref_max=3.962e+00
+    bf16mma.db vs FLA                    max_abs=7.756e-03  max_rel=1.957e-03  ref_max=3.962e+00
+    bf16mma.dA vs torch                  max_abs=1.192e-06  max_rel=2.586e-07  ref_max=4.610e+00
+    bf16mma.dA vs FLA                    max_abs=2.139e-02  max_rel=4.633e-03  ref_max=4.618e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=4.768e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=2.384e-07  [DIFF]
+    mma.db vs bf16                       max_abs=2.427e-05  [DIFF]
+    mma.dkgb vs bf16                     max_abs=2.441e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=2.980e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=4.016e-05  [DIFF]
+    mma.dg vs bf16                       max_abs=5.039e-06  [DIFF]
+    prod.dqg vs FLA                      max_abs=1.660e-03  max_rel=9.938e-04  ref_max=1.670e+00
+    prod.dkg vs FLA                      max_abs=2.358e-02  max_rel=8.787e-04  ref_max=2.683e+01
+    prod.dg vs FLA                       max_abs=4.796e-03  max_rel=8.732e-04  ref_max=5.492e+00
+    prod.db vs FLA                       max_abs=2.731e-03  max_rel=7.037e-04  ref_max=3.880e+00
+    prod.dA vs FLA                       max_abs=5.838e-03  max_rel=1.665e-03  ref_max=3.507e+00
+    tma.dqg vs FLA                       max_abs=1.660e-03  max_rel=9.938e-04  ref_max=1.670e+00
+    tma.dkg vs FLA                       max_abs=2.358e-02  max_rel=8.787e-04  ref_max=2.683e+01
+    tma.dg vs FLA                        max_abs=4.796e-03  max_rel=8.732e-04  ref_max=5.492e+00
+    tma.db vs FLA                        max_abs=2.731e-03  max_rel=7.037e-04  ref_max=3.880e+00
+    tma.dA vs FLA                        max_abs=5.838e-03  max_rel=1.665e-03  ref_max=3.507e+00
+    bf16.dqg vs FLA                      max_abs=2.078e-03  max_rel=1.244e-03  ref_max=1.671e+00
+    bf16.dkg vs FLA                      max_abs=2.352e-01  max_rel=8.763e-03  ref_max=2.684e+01
+    bf16.dg vs FLA                       max_abs=5.215e-02  max_rel=9.458e-03  ref_max=5.514e+00
+    bf16.db vs FLA                       max_abs=6.353e-03  max_rel=1.635e-03  ref_max=3.886e+00
+    bf16.dA vs FLA                       max_abs=1.915e-02  max_rel=5.438e-03  ref_max=3.522e+00
+    bf16mma.dqg vs FLA                   max_abs=2.078e-03  max_rel=1.244e-03  ref_max=1.671e+00
+    bf16mma.dkg vs FLA                   max_abs=2.352e-01  max_rel=8.763e-03  ref_max=2.684e+01
+    bf16mma.dg vs FLA                    max_abs=5.215e-02  max_rel=9.458e-03  ref_max=5.514e+00
+    bf16mma.db vs FLA                    max_abs=6.353e-03  max_rel=1.635e-03  ref_max=3.886e+00
+    bf16mma.dA vs FLA                    max_abs=1.915e-02  max_rel=5.438e-03  ref_max=3.522e+00
+
+#### K = 128, V = 64   smem prod=125056 tma=114816 bf16=86144 bf16mma=86144 ####
+
+# B2 T1024 H8  grid=(64, 16)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=4.768e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=4.768e-07  [DIFF]
+    mma.db vs bf16                       max_abs=2.500e-05  [DIFF]
+    mma.dkgb vs bf16                     max_abs=4.883e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=2.384e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=7.248e-05  [DIFF]
+    mma.dg vs bf16                       max_abs=7.920e-06  [DIFF]
+    prod.dqg vs torch                    max_abs=4.750e-04  max_rel=3.029e-04  ref_max=1.568e+00
+    prod.dqg vs FLA                      max_abs=1.501e-03  max_rel=9.576e-04  ref_max=1.567e+00
+    prod.dkg vs torch                    max_abs=6.713e-03  max_rel=3.463e-04  ref_max=1.939e+01
+    prod.dkg vs FLA                      max_abs=1.808e-02  max_rel=9.333e-04  ref_max=1.937e+01
+    prod.dg vs torch                     max_abs=1.302e-03  max_rel=3.060e-04  ref_max=4.254e+00
+    prod.dg vs FLA                       max_abs=3.514e-03  max_rel=8.265e-04  ref_max=4.251e+00
+    prod.db vs torch                     max_abs=8.276e-04  max_rel=2.629e-04  ref_max=3.148e+00
+    prod.db vs FLA                       max_abs=2.794e-03  max_rel=8.878e-04  ref_max=3.147e+00
+    prod.dA vs torch                     max_abs=3.275e-04  max_rel=9.567e-05  ref_max=3.423e+00
+    prod.dA vs FLA                       max_abs=5.370e-03  max_rel=1.570e-03  ref_max=3.420e+00
+    tma.dqg vs torch                     max_abs=4.750e-04  max_rel=3.029e-04  ref_max=1.568e+00
+    tma.dqg vs FLA                       max_abs=1.501e-03  max_rel=9.576e-04  ref_max=1.567e+00
+    tma.dkg vs torch                     max_abs=6.713e-03  max_rel=3.463e-04  ref_max=1.939e+01
+    tma.dkg vs FLA                       max_abs=1.808e-02  max_rel=9.333e-04  ref_max=1.937e+01
+    tma.dg vs torch                      max_abs=1.302e-03  max_rel=3.060e-04  ref_max=4.254e+00
+    tma.dg vs FLA                        max_abs=3.514e-03  max_rel=8.265e-04  ref_max=4.251e+00
+    tma.db vs torch                      max_abs=8.276e-04  max_rel=2.629e-04  ref_max=3.148e+00
+    tma.db vs FLA                        max_abs=2.794e-03  max_rel=8.878e-04  ref_max=3.147e+00
+    tma.dA vs torch                      max_abs=3.275e-04  max_rel=9.567e-05  ref_max=3.423e+00
+    tma.dA vs FLA                        max_abs=5.370e-03  max_rel=1.570e-03  ref_max=3.420e+00
+    bf16.dqg vs torch                    max_abs=2.980e-07  max_rel=1.900e-07  ref_max=1.569e+00
+    bf16.dqg vs FLA                      max_abs=1.954e-03  max_rel=1.245e-03  ref_max=1.569e+00
+    bf16.dkg vs torch                    max_abs=4.186e-04  max_rel=2.161e-05  ref_max=1.937e+01
+    bf16.dkg vs FLA                      max_abs=2.485e-01  max_rel=1.280e-02  ref_max=1.942e+01
+    bf16.dg vs torch                     max_abs=8.318e-05  max_rel=1.955e-05  ref_max=4.255e+00
+    bf16.dg vs FLA                       max_abs=4.194e-02  max_rel=9.881e-03  ref_max=4.245e+00
+    bf16.db vs torch                     max_abs=2.685e-04  max_rel=8.524e-05  ref_max=3.150e+00
+    bf16.db vs FLA                       max_abs=6.327e-03  max_rel=2.007e-03  ref_max=3.152e+00
+    bf16.dA vs torch                     max_abs=8.345e-07  max_rel=2.435e-07  ref_max=3.426e+00
+    bf16.dA vs FLA                       max_abs=1.781e-02  max_rel=5.212e-03  ref_max=3.418e+00
+    bf16mma.dqg vs torch                 max_abs=2.980e-07  max_rel=1.900e-07  ref_max=1.569e+00
+    bf16mma.dqg vs FLA                   max_abs=1.954e-03  max_rel=1.245e-03  ref_max=1.569e+00
+    bf16mma.dkg vs torch                 max_abs=4.186e-04  max_rel=2.161e-05  ref_max=1.937e+01
+    bf16mma.dkg vs FLA                   max_abs=2.485e-01  max_rel=1.280e-02  ref_max=1.942e+01
+    bf16mma.dg vs torch                  max_abs=8.318e-05  max_rel=1.955e-05  ref_max=4.255e+00
+    bf16mma.dg vs FLA                    max_abs=4.194e-02  max_rel=9.881e-03  ref_max=4.245e+00
+    bf16mma.db vs torch                  max_abs=2.685e-04  max_rel=8.524e-05  ref_max=3.150e+00
+    bf16mma.db vs FLA                    max_abs=6.327e-03  max_rel=2.007e-03  ref_max=3.152e+00
+    bf16mma.dA vs torch                  max_abs=8.345e-07  max_rel=2.435e-07  ref_max=3.426e+00
+    bf16mma.dA vs FLA                    max_abs=1.781e-02  max_rel=5.212e-03  ref_max=3.418e+00
+
+# T512 H4  grid=(32, 4)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=4.768e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=2.384e-07  [DIFF]
+    mma.db vs bf16                       max_abs=1.401e-05  [DIFF]
+    mma.dkgb vs bf16                     max_abs=4.883e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=1.788e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=3.615e-04  [DIFF]
+    mma.dg vs bf16                       max_abs=1.131e-05  [DIFF]
+    prod.dqg vs torch                    max_abs=4.500e-04  max_rel=2.571e-04  ref_max=1.750e+00
+    prod.dqg vs FLA                      max_abs=1.419e-03  max_rel=8.114e-04  ref_max=1.749e+00
+    prod.dkg vs torch                    max_abs=5.238e-03  max_rel=3.108e-04  ref_max=1.685e+01
+    prod.dkg vs FLA                      max_abs=1.653e-02  max_rel=9.816e-04  ref_max=1.684e+01
+    prod.dg vs torch                     max_abs=1.049e-03  max_rel=3.089e-04  ref_max=3.396e+00
+    prod.dg vs FLA                       max_abs=2.647e-03  max_rel=7.800e-04  ref_max=3.393e+00
+    prod.db vs torch                     max_abs=6.432e-04  max_rel=1.927e-04  ref_max=3.338e+00
+    prod.db vs FLA                       max_abs=1.777e-03  max_rel=5.325e-04  ref_max=3.337e+00
+    prod.dA vs torch                     max_abs=3.506e-04  max_rel=1.517e-04  ref_max=2.311e+00
+    prod.dA vs FLA                       max_abs=4.735e-03  max_rel=2.050e-03  ref_max=2.310e+00
+    tma.dqg vs torch                     max_abs=4.500e-04  max_rel=2.571e-04  ref_max=1.750e+00
+    tma.dqg vs FLA                       max_abs=1.419e-03  max_rel=8.114e-04  ref_max=1.749e+00
+    tma.dkg vs torch                     max_abs=5.238e-03  max_rel=3.108e-04  ref_max=1.685e+01
+    tma.dkg vs FLA                       max_abs=1.653e-02  max_rel=9.816e-04  ref_max=1.684e+01
+    tma.dg vs torch                      max_abs=1.049e-03  max_rel=3.089e-04  ref_max=3.396e+00
+    tma.dg vs FLA                        max_abs=2.647e-03  max_rel=7.800e-04  ref_max=3.393e+00
+    tma.db vs torch                      max_abs=6.432e-04  max_rel=1.927e-04  ref_max=3.338e+00
+    tma.db vs FLA                        max_abs=1.777e-03  max_rel=5.325e-04  ref_max=3.337e+00
+    tma.dA vs torch                      max_abs=3.506e-04  max_rel=1.517e-04  ref_max=2.311e+00
+    tma.dA vs FLA                        max_abs=4.735e-03  max_rel=2.050e-03  ref_max=2.310e+00
+    bf16.dqg vs torch                    max_abs=3.576e-07  max_rel=2.045e-07  ref_max=1.749e+00
+    bf16.dqg vs FLA                      max_abs=1.635e-03  max_rel=9.350e-04  ref_max=1.749e+00
+    bf16.dkg vs torch                    max_abs=3.294e-04  max_rel=1.954e-05  ref_max=1.685e+01
+    bf16.dkg vs FLA                      max_abs=2.656e-01  max_rel=1.587e-02  ref_max=1.673e+01
+    bf16.dg vs torch                     max_abs=4.318e-05  max_rel=1.272e-05  ref_max=3.394e+00
+    bf16.dg vs FLA                       max_abs=2.917e-02  max_rel=8.566e-03  ref_max=3.405e+00
+    bf16.db vs torch                     max_abs=2.083e-04  max_rel=6.234e-05  ref_max=3.341e+00
+    bf16.db vs FLA                       max_abs=5.857e-03  max_rel=1.753e-03  ref_max=3.341e+00
+    bf16.dA vs torch                     max_abs=5.960e-07  max_rel=2.577e-07  ref_max=2.313e+00
+    bf16.dA vs FLA                       max_abs=1.399e-02  max_rel=6.047e-03  ref_max=2.313e+00
+    bf16mma.dqg vs torch                 max_abs=3.576e-07  max_rel=2.045e-07  ref_max=1.749e+00
+    bf16mma.dqg vs FLA                   max_abs=1.635e-03  max_rel=9.350e-04  ref_max=1.749e+00
+    bf16mma.dkg vs torch                 max_abs=3.294e-04  max_rel=1.954e-05  ref_max=1.685e+01
+    bf16mma.dkg vs FLA                   max_abs=2.656e-01  max_rel=1.587e-02  ref_max=1.673e+01
+    bf16mma.dg vs torch                  max_abs=4.318e-05  max_rel=1.272e-05  ref_max=3.394e+00
+    bf16mma.dg vs FLA                    max_abs=2.917e-02  max_rel=8.566e-03  ref_max=3.405e+00
+    bf16mma.db vs torch                  max_abs=2.083e-04  max_rel=6.234e-05  ref_max=3.341e+00
+    bf16mma.db vs FLA                    max_abs=5.857e-03  max_rel=1.753e-03  ref_max=3.341e+00
+    bf16mma.dA vs torch                  max_abs=5.960e-07  max_rel=2.577e-07  ref_max=2.313e+00
+    bf16mma.dA vs FLA                    max_abs=1.399e-02  max_rel=6.047e-03  ref_max=2.313e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=4.768e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=4.768e-07  [DIFF]
+    mma.db vs bf16                       max_abs=5.960e-06  [DIFF]
+    mma.dkgb vs bf16                     max_abs=1.221e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=1.788e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=5.192e-05  [DIFF]
+    mma.dg vs bf16                       max_abs=3.679e-06  [DIFF]
+    prod.dqg vs FLA                      max_abs=1.145e-03  max_rel=8.327e-04  ref_max=1.375e+00
+    prod.dkg vs FLA                      max_abs=1.429e-02  max_rel=8.751e-04  ref_max=1.633e+01
+    prod.dg vs FLA                       max_abs=2.824e-03  max_rel=8.193e-04  ref_max=3.447e+00
+    prod.db vs FLA                       max_abs=1.653e-03  max_rel=6.393e-04  ref_max=2.586e+00
+    prod.dA vs FLA                       max_abs=3.747e-03  max_rel=1.626e-03  ref_max=2.304e+00
+    tma.dqg vs FLA                       max_abs=1.145e-03  max_rel=8.327e-04  ref_max=1.375e+00
+    tma.dkg vs FLA                       max_abs=1.429e-02  max_rel=8.751e-04  ref_max=1.633e+01
+    tma.dg vs FLA                        max_abs=2.824e-03  max_rel=8.193e-04  ref_max=3.447e+00
+    tma.db vs FLA                        max_abs=1.653e-03  max_rel=6.393e-04  ref_max=2.586e+00
+    tma.dA vs FLA                        max_abs=3.747e-03  max_rel=1.626e-03  ref_max=2.304e+00
+    bf16.dqg vs FLA                      max_abs=1.635e-03  max_rel=1.187e-03  ref_max=1.377e+00
+    bf16.dkg vs FLA                      max_abs=1.770e-01  max_rel=1.083e-02  ref_max=1.635e+01
+    bf16.dg vs FLA                       max_abs=3.558e-02  max_rel=1.033e-02  ref_max=3.443e+00
+    bf16.db vs FLA                       max_abs=5.354e-03  max_rel=2.069e-03  ref_max=2.587e+00
+    bf16.dA vs FLA                       max_abs=1.353e-02  max_rel=5.890e-03  ref_max=2.296e+00
+    bf16mma.dqg vs FLA                   max_abs=1.635e-03  max_rel=1.187e-03  ref_max=1.377e+00
+    bf16mma.dkg vs FLA                   max_abs=1.770e-01  max_rel=1.083e-02  ref_max=1.635e+01
+    bf16mma.dg vs FLA                    max_abs=3.558e-02  max_rel=1.033e-02  ref_max=3.443e+00
+    bf16mma.db vs FLA                    max_abs=5.354e-03  max_rel=2.069e-03  ref_max=2.587e+00
+    bf16mma.dA vs FLA                    max_abs=1.353e-02  max_rel=5.890e-03  ref_max=2.296e+00
+
+#### K = 128, V = 128   smem prod=129152 tma=118912 bf16=90240 bf16mma=90240 ####
+
+# B2 T1024 H8  grid=(64, 16)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=9.537e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=7.153e-07  [DIFF]
+    mma.db vs bf16                       max_abs=5.460e-05  [DIFF]
+    mma.dkgb vs bf16                     max_abs=9.766e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=4.768e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=1.589e-04  [DIFF]
+    mma.dg vs bf16                       max_abs=3.667e-05  [DIFF]
+    prod.dqg vs torch                    max_abs=6.503e-04  max_rel=3.315e-04  ref_max=1.962e+00
+    prod.dqg vs FLA                      max_abs=1.933e-03  max_rel=9.860e-04  ref_max=1.961e+00
+    prod.dkg vs torch                    max_abs=9.316e-03  max_rel=3.573e-04  ref_max=2.607e+01
+    prod.dkg vs FLA                      max_abs=2.466e-02  max_rel=9.466e-04  ref_max=2.605e+01
+    prod.dg vs torch                     max_abs=1.892e-03  max_rel=3.664e-04  ref_max=5.164e+00
+    prod.dg vs FLA                       max_abs=5.212e-03  max_rel=1.010e-03  ref_max=5.160e+00
+    prod.db vs torch                     max_abs=1.079e-03  max_rel=2.134e-04  ref_max=5.058e+00
+    prod.db vs FLA                       max_abs=3.155e-03  max_rel=6.240e-04  ref_max=5.057e+00
+    prod.dA vs torch                     max_abs=5.025e-04  max_rel=1.313e-04  ref_max=3.826e+00
+    prod.dA vs FLA                       max_abs=6.317e-03  max_rel=1.653e-03  ref_max=3.822e+00
+    tma.dqg vs torch                     max_abs=6.503e-04  max_rel=3.315e-04  ref_max=1.962e+00
+    tma.dqg vs FLA                       max_abs=1.933e-03  max_rel=9.860e-04  ref_max=1.961e+00
+    tma.dkg vs torch                     max_abs=9.316e-03  max_rel=3.573e-04  ref_max=2.607e+01
+    tma.dkg vs FLA                       max_abs=2.466e-02  max_rel=9.466e-04  ref_max=2.605e+01
+    tma.dg vs torch                      max_abs=1.892e-03  max_rel=3.664e-04  ref_max=5.164e+00
+    tma.dg vs FLA                        max_abs=5.212e-03  max_rel=1.010e-03  ref_max=5.160e+00
+    tma.db vs torch                      max_abs=1.079e-03  max_rel=2.134e-04  ref_max=5.058e+00
+    tma.db vs FLA                        max_abs=3.155e-03  max_rel=6.240e-04  ref_max=5.057e+00
+    tma.dA vs torch                      max_abs=5.025e-04  max_rel=1.313e-04  ref_max=3.826e+00
+    tma.dA vs FLA                        max_abs=6.317e-03  max_rel=1.653e-03  ref_max=3.822e+00
+    bf16.dqg vs torch                    max_abs=7.153e-07  max_rel=3.643e-07  ref_max=1.964e+00
+    bf16.dqg vs FLA                      max_abs=2.782e-03  max_rel=1.417e-03  ref_max=1.963e+00
+    bf16.dkg vs torch                    max_abs=6.851e-04  max_rel=2.627e-05  ref_max=2.607e+01
+    bf16.dkg vs FLA                      max_abs=3.133e-01  max_rel=1.202e-02  ref_max=2.607e+01
+    bf16.dg vs torch                     max_abs=9.078e-05  max_rel=1.758e-05  ref_max=5.165e+00
+    bf16.dg vs FLA                       max_abs=6.167e-02  max_rel=1.205e-02  ref_max=5.119e+00
+    bf16.db vs torch                     max_abs=3.636e-04  max_rel=7.192e-05  ref_max=5.055e+00
+    bf16.db vs FLA                       max_abs=8.633e-03  max_rel=1.707e-03  ref_max=5.057e+00
+    bf16.dA vs torch                     max_abs=1.669e-06  max_rel=4.364e-07  ref_max=3.825e+00
+    bf16.dA vs FLA                       max_abs=1.958e-02  max_rel=5.103e-03  ref_max=3.838e+00
+    bf16mma.dqg vs torch                 max_abs=5.960e-07  max_rel=3.035e-07  ref_max=1.964e+00
+    bf16mma.dqg vs FLA                   max_abs=2.782e-03  max_rel=1.417e-03  ref_max=1.963e+00
+    bf16mma.dkg vs torch                 max_abs=6.851e-04  max_rel=2.627e-05  ref_max=2.607e+01
+    bf16mma.dkg vs FLA                   max_abs=3.133e-01  max_rel=1.202e-02  ref_max=2.607e+01
+    bf16mma.dg vs torch                  max_abs=9.078e-05  max_rel=1.758e-05  ref_max=5.165e+00
+    bf16mma.dg vs FLA                    max_abs=6.167e-02  max_rel=1.205e-02  ref_max=5.119e+00
+    bf16mma.db vs torch                  max_abs=3.636e-04  max_rel=7.192e-05  ref_max=5.055e+00
+    bf16mma.db vs FLA                    max_abs=8.633e-03  max_rel=1.707e-03  ref_max=5.057e+00
+    bf16mma.dA vs torch                  max_abs=1.669e-06  max_rel=4.364e-07  ref_max=3.825e+00
+    bf16mma.dA vs FLA                    max_abs=1.958e-02  max_rel=5.103e-03  ref_max=3.838e+00
+
+# T512 H4  grid=(32, 4)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=4.768e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=4.768e-07  [DIFF]
+    mma.db vs bf16                       max_abs=1.025e-05  [DIFF]
+    mma.dkgb vs bf16                     max_abs=4.883e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=3.576e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=7.766e-05  [DIFF]
+    mma.dg vs bf16                       max_abs=2.753e-06  [DIFF]
+    prod.dqg vs torch                    max_abs=6.169e-04  max_rel=3.624e-04  ref_max=1.702e+00
+    prod.dqg vs FLA                      max_abs=1.788e-03  max_rel=1.051e-03  ref_max=1.701e+00
+    prod.dkg vs torch                    max_abs=7.405e-03  max_rel=3.052e-04  ref_max=2.427e+01
+    prod.dkg vs FLA                      max_abs=1.932e-02  max_rel=7.967e-04  ref_max=2.425e+01
+    prod.dg vs torch                     max_abs=1.363e-03  max_rel=2.528e-04  ref_max=5.390e+00
+    prod.dg vs FLA                       max_abs=3.973e-03  max_rel=7.376e-04  ref_max=5.386e+00
+    prod.db vs torch                     max_abs=8.417e-04  max_rel=2.106e-04  ref_max=3.996e+00
+    prod.db vs FLA                       max_abs=2.338e-03  max_rel=5.854e-04  ref_max=3.995e+00
+    prod.dA vs torch                     max_abs=5.300e-04  max_rel=1.259e-04  ref_max=4.211e+00
+    prod.dA vs FLA                       max_abs=9.809e-03  max_rel=2.335e-03  ref_max=4.201e+00
+    tma.dqg vs torch                     max_abs=6.169e-04  max_rel=3.624e-04  ref_max=1.702e+00
+    tma.dqg vs FLA                       max_abs=1.788e-03  max_rel=1.051e-03  ref_max=1.701e+00
+    tma.dkg vs torch                     max_abs=7.405e-03  max_rel=3.052e-04  ref_max=2.427e+01
+    tma.dkg vs FLA                       max_abs=1.932e-02  max_rel=7.967e-04  ref_max=2.425e+01
+    tma.dg vs torch                      max_abs=1.363e-03  max_rel=2.528e-04  ref_max=5.390e+00
+    tma.dg vs FLA                        max_abs=3.973e-03  max_rel=7.376e-04  ref_max=5.386e+00
+    tma.db vs torch                      max_abs=8.417e-04  max_rel=2.106e-04  ref_max=3.996e+00
+    tma.db vs FLA                        max_abs=2.338e-03  max_rel=5.854e-04  ref_max=3.995e+00
+    tma.dA vs torch                      max_abs=5.300e-04  max_rel=1.259e-04  ref_max=4.211e+00
+    tma.dA vs FLA                        max_abs=9.809e-03  max_rel=2.335e-03  ref_max=4.201e+00
+    bf16.dqg vs torch                    max_abs=5.960e-07  max_rel=3.503e-07  ref_max=1.702e+00
+    bf16.dqg vs FLA                      max_abs=2.408e-03  max_rel=1.415e-03  ref_max=1.702e+00
+    bf16.dkg vs torch                    max_abs=6.452e-04  max_rel=2.660e-05  ref_max=2.425e+01
+    bf16.dkg vs FLA                      max_abs=2.686e-01  max_rel=1.118e-02  ref_max=2.403e+01
+    bf16.dg vs torch                     max_abs=5.414e-05  max_rel=1.004e-05  ref_max=5.392e+00
+    bf16.dg vs FLA                       max_abs=4.830e-02  max_rel=8.976e-03  ref_max=5.381e+00
+    bf16.db vs torch                     max_abs=3.225e-04  max_rel=8.061e-05  ref_max=4.000e+00
+    bf16.db vs FLA                       max_abs=6.426e-03  max_rel=1.607e-03  ref_max=3.999e+00
+    bf16.dA vs torch                     max_abs=1.192e-06  max_rel=2.830e-07  ref_max=4.212e+00
+    bf16.dA vs FLA                       max_abs=1.914e-02  max_rel=4.566e-03  ref_max=4.193e+00
+    bf16mma.dqg vs torch                 max_abs=4.768e-07  max_rel=2.802e-07  ref_max=1.702e+00
+    bf16mma.dqg vs FLA                   max_abs=2.408e-03  max_rel=1.415e-03  ref_max=1.702e+00
+    bf16mma.dkg vs torch                 max_abs=6.452e-04  max_rel=2.660e-05  ref_max=2.425e+01
+    bf16mma.dkg vs FLA                   max_abs=2.686e-01  max_rel=1.118e-02  ref_max=2.403e+01
+    bf16mma.dg vs torch                  max_abs=5.414e-05  max_rel=1.004e-05  ref_max=5.392e+00
+    bf16mma.dg vs FLA                    max_abs=4.830e-02  max_rel=8.976e-03  ref_max=5.381e+00
+    bf16mma.db vs torch                  max_abs=3.225e-04  max_rel=8.061e-05  ref_max=4.000e+00
+    bf16mma.db vs FLA                    max_abs=6.426e-03  max_rel=1.607e-03  ref_max=3.999e+00
+    bf16mma.dA vs torch                  max_abs=1.192e-06  max_rel=2.830e-07  ref_max=4.212e+00
+    bf16mma.dA vs FLA                    max_abs=1.914e-02  max_rel=4.566e-03  ref_max=4.193e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    tma.dv2 vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dv2 vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dvb vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dvb vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkgb vs prod                     max_abs=0.000e+00  [BIT]
+    bf16.dkgb vs prod(q)                 max_abs=0.000e+00  [BIT]
+    tma.db vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.db vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dApre vs prod                    max_abs=0.000e+00  [BIT]
+    bf16.dApre vs prod(q)                max_abs=0.000e+00  [BIT]
+    tma.dA vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dA vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dqg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dqg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dkg vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dkg vs prod(q)                  max_abs=0.000e+00  [BIT]
+    tma.dg vs prod                       max_abs=0.000e+00  [BIT]
+    bf16.dg vs prod(q)                   max_abs=0.000e+00  [BIT]
+    tma.dgk vs prod                      max_abs=0.000e+00  [BIT]
+    bf16.dgk vs prod(q)                  max_abs=0.000e+00  [BIT]
+    mma.dv2 vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dvb vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dApre vs bf16                    max_abs=4.768e-07  [DIFF]
+    mma.dA vs bf16                       max_abs=3.576e-07  [DIFF]
+    mma.db vs bf16                       max_abs=7.868e-06  [DIFF]
+    mma.dkgb vs bf16                     max_abs=4.883e-04  [DIFF]
+    mma.dgk vs bf16                      max_abs=0.000e+00  [BIT]
+    mma.dqg vs bf16                      max_abs=2.384e-07  [DIFF]
+    mma.dkg vs bf16                      max_abs=3.517e-05  [DIFF]
+    mma.dg vs bf16                       max_abs=2.038e-06  [DIFF]
+    prod.dqg vs FLA                      max_abs=1.704e-03  max_rel=9.635e-04  ref_max=1.768e+00
+    prod.dkg vs FLA                      max_abs=2.067e-02  max_rel=9.400e-04  ref_max=2.199e+01
+    prod.dg vs FLA                       max_abs=3.665e-03  max_rel=8.337e-04  ref_max=4.396e+00
+    prod.db vs FLA                       max_abs=2.045e-03  max_rel=5.483e-04  ref_max=3.729e+00
+    prod.dA vs FLA                       max_abs=5.596e-03  max_rel=1.561e-03  ref_max=3.586e+00
+    tma.dqg vs FLA                       max_abs=1.704e-03  max_rel=9.635e-04  ref_max=1.768e+00
+    tma.dkg vs FLA                       max_abs=2.067e-02  max_rel=9.400e-04  ref_max=2.199e+01
+    tma.dg vs FLA                        max_abs=3.665e-03  max_rel=8.337e-04  ref_max=4.396e+00
+    tma.db vs FLA                        max_abs=2.045e-03  max_rel=5.483e-04  ref_max=3.729e+00
+    tma.dA vs FLA                        max_abs=5.596e-03  max_rel=1.561e-03  ref_max=3.586e+00
+    bf16.dqg vs FLA                      max_abs=2.253e-03  max_rel=1.272e-03  ref_max=1.771e+00
+    bf16.dkg vs FLA                      max_abs=3.216e-01  max_rel=1.462e-02  ref_max=2.200e+01
+    bf16.dg vs FLA                       max_abs=3.996e-02  max_rel=9.113e-03  ref_max=4.385e+00
+    bf16.db vs FLA                       max_abs=6.406e-03  max_rel=1.716e-03  ref_max=3.733e+00
+    bf16.dA vs FLA                       max_abs=1.727e-02  max_rel=4.813e-03  ref_max=3.588e+00
+    bf16mma.dqg vs FLA                   max_abs=2.253e-03  max_rel=1.272e-03  ref_max=1.771e+00
+    bf16mma.dkg vs FLA                   max_abs=3.216e-01  max_rel=1.462e-02  ref_max=2.200e+01
+    bf16mma.dg vs FLA                    max_abs=3.996e-02  max_rel=9.113e-03  ref_max=4.385e+00
+    bf16mma.db vs FLA                    max_abs=6.406e-03  max_rel=1.716e-03  ref_max=3.733e+00
+    bf16mma.dA vs FLA                    max_abs=1.727e-02  max_rel=4.813e-03  ref_max=3.588e+00
+
+--------------------------------------------------------------------------------------------------------
+staging bit-identity (worst max_abs; 0 == bit-identical):
+    tma_vs_prod              0.000e+00
+    bf16_vs_prod             0.000e+00
+    mma_vs_bf16_straight     1.953e-03
+    mma_vs_bf16_gate         3.615e-04
+external anchor worst max_rel over all (K,V)/cases:
+    (fp32 group = prod/tma vs fp32 torch/FLA; bf16 group = bf16/bf16mma vs torch on bf16-valued inputs / FLA all-bf16)
+    dqg   fp32: torch 3.624e-04  FLA 1.051e-03 | bf16: torch 6.154e-07  FLA 1.417e-03
+    dkg   fp32: torch 3.703e-04  FLA 9.832e-04 | bf16: torch 2.660e-05  FLA 1.587e-02
+    dg    fp32: torch 3.664e-04  FLA 1.010e-03 | bf16: torch 2.119e-05  FLA 1.232e-02
+    db    fp32: torch 2.681e-04  FLA 8.878e-04 | bf16: torch 9.000e-05  FLA 2.069e-03
+    dA    fp32: torch 1.517e-04  FLA 2.335e-03 | bf16: torch 7.960e-07  FLA 6.047e-03
+
+========================================================================================================
+Part B: K=256 INTRA fold (bf16 staging only) -- EXTERNAL anchor vs wy_dqkg_torch + intra_torch
+========================================================================================================
+
+#### K = 256, V = 64   smem prod(fp32)=215680 bf16=144000 bf16_intra=194688 FIT ####
+
+# B2 T1024 H8  grid=(64, 16)
+    (prod_intra - prod).dqg max_abs=1.004e+00 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=2.384e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    bf16_intra.dqg vs torch(B2+B3)       max_abs=4.233e-04  max_rel=2.562e-04  ref_max=1.652e+00
+    bf16_intra.dkg vs torch(B2+B3)       max_abs=5.571e-04  max_rel=2.726e-05  ref_max=2.043e+01
+    bf16_intra.dg vs torch(B2+B3)        max_abs=8.133e-05  max_rel=2.477e-05  ref_max=3.284e+00
+    bf16_intra.db vs torch(B2+B3)        max_abs=2.996e-04  max_rel=9.000e-05  ref_max=3.328e+00
+    bf16_intra.dA vs torch               max_abs=9.537e-07  max_rel=3.145e-07  ref_max=3.032e+00
+
+# T512 H4  grid=(32, 4)
+    (prod_intra - prod).dqg max_abs=9.743e-01 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=2.384e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=7.153e-07  [DIFF]
+    bf16_intra.dqg vs torch(B2+B3)       max_abs=4.662e-04  max_rel=2.856e-04  ref_max=1.632e+00
+    bf16_intra.dkg vs torch(B2+B3)       max_abs=3.868e-04  max_rel=2.233e-05  ref_max=1.732e+01
+    bf16_intra.dg vs torch(B2+B3)        max_abs=4.944e-05  max_rel=1.919e-05  ref_max=2.576e+00
+    bf16_intra.db vs torch(B2+B3)        max_abs=1.938e-04  max_rel=5.869e-05  ref_max=3.303e+00
+    bf16_intra.dA vs torch               max_abs=7.153e-07  max_rel=2.913e-07  ref_max=2.455e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    (prod_intra - prod).dqg max_abs=8.330e-01 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=2.384e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=2.384e-07  [DIFF]
+
+#### K = 256, V = 256   smem prod(fp32)=227968 bf16=156288 bf16_intra=206976 FIT ####
+
+# B2 T1024 H8  grid=(64, 16)
+    (prod_intra - prod).dqg max_abs=9.500e-01 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=9.537e-07  [DIFF]
+    bf16_intra.dqg vs torch(B2+B3)       max_abs=4.110e-04  max_rel=1.180e-04  ref_max=3.482e+00
+    bf16_intra.dkg vs torch(B2+B3)       max_abs=8.316e-04  max_rel=2.301e-05  ref_max=3.615e+01
+    bf16_intra.dg vs torch(B2+B3)        max_abs=1.083e-04  max_rel=1.701e-05  ref_max=6.368e+00
+    bf16_intra.db vs torch(B2+B3)        max_abs=4.987e-04  max_rel=6.826e-05  ref_max=7.305e+00
+    bf16_intra.dA vs torch               max_abs=3.099e-06  max_rel=4.538e-07  ref_max=6.830e+00
+
+# T512 H4  grid=(32, 4)
+    (prod_intra - prod).dqg max_abs=9.743e-01 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=9.537e-07  [DIFF]
+    bf16_intra.dqg vs torch(B2+B3)       max_abs=4.661e-04  max_rel=1.598e-04  ref_max=2.918e+00
+    bf16_intra.dkg vs torch(B2+B3)       max_abs=7.591e-04  max_rel=2.306e-05  ref_max=3.293e+01
+    bf16_intra.dg vs torch(B2+B3)        max_abs=6.598e-05  max_rel=1.057e-05  ref_max=6.242e+00
+    bf16_intra.db vs torch(B2+B3)        max_abs=3.904e-04  max_rel=6.078e-05  ref_max=6.423e+00
+    bf16_intra.dA vs torch               max_abs=3.099e-06  max_rel=6.518e-07  ref_max=4.756e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    (prod_intra - prod).dqg max_abs=8.330e-01 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=9.537e-07  [DIFF]
+
+#### K = 128, V = 128   smem prod(fp32)=129152 bf16=90240 bf16_intra=116352 FIT ####
+
+# B2 T1024 H8  grid=(64, 16)
+    (prod_intra - prod).dqg max_abs=1.325e+00 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=9.537e-07  [DIFF]
+    bf16_intra.dqg vs torch(B2+B3)       max_abs=5.543e-04  max_rel=2.724e-04  ref_max=2.035e+00
+    bf16_intra.dkg vs torch(B2+B3)       max_abs=7.756e-04  max_rel=2.973e-05  ref_max=2.609e+01
+    bf16_intra.dg vs torch(B2+B3)        max_abs=1.079e-04  max_rel=2.091e-05  ref_max=5.163e+00
+    bf16_intra.db vs torch(B2+B3)        max_abs=3.636e-04  max_rel=7.285e-05  ref_max=4.991e+00
+    bf16_intra.dA vs torch               max_abs=1.669e-06  max_rel=4.364e-07  ref_max=3.825e+00
+
+# T512 H4  grid=(32, 4)
+    (prod_intra - prod).dqg max_abs=1.301e+00 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    bf16_intra.dqg vs torch(B2+B3)       max_abs=6.393e-04  max_rel=3.602e-04  ref_max=1.775e+00
+    bf16_intra.dkg vs torch(B2+B3)       max_abs=6.382e-04  max_rel=2.636e-05  ref_max=2.421e+01
+    bf16_intra.dg vs torch(B2+B3)        max_abs=8.506e-05  max_rel=1.578e-05  ref_max=5.391e+00
+    bf16_intra.db vs torch(B2+B3)        max_abs=3.225e-04  max_rel=8.313e-05  ref_max=3.879e+00
+    bf16_intra.dA vs torch               max_abs=1.192e-06  max_rel=2.830e-07  ref_max=4.212e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    (prod_intra - prod).dqg max_abs=1.106e+00 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+
+#### K = 64, V = 64   smem prod(fp32)=79744 bf16=57216 bf16_intra=71040 FIT ####
+
+# B2 T1024 H8  grid=(64, 16)
+    (prod_intra - prod).dqg max_abs=1.756e+00 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    bf16_intra.dqg vs torch(B2+B3)       max_abs=8.148e-04  max_rel=4.666e-04  ref_max=1.746e+00
+    bf16_intra.dkg vs torch(B2+B3)       max_abs=7.873e-04  max_rel=4.554e-05  ref_max=1.729e+01
+    bf16_intra.dg vs torch(B2+B3)        max_abs=2.168e-04  max_rel=3.264e-05  ref_max=6.641e+00
+    bf16_intra.db vs torch(B2+B3)        max_abs=2.702e-04  max_rel=6.680e-05  ref_max=4.045e+00
+    bf16_intra.dA vs torch               max_abs=1.192e-06  max_rel=3.833e-07  ref_max=3.110e+00
+
+# T512 H4  grid=(32, 4)
+    (prod_intra - prod).dqg max_abs=1.565e+00 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=2.384e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=4.768e-07  [DIFF]
+    bf16_intra.dqg vs torch(B2+B3)       max_abs=5.696e-04  max_rel=2.875e-04  ref_max=1.981e+00
+    bf16_intra.dkg vs torch(B2+B3)       max_abs=6.924e-04  max_rel=4.038e-05  ref_max=1.715e+01
+    bf16_intra.dg vs torch(B2+B3)        max_abs=2.055e-04  max_rel=4.024e-05  ref_max=5.106e+00
+    bf16_intra.db vs torch(B2+B3)        max_abs=2.567e-04  max_rel=7.791e-05  ref_max=3.295e+00
+    bf16_intra.dA vs torch               max_abs=7.153e-07  max_rel=2.903e-07  ref_max=2.464e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    (prod_intra - prod).dqg max_abs=1.558e+00 (intra contribution added)
+    fold.dqg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dkg vs bf16+b3                  max_abs=0.000e+00  [BIT]
+    fold.dg vs bf16+b3                   max_abs=2.384e-07  [DIFF]
+    fold.db vs bf16+b3                   max_abs=2.384e-07  [DIFF]
+
+--------------------------------------------------------------------------------------------------------
+fold self-consistency (bit-identity; dg/db fp32 add-order ulp):
+    K=256 V= 64 dqg  0.000e+00
+    K=256 V= 64 dkg  0.000e+00
+    K=256 V= 64 dg   2.384e-07
+    K=256 V= 64 db   7.153e-07
+    K=256 V=256 dqg  0.000e+00
+    K=256 V=256 dkg  0.000e+00
+    K=256 V=256 dg   4.768e-07
+    K=256 V=256 db   9.537e-07
+    K=128 V=128 dqg  0.000e+00
+    K=128 V=128 dkg  0.000e+00
+    K=128 V=128 dg   4.768e-07
+    K=128 V=128 db   9.537e-07
+    K= 64 V= 64 dqg  0.000e+00
+    K= 64 V= 64 dkg  0.000e+00
+    K= 64 V= 64 dg   4.768e-07
+    K= 64 V= 64 db   4.768e-07
+external anchor (max_rel vs wy_dqkg_torch+intra_torch; torch-only, T%BT==0):
+    K=256 V= 64 dqg  2.856e-04
+    K=256 V= 64 dkg  2.726e-05
+    K=256 V= 64 dg   2.477e-05
+    K=256 V= 64 db   9.000e-05
+    K=256 V= 64 dA   3.145e-07
+    K=256 V=256 dqg  1.598e-04
+    K=256 V=256 dkg  2.306e-05
+    K=256 V=256 dg   1.701e-05
+    K=256 V=256 db   6.826e-05
+    K=256 V=256 dA   6.518e-07
+    K=128 V=128 dqg  3.602e-04
+    K=128 V=128 dkg  2.973e-05
+    K=128 V=128 dg   2.091e-05
+    K=128 V=128 db   8.313e-05
+    K=128 V=128 dA   4.364e-07
+    K= 64 V= 64 dqg  4.666e-04
+    K= 64 V= 64 dkg  4.554e-05
+    K= 64 V= 64 dg   4.024e-05
+    K= 64 V= 64 db   7.791e-05
+    K= 64 V= 64 dA   3.833e-07
+
+========================================================================================================
+Part C: resources over the (K,V) grid (registers / spill / smem)
+========================================================================================================
+      K     V | tag           regs    spill    occup    occsm       smem
+     64   256 | prod           114        0        -        -      92032
+     64   256 | tma            128        0        -        -      85888
+     64   256 | bf16           116        0        -        -      69504
+     64   256 | bf16mma        112        0        -        -      69504
+    256    64 | prod           152        0        -        -     215680
+    256    64 | tma            140        0        -        -     197248
+    256    64 | bf16           170        0        -        -     144000
+    256    64 | bf16mma        148        0        -        -     144000
+     64   128 | prod            90        0        -        -      83840
+     64   128 | tma             80        0        -        -      77696
+     64   128 | bf16            78        0        -        -      61312
+     64   128 | bf16mma         64       24        -        -      61312
+    128    64 | prod           113        0        -        -     125056
+    128    64 | tma            128        0        -        -     114816
+    128    64 | bf16           106        0        -        -      86144
+    128    64 | bf16mma        106        0        -        -      86144
+    128   128 | prod           112        0        -        -     129152
+    128   128 | tma            128        0        -        -     118912
+    128   128 | bf16           104        0        -        -      90240
+    128   128 | bf16mma        102        0        -        -      90240
+
+DONE
