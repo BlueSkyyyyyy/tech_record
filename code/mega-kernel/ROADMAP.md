@@ -3194,8 +3194,46 @@
       `task_register.cc:2151/2304`）无 block scale，与 FP8 版/MoE 版三足对照。
       判据**不贡献任何 C 判据**（同 `docs/29` §6/`docs/30` §7/`docs/31` §9；C1/C2 由运行层拿）。
       配套博客 post `mega-kernel-33-mpk-sm100-linear`（weight 34）并更新 `mega-kernel-00-index` 第 33 项；
-      并把「公开 `linear_fp8_1d2d_sm100` 实际走 1d1d 身体 / 身体 B 未接线」与「SM100 手写 GEMM 的
+      并      把「公开 `linear_fp8_1d2d_sm100` 实际走 1d1d 身体 / 身体 B 未接线」与「SM100 手写 GEMM 的
       `kNumSMs=1` 适配」补进「已知坑」。
+
+### P119 SM100 block-scaled FP8 MoE group-GEMM device 内部走读（`docs/33-mpk-fp8-group-gemm.md`）
+
+- [x] **P119-1** 补掉 `docs/32`（P118-1）**§7「局限」明留的「未展开的更深层」**——「`fp8_group_gemm_sm100.cuh`
+      的 **UMMA 主循环 / UTCCP 序列 / epilogue scatter** 仍未逐行」。见
+      `docs/33-mpk-fp8-group-gemm.md`（快照 `f9eb70c`，与 `docs/06`–`docs/32` 同快照；**纯源码走读
+      （资料分析），本轮无新实验**——SM100 `sm_100f` 在目标卡 H100/sm90 不可执行）。headline：
+      **(A) 数据通路**：`fp8_group_gemm_sm100.cuh`（1567 行）是「1 个 CTA 跑 **3 条 warp 特化流水**」——
+      8 warp 里 `warp5 DMA`（生产者）/`warp6 SCALE`（尺度生产者）/`warp4 MMA`（消费者+生产者）/
+      `warps0-3 EPILOGUE`（消费者）由 **6 个 `mbarrier`**（`a_full` TransactionBarrier / `b_full` 32-lane /
+      `ab_empty` / `acc_full` / `acc_empty` 4-arrival / `sf_ready`）+ 2 个 `NamedBarrier`
+      （`TmemAllocBarrier` 160 / `EpilogueBarrier` 128）串联；swapAB 约定把 **UMMA-M=输出维、
+      UMMA-N=token 维**（`:63-72`）。**warp5**：A 走 TMA（坐标 `(K_off, expert*ORIG_OUT+M_off)`，
+      `set_barrier_transaction_bytes`）+ B 走**手写 SWIZZLE_128B `cp.async`**（`off ^ (((off>>7)&7)<<4)`）
+      带 **per-token routing 检查**（未路由写零）；乐观 peek + lookahead（`try_wait_barrier`）贯穿三 warp。
+      **warp4**：等 `a_full/b_full/sf_ready` → `SM100_UTCCP_4x32dp128bit_1cta` 把 scale 从 SMEM 搬进
+      TMEM → 每 K-tile 发 **4 条 `SM100_MMA_MXF8F6F4_SS`**（`bK/UMMA_K=128/32`，`first_tile&&k_sub==0`
+      覆盖否则累加）；描述符 lo-word **按 stage 预存到 lane 再用 `__shfl_sync` 广播**；`umma_arrive`
+      保证 DMA 不覆写。**warp6**：fp32 scale → **UE8M0 `(__float_as_uint(sf)>>23)&0xFF`** → pack 4 复本
+      → **`fp8_utccp_warp_transpose`（4×32→32×4，注释自称 identical to DeepGEMM）** → `sf_ready`；
+      末尾有 **`FIX 2026-04-22` 竞态修复**（scale warp 先等 `ab_empty` 再覆写 sfa/sfb，TP=4/w2/mbt=64 下
+      UTCCP 与覆盖赛跑）。**(B) epilogue**（`:1440-1552`）：`TMEM_LOAD_32dp32b1x` 载 FP32 累加器 →
+      `NumericConverter` 转 BF16 → 按 routing **scatter `mOutput(n,topk-1,m)`**（仅被路由 token 写）；
+      `acc_full/acc_empty` 双 barrier；**TMEM `free` 不 `release_allocation_lock`**（`:1559-1564`，注释
+      引 `moe_linear_sm100.cuh:820` 的 "don't do relinquish for megakernel"）——**C2 常驻对 device task
+      的直接让步**（与 `docs/32` `kNumSMs=1` 同族）。**(C) 生产布线（补 `docs/31` §10「TaskType 登记
+      未全表复核」中本文件这一支）**：`register_moe_fp8_sm100_task`（`task_register.cc:3204-3452`）发射
+      `TASK_MOE_W13_FP8_SM100=248`/`TASK_MOE_W2_FP8_SM100=249`（`runtime_header.h:136-137`），
+      `task_config=(6,1,...)`（`graph.cc:713-720`），实参 **`MMA_M=128`/`MMA_N=16`/`bk=128`/
+      `num_ab_stages=8`/`num_acc_stages=2`**，`EXPERT_STRIDE=grid_dim.x`，`expert_offset=bid.x`
+      （`runtime.cc:352-359`）⇒ **x 维切专家、y 维切 N**。**(D) 一条「定义但未接线」证据**（延续本专题
+      方法论）：文件内       `fp8_make_sf_smem_desc`/`fp8_advance_umma_desc_lo`/`fp8_tcgen05_after_thread_sync`
+      **有定义无调用者**，实际用的是 `sm100_utils.cuh` 的共享版本。与 DeepGEMM 静态对应
+      （`mma/sm100.cuh:42-48` `make_sf_desc`、`sm100_fp8_fp4_gemm_1d1d.cuh:461-480` 转置、
+      `sm100_fp8_fp4_mega_moe.cuh:837/841-842/895` mega MoE）。判据**不贡献任何 C 判据**
+      （同 `docs/29`–`docs/32`；C1/C2 由运行层拿）。配套博客 post `mega-kernel-34-mpk-fp8-group-gemm`
+      （weight 35）并更新 `mega-kernel-00-index` 第 34 项；并把「scale warp 需等 `ab_empty` 防 UTCCP
+      覆盖赛跑」与「`fp8_group_gemm_sm100.cuh` 三个本地 helper 未接线」补进「已知坑」。
 
 ## 每轮增量流程（autopilot）
 
@@ -3392,12 +3430,36 @@
 - **SM100 手写 GEMM 进持久化内核时用 `kNumSMs=1` 收成单 CTA**（P118-1/`docs/32` §5.3）：`linear_fp8_sm100`
   本是「`blockIdx.x` 当 tile scheduler」的多 CTA GEMM，但 MPK 的持久化 worker 里 `blockIdx.x` 是
   **worker 索引**，`register_linear_fp8_sm100_task` 只能把 `kNumSMs` 设成 `MPK_MAX_NUM_WORKERS`
-  使首块恒有效、单 CTA 一趟遍历所有 tile（`task_register.cc:4817-4840` 的 HACK 注释 + `kNumStages=25`
-  压 207 KB SMEM）。读这类 task 的 grid/block 语义前先确认「它是单 CTA 循环还是多 CTA grid」。
+   使首块恒有效、单 CTA 一趟遍历所有 tile（`task_register.cc:4817-4840` 的 HACK 注释 + `kNumStages=25`
+   压 207 KB SMEM）。读这类 task 的 grid/block 语义前先确认「它是单 CTA 循环还是多 CTA grid」。
+- **SM100 block-scaled task 里「尺度流水」与「数据流水」共享 stage 编号，且 scale 覆写必须被 `ab_empty`
+  门控**（P119-1/`docs/33` §5）：`fp8_group_gemm_sm100.cuh` 里 DMA/MMA/SCALE 三个 warp **必须同序**遍历
+  同一 `(expert,m_tile,n_tile,k_tile)`，`smem_buf=(num_prev_k_blk+k_tile)%NUM_AB_STAGE` 才一致；scale warp
+  写 `sfa/sfb_smem` 前**必须**先 `wait_barrier(ab_empty)`——`ab_empty` 由 MMA 的 `umma_arrive`
+  （`tcgen05.commit`）触发，会等**所有** tcgen05（含 UTCCP）完成；否则在 `k_tile_count==NUM_AB_STAGE`
+  （如 TP=4/w2/mbt=64）时 scale warp 会绕回覆盖 UTCCP 还在读的 buffer（源码 `:1357-1368` 的
+  `FIX 2026-04-22` 即此）。改 pipeline 深度或 TP 前先复核这条门。
+- **`fp8_group_gemm_sm100.cuh` 里有三个「有定义、无调用者」的本地 helper**（P119-1/`docs/33` §9.4）：
+  `fp8_make_sf_smem_desc`（`:283-296`）、`fp8_advance_umma_desc_lo`（`:267-271`）、
+  `fp8_tcgen05_after_thread_sync`（`:153-155`）——MMA warp 实际调的是 `sm100_utils.cuh` 的
+  `make_sf_desc`/`advance_umma_desc_lo`，scale warp 用的是 `fence_view_async_shared`。按函数名/文件内定义
+  推断「哪份实现真在跑」会错（同 `docs/16`/`docs/20`/`docs/32` 的「已实现未接线」族）；须 `grep` 调用者。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P118-1 完成（1/1）**。补齐 `docs/31`（P117-1）**§10「局限」明留的两条尾巴**
+- 当前进度：**P119-1 完成（1/1）**。补齐 `docs/32`（P118-1）**§7「局限」明留的「未展开的更深层」**
+  （`fp8_group_gemm_sm100.cuh` 的 UMMA 主循环 / UTCCP 序列 / epilogue scatter 未逐行）——把 SM100
+  block-scaled FP8 MoE group-GEMM 的 device 身体逐段打开，见 `docs/33-mpk-fp8-group-gemm.md`
+  （快照 `f9eb70c`，**纯源码走读、无新实验**）。headline：**(A)** 1 个 CTA 跑 **3 条 warp 特化流水**
+  （DMA/SCALE/MMA/epilogue + 6 `mbarrier` + 2 `NamedBarrier`）：DMA 的 TMA+手写 swizzle `cp.async`
+  （routing 检查）、MMA 的 `UTCCP`+**4×`SM100_MMA_MXF8F6F4_SS`**（描述符 `__shfl` 广播）、SCALE 的
+  **fp32→UE8M0→warp 转置**（含 `FIX 2026-04-22` 竞态修复）、epilogue 的 **TMEM→BF16→routing scatter**；
+  **(B)** TMEM `free` 不 `release_allocation_lock`——C2 常驻对 device task 的直接让步；**(C)** 生产布线
+  `register_moe_fp8_sm100_task`→`TASK_MOE_{W13,W2}_FP8_SM100=248/249`（`(6,1)` / `MMA_N=16` /
+  `num_ab_stages=8` / `expert_offset=bid.x`）；**(D)** 三个本地 helper「有定义无调用者」。判据**不贡献
+  任何 C 判据**（同 `docs/29`–`docs/32`）。配套博客 post `mega-kernel-34-mpk-fp8-group-gemm`（weight 35）
+  并更新 `mega-kernel-00-index` 第 34 项；并把两条坑补进「已知坑」。
+- 此前：**P118-1 完成（1/1）**。补齐 `docs/31`（P117-1）**§10「局限」明留的两条尾巴**
   （`linear_fp8_sm100` 家族内部 / SM100 task 的生产登记未复核）——把 SM100 block-scaled FP8 线性
   task 的 device 身体与生产布线打开，见 `docs/32-mpk-sm100-linear-tasks.md`（快照 `f9eb70c`，
   **纯源码走读、无新实验**）。headline：**(A) `linear_fp8_sm100` 家族实为 10 文件、两套 device 身体**
