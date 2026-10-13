@@ -14629,3 +14629,164 @@ nvcc 13.2、**每配置独立进程**——cluster launch failure 会 sticky 污
   同族相对排序**；撕裂判据（`max_nearest>1e-3`）只覆盖「整 chunk 级」混合，更细的字节级交错未刻画；
   `race` 的 winner 直方图偏斜是**倾向性观察**、不作为确定性结论；未测 SM100（`cta_group::2` 2SM
   multicast）与 2D/3D cluster。
+
+## 97. cluster 跨 SM 交换：用 TMA 事务计数（`expect_tx`）表达每槽 done——比软件 arrive 快 10–14%、但仍慢于单次 `cluster.sync`（P172-1）
+
+本节补掉 §89.7 明留的尾巴——`mbar` 系列（§89/§90/§91/§92）只用 `ready`/`ack` 两枚 mbarrier 的
+**软件 `arrive`** 表达「数据写完（done）」，**未测用 `expect_tx`（TMA 事务计数）表达每槽 done**
+的形态。本节问：**把「数据交付 + done 信号」交给 TMA 引擎（`cp.async.bulk` 搬字节、完成按事务
+字节数记账到对端 mbarrier），相比「全 block 每线程远端 store + 每线程远端 arrive」，是更快还是更慢？**
+
+### 97.1 问题
+
+§89–§92 在「cluster 跨 SM 交换」上排出一条完整光谱：`ring1`（环形槽 + 单次 `cluster.sync`/round）
+最快，`mbar`（每线程每槽一对 mbarrier 的 software arrive，零 `cluster.sync`）次之，`mbarb`
+（每 block 一次 arrive + `__syncthreads`）与 `mbarw`（每 warp 一次 arrive + 显式 cluster fence）
+因会合/fence 反而更慢。四者都是**软件握手**：生产者用 `st.shared::cluster` 把数据写进对端 SMEM、
+再用 `mbarrier.arrive` 表达「写完了」。硬件另有一条路——**TMA bulk 拷贝自带完成机制**：把数据搬进
+对端 SMEM 的 `cp.async.bulk` 可让其**完成按实际事务字节数（tx count）记账到对端 mbarrier**，于是
+「done」不是软件 arrive，而是硬件对「字节确实落地」的记账。这就是 §89.7 写明「未测」的形态。
+
+### 97.2 方法
+
+源码复用 `src/cluster_concurrency.cu`（**新增载体 `mtex`（path 10）与两个 helper
+`mbar_arrive_expect_tx_remote`/`bulk_s2s`**，不改既有 `pull`/`push`/`ring`/`ring1`/`mbar`/`mbarb`/
+`mbarw` 语义），脚本 `harness/cluster_mtex.sh`，原始输出 `harness/cluster_mtex.out.txt`
+（目标卡 H100 / sm90a、**固定空闲 device 6**、nvcc 13.2、每配置独立进程以规避 sticky context；
+计时项 min-of-20 且报 `ok/20`、探针报 `ok/N`）。
+
+语义/拓扑/数据量/环深与 §89 `mbar` 逐字相同（每 block 有 `snd`/`rcv` 两块 SMEM；每 block 每 round
+把 `SEG = TH·U = 256·U` 个 `float` 推给 `(rank+1)%C` 的 `rcv` 第 `j=r%S` 槽、读回后 ack 给上游），
+**唯一设计变量 = 「数据交付 + ready/done」如何表达**：
+
+- `mbar`（§89 对照）：生产者**全 block 每线程** `dst[j*SEG+u*TH+tid]=snd[...]` 写对端 SMEM，再
+  每线程远端 `mbarrier.arrive` 对端 `readyBar[j]`（每 round 每 block `2·TH=512` 次跨 SM arrive）；
+  done = 最后一枚软件 arrive。
+- `mtex`（**新**）：生产者 **`tid0` 单点**先对**对端** `readyBar[j]` 做一次远端
+  `mbarrier.arrive.expect_tx.release.cluster.shared::cluster`（登记到达数 1 + 期望 `SEG*4` 字节），
+  再发一笔 `cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes` 把
+  `snd[off..off+SEG)` 搬进对端 `rcv[j]`，**完成按 tx 字节数落到同一枚对端 `readyBar[j]`**；done =
+  硬件事务记账（生产者侧「登记 + 搬运」同程序序，故消费者无需预 arm，规避「消费者还没 arm、TMA
+  已完成」的竞态）。
+- `ack`（背压）方向与 `mbar` 逐字相同（消费者每线程远端 arrive 生产者的 `ackBar[j]`，`count=TH`），
+  以便单变量隔离「ready/done 的表达方式」。
+
+关键 helper（`src/cluster_concurrency.cu`）：
+
+```
+mbarrier.arrive.expect_tx.release.cluster.shared::cluster.b64 _, [mbar_cluster], bytes;   // 远端登记到达 + 期望字节
+cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes                    // 本 SMEM -> 对端 cluster SMEM
+    [dst_cluster], [src_local], bytes, [mbar_cluster];
+```
+
+`dst_cluster`/`mbar_cluster` 均用 `mapa.shared::cluster` 把本地 SMEM 地址映射到对端 CTA rank。
+
+### 97.3 §A 资源表：`mtex` 与 `mbar` 逐档同占用率（SMEM/寄存器同档）
+
+`sb=32KB, T=256`（完整表见 `.out.txt` §A）：
+
+```
+  载体    U=1            U=2            U=4            U=8            U=16
+  mbar   regs=18 occ=6  regs=18 occ=5  regs=18 occ=4  regs=26 occ=3  regs=32 occ=3
+  mtex   regs=18 occ=6  regs=18 occ=5  regs=18 occ=4  regs=26 occ=3  regs=32 occ=3
+  ring1  regs=31 occ=3  regs=32 occ=3  regs=32 occ=3  regs=32 occ=3  regs=32 occ=3
+```
+
+`mtex` 与 `mbar` 是**资源逐档相同**的对照（`U=1` 都 18 regs/occ=6、`U=8` 都 26 regs/occ=3，
+`localB=0` 无溢出），且因 `rcv` 只留 `S` 个槽 + mbarrier 标志区而比 `ring1` 的 `2·sb` SMEM 更小、
+低 `U` 占用率更高。故 `mtex` vs `mbar` 的吞吐差**只能归因「交付 + done 的表达方式」**。
+
+### 97.4 §B（Q1）`mtex` 稳定到 `grid=1056`（与 `mbar`/`ring1` 同档），逐位正确
+
+`C=2, U=8, rounds=64`，单发探针扫 `grid`：`mtex`（`D`）在 `grid=2/16/32/64/132/264/528/792/1056`
+**全部 `1/1 ok`**、重复 3 发 `3/3 ok`，与 `mbar`（`P`）、`ring1`（`M`）**逐点同档**。
+
+⇒ **用 TMA 事务计数表达每槽 done 的形态同样可行且稳定**，没有引入 §88 `ring`（纯 `volatile` 握手）
+那类 `unspecified launch failure`；每个 `ok` 的 case 都经 `check()` 逐位对参考（`maxerr 0 bad 0`）。
+
+### 97.5 §C（Q2 headline）`mtex` 在每个 `U` 上都比 `mbar` 快 10–14%，但仍慢于 `ring1`
+
+`grid=264`，min-of-20，三载体对跑（单位 GB/s 远端，完整见 `.out.txt` §C）：
+
+```
+  C=2      U=1     U=2     U=4     U=8     U=16
+  mtex     181.8   357.9   681.2   1235.1  1997.9
+  mbar     165.2   325.1   597.3   1089.8  1858.8
+  ring1    327.1   525.7   962.0   1617.6  2475.2
+
+  C=8      U=1     U=2     U=4     U=8     U=16
+  mtex     176.1   343.4   638.5   1100.0  1804.1
+  mbar     164.7   324.4   598.9   1031.8  1666.2
+  ring1    274.7   499.9   940.3   1439.9  2078.5
+```
+
+- **`mtex > mbar` 在每个 `U`、每个 `C` 上成立**：`mtex/mbar` = 1.10/1.10/1.14/1.13/1.08（C=2）、
+  1.07/1.06/1.07/1.07/1.08（C=8），量级 **+6%–14%**。即**把每 round 每 block 的 512 次远端
+  `st.shared::cluster` + 512 次远端 `arrive`，换成 1 笔 TMA bulk + 1 次远端 `arrive.expect_tx`，
+  净省 ~10%**——单线程异步搬运 + 硬件事务记账，比全 block 线程各自远端写、各自远端 arrive 更省。
+- **但 `ring1` 在每个 `U` 上仍最快**：`ring1/mtex` = 1.80/1.47/1.41/1.31/1.24（C=2）、
+  1.56/1.46/1.47/1.31/1.15（C=8），即 **1.15×–1.80×**；`ring1/mbar` = 1.98/1.62/1.61/1.48/1.33。
+  低 `U`（延迟受限、每 round 同步开销占比高）差距最大，高 `U`（带宽受限、每 round 固定代价被摊薄）
+  差距收窄——**与 §89.6/§90.3 的「每 round 两次依赖的跨 SM 往返 vs 一次 `cluster.sync`」机制一致**：
+  `mtex` 只优化了 ready 方向的**交付手段**，没有消掉「ready 等一次 + ack 等一次」的**两条依赖往返**，
+  而 `ring1` 每 round 只有**一条** `cluster.sync`。
+
+### 97.6 §D（Q3）大 `grid` 下同一结论成立（`C=2`）
+
+```
+  U=8     mtex     mbar     ring1        U=16    mtex     mbar     ring1
+  g=528   1203.5   1142.2   1683.0       g=528   1914.5   1823.9   2263.1
+  g=1056  1598.4   1495.5   2150.9       g=1056  2551.5   2386.9   3022.6
+```
+
+- `mtex/mbar` 在 `grid=528/1056`、`U=8/16` 上恒 **1.05–1.07×**；`ring1/mtex` 恒 **1.18–1.40×**。
+  ⇒ **§C 的两条排序（`mtex > mbar`、`ring1 > mtex`）在大 `grid` 下不翻盘**。
+
+### 97.7 §E（Q4）环深 `S` 不是一阶旋钮（与 §89.5/§90.5/§91.5 同结论）
+
+`mtex`，`C=2, grid=264, rounds=64`，扫 `S∈{1,2,4,8}`：
+
+```
+   U=1   S=1 182.8 | S=2 181.6 | S=4 177.9 | S=8 180.2  GB/s
+   U=8   S=1 1239.4 | S=2 1240.4 | S=4 1240.4 | S=8 1241.1  GB/s
+```
+
+吞吐几乎不动（`U=1` 极差 2.7%、`U=8` 0.1%）——每 round 的固定代价是「ready 等 + ack 等」的跨 SM
+依赖往返，背压 `ack` 等待很少绑定，`S` 摊薄不了它。
+
+### 97.8 §F（Q5）确定性：同一配置连跑 6 次无性能双模态
+
+`C=2, grid=264, U=8` 连跑 6 次：**1233.0 / 1236.9 / 1237.9 / 1238.3 / 1242.2 / 1247.2 GB/s**
+（抖动 <1.2%，每次 `ok=20/20`、`maxerr 0`）。`mtex` 的等待发生在**全 block**（消费者每线程
+`try_wait` 对端 `readyBar`），且 `expect_tx` 的完成来自硬件 TMA 引擎，**不涉及 §90.4 `mbarb` 那种
+「单线程等待 + 长 suspend-hint」耦合**，故未观察到双模态。
+
+### 97.9 结论、判据与局限
+
+- **结论一（headline，肯定性）**：**用 `expect_tx`（TMA 事务计数）表达每槽 done 的形态在 H100 DSM
+  上可行、稳定、逐位正确**——`mtex` 在 `grid≤1056`、`U≤16` 全稳、`maxerr 0`、无性能双模态。
+  §89.7「未测 `expect_tx` 形态」的答案是：**它能用**，且**消费者无需预 arm**（登记由生产者侧
+  `arrive.expect_tx` 与 bulk 同程序序表达，规避 arm 竞态）。
+- **结论二（headline，定量）**：**它比软件 arrive 的 `mbar` 快 6%–14%**（`mtex > mbar` 在每个
+  `U`/`C`/`grid` 上成立）。机制：把每 round 每 block 的 `2·TH` 次远端 store + `2·TH` 次远端 arrive，
+  换成 1 笔 TMA bulk + 1 次远端 `arrive.expect_tx`——单线程异步搬运 + 硬件字节记账，比全 block
+  线程各自远端写/到达更省 SMEM/LSU 与 arrive 条数。
+- **结论三（工程取舍）**：**但仍慢于单次 `cluster.sync` 的 `ring1`（1.15×–1.80×）**。⇒ 优化「done
+  的表达方式」只能省 ready 方向的**交付手段**，省不掉「ready 等一次 + ack 等一次」的**两条依赖
+  往返**；`ring1` 每 round 只有一条 `cluster.sync`。**「保留一个便宜的每步同步点」的结论（§89.7/
+  §90.6）不受影响**，且现在多了一条硬件原语层的注脚：连「用 TMA 事务计数做 done」这条最硬的
+  每槽握手，也在 `ring1` 之下。
+- **对生产实现的印证**：DeepGEMM symmetric memory / MPK ring barrier（`docs/17` §3、`docs/12`
+  §4–§7）用「每步一个同步点 + 环形槽降频 + 批量搬运」。`mtex` 正好对应「批量搬运（TMA）+ 硬件
+  记账」这一半，本节量化它相对纯软件 arrive 的收益（+10%）与相对每步同步点的差距（−20% 上下），
+  给出「为何不把 done 细化到每槽」的第二条独立理由（第一条在 §89/§90）。
+- **判据（C1–C5，`docs/00` §3）**：`mtex` 单常驻 kernel、设备侧推进、`cluster.sync`/`mbarrier`/
+  TMA 事务计数细化 **C4**；**仍不是 C5**（无固定角色 worker/scheduler 动态派发，与 §18–§23/
+  §86–§96 同档）。
+- **局限（诚实标注）**：只测 H100/sm90a（DSM 的真正家是 SM100 2SM，本机不可执行）；只改了 **ready
+  方向**的交付/done，**ack 方向仍为软件 arrive**（保证单变量隔离），故量的是「done 表达方式」而非
+  「双向全 TMA」；`cp.async.bulk.shared::cluster.shared::cta` 的 S2S 形态只搬**连续** SEG 段（本
+  实验布局恰连续），未测 TMA tensor/2D 或非连续搬运；搬运的是合成 `float`、非真实 task tile；
+  计时取 min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；未做 ncu 归因
+  （结论二的「省 store/arrive」是「资源同档 + 单变量改变」的对照推断，未用 `gpu__time_duration`
+  拆分单次 mbarrier 往返与 TMA 交付各自占比）；未测 `tensormap` 版 multicast/`cta_group::2`。
