@@ -1,0 +1,330 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=64 -DB2M_VD=128 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_64_128.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=128 -DB2M_VD=128 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_128_128.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=256 -DB2M_VD=128 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_256_128.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=64 -DB2M_VD=256 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_64_256.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=256 -DB2M_VD=64 -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_256_64.so
+================================================================================================
+Part A: correctness -- K2-mma CUDA base GEMM core, K in {64,128,256}
+        vs torch fp32 (golden, allow_tf32=False) and vs identical-op Triton core
+================================================================================================
+
+#### K = 64, V = 128 ####
+
+# B8 T2048 H8  grid=(128, 64)
+    [K64V128] cuda dq vs torch max_abs=9.665e-03  max_rel=3.097e-04  ref_max=3.121e+01
+    [K64V128] trit dq vs torch max_abs=2.562e-02  max_rel=8.209e-04  ref_max=3.121e+01
+    [K64V128] cuda dq vs trit  max_abs=2.968e-02  max_rel=9.517e-04  ref_max=3.118e+01
+    [K64V128] cuda dk vs torch max_abs=1.134e-02  max_rel=3.677e-04  ref_max=3.084e+01
+    [K64V128] trit dk vs torch max_abs=2.549e-02  max_rel=8.266e-04  ref_max=3.084e+01
+    [K64V128] cuda dk vs trit  max_abs=2.886e-02  max_rel=9.366e-04  ref_max=3.082e+01
+    [K64V128] cuda dw vs torch max_abs=1.034e-03  max_rel=3.158e-04  ref_max=3.275e+00
+    [K64V128] trit dw vs torch max_abs=2.655e-03  max_rel=8.107e-04  ref_max=3.275e+00
+    [K64V128] cuda dw vs trit  max_abs=2.937e-03  max_rel=8.974e-04  ref_max=3.272e+00
+    [K64V128] cuda dgk vs torch max_abs=1.907e-06  max_rel=1.341e-07  ref_max=1.422e+01
+    [K64V128] trit dgk vs torch max_abs=1.907e-06  max_rel=1.341e-07  ref_max=1.422e+01
+    [K64V128] cuda dgk vs trit  max_abs=1.907e-06  max_rel=1.341e-07  ref_max=1.422e+01
+
+# B2 T1024 H8  grid=(64, 16)
+    [K64V128] cuda dq vs torch max_abs=8.686e-03  max_rel=3.027e-04  ref_max=2.869e+01
+    [K64V128] trit dq vs torch max_abs=2.276e-02  max_rel=7.932e-04  ref_max=2.869e+01
+    [K64V128] cuda dq vs trit  max_abs=2.535e-02  max_rel=8.840e-04  ref_max=2.867e+01
+    [K64V128] cuda dk vs torch max_abs=8.956e-03  max_rel=2.863e-04  ref_max=3.128e+01
+    [K64V128] trit dk vs torch max_abs=2.227e-02  max_rel=7.119e-04  ref_max=3.128e+01
+    [K64V128] cuda dk vs trit  max_abs=2.527e-02  max_rel=8.082e-04  ref_max=3.126e+01
+    [K64V128] cuda dw vs torch max_abs=8.580e-04  max_rel=3.000e-04  ref_max=2.861e+00
+    [K64V128] trit dw vs torch max_abs=2.219e-03  max_rel=7.758e-04  ref_max=2.861e+00
+    [K64V128] cuda dw vs trit  max_abs=2.542e-03  max_rel=8.892e-04  ref_max=2.859e+00
+    [K64V128] cuda dgk vs torch max_abs=1.907e-06  max_rel=1.543e-07  ref_max=1.236e+01
+    [K64V128] trit dgk vs torch max_abs=1.907e-06  max_rel=1.543e-07  ref_max=1.236e+01
+    [K64V128] cuda dgk vs trit  max_abs=1.907e-06  max_rel=1.543e-07  ref_max=1.236e+01
+
+# T512 H4  grid=(32, 4)
+    [K64V128] cuda dq vs torch max_abs=8.391e-03  max_rel=3.276e-04  ref_max=2.561e+01
+    [K64V128] trit dq vs torch max_abs=2.261e-02  max_rel=8.826e-04  ref_max=2.561e+01
+    [K64V128] cuda dq vs trit  max_abs=2.702e-02  max_rel=1.056e-03  ref_max=2.560e+01
+    [K64V128] cuda dk vs torch max_abs=8.512e-03  max_rel=3.341e-04  ref_max=2.548e+01
+    [K64V128] trit dk vs torch max_abs=2.076e-02  max_rel=8.149e-04  ref_max=2.548e+01
+    [K64V128] cuda dk vs trit  max_abs=2.238e-02  max_rel=8.792e-04  ref_max=2.546e+01
+    [K64V128] cuda dw vs torch max_abs=7.449e-04  max_rel=2.656e-04  ref_max=2.804e+00
+    [K64V128] trit dw vs torch max_abs=2.272e-03  max_rel=8.101e-04  ref_max=2.804e+00
+    [K64V128] cuda dw vs trit  max_abs=2.465e-03  max_rel=8.794e-04  ref_max=2.802e+00
+    [K64V128] cuda dgk vs torch max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+    [K64V128] trit dgk vs torch max_abs=9.537e-07  max_rel=8.138e-08  ref_max=1.172e+01
+    [K64V128] cuda dgk vs trit  max_abs=1.431e-06  max_rel=1.221e-07  ref_max=1.172e+01
+
+# T250 H3 (non-div)  grid=(16, 3)
+    [K64V128] cuda dq vs torch max_abs=7.896e-03  max_rel=2.944e-04  ref_max=2.682e+01
+    [K64V128] trit dq vs torch max_abs=2.058e-02  max_rel=7.673e-04  ref_max=2.682e+01
+    [K64V128] cuda dq vs trit  max_abs=2.411e-02  max_rel=8.996e-04  ref_max=2.680e+01
+    [K64V128] cuda dk vs torch max_abs=7.614e-03  max_rel=2.835e-04  ref_max=2.686e+01
+    [K64V128] trit dk vs torch max_abs=2.088e-02  max_rel=7.774e-04  ref_max=2.686e+01
+    [K64V128] cuda dk vs trit  max_abs=2.358e-02  max_rel=8.786e-04  ref_max=2.684e+01
+    [K64V128] cuda dw vs torch max_abs=7.896e-04  max_rel=2.843e-04  ref_max=2.777e+00
+    [K64V128] trit dw vs torch max_abs=1.971e-03  max_rel=7.098e-04  ref_max=2.777e+00
+    [K64V128] cuda dw vs trit  max_abs=2.166e-03  max_rel=7.805e-04  ref_max=2.776e+00
+    [K64V128] cuda dgk vs torch max_abs=1.192e-06  max_rel=1.114e-07  ref_max=1.070e+01
+    [K64V128] trit dgk vs torch max_abs=9.537e-07  max_rel=8.912e-08  ref_max=1.070e+01
+    [K64V128] cuda dgk vs trit  max_abs=1.192e-06  max_rel=1.114e-07  ref_max=1.070e+01
+
+#### K = 128, V = 128 ####
+
+# B8 T2048 H8  grid=(128, 64)
+    [K128V128] cuda dq vs torch max_abs=1.059e-02  max_rel=3.178e-04  ref_max=3.333e+01
+    [K128V128] trit dq vs torch max_abs=2.547e-02  max_rel=7.641e-04  ref_max=3.333e+01
+    [K128V128] cuda dq vs trit  max_abs=2.918e-02  max_rel=8.760e-04  ref_max=3.331e+01
+    [K128V128] cuda dk vs torch max_abs=1.014e-02  max_rel=2.608e-04  ref_max=3.888e+01
+    [K128V128] trit dk vs torch max_abs=2.555e-02  max_rel=6.571e-04  ref_max=3.888e+01
+    [K128V128] cuda dk vs trit  max_abs=2.992e-02  max_rel=7.700e-04  ref_max=3.885e+01
+    [K128V128] cuda dw vs torch max_abs=1.020e-03  max_rel=3.408e-04  ref_max=2.993e+00
+    [K128V128] trit dw vs torch max_abs=2.503e-03  max_rel=8.363e-04  ref_max=2.993e+00
+    [K128V128] cuda dw vs trit  max_abs=2.933e-03  max_rel=9.804e-04  ref_max=2.992e+00
+    [K128V128] cuda dgk vs torch max_abs=1.907e-06  max_rel=1.311e-07  ref_max=1.455e+01
+    [K128V128] trit dgk vs torch max_abs=1.907e-06  max_rel=1.311e-07  ref_max=1.455e+01
+    [K128V128] cuda dgk vs trit  max_abs=1.907e-06  max_rel=1.311e-07  ref_max=1.455e+01
+
+# B2 T1024 H8  grid=(64, 16)
+    [K128V128] cuda dq vs torch max_abs=9.860e-03  max_rel=3.292e-04  ref_max=2.995e+01
+    [K128V128] trit dq vs torch max_abs=2.472e-02  max_rel=8.255e-04  ref_max=2.995e+01
+    [K128V128] cuda dq vs trit  max_abs=2.823e-02  max_rel=9.433e-04  ref_max=2.993e+01
+    [K128V128] cuda dk vs torch max_abs=9.924e-03  max_rel=3.281e-04  ref_max=3.025e+01
+    [K128V128] trit dk vs torch max_abs=2.474e-02  max_rel=8.179e-04  ref_max=3.025e+01
+    [K128V128] cuda dk vs trit  max_abs=2.680e-02  max_rel=8.865e-04  ref_max=3.023e+01
+    [K128V128] cuda dw vs torch max_abs=8.987e-04  max_rel=3.025e-04  ref_max=2.971e+00
+    [K128V128] trit dw vs torch max_abs=2.407e-03  max_rel=8.102e-04  ref_max=2.971e+00
+    [K128V128] cuda dw vs trit  max_abs=2.791e-03  max_rel=9.401e-04  ref_max=2.969e+00
+    [K128V128] cuda dgk vs torch max_abs=1.907e-06  max_rel=1.335e-07  ref_max=1.429e+01
+    [K128V128] trit dgk vs torch max_abs=1.907e-06  max_rel=1.335e-07  ref_max=1.429e+01
+    [K128V128] cuda dgk vs trit  max_abs=1.907e-06  max_rel=1.335e-07  ref_max=1.429e+01
+
+# T512 H4  grid=(32, 4)
+    [K128V128] cuda dq vs torch max_abs=8.778e-03  max_rel=3.225e-04  ref_max=2.722e+01
+    [K128V128] trit dq vs torch max_abs=2.440e-02  max_rel=8.967e-04  ref_max=2.722e+01
+    [K128V128] cuda dq vs trit  max_abs=2.594e-02  max_rel=9.541e-04  ref_max=2.719e+01
+    [K128V128] cuda dk vs torch max_abs=8.017e-03  max_rel=3.092e-04  ref_max=2.592e+01
+    [K128V128] trit dk vs torch max_abs=2.243e-02  max_rel=8.654e-04  ref_max=2.592e+01
+    [K128V128] cuda dk vs trit  max_abs=2.447e-02  max_rel=9.446e-04  ref_max=2.591e+01
+    [K128V128] cuda dw vs torch max_abs=8.188e-04  max_rel=2.940e-04  ref_max=2.785e+00
+    [K128V128] trit dw vs torch max_abs=2.042e-03  max_rel=7.331e-04  ref_max=2.785e+00
+    [K128V128] cuda dw vs trit  max_abs=2.489e-03  max_rel=8.945e-04  ref_max=2.783e+00
+    [K128V128] cuda dgk vs torch max_abs=1.907e-06  max_rel=1.480e-07  ref_max=1.288e+01
+    [K128V128] trit dgk vs torch max_abs=1.431e-06  max_rel=1.110e-07  ref_max=1.288e+01
+    [K128V128] cuda dgk vs trit  max_abs=1.907e-06  max_rel=1.480e-07  ref_max=1.288e+01
+
+# T250 H3 (non-div)  grid=(16, 3)
+    [K128V128] cuda dq vs torch max_abs=8.778e-03  max_rel=3.583e-04  ref_max=2.449e+01
+    [K128V128] trit dq vs torch max_abs=2.058e-02  max_rel=8.401e-04  ref_max=2.449e+01
+    [K128V128] cuda dq vs trit  max_abs=2.411e-02  max_rel=9.851e-04  ref_max=2.447e+01
+    [K128V128] cuda dk vs torch max_abs=8.287e-03  max_rel=2.903e-04  ref_max=2.855e+01
+    [K128V128] trit dk vs torch max_abs=2.157e-02  max_rel=7.556e-04  ref_max=2.855e+01
+    [K128V128] cuda dk vs trit  max_abs=2.210e-02  max_rel=7.747e-04  ref_max=2.853e+01
+    [K128V128] cuda dw vs torch max_abs=7.644e-04  max_rel=2.941e-04  ref_max=2.599e+00
+    [K128V128] trit dw vs torch max_abs=2.005e-03  max_rel=7.713e-04  ref_max=2.599e+00
+    [K128V128] cuda dw vs trit  max_abs=2.405e-03  max_rel=9.259e-04  ref_max=2.597e+00
+    [K128V128] cuda dgk vs torch max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+    [K128V128] trit dgk vs torch max_abs=9.537e-07  max_rel=8.138e-08  ref_max=1.172e+01
+    [K128V128] cuda dgk vs trit  max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+
+#### K = 256, V = 128 ####
+
+# B8 T2048 H8  grid=(128, 64)
+    [K256V128] cuda dq vs torch max_abs=1.151e-02  max_rel=3.094e-04  ref_max=3.721e+01
+    [K256V128] cuda dk vs torch max_abs=1.026e-02  max_rel=3.193e-04  ref_max=3.214e+01
+    [K256V128] cuda dw vs torch max_abs=1.095e-03  max_rel=3.294e-04  ref_max=3.323e+00
+    [K256V128] cuda dgk vs torch max_abs=2.861e-06  max_rel=2.008e-07  ref_max=1.425e+01
+
+# B2 T1024 H8  grid=(64, 16)
+    [K256V128] cuda dq vs torch max_abs=1.011e-02  max_rel=3.302e-04  ref_max=3.063e+01
+    [K256V128] cuda dk vs torch max_abs=9.485e-03  max_rel=3.321e-04  ref_max=2.856e+01
+    [K256V128] cuda dw vs torch max_abs=9.624e-04  max_rel=3.081e-04  ref_max=3.124e+00
+    [K256V128] cuda dgk vs torch max_abs=2.861e-06  max_rel=2.224e-07  ref_max=1.287e+01
+
+# T512 H4  grid=(32, 4)
+    [K256V128] cuda dq vs torch max_abs=8.905e-03  max_rel=3.339e-04  ref_max=2.667e+01
+    [K256V128] cuda dk vs torch max_abs=9.432e-03  max_rel=3.268e-04  ref_max=2.887e+01
+    [K256V128] cuda dw vs torch max_abs=8.438e-04  max_rel=3.208e-04  ref_max=2.630e+00
+    [K256V128] cuda dgk vs torch max_abs=2.384e-06  max_rel=1.915e-07  ref_max=1.245e+01
+
+# T250 H3 (non-div)  grid=(16, 3)
+    [K256V128] cuda dq vs torch max_abs=9.621e-03  max_rel=3.744e-04  ref_max=2.570e+01
+    [K256V128] cuda dk vs torch max_abs=9.238e-03  max_rel=3.263e-04  ref_max=2.831e+01
+    [K256V128] cuda dw vs torch max_abs=8.987e-04  max_rel=3.286e-04  ref_max=2.735e+00
+    [K256V128] cuda dgk vs torch max_abs=1.907e-06  max_rel=1.480e-07  ref_max=1.288e+01
+
+#### K = 64, V = 256 ####
+
+# B8 T2048 H8  grid=(128, 64)
+    [K64V256] cuda dq vs torch max_abs=1.560e-02  max_rel=3.533e-04  ref_max=4.416e+01
+    [K64V256] trit dq vs torch max_abs=3.516e-02  max_rel=7.962e-04  ref_max=4.416e+01
+    [K64V256] cuda dq vs trit  max_abs=4.099e-02  max_rel=9.288e-04  ref_max=4.413e+01
+    [K64V256] cuda dk vs torch max_abs=1.295e-02  max_rel=2.924e-04  ref_max=4.430e+01
+    [K64V256] trit dk vs torch max_abs=3.454e-02  max_rel=7.797e-04  ref_max=4.430e+01
+    [K64V256] cuda dk vs trit  max_abs=3.908e-02  max_rel=8.828e-04  ref_max=4.427e+01
+    [K64V256] cuda dw vs torch max_abs=1.405e-03  max_rel=3.072e-04  ref_max=4.576e+00
+    [K64V256] trit dw vs torch max_abs=3.603e-03  max_rel=7.873e-04  ref_max=4.576e+00
+    [K64V256] cuda dw vs trit  max_abs=4.082e-03  max_rel=8.928e-04  ref_max=4.572e+00
+    [K64V256] cuda dgk vs torch max_abs=3.815e-06  max_rel=2.187e-07  ref_max=1.745e+01
+    [K64V256] trit dgk vs torch max_abs=2.861e-06  max_rel=1.640e-07  ref_max=1.745e+01
+    [K64V256] cuda dgk vs trit  max_abs=3.815e-06  max_rel=2.187e-07  ref_max=1.745e+01
+
+# B2 T1024 H8  grid=(64, 16)
+    [K64V256] cuda dq vs torch max_abs=1.291e-02  max_rel=3.014e-04  ref_max=4.283e+01
+    [K64V256] trit dq vs torch max_abs=3.432e-02  max_rel=8.013e-04  ref_max=4.283e+01
+    [K64V256] cuda dq vs trit  max_abs=3.894e-02  max_rel=9.099e-04  ref_max=4.280e+01
+    [K64V256] cuda dk vs torch max_abs=1.205e-02  max_rel=2.888e-04  ref_max=4.171e+01
+    [K64V256] trit dk vs torch max_abs=3.239e-02  max_rel=7.765e-04  ref_max=4.171e+01
+    [K64V256] cuda dk vs trit  max_abs=3.585e-02  max_rel=8.601e-04  ref_max=4.168e+01
+    [K64V256] cuda dw vs torch max_abs=1.238e-03  max_rel=3.057e-04  ref_max=4.050e+00
+    [K64V256] trit dw vs torch max_abs=3.107e-03  max_rel=7.672e-04  ref_max=4.050e+00
+    [K64V256] cuda dw vs trit  max_abs=3.772e-03  max_rel=9.319e-04  ref_max=4.047e+00
+    [K64V256] cuda dgk vs torch max_abs=2.861e-06  max_rel=1.633e-07  ref_max=1.753e+01
+    [K64V256] trit dgk vs torch max_abs=2.384e-06  max_rel=1.360e-07  ref_max=1.753e+01
+    [K64V256] cuda dgk vs trit  max_abs=2.861e-06  max_rel=1.633e-07  ref_max=1.753e+01
+
+# T512 H4  grid=(32, 4)
+    [K64V256] cuda dq vs torch max_abs=1.129e-02  max_rel=2.777e-04  ref_max=4.065e+01
+    [K64V256] trit dq vs torch max_abs=2.795e-02  max_rel=6.877e-04  ref_max=4.065e+01
+    [K64V256] cuda dq vs trit  max_abs=3.327e-02  max_rel=8.191e-04  ref_max=4.062e+01
+    [K64V256] cuda dk vs torch max_abs=1.123e-02  max_rel=2.745e-04  ref_max=4.092e+01
+    [K64V256] trit dk vs torch max_abs=3.231e-02  max_rel=7.896e-04  ref_max=4.092e+01
+    [K64V256] cuda dk vs trit  max_abs=3.214e-02  max_rel=7.861e-04  ref_max=4.089e+01
+    [K64V256] cuda dw vs torch max_abs=1.076e-03  max_rel=3.105e-04  ref_max=3.465e+00
+    [K64V256] trit dw vs torch max_abs=2.861e-03  max_rel=8.258e-04  ref_max=3.465e+00
+    [K64V256] cuda dw vs trit  max_abs=3.085e-03  max_rel=8.909e-04  ref_max=3.462e+00
+    [K64V256] cuda dgk vs torch max_abs=2.861e-06  max_rel=1.771e-07  ref_max=1.616e+01
+    [K64V256] trit dgk vs torch max_abs=1.907e-06  max_rel=1.181e-07  ref_max=1.616e+01
+    [K64V256] cuda dgk vs trit  max_abs=1.907e-06  max_rel=1.181e-07  ref_max=1.616e+01
+
+# T250 H3 (non-div)  grid=(16, 3)
+    [K64V256] cuda dq vs torch max_abs=1.148e-02  max_rel=3.335e-04  ref_max=3.442e+01
+    [K64V256] trit dq vs torch max_abs=2.613e-02  max_rel=7.593e-04  ref_max=3.442e+01
+    [K64V256] cuda dq vs trit  max_abs=2.849e-02  max_rel=8.283e-04  ref_max=3.439e+01
+    [K64V256] cuda dk vs torch max_abs=9.728e-03  max_rel=2.485e-04  ref_max=3.915e+01
+    [K64V256] trit dk vs torch max_abs=2.932e-02  max_rel=7.491e-04  ref_max=3.915e+01
+    [K64V256] cuda dk vs trit  max_abs=3.241e-02  max_rel=8.285e-04  ref_max=3.912e+01
+    [K64V256] cuda dw vs torch max_abs=9.823e-04  max_rel=2.889e-04  ref_max=3.401e+00
+    [K64V256] trit dw vs torch max_abs=2.575e-03  max_rel=7.573e-04  ref_max=3.401e+00
+    [K64V256] cuda dw vs trit  max_abs=3.028e-03  max_rel=8.912e-04  ref_max=3.398e+00
+    [K64V256] cuda dgk vs torch max_abs=2.384e-06  max_rel=1.750e-07  ref_max=1.362e+01
+    [K64V256] trit dgk vs torch max_abs=1.907e-06  max_rel=1.400e-07  ref_max=1.362e+01
+    [K64V256] cuda dgk vs trit  max_abs=2.861e-06  max_rel=2.100e-07  ref_max=1.362e+01
+
+#### K = 256, V = 64 ####
+
+# B8 T2048 H8  grid=(128, 64)
+    [K256V64] cuda dq vs torch max_abs=8.610e-03  max_rel=3.682e-04  ref_max=2.339e+01
+    [K256V64] trit dq vs torch max_abs=1.979e-02  max_rel=8.461e-04  ref_max=2.339e+01
+    [K256V64] cuda dq vs trit  max_abs=2.330e-02  max_rel=9.972e-04  ref_max=2.337e+01/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+
+    [K256V64] cuda dk vs torch max_abs=8.577e-03  max_rel=3.063e-04  ref_max=2.801e+01
+    [K256V64] trit dk vs torch max_abs=2.019e-02  max_rel=7.210e-04  ref_max=2.801e+01
+    [K256V64] cuda dk vs trit  max_abs=2.403e-02  max_rel=8.587e-04  ref_max=2.799e+01
+    [K256V64] cuda dw vs torch max_abs=9.098e-04  max_rel=3.887e-04  ref_max=2.341e+00
+    [K256V64] trit dw vs torch max_abs=2.039e-03  max_rel=8.714e-04  ref_max=2.341e+00
+    [K256V64] cuda dw vs trit  max_abs=2.409e-03  max_rel=1.030e-03  ref_max=2.339e+00
+    [K256V64] cuda dgk vs torch max_abs=2.384e-06  max_rel=2.213e-07  ref_max=1.077e+01
+    [K256V64] trit dgk vs torch max_abs=1.907e-06  max_rel=1.771e-07  ref_max=1.077e+01
+    [K256V64] cuda dgk vs trit  max_abs=2.623e-06  max_rel=2.435e-07  ref_max=1.077e+01
+
+# B2 T1024 H8  grid=(64, 16)
+    [K256V64] cuda dq vs torch max_abs=7.664e-03  max_rel=3.503e-04  ref_max=2.188e+01
+    [K256V64] trit dq vs torch max_abs=2.242e-02  max_rel=1.024e-03  ref_max=2.188e+01
+    [K256V64] cuda dq vs trit  max_abs=2.707e-02  max_rel=1.239e-03  ref_max=2.186e+01
+    [K256V64] cuda dk vs torch max_abs=8.802e-03  max_rel=4.024e-04  ref_max=2.188e+01
+    [K256V64] trit dk vs torch max_abs=2.092e-02  max_rel=9.563e-04  ref_max=2.188e+01
+    [K256V64] cuda dk vs trit  max_abs=2.343e-02  max_rel=1.072e-03  ref_max=2.186e+01
+    [K256V64] cuda dw vs torch max_abs=7.303e-04  max_rel=3.362e-04  ref_max=2.172e+00
+    [K256V64] trit dw vs torch max_abs=1.928e-03  max_rel=8.877e-04  ref_max=2.172e+00
+    [K256V64] cuda dw vs trit  max_abs=2.161e-03  max_rel=9.957e-04  ref_max=2.170e+00
+    [K256V64] cuda dgk vs torch max_abs=2.384e-06  max_rel=2.529e-07  ref_max=9.427e+00
+    [K256V64] trit dgk vs torch max_abs=1.431e-06  max_rel=1.517e-07  ref_max=9.427e+00
+    [K256V64] cuda dgk vs trit  max_abs=2.384e-06  max_rel=2.529e-07  ref_max=9.427e+00
+
+# T512 H4  grid=(32, 4)
+    [K256V64] cuda dq vs torch max_abs=7.193e-03  max_rel=3.702e-04  ref_max=1.943e+01
+    [K256V64] trit dq vs torch max_abs=1.601e-02  max_rel=8.239e-04  ref_max=1.943e+01
+    [K256V64] cuda dq vs trit  max_abs=1.783e-02  max_rel=9.184e-04  ref_max=1.942e+01
+    [K256V64] cuda dk vs torch max_abs=6.868e-03  max_rel=3.457e-04  ref_max=1.986e+01
+    [K256V64] trit dk vs torch max_abs=1.733e-02  max_rel=8.725e-04  ref_max=1.986e+01
+    [K256V64] cuda dk vs trit  max_abs=1.873e-02  max_rel=9.438e-04  ref_max=1.985e+01
+    [K256V64] cuda dw vs torch max_abs=6.840e-04  max_rel=3.373e-04  ref_max=2.028e+00
+    [K256V64] trit dw vs torch max_abs=1.636e-03  max_rel=8.065e-04  ref_max=2.028e+00
+    [K256V64] cuda dw vs trit  max_abs=1.837e-03  max_rel=9.063e-04  ref_max=2.026e+00
+    [K256V64] cuda dgk vs torch max_abs=1.907e-06  max_rel=1.894e-07  ref_max=1.007e+01
+    [K256V64] trit dgk vs torch max_abs=9.537e-07  max_rel=9.470e-08  ref_max=1.007e+01
+    [K256V64] cuda dgk vs trit  max_abs=1.907e-06  max_rel=1.894e-07  ref_max=1.007e+01
+
+# T250 H3 (non-div)  grid=(16, 3)
+    [K256V64] cuda dq vs torch max_abs=6.083e-03  max_rel=3.315e-04  ref_max=1.835e+01
+    [K256V64] trit dq vs torch max_abs=1.548e-02  max_rel=8.438e-04  ref_max=1.835e+01
+    [K256V64] cuda dq vs trit  max_abs=1.995e-02  max_rel=1.088e-03  ref_max=1.834e+01
+    [K256V64] cuda dk vs torch max_abs=6.422e-03  max_rel=3.404e-04  ref_max=1.886e+01
+    [K256V64] trit dk vs torch max_abs=1.534e-02  max_rel=8.135e-04  ref_max=1.886e+01
+    [K256V64] cuda dk vs trit  max_abs=1.812e-02  max_rel=9.615e-04  ref_max=1.885e+01
+    [K256V64] cuda dw vs torch max_abs=7.184e-04  max_rel=3.345e-04  ref_max=2.147e+00
+    [K256V64] trit dw vs torch max_abs=1.603e-03  max_rel=7.463e-04  ref_max=2.147e+00
+    [K256V64] cuda dw vs trit  max_abs=1.815e-03  max_rel=8.460e-04  ref_max=2.146e+00
+    [K256V64] cuda dgk vs torch max_abs=1.431e-06  max_rel=1.689e-07  ref_max=8.472e+00
+    [K256V64] trit dgk vs torch max_abs=9.537e-07  max_rel=1.126e-07  ref_max=8.472e+00
+    [K256V64] cuda dgk vs trit  max_abs=1.907e-06  max_rel=2.251e-07  ref_max=8.472e+00
+
+worst max_rel over all cases:
+     K    V field   cuda/torch  trit/torch  cuda/trit
+    64  128    dq    3.276e-04   8.826e-04  1.056e-03
+    64  128    dk    3.677e-04   8.266e-04  9.366e-04
+    64  128    dw    3.158e-04   8.107e-04  8.974e-04
+    64  128   dgk    1.628e-07   1.543e-07  1.543e-07
+   128  128    dq    3.583e-04   8.967e-04  9.851e-04
+   128  128    dk    3.281e-04   8.654e-04  9.446e-04
+   128  128    dw    3.408e-04   8.363e-04  9.804e-04
+   128  128   dgk    1.628e-07   1.335e-07  1.628e-07
+   256  128    dq    3.744e-04         n/a        n/a
+   256  128    dk    3.321e-04         n/a        n/a
+   256  128    dw    3.294e-04         n/a        n/a
+   256  128   dgk    2.224e-07         n/a        n/a
+    64  256    dq    3.533e-04   8.013e-04  9.288e-04
+    64  256    dk    2.924e-04   7.896e-04  8.828e-04
+    64  256    dw    3.105e-04   8.258e-04  9.319e-04
+    64  256   dgk    2.187e-07   1.640e-07  2.187e-07
+   256   64    dq    3.702e-04   1.024e-03  1.239e-03
+   256   64    dk    4.024e-04   9.563e-04  1.072e-03
+   256   64    dw    3.887e-04   8.877e-04  1.030e-03
+   256   64   dgk    2.529e-07   1.771e-07  2.529e-07
+  (trit n/a when K*V > 128*128: the identical-op Triton core holds the full [V,K] operand in smem (>232 KB); CUDA streams V-tiles so it still runs.)
+
+================================================================================================
+Part B: identical-op kernel-only timing -- CUDA base GEMM core vs Triton core
+================================================================================================
+  case                  K    V |  CUDA dev CUDA wall |  trit nw8 | CUDA/trit
+  B8 T2048 H8          64  128 |     290.2     292.4 |     282.9 |     1.03x
+  B2 T1024 H8          64  128 |      41.7      43.7 |      44.0 |     0.95x
+  T512 H4              64  128 |       5.8      30.0 |       4.6 |     1.26x
+  T250 H3 (non-div)    64  128 |       5.3      29.7 |       4.0 |     1.32x
+  B8 T2048 H8         128  128 |     518.0     519.9 |     551.4 |     0.94x
+  B2 T1024 H8         128  128 |      70.9      72.7 |      81.7 |     0.87x
+  T512 H4             128  128 |       9.3      29.4 |       6.8 |     1.36x
+  T250 H3 (non-div)   128  128 |       8.5      30.0 |       5.8 |     1.47x
+  B8 T2048 H8         256  128 |     981.6     983.3 |       n/a |      n/a
+  B2 T1024 H8         256  128 |     135.8     137.5 |       n/a |      n/a
+  T512 H4             256  128 |      18.8      30.0 |       n/a |      n/a
+  T250 H3 (non-div)   256  128 |      12.3      29.7 |       n/a |      n/a
+  B8 T2048 H8          64  256 |     562.7     565.4 |     638.6 |     0.88x
+  B2 T1024 H8          64  256 |      75.8      77.7 |      93.3 |     0.81x
+  T512 H4              64  256 |       9.1      30.0 |       8.1 |     1.12x
+  T250 H3 (non-div)    64  256 |       8.7      30.3 |       7.1 |     1.23x
+  B8 T2048 H8         256   64 |     634.6     635.9 |     660.8 |     0.96x
+  B2 T1024 H8         256   64 |      89.3      90.8 |      88.5 |     1.01x
+  T512 H4             256   64 |      11.8      30.1 |       6.8 |     1.74x
+  T250 H3 (non-div)   256   64 |       8.7      30.0 |       5.8 |     1.49x
+
+================================================================================================
+Part D: static cost (smem scales with KD h/dh rows x BVK V-tile)
+================================================================================================
+  K=  64 V= 128: smem = 50688 B (49.5 KB), block = 256 threads; nvt = 4 (BVK=32), grid=(NT, B*H)
+  K= 128 V= 128: smem = 87552 B (85.5 KB), block = 256 threads; nvt = 4 (BVK=32), grid=(NT, B*H)
+  K= 256 V= 128: smem = 161280 B (157.5 KB), block = 256 threads; nvt = 4 (BVK=32), grid=(NT, B*H)
+  K=  64 V= 256: smem = 50688 B (49.5 KB), block = 256 threads; nvt = 8 (BVK=32), grid=(NT, B*H)
+  K= 256 V=  64: smem = 161280 B (157.5 KB), block = 256 threads; nvt = 2 (BVK=32), grid=(NT, B*H)
+
+DONE

@@ -1,0 +1,160 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+cross: base GEMM core under -DB2M_TMA (TMA staging), K in {64,128,256}
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=64 -DB2M_VD=128 -DB2M_TMA -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_tma_64_128.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=128 -DB2M_VD=128 -DB2M_TMA -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_tma_128_128.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=256 -DB2M_VD=128 -DB2M_TMA -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_tma_256_128.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=64 -DB2M_VD=256 -DB2M_TMA -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_tma_64_256.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=256 -DB2M_VD=64 -DB2M_TMA -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_tma_256_64.so
+
+#### K = 64, V = 128 (TMA) ####
+
+# B8 T2048 H8
+    tma[K64V128] dq vs torch max_abs=9.665e-03  max_rel=3.097e-04  ref_max=3.121e+01
+    tma[K64V128] dk vs torch max_abs=1.134e-02  max_rel=3.677e-04  ref_max=3.084e+01
+    tma[K64V128] dw vs torch max_abs=1.034e-03  max_rel=3.158e-04  ref_max=3.275e+00
+    tma[K64V128] dgk vs torch max_abs=1.907e-06  max_rel=1.341e-07  ref_max=1.422e+01
+
+# B2 T1024 H8
+    tma[K64V128] dq vs torch max_abs=8.686e-03  max_rel=3.027e-04  ref_max=2.869e+01
+    tma[K64V128] dk vs torch max_abs=8.956e-03  max_rel=2.863e-04  ref_max=3.128e+01
+    tma[K64V128] dw vs torch max_abs=8.580e-04  max_rel=3.000e-04  ref_max=2.861e+00
+    tma[K64V128] dgk vs torch max_abs=1.907e-06  max_rel=1.543e-07  ref_max=1.236e+01
+
+# T512 H4
+    tma[K64V128] dq vs torch max_abs=8.391e-03  max_rel=3.276e-04  ref_max=2.561e+01
+    tma[K64V128] dk vs torch max_abs=8.512e-03  max_rel=3.341e-04  ref_max=2.548e+01
+    tma[K64V128] dw vs torch max_abs=7.449e-04  max_rel=2.656e-04  ref_max=2.804e+00
+    tma[K64V128] dgk vs torch max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+
+# T250 H3 (non-div)
+    tma[K64V128] dq vs torch max_abs=7.896e-03  max_rel=2.944e-04  ref_max=2.682e+01
+    tma[K64V128] dk vs torch max_abs=7.614e-03  max_rel=2.835e-04  ref_max=2.686e+01
+    tma[K64V128] dw vs torch max_abs=7.896e-04  max_rel=2.843e-04  ref_max=2.777e+00
+    tma[K64V128] dgk vs torch max_abs=1.192e-06  max_rel=1.114e-07  ref_max=1.070e+01
+
+#### K = 128, V = 128 (TMA) ####
+
+# B8 T2048 H8
+    tma[K128V128] dq vs torch max_abs=1.059e-02  max_rel=3.178e-04  ref_max=3.333e+01
+    tma[K128V128] dk vs torch max_abs=1.014e-02  max_rel=2.608e-04  ref_max=3.888e+01
+    tma[K128V128] dw vs torch max_abs=1.020e-03  max_rel=3.408e-04  ref_max=2.993e+00
+    tma[K128V128] dgk vs torch max_abs=1.907e-06  max_rel=1.311e-07  ref_max=1.455e+01
+
+# B2 T1024 H8
+    tma[K128V128] dq vs torch max_abs=9.860e-03  max_rel=3.292e-04  ref_max=2.995e+01
+    tma[K128V128] dk vs torch max_abs=9.924e-03  max_rel=3.281e-04  ref_max=3.025e+01
+    tma[K128V128] dw vs torch max_abs=8.987e-04  max_rel=3.025e-04  ref_max=2.971e+00
+    tma[K128V128] dgk vs torch max_abs=1.907e-06  max_rel=1.335e-07  ref_max=1.429e+01
+
+# T512 H4
+    tma[K128V128] dq vs torch max_abs=8.778e-03  max_rel=3.225e-04  ref_max=2.722e+01
+    tma[K128V128] dk vs torch max_abs=8.017e-03  max_rel=3.092e-04  ref_max=2.592e+01
+    tma[K128V128] dw vs torch max_abs=8.188e-04  max_rel=2.940e-04  ref_max=2.785e+00
+    tma[K128V128] dgk vs torch max_abs=1.907e-06  max_rel=1.480e-07  ref_max=1.288e+01
+
+# T250 H3 (non-div)
+    tma[K128V128] dq vs torch max_abs=8.778e-03  max_rel=3.583e-04  ref_max=2.449e+01
+    tma[K128V128] dk vs torch max_abs=8.287e-03  max_rel=2.903e-04  ref_max=2.855e+01
+    tma[K128V128] dw vs torch max_abs=7.644e-04  max_rel=2.941e-04  ref_max=2.599e+00
+    tma[K128V128] dgk vs torch max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+
+#### K = 256, V = 128 (TMA) ####
+
+# B8 T2048 H8
+    tma[K256V128] dq vs torch max_abs=1.151e-02  max_rel=3.094e-04  ref_max=3.721e+01
+    tma[K256V128] dk vs torch max_abs=1.026e-02  max_rel=3.193e-04  ref_max=3.214e+01
+    tma[K256V128] dw vs torch max_abs=1.095e-03  max_rel=3.294e-04  ref_max=3.323e+00
+    tma[K256V128] dgk vs torch max_abs=2.861e-06  max_rel=2.008e-07  ref_max=1.425e+01
+
+# B2 T1024 H8
+    tma[K256V128] dq vs torch max_abs=1.011e-02  max_rel=3.302e-04  ref_max=3.063e+01
+    tma[K256V128] dk vs torch max_abs=9.485e-03  max_rel=3.321e-04  ref_max=2.856e+01
+    tma[K256V128] dw vs torch max_abs=9.624e-04  max_rel=3.081e-04  ref_max=3.124e+00
+    tma[K256V128] dgk vs torch max_abs=2.861e-06  max_rel=2.224e-07  ref_max=1.287e+01
+
+# T512 H4
+    tma[K256V128] dq vs torch max_abs=8.905e-03  max_rel=3.339e-04  ref_max=2.667e+01
+    tma[K256V128] dk vs torch max_abs=9.432e-03  max_rel=3.268e-04  ref_max=2.887e+01
+    tma[K256V128] dw vs torch max_abs=8.438e-04  max_rel=3.208e-04  ref_max=2.630e+00
+    tma[K256V128] dgk vs torch max_abs=2.384e-06  max_rel=1.915e-07  ref_max=1.245e+01
+
+# T250 H3 (non-div)
+    tma[K256V128] dq vs torch max_abs=9.621e-03  max_rel=3.744e-04  ref_max=2.570e+01
+    tma[K256V128] dk vs torch max_abs=9.238e-03  max_rel=3.263e-04  ref_max=2.831e+01
+    tma[K256V128] dw vs torch max_abs=8.987e-04  max_rel=3.286e-04  ref_max=2.735e+00
+    tma[K256V128] dgk vs torch max_abs=1.907e-06  max_rel=1.480e-07  ref_max=1.288e+01
+
+#### K = 64, V = 256 (TMA) ####
+
+# B8 T2048 H8
+    tma[K64V256] dq vs torch max_abs=1.560e-02  max_rel=3.533e-04  ref_max=4.416e+01
+    tma[K64V256] dk vs torch max_abs=1.295e-02  max_rel=2.924e-04  ref_max=4.430e+01
+    tma[K64V256] dw vs torch max_abs=1.405e-03  max_rel=3.072e-04  ref_max=4.576e+00
+    tma[K64V256] dgk vs torch max_abs=3.815e-06  max_rel=2.187e-07  ref_max=1.745e+01
+
+# B2 T1024 H8
+    tma[K64V256] dq vs torch max_abs=1.291e-02  max_rel=3.014e-04  ref_max=4.283e+01
+    tma[K64V256] dk vs torch max_abs=1.205e-02  max_rel=2.888e-04  ref_max=4.171e+01
+    tma[K64V256] dw vs torch max_abs=1.238e-03  max_rel=3.057e-04  ref_max=4.050e+00
+    tma[K64V256] dgk vs torch max_abs=2.861e-06  max_rel=1.633e-07  ref_max=1.753e+01
+
+# T512 H4
+    tma[K64V256] dq vs torch max_abs=1.129e-02  max_rel=2.777e-04  ref_max=4.065e+01
+    tma[K64V256] dk vs torch max_abs=1.123e-02  max_rel=2.745e-04  ref_max=4.092e+01
+    tma[K64V256] dw vs torch max_abs=1.076e-03  max_rel=3.105e-04  ref_max=3.465e+00
+    tma[K64V256] dgk vs torch max_abs=2.861e-06  max_rel=1.771e-07  ref_max=1.616e+01
+
+# T250 H3 (non-div)
+    tma[K64V256] dq vs torch max_abs=1.148e-02  max_rel=3.335e-04  ref_max=3.442e+01
+    tma[K64V256] dk vs torch max_abs=9.728e-03  max_rel=2.485e-04  ref_max=3.915e+01
+    tma[K64V256] dw vs torch max_abs=9.823e-04  max_rel=2.889e-04  ref_max=3.401e+00
+    tma[K64V256] dgk vs torch max_abs=2.384e-06  max_rel=1.750e-07  ref_max=1.362e+01
+
+#### K = 256, V = 64 (TMA) ####
+
+# B8 T2048 H8
+    tma[K256V64] dq vs torch max_abs=8.610e-03  max_rel=3.682e-04  ref_max=2.339e+01
+    tma[K256V64] dk vs torch max_abs=8.577e-03  max_rel=3.063e-04  ref_max=2.801e+01
+    tma[K256V64] dw vs torch max_abs=9.098e-04  max_rel=3.887e-04  ref_max=2.341e+00
+    tma[K256V64] dgk vs torch max_abs=2.384e-06  max_rel=2.213e-07  ref_max=1.077e+01
+
+# B2 T1024 H8
+    tma[K256V64] dq vs torch max_abs=7.664e-03  max_rel=3.503e-04  ref_max=2.188e+01
+    tma[K256V64] dk vs torch max_abs=8.802e-03  max_rel=4.024e-04  ref_max=2.188e+01
+    tma[K256V64] dw vs torch max_abs=7.303e-04  max_rel=3.362e-04  ref_max=2.172e+00
+    tma[K256V64] dgk vs torch max_abs=2.384e-06  max_rel=2.529e-07  ref_max=9.427e+00
+
+# T512 H4
+    tma[K256V64] dq vs torch max_abs=7.193e-03  max_rel=3.702e-04  ref_max=1.943e+01
+    tma[K256V64] dk vs torch max_abs=6.868e-03  max_rel=3.457e-04  ref_max=1.986e+01
+    tma[K256V64] dw vs torch max_abs=6.840e-04  max_rel=3.373e-04  ref_max=2.028e+00
+    tma[K256V64] dgk vs torch max_abs=1.907e-06  max_rel=1.894e-07  ref_max=1.007e+01
+
+# T250 H3 (non-div)
+    tma[K256V64] dq vs torch max_abs=6.083e-03  max_rel=3.315e-04  ref_max=1.835e+01
+    tma[K256V64] dk vs torch max_abs=6.422e-03  max_rel=3.404e-04  ref_max=1.886e+01
+    tma[K256V64] dw vs torch max_abs=7.184e-04  max_rel=3.345e-04  ref_max=2.147e+00
+    tma[K256V64] dgk vs torch max_abs=1.431e-06  max_rel=1.689e-07  ref_max=8.472e+00
+
+worst max_rel (TMA vs torch fp32):
+  K=  64 V= 128: dq 3.276e-04  dk 3.677e-04  dw 3.158e-04  dgk 1.628e-07
+  K= 128 V= 128: dq 3.583e-04  dk 3.281e-04  dw 3.408e-04  dgk 1.628e-07
+  K= 256 V= 128: dq 3.744e-04  dk 3.321e-04  dw 3.294e-04  dgk 2.224e-07
+  K=  64 V= 256: dq 3.533e-04  dk 2.924e-04  dw 3.105e-04  dgk 2.187e-07
+  K= 256 V=  64: dq 3.702e-04  dk 4.024e-04  dw 3.887e-04  dgk 2.529e-07
+
+============================================================================================
+Part B: TMA vs cp.async staging -- bit-identity of the K!=128 base GEMM core
+============================================================================================
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=64 -DB2M_VD=128 -DB2M_TMA -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_64_128.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=128 -DB2M_VD=128 -DB2M_TMA -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_128_128.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=256 -DB2M_VD=128 -DB2M_TMA -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_256_128.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=64 -DB2M_VD=256 -DB2M_TMA -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_64_256.so
+build: nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared -DB2M_KD=256 -DB2M_VD=64 -DB2M_TMA -lcuda ~/proj/tech_record/code/flash-kda/harness/b2_mma_probe.cu -o /tmp/b2k128_256_64.so
+  max |TMA - cp.async| over all (K,V,case):
+    dq    0.000e+00
+    dk    0.000e+00
+    dw    0.000e+00
+    dgk   0.000e+00
+
+DONE

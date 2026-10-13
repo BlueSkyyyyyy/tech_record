@@ -1,5 +1,5 @@
 ---
-title: "KDA 前反向算子实现解析（七）：前向性能/ncu 剖析 与 反向 CUDA 工程化（B1 TMA 流水、B2 六段 K2 形状核、DA/store/stage 收尾）—— FlashKDA vs FLA chunk_kda"
+title: "KDA 前反向算子实现解析（七）：前向性能/ncu 剖析 与 反向 CUDA 工程化（B1 TMA 流水、B2 六段 K2 形状核、DA/store/stage 收尾、K≠128 base GEMM core 参数化）—— FlashKDA vs FLA chunk_kda"
 date: 2026-10-12T22:53:00+08:00
 draft: false
 weight: 8

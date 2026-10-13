@@ -486,9 +486,19 @@ constexpr int OPS = BVP;
 #endif
 
 static_assert(VD % BVK == 0, "BVK must divide V");
-// P7-81: only the contraction dim `V` is scanned (K != V).  `K` stays 128 because the 16-wide
-// warp lane layouts are baked into the `dgk` column reduction (`l & 15`) and the gate chain.
-static_assert(KD == 128, "P7-81: only V is parameterized; K=128 is baked into the 16-wide warp reductions");
+// P7-88: the **base GEMM core** (`dq/dk/dw/dgk`) is now generic in K too, not just V.  The
+// output-N warp split is `BW = KD/NW`; the number of mma `n=8` tiles per warp is `NBW = BW/8`.
+// `K` only ever appears as the h/dh row count (= output N), so the contraction is unchanged.
+// The `dgk` column reduction is made generic (lane `l` owns column `l % BW`, V-subclass
+// `l / BW`), which needs `BW` a power of two `<= 32` -> `KD in {64,128,256}` at NW=8.
+// The six non-GEMM segments still bake `BW == 16` (their own `nt < 2` accumulator loops and
+// the 16-wide gate/`dgk` reductions), so require `KD == 128` whenever any of them is on.
+static_assert(BW == 8 || BW == 16 || BW == 32,
+              "P7-88: only K in {64,128,256} (BW in {8,16,32}) is supported");
+constexpr int NBW = BW / 8;    // mma `n=8` tiles per warp over the output-K axis
+#if (B2M_OUT || B2M_DKGB || B2M_DA || B2M_DB || B2M_SAND || B2M_GATE || B2M_INTRA || B2M_QKG || B2M_HDW) && B2M_KD != 128
+#error "P7-88: the six non-GEMM segments still bake BW=16; only the base GEMM core supports K!=128"
+#endif
 // P7-82: the six non-GEMM segments are now generic in K != V as well (the V-axis ones use
 // `BVW = VD/NW`, the K-axis ones keep `BW = KD/NW`).  The single remaining K/V coupling is the
 // **global-`dw` DKGB staging** (`-DB2M_DKGB` without `-DB2M_HDW`): its `dwm` operand is K-tiled
@@ -979,9 +989,9 @@ b2mma_kernel(
     const int l = threadIdx.x & 31, warp = threadIdx.x >> 5;
     const int g = l >> 2, t = l & 3;   // groupID, threadID-in-group
 
-    float accq[2][4], acck[2][4], accw[2][4];
+    float accq[NBW][4], acck[NBW][4], accw[NBW][4];
     #pragma unroll
-    for (int nt = 0; nt < 2; ++nt)
+    for (int nt = 0; nt < NBW; ++nt)
         #pragma unroll
         for (int x = 0; x < 4; ++x) { accq[nt][x] = 0.f; acck[nt][x] = 0.f; accw[nt][x] = 0.f; }
     float gpart = 0.f;
@@ -1135,7 +1145,7 @@ b2mma_kernel(
             aw[2] = rd2(pdv, g    , kc + 2 * t + 8, BT);
             aw[3] = rd2(pdv, g + 8, kc + 2 * t + 8, BT);
             #pragma unroll
-            for (int nt = 0; nt < 2; ++nt) {
+            for (int nt = 0; nt < NBW; ++nt) {
                 const int krow = warp * BW + nt * 8 + g;   // output column = k = n index
                 // B (col-major k16 x n8): b0={B[2t][g],B[2t+1][g]}, b1={B[2t+8][g],B[2t+9][g]};
                 // with h[n][k] the B[k][n]=h[n][k] element is h[krow][kc+2t..].
@@ -1168,7 +1178,7 @@ b2mma_kernel(
             aw[2] = to_tf32(rd((const float*)st->dv, g    , kc + t + 4, BT));
             aw[3] = to_tf32(rd((const float*)st->dv, g + 8, kc + t + 4, BT));
             #pragma unroll
-            for (int nt = 0; nt < 2; ++nt) {
+            for (int nt = 0; nt < NBW; ++nt) {
                 const int krow = warp * BW + nt * 8 + g;   // output column = k = n index
                 uint32_t bh[2], bd[2];
                 bh[0] = to_tf32(rd((const float*)st->h , krow, kc + t, KD));
@@ -1187,6 +1197,7 @@ b2mma_kernel(
         // BVP=36 -> bank = (4*kcol + vv) & 31; 16 consecutive kcols therefore alias as
         // (kcol, kcol+8).  Use only 8 kcols per instruction: c = l&7 (kcol low bits),
         // s = l>>3 (the vv subclass), so banks = 4*c + s cover 0..31 exactly.
+        static_assert(BW == 16, "P7-88: B2M_DGKCF is written for BW=16");
         {
             const int c = l & 7, s = l >> 3;
             #pragma unroll
@@ -1199,11 +1210,14 @@ b2mma_kernel(
             }
         }
   #else
-        // baseline dgk column reduction: lane l handles column warp*BW + (l&15), split v by l>>4
+        // P7-88: generic `dgk` column reduction -- lane `l` owns column `c = l % BW` of this warp
+        // (split the V contraction across the `32/BW` subclasses `s = l / BW`).  At BW=16 this is
+        // exactly the old baseline (`l & 15` / `l >> 4`, step 2).
         {
-            const int kcol = warp * BW + (l & 15);
+            const int c = l % BW, s = l / BW;
+            const int kcol = warp * BW + c;
             float p = 0.f;
-            for (int vv = (l >> 4); vv < BVK; vv += 2)
+            for (int vv = s; vv < BVK; vv += 32 / BW)
                 p += rd((const float*)st->h, kcol, vv, KD) * rd((const float*)st->dh, kcol, vv, KD);
             gpart += p;
         }
@@ -1332,7 +1346,7 @@ b2mma_kernel(
     // ---- store ----
     const int t0 = i_t * BT;
     #pragma unroll
-    for (int nt = 0; nt < 2; ++nt) {
+    for (int nt = 0; nt < NBW; ++nt) {
         const int col = warp * BW + nt * 8 + 2 * t;
         const int tr0 = t0 + g, tr1 = t0 + g + 8;
         const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
@@ -1389,8 +1403,12 @@ b2mma_kernel(
         dgk[base + 8] = gpart1;
     }
   #else
-    gpart += __shfl_xor_sync(0xffffffffu, gpart, 16);
-    if (l < 16) {
+    // P7-88: reduce the `32/BW` V-subclasses that share each column (xor over the subclass bits);
+    // lane `l < BW` then holds the finished column `warp*BW + l`.  At BW=16 this is the old `xor 16`.
+    #pragma unroll
+    for (int sh = BW; sh < 32; sh <<= 1)
+        gpart += __shfl_xor_sync(0xffffffffu, gpart, sh);
+    if (l < BW) {
         const int kcol = warp * BW + l;
         dgk[((int64_t)(n * NT + i_t) * H + hh) * KD + kcol] = gpart;
     }
