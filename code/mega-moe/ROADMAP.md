@@ -2535,7 +2535,32 @@
       每条负用例打印真实 `DGException` 的 `file:line`（`:110/115/117/119/124/126/128/129`、
       `smxx_layout.hpp:293/299/312/314`），并坐实 C5「预分配更大 buffer 通过」/ D2「naive reshape 后
       post-permute stride `(1,4,20)` 被拒」。配套博客 `content/posts/mega-moe-91-sf-contract-cross-api`
-      （索引页新增第 91 篇）。
+       （索引页新增第 91 篇）。
+
+### P82 增量（opt-in，补齐所有 kernel 共用的「共享内存布局结构层」）
+
+- [x] **P82-1** **DeepGEMM 的共享内存布局结构层**（`deep_gemm/include/deep_gemm/layout/gemm.cuh`；
+      `.../layout/mqa_logits.cuh`；消费方 `impls/sm100_{bf16,fp8_fp4}_gemm_1d1d.cuh` /
+      `impls/sm100_mqa_logits.cuh`；host `csrc/jit_kernels/heuristics/sm100.hpp:209-252` /
+      `csrc/jit_kernels/impls/sm100_mqa_logits.hpp:119-194/249-268`）。第 44 篇补了设备端数学地板、
+      第 67 篇补了 TMA 拷贝层、第 56 篇补了 128 字节描述符来源，但**每个 kernel 开头
+      `extern __shared__ ... smem_buffer[]` 之后共享内存怎么切、host 怎么算 `num_smem_bytes`**
+      一直没被单独讲过。本篇补上 `layout/` 里**最后两个没被系统拆过的文件**。两个非平凡点：
+      ① **精确镜像**（MQA）——host `MQALogitsConfig::smem_size()` 用 `add_region` 循环逐段复刻
+      `MQALogitsSharedStorage` 布局，JIT 源码 `:254-256` 放 `static_assert(sizeof(...) == smem_size)`
+      把二者钉死，故 `sizeof == num_smem_bytes`；② **保守预算**（稠密 GEMM）——`get_pipeline_config`
+      的 `smem_barriers=kNumMaxStages*8*3+2*8*3+8=824` 一律按 32 级预留、`store_block_n` 由
+      `swizzle_cd_mode` 反推、`num_stages` 用 `smem_capacity` 反算，故不必先知道 stage 数就能给上界；
+      `SM100BF16GemmSharedStorage` 的 `reserved_barriers`（`gemm.cuh:31-32` 注释）正是把 BF16 的每
+      stage barrier 数从 2 补到 3、以对齐 block-scaled 布局。结构体只含 constexpr/`alignas`/cutlass
+      mbarrier、**不含 UMMA/TMA 设备指令**，故 H100(sm90) 直接 include 真实头文件逐字段核验。
+      H100 实测 `src/smem_layout.cu` + `harness/exp_smem_layout.{sh,out.txt}`：**42 PASS / 0 FAIL**——
+      A) 8 组 MQA 配置 `sizeof == host 镜像`（`alignof` 恰为 `kSwizzleAlignment` ∈ {256,512,1024}、
+      `offsetof` 全落对齐、派生常量一致）；B) 8 组 GEMM 配置 `used = offsetof(tmem_ptr)+4 <= host`，
+      且**`slack = 824 − 实际 barrier 字节` 精确**（BF16 S8 592 / FP8 S8 584 / FP4 S4 680），
+      `sizeof − used` 的尾部补齐最多 1023B 不占 smem，CD/A/B 1024 对齐、SF stage 字节 == host
+      `sf_block_m*block_k/32`；C) BF16 与 FP8FP4 每 stage barrier 数都是 3、总字节 232 vs 240 均 ≤ 824。
+      配套博客 `content/posts/mega-moe-92-smem-layout-struct`（索引页新增第 92 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2562,8 +2587,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P81 各增量完成（P15-1…P41-1、P42-1…P81-1）。**
-  本轮 P81-1：新建 `docs/91-sf-contract-cross-api.md`（+`src/sf_contract_conformance.cu`、
+- 当前进度：**P0~P14 全部完成；P15~P82 各增量完成（P15-1…P41-1、P42-1…P82-1）。**
+  本轮 P82-1：新建 `docs/92-smem-layout.md`（+`src/smem_layout.cu`、
+  `harness/exp_smem_layout.{sh,out.txt}`）——补齐所有 SM100 kernel 共用的**共享内存布局结构层**：
+  `layout/gemm.cuh`（`SM100BF16GemmSharedStorage` / `SM100FP8FP4GemmSharedStorage`）与
+  `layout/mqa_logits.cuh`（`MQALogitsSharedStorage`），即 `layout/` 里最后两个没被系统拆过的文件。
+  **两条策略**：① MQA **精确镜像**——host `MQALogitsConfig::smem_size()`（`sm100_mqa_logits.hpp:168-194`）
+  逐段复刻结构体，JIT 源码 `static_assert(sizeof(...) == smem_size)` 钉死，故 `sizeof == num_smem_bytes`；
+  ② 稠密 GEMM **保守预算**——`get_pipeline_config`（`heuristics/sm100.hpp:209-252`）barrier 恒按
+  `kNumMaxStages=32` 预留（824B）、`store_block_n` 由 `swizzle_cd_mode` 反推。`reserved_barriers`
+  把 BF16 每 stage barrier 数从 2 补到 3（对齐 block-scaled 布局）。结构体纯 host 可编译，H100 直接
+  include 真实头文件：**42 PASS / 0 FAIL**（8 组 MQA `sizeof==镜像`、8 组 GEMM `used<=host` 且
+  `slack==824−barrier` 精确、对齐/SF stage 全对）。索引页新增第 92 篇。
+  上一轮 P81-1：新建 `docs/91-sf-contract-cross-api.md`（+`src/sf_contract_conformance.cu`、
   `harness/exp_sf_contract_conformance.{sh,out.txt}`）——以 DeepGEMM 官方 SF 契约
   `docs/scaling-factor-format.md` 为准，核验 host 契约代码：两条路径（自动变换 vs 预变换只校验）、
   §3 预变换 int32 stride 契约（MN-major + TMA 对齐）、§5.2 K-grouped 预打包（仅 gran_k=32、下界 `>=`）、
@@ -3495,7 +3531,12 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P81 已完成（最新 **P81-1 官方 SF 契约的代码对照与 H100 一致性核验**：
+- **下一步**：P0~P82 已完成（最新 **P82-1 DeepGEMM 的共享内存布局结构层**：
+  `layout/gemm.cuh` + `layout/mqa_logits.cuh`——`SharedStorage` 用「成员顺序 + `alignas`」把共享内存
+  布局变成类型属性，host 两条策略（MQA 精确镜像 + JIT `static_assert` / 稠密 GEMM 保守预算 824B）；
+  H100 直接 include 真实头文件逐字段核验 **42 PASS / 0 FAIL**，`used<=host` 且 `slack==824−barrier`
+  精确；`reserved_barriers` 让 BF16 每 stage barrier 数对齐 block-scaled 布局；详见上）。
+  上一轮 P81-1：P0~P81 已完成（最新 **P81-1 官方 SF 契约的代码对照与 H100 一致性核验**：
   以 `docs/scaling-factor-format.md` 为准核验 host 契约代码——两条路径（自动变换 vs 预变换只校验）、
   §3 int32 预变换 stride 契约、§5.2 K-grouped 预打包（仅 gran_k=32、下界 `>=`）、§6.2 einsum
   「按 post-permute 坐标变换再换回」、§6.3 Mega MoE 四条更硬要求；`check_sf_layout` /
