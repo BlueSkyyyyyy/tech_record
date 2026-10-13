@@ -491,14 +491,14 @@ static_assert(VD % BVK == 0, "BVK must divide V");
 // `K` only ever appears as the h/dh row count (= output N), so the contraction is unchanged.
 // The `dgk` column reduction is made generic (lane `l` owns column `l % BW`, V-subclass
 // `l / BW`), which needs `BW` a power of two `<= 32` -> `KD in {64,128,256}` at NW=8.
-// The six non-GEMM segments still bake `BW == 16` (their own `nt < 2` accumulator loops and
-// the 16-wide gate/`dgk` reductions), so require `KD == 128` whenever any of them is on.
+// P7-90: the six non-GEMM segments are now generic in `K` too.  Every K-axis accumulator
+// (`acc3`, the gate/`intra` `idq/idk/idg`, the DKGB store, the `swall` handoff) previously
+// hard-baked `nt < 2` (BW=16); each is `nt < NBW` now, sized `[NBW][4]`.  The gate/`dgk`
+// reductions were already BW-generic (P7-88); the remaining BW==16 bake is the diagnostic
+// `B2M_DGKCF` path only (its own `static_assert`).
 static_assert(BW == 8 || BW == 16 || BW == 32,
               "P7-88: only K in {64,128,256} (BW in {8,16,32}) is supported");
 constexpr int NBW = BW / 8;    // mma `n=8` tiles per warp over the output-K axis
-#if (B2M_OUT || B2M_DKGB || B2M_DA || B2M_DB || B2M_SAND || B2M_GATE || B2M_INTRA || B2M_QKG || B2M_HDW) && B2M_KD != 128
-#error "P7-88: the six non-GEMM segments still bake BW=16; only the base GEMM core supports K!=128"
-#endif
 // P7-82: the six non-GEMM segments are now generic in K != V as well (the V-axis ones use
 // `BVW = VD/NW`, the K-axis ones keep `BW = KD/NW`).  The single remaining K/V coupling is the
 // **global-`dw` DKGB staging** (`-DB2M_DKGB` without `-DB2M_HDW`): its `dwm` operand is K-tiled
@@ -999,7 +999,7 @@ b2mma_kernel(
 #if B2M_INTRA
     // P7-63: folded B3 `intra` diagonal contributions (same mma-fragment layout as the gate's
     // final `dq/dk/dg`), produced after SAND and merged into the GATE/DB stores below.
-    float idq[2][4], idk[2][4], idg[2][4];
+    float idq[NBW][4], idk[NBW][4], idg[NBW][4];
 #endif
 #if B2M_OUT
     float acc2[NBV][4];   // dvb[o_A, v] output tile (m16 x NBV*n8), warp-private V columns
@@ -1009,9 +1009,9 @@ b2mma_kernel(
         for (int x = 0; x < 4; ++x) acc2[nt][x] = 0.f;
 #endif
 #if B2M_DKGB
-    float acc3[2][4];     // dkgb[o_A, k] output tile (m16 x 2*n8), warp-private k columns
+    float acc3[NBW][4];   // dkgb[o_A, k] output tile (m16 x NBW*n8), warp-private k columns
     #pragma unroll
-    for (int nt = 0; nt < 2; ++nt)
+    for (int nt = 0; nt < NBW; ++nt)
         #pragma unroll
         for (int x = 0; x < 4; ++x) acc3[nt][x] = 0.f;
 #endif
@@ -1271,7 +1271,7 @@ b2mma_kernel(
                     const float a11 = (i_t * BT + ot1) < T ? A4[a_base + (int64_t)ot1 * (H * BT) + g + 8] : 0.f;
                     const uint32_t af[4] = {to_tf32(a00), to_tf32(a10), to_tf32(a01), to_tf32(a11)};
                     #pragma unroll
-                    for (int nt = 0; nt < 2; ++nt) {
+                    for (int nt = 0; nt < NBW; ++nt) {
                         const int lc = local0 + nt * 8 + g;
                         uint32_t bf[2];
                         bf[0] = to_tf32(-rds(st->dwm, ot0, lc, BT));
@@ -1440,7 +1440,7 @@ b2mma_kernel(
     // contract over o_t (warp `w` owns k columns [w*BW,w*BW+BW), i.e. its own `swall` slice).
     {
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
+        for (int nt = 0; nt < NBW; ++nt) {
             const int col = nt * 8 + 2 * t;
             sh->swall[warp][g][col]         = accw[nt][0];
             sh->swall[warp][g][col + 1]     = accw[nt][1];
@@ -1458,7 +1458,7 @@ b2mma_kernel(
             const float a11 = (i_t * BT + ot1) < T ? A4[a_base + (int64_t)ot1 * (H * BT) + g + 8] : 0.f;
             const uint32_t af[4] = {to_tf32(a00), to_tf32(a10), to_tf32(a01), to_tf32(a11)};
             #pragma unroll
-            for (int nt = 0; nt < 2; ++nt) {
+            for (int nt = 0; nt < NBW; ++nt) {
                 const int lc = nt * 8 + g;   // local k column within this warp's slice
                 uint32_t bf[2];
                 bf[0] = to_tf32(-sh->swall[warp][ot0][lc]);
@@ -1471,7 +1471,7 @@ b2mma_kernel(
 #if B2M_DKGB && !B2M_OFF_DKGB
     // ---- store `dkgb` = A @ (-dw) (row = o_A token axis, col = output k) ----
     #pragma unroll
-    for (int nt = 0; nt < 2; ++nt) {
+    for (int nt = 0; nt < NBW; ++nt) {
         const int col = warp * BW + nt * 8 + 2 * t;
         const int tr0 = t0 + g, tr1 = t0 + g + 8;
         const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * KD + col;
@@ -1489,7 +1489,7 @@ b2mma_kernel(
         // Mirror this warp's `dw` (=accw, mma-fragment layout: rows g/g+8, cols 2t/2t+1) into
         // `swall[warp]` so any lane can read it in row-major order.
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
+        for (int nt = 0; nt < NBW; ++nt) {
             const int col = nt * 8 + 2 * t;
             sh->swall[warp][g][col]         = accw[nt][0];
             sh->swall[warp][g][col + 1]     = accw[nt][1];
@@ -1629,9 +1629,9 @@ b2mma_kernel(
     }
     __syncthreads();
     {
-        float idt[2][4];
+        float idt[NBW][4];
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt)
+        for (int nt = 0; nt < NBW; ++nt)
             #pragma unroll
             for (int i = 0; i < 4; ++i) { idq[nt][i] = 0.f; idk[nt][i] = 0.f; idt[nt][i] = 0.f; }
         // in-kernel sandwiched `dAkk` = masked `-daB`
@@ -1650,7 +1650,7 @@ b2mma_kernel(
             uint32_t sk_[4] = {to_tf32(SAKK(j0, g)),       to_tf32(SAKK(j0, g + 8)),
                                to_tf32(SAKK(j1, g)),       to_tf32(SAKK(j1, g + 8))};
             #pragma unroll
-            for (int nt = 0; nt < 2; ++nt) {
+            for (int nt = 0; nt < NBW; ++nt) {
                 const int col = warp * BW + nt * 8 + g;
                 const float kg0 = sh->sik[j0][col] * exp2f(-sh->sig[j0][col]);
                 const float kg1 = sh->sik[j1][col] * exp2f(-sh->sig[j1][col]);
@@ -1668,9 +1668,9 @@ b2mma_kernel(
             }
         }
         // gating (rows g/g+8, cols nt*8+2t+(i&1)); `dkpre` saved for `db`
-        float dkpre[2][4];
+        float dkpre[NBW][4];
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
+        for (int nt = 0; nt < NBW; ++nt) {
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 const int rowrel = (i < 2) ? g : g + 8;
@@ -1684,7 +1684,7 @@ b2mma_kernel(
             }
         }
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
+        for (int nt = 0; nt < NBW; ++nt) {
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 const int rowrel = (i < 2) ? g : g + 8;
@@ -1697,7 +1697,7 @@ b2mma_kernel(
         // db partial: sum_k dkpre * k over this warp's k columns, then cross-warp
         float pr0 = 0.f, pr1 = 0.f;
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
+        for (int nt = 0; nt < NBW; ++nt) {
             #pragma unroll
             for (int i = 0; i < 4; ++i) {
                 const int rowrel = (i < 2) ? g : g + 8;
@@ -1724,11 +1724,11 @@ b2mma_kernel(
 #if !B2M_QKG
         const int64_t gl_base = ((int64_t)(n * T + last) * H + hh) * KD;
 #endif
-        float dgv[2][4];
-        float dqgv[2][4], dkgv[2][4];
+        float dgv[NBW][4];
+        float dqgv[NBW][4], dkgv[NBW][4];
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
-            const int cl = nt * 8 + 2 * t;                // column within the warp's owned 16
+        for (int nt = 0; nt < NBW; ++nt) {
+            const int cl = nt * 8 + 2 * t;                // column within the warp's owned BW
             const int c0 = warp * BW + cl, c1 = c0 + 1;
 #if B2M_QKG
             const float gl0 = sh->sgb[lastrow][c0], gl1 = sh->sgb[lastrow][c1];
@@ -1806,7 +1806,7 @@ b2mma_kernel(
         }
         __syncwarp();
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
+        for (int nt = 0; nt < NBW; ++nt) {
             const int cl = nt * 8 + 2 * t;
             const int c0 = warp * BW + cl, c1 = c0 + 1;
             const float dl0 = sh->sdgkt[c0], dl1 = sh->sdgkt[c1];
@@ -1847,7 +1847,7 @@ b2mma_kernel(
         // K-axis -- so with K != V they have different per-warp widths (`BVW` vs `BW`).  At K==V
         // (NBV==2) the NBV-major loop below reproduces the original interleave acc2/acc3/acc2/acc3
         // exactly, so the reduction is bit-identical to the pre-P7-82 kernel.
-        constexpr int NM = NBV > 2 ? NBV : 2;
+        constexpr int NM = NBV > NBW ? NBV : NBW;
         #pragma unroll
         for (int nt = 0; nt < NM; ++nt) {
             const int cl = nt * 8 + 2 * t;
@@ -1855,7 +1855,7 @@ b2mma_kernel(
                 p0 += acc2[nt][0] * sh->dbv[warp][g][cl]     + acc2[nt][1] * sh->dbv[warp][g][cl + 1];
                 p1 += acc2[nt][2] * sh->dbv[warp][g + 8][cl] + acc2[nt][3] * sh->dbv[warp][g + 8][cl + 1];
             }
-            if (nt < 2) {     // dkgb * kg : K columns [warp*BW, +BW)
+            if (nt < NBW) {   // dkgb * kg : K columns [warp*BW, +BW)
                 const int ck = warp * BW + cl;
                 p0 += acc3[nt][0] * sh->skg[g][ck]           + acc3[nt][1] * sh->skg[g][ck + 1];
                 p1 += acc3[nt][2] * sh->skg[g + 8][ck]       + acc3[nt][3] * sh->skg[g + 8][ck + 1];

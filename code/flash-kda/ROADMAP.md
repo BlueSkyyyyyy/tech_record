@@ -1247,6 +1247,25 @@
        GEMM core 的 `K`×`V`×dtype/staging 三维收口；默认 `K=V=128` 零差异、部署仍 §45 的 `cf`。
        见 `docs/07` §92。**边界**：只 base core（六段仍 `KD==128`）、`BF16_VDW`×K≠128 未测、`K=192`
        被拒。
+- [x] **P7-90** 关闭 §92.7（P7-89）点名的最后一条 `K≠V` 工程边界——**把 `K` 参数化扩到六段生产核**
+       （此前只对 base GEMM core 做过，P7-88）。回读 `b2_mma_probe.cu` 定位六段里所有**硬编码
+       `nt < 2`（BW=16）的 K 轴累加器**：`acc3`（DKGB 输出，global-`dw` 与 `-DB2M_HDW` 同 CTA 交接两处
+       mma + store）、`DA` 的 `swall` 镜像、门控链的 `idq/idk/idg` 与 `dqgv/dkgv/dgv`、折叠 `intra` 的
+       `idt/dkpre`、`db` 的 `dkgb*kg` 交叉项——**全部改 `nt < NBW` 并把数组从 `[2][4]` 改 `[NBW][4]`**，
+       删掉 `#error`（`b2_mma_probe.cu` 共 **27 处**、算术一字未动；`BW==16` 时 `NBW==2` 逐字节等价）。
+       注意 `dAacc/dKacc`（`:1026/1320/1511/1520`）的 `nt<2` 是 **BT/8 轴**（BT=16 固定）**不能动**；
+       gate/`dgk` 两处归约早在 P7-88 已 BW-泛化。新增 `harness/check_bwd_b2_k128_prod.py`
+       （`check_bwd_b2_k128_prod.out.txt`，空闲卡）。**Part A（回归）**：`KD=VD=128` 改后 vs 改前
+       （`git HEAD` 源）`-DB2M_PROD -DB2M_HDW` **十项输出逐位相同（`max_abs=0`）**。**Part B**：
+       `K∈{64,128,256}`（V=K）+ 交叉 `(K=64,V=128)` × 3 shape，prod vs torch fp32：K 轴
+       `dqg` **逐位 0**、`dkg/dg ≤5.8e-7/2.2e-7`、`dgk ≤2.1e-7`（=fp32 归约序）；V 轴
+       `dv2≤3.5e-4/dvb≤2.9e-4/dkgb≤4.9e-4/db≤2.5e-4/dApre≤1.3e-4`（=tf32 底噪，**与 `K=128` 行逐值同阶**、
+       无 K 依赖）。**Part C**：prod vs prod+TMA 在全部 `(K,V)` **逐位相同（`max_abs=0`）**。
+       **Part D**：`K=64/128/256` regs **64/112/147 零 spill**、smem `77.9/126.1/222.6 KB`（`K=256`
+       仍 < 227 KB 上限、可运行）。**Part E**：`B2T1024H8` prod dev `66.4/174.6/426.5 µs`（K=64/128/256，
+       近线性）。**结论**：六段生产核 `K` 泛化收口、部署 `K=V=128` 零差异、六段不再有 `K` 相关 `#error`；
+       默认部署仍 §45 的 `cf`。见 `docs/07` §93。**边界**：只新增 `K`，`K=192` 的 `BW=24` 非 2 幂仍被拒；
+       `intra`/`BF16`/TMA 交叉 × `K≠128` 未做 `ncu`；`-DB2M_BF16_VDW` × 六段 `K≠128` 未测。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1753,8 +1772,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-89 补测 + P8-3**。
-  - P7-89（本轮）：**关闭 §91.8（P7-88）点名的最后一条 base-core 边界——`-DB2M_BF16`/`-DB2M_BF16MMA`
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-90 补测 + P8-3**。
+  - P7-90（本轮）：**关闭 §92.7 点名的最后一条 `K≠V` 工程边界——把 `K` 参数化扩到六段生产核**
+    （此前只对 base GEMM core 做过）。把六段里硬编码 `nt < 2`（BW=16）的 K 轴累加器
+    （`acc3`、门控/`intra` 的 `idq/idk/idg`、`swall` 镜像、`db` 的 `dkgb*kg` 项）全改 `nt < NBW`、
+    数组 `[2][4]→[NBW][4]`，删 `#error`；`b2_mma_probe.cu` 共 **27 处**、算术一字未动
+    （`BW=16` 时逐字节等价）。新增 `harness/check_bwd_b2_k128_prod.py`（`..._k128_prod.out.txt`，空闲卡）。
+    **Part A**：`KD=VD=128` 改后 vs `git HEAD` **十项逐位相同**。**Part B**：`K∈{64,128,256}`+交叉
+    `(64,128)`，K 轴 `dqg` 逐位 0 / `dkg,dg,dgk ≤5.8e-7`；V 轴 `dv2≤3.5e-4…dApre≤1.3e-4`（tf32 底噪，
+    与 `K=128` 逐值同阶）。**Part C**：prod vs prod+TMA 全 `(K,V)` **逐位 0**。**Part D**：`K=64/128/256`
+    regs `64/112/147` 零 spill、smem `77.9/126.1/222.6 KB`（`K=256` 仍可运行）。**Part E**：
+    `B2T1024H8` dev `66.4/174.6/426.5 µs`。**结论**：六段生产核 `K` 泛化收口、部署 `K=V=128` 零差异。
+    见 `docs/07` §93。
+  - P7-89（上轮）：**关闭 §91.8（P7-88）点名的最后一条 base-core 边界——`-DB2M_BF16`/`-DB2M_BF16MMA`
     × `K≠128`**。`K` 只以 `h/dh` 行数（输出 N）出现、不进收缩，bf16 staging 行距 `OPS=BVK+8`
     （`b2_mma_probe.cu:480`）本就 K-clean，mma n-tile 数已由 P7-88 参数化为 `NBW=BW/8`；故这条
     交叉理论上只是 staging 问题，本轮实测确认。**`b2_mma_probe.cu` 一行未改**。新增
@@ -3047,8 +3077,15 @@
     逆的第一行都解错（残差 $10^5$），须改用前代（forward substitution，即 kernel 的 8×8 前代思路）；
     另 FLA 的 `g_cumsum` 是**块内局部** log2 累计、`Aqk` 存的是未 mask 全阵。
 
-- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-88 补测（+ P8-2/P8-3 一页纸补全）**，进入收尾/维护。
-  **P7-88（本轮）**：关闭 §90.5 明确 defer 的最后一条 K≠V 边界——**`K≠128` lane 布局重写（base GEMM core）**：
+- **下一步：专题 P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-90 补测（+ P8-2/P8-3 一页纸补全）**，进入收尾/维护。
+  **P7-90（本轮）**：关闭 §92.7 点名的最后一条 `K≠V` 工程边界——**把 `K` 参数化扩到六段生产核**：
+  六段里所有硬编码 `nt<2`（BW=16）的 K 轴累加器（`acc3`、门控/`intra` 的 `idq/idk/idg`、`swall` 镜像、
+  `db` 的 `dkgb*kg` 项）改 `nt<NBW`、数组 `[2][4]→[NBW][4]`、删 `#error`（共 27 处、算术一字未动）。
+  `KD=VD=128` 改后 vs `git HEAD` **十项逐位相同**；`K∈{64,128,256}`+交叉 K 轴 `dqg` 逐位 0、`dkg/dg/dgk
+  ≤5.8e-7`、V 轴 tf32 底噪（与 `K=128` 逐值同阶）；TMA 逐位；`K=256` regs 147 零 spill、smem 222.6KB
+  可运行。默认部署 `K=V=128` 零差异。见 `docs/07` §93。
+  **P7-89（上轮）**：关闭 §91.8 点名 base-core 边界（`BF16`/`BF16MMA × K≠128`）。
+  **P7-88（上上轮）**：关闭 §90.5 明确 defer 的最后一条 K≠V 边界——**`K≠128` lane 布局重写（base GEMM core）**：
   `2`→`NBW=BW/8` + `dgk` 通用列归约（`BW=16` 下逐字等价）；`K∈{64,128,256}`(+交叉) 全贴 tf32 底噪、
   `K=128` 逐值回归、TMA 与 cp.async **逐位相同**（`max_abs=0`）。六段仍 `KD==128`（新 `#error`），
   `K=192` 被拒。默认部署 `K=V=128` 零差异。见 `docs/07` §91。

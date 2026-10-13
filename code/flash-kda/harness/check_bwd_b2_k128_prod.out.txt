@@ -1,0 +1,389 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+============================================================================================
+Part A: KD==VD==128 regression -- modified vs pre-change (git HEAD) prod, bit-identical
+============================================================================================
+
+# B2 T1024 H8  grid=(64, 16)
+    orig vs new dv2                max_abs=0.000e+00  [OK ]
+    orig vs new dvb                max_abs=0.000e+00  [OK ]
+    orig vs new dkgb               max_abs=0.000e+00  [OK ]
+    orig vs new db                 max_abs=0.000e+00  [OK ]
+    orig vs new dApre              max_abs=0.000e+00  [OK ]
+    orig vs new dA                 max_abs=0.000e+00  [OK ]
+    orig vs new dqg                max_abs=0.000e+00  [OK ]
+    orig vs new dkg                max_abs=0.000e+00  [OK ]
+    orig vs new dg                 max_abs=0.000e+00  [OK ]
+    orig vs new dgk                max_abs=0.000e+00  [OK ]
+
+# T512 H4  grid=(32, 4)
+    orig vs new dv2                max_abs=0.000e+00  [OK ]
+    orig vs new dvb                max_abs=0.000e+00  [OK ]
+    orig vs new dkgb               max_abs=0.000e+00  [OK ]
+    orig vs new db                 max_abs=0.000e+00  [OK ]
+    orig vs new dApre              max_abs=0.000e+00  [OK ]
+    orig vs new dA                 max_abs=0.000e+00  [OK ]
+    orig vs new dqg                max_abs=0.000e+00  [OK ]
+    orig vs new dkg                max_abs=0.000e+00  [OK ]
+    orig vs new dg                 max_abs=0.000e+00  [OK ]
+    orig vs new dgk                max_abs=0.000e+00  [OK ]
+
+# T250 H3 (non-div)  grid=(16, 3)
+    orig vs new dv2                max_abs=0.000e+00  [OK ]
+    orig vs new dvb                max_abs=0.000e+00  [OK ]
+    orig vs new dkgb               max_abs=0.000e+00  [OK ]
+    orig vs new db                 max_abs=0.000e+00  [OK ]
+    orig vs new dApre              max_abs=0.000e+00  [OK ]
+    orig vs new dA                 max_abs=0.000e+00  [OK ]
+    orig vs new dqg                max_abs=0.000e+00  [OK ]
+    orig vs new dkg                max_abs=0.000e+00  [OK ]
+    orig vs new dg                 max_abs=0.000e+00  [OK ]
+    orig vs new dgk                max_abs=0.000e+00  [OK ]
+
+Part A worst max_abs over all fields/cases: 0.000e+00  [BIT-IDENTICAL]
+
+============================================================================================
+Part B: K!=128 six-segment correctness -- prod(HDW) vs torch fp32 references
+============================================================================================
+
+#### K = 64  V = 64 ####
+
+# B2 T1024 H8  grid=(64, 16)
+    [64,64] dgk    vs torch  max_abs=9.537e-07  max_rel=9.928e-08  ref_max=9.606e+00
+    [64,64] dv2    vs torch  max_abs=1.126e-04  max_rel=2.945e-04  ref_max=3.822e-01
+    [64,64] dvb    vs torch  max_abs=1.283e-04  max_rel=2.611e-04  ref_max=4.914e-01
+    [64,64] dkgb   vs torch  max_abs=1.017e-03  max_rel=4.485e-04  ref_max=2.266e+00
+    [64,64] db     vs torch  max_abs=8.253e-04  max_rel=2.062e-04  ref_max=4.003e+00
+    [64,64] dApre  vs torch  max_abs=4.437e-04  max_rel=1.079e-04  ref_max=4.111e+00
+    [64,64] dqg    vs torch  max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.436e+00
+    [64,64] dkg    vs torch  max_abs=9.537e-07  max_rel=5.524e-08  ref_max=1.727e+01
+    [64,64] dg     vs torch  max_abs=9.537e-07  max_rel=1.432e-07  ref_max=6.659e+00
+
+# T512 H4  grid=(32, 4)
+    [64,64] dgk    vs torch  max_abs=9.537e-07  max_rel=1.126e-07  ref_max=8.472e+00
+    [64,64] dv2    vs torch  max_abs=1.097e-04  max_rel=3.463e-04  ref_max=3.168e-01
+    [64,64] dvb    vs torch  max_abs=1.268e-04  max_rel=2.889e-04  ref_max=4.389e-01
+    [64,64] dkgb   vs torch  max_abs=9.341e-04  max_rel=4.099e-04  ref_max=2.279e+00
+    [64,64] db     vs torch  max_abs=6.626e-04  max_rel=1.991e-04  ref_max=3.329e+00
+    [64,64] dApre  vs torch  max_abs=4.015e-04  max_rel=1.207e-04  ref_max=3.327e+00
+    [64,64] dqg    vs torch  max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.462e+00
+    [64,64] dkg    vs torch  max_abs=4.768e-07  max_rel=2.786e-08  ref_max=1.712e+01
+    [64,64] dg     vs torch  max_abs=7.153e-07  max_rel=1.442e-07  ref_max=4.960e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    [64,64] dgk    vs torch  max_abs=9.537e-07  max_rel=1.215e-07  ref_max=7.847e+00
+    [64,64] dv2    vs torch  max_abs=1.084e-04  max_rel=3.529e-04  ref_max=3.071e-01
+    [64,64] dvb    vs torch  max_abs=1.223e-04  max_rel=2.737e-04  ref_max=4.468e-01
+    [64,64] dkgb   vs torch  max_abs=1.016e-03  max_rel=4.712e-04  ref_max=2.156e+00
+    [64,64] db     vs torch  max_abs=7.133e-04  max_rel=2.509e-04  ref_max=2.843e+00
+    [64,64] dApre  vs torch  max_abs=3.282e-04  max_rel=1.022e-04  ref_max=3.210e+00
+    [64,64] dqg    vs torch  max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.107e+00
+    [64,64] dkg    vs torch  max_abs=4.768e-07  max_rel=2.295e-08  ref_max=2.078e+01
+    [64,64] dg     vs torch  max_abs=9.537e-07  max_rel=2.117e-07  ref_max=4.504e+00
+
+#### K = 128  V = 128 ####
+
+# B2 T1024 H8  grid=(64, 16)
+    [128,128] dgk    vs torch max_abs=1.907e-06  max_rel=1.335e-07  ref_max=1.429e+01
+    [128,128] dv2    vs torch max_abs=1.139e-04  max_rel=2.880e-04  ref_max=3.954e-01
+    [128,128] dvb    vs torch max_abs=1.273e-04  max_rel=2.581e-04  ref_max=4.935e-01
+    [128,128] dkgb   vs torch max_abs=1.383e-03  max_rel=4.675e-04  ref_max=2.957e+00
+    [128,128] db     vs torch max_abs=1.079e-03  max_rel=2.134e-04  ref_max=5.058e+00
+    [128,128] dApre  vs torch max_abs=5.821e-04  max_rel=1.108e-04  ref_max=5.252e+00
+    [128,128] dqg    vs torch max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.961e+00
+    [128,128] dkg    vs torch max_abs=9.537e-07  max_rel=3.658e-08  ref_max=2.607e+01
+    [128,128] dg     vs torch max_abs=9.537e-07  max_rel=1.847e-07  ref_max=5.164e+00
+
+# T512 H4  grid=(32, 4)
+    [128,128] dgk    vs torch max_abs=1.907e-06  max_rel=1.480e-07  ref_max=1.288e+01
+    [128,128] dv2    vs torch max_abs=1.099e-04  max_rel=2.802e-04  ref_max=3.923e-01
+    [128,128] dvb    vs torch max_abs=1.279e-04  max_rel=2.795e-04  ref_max=4.578e-01
+    [128,128] dkgb   vs torch max_abs=1.325e-03  max_rel=4.735e-04  ref_max=2.798e+00
+    [128,128] db     vs torch max_abs=8.417e-04  max_rel=2.106e-04  ref_max=3.996e+00
+    [128,128] dApre  vs torch max_abs=6.284e-04  max_rel=1.319e-04  ref_max=4.765e+00
+    [128,128] dqg    vs torch max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.702e+00
+    [128,128] dkg    vs torch max_abs=9.537e-07  max_rel=3.930e-08  ref_max=2.427e+01
+    [128,128] dg     vs torch max_abs=7.153e-07  max_rel=1.327e-07  ref_max=5.390e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    [128,128] dgk    vs torch max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+    [128,128] dv2    vs torch max_abs=1.067e-04  max_rel=2.923e-04  ref_max=3.652e-01
+    [128,128] dvb    vs torch max_abs=1.234e-04  max_rel=2.769e-04  ref_max=4.455e-01
+    [128,128] dkgb   vs torch max_abs=1.019e-03  max_rel=3.925e-04  ref_max=2.597e+00
+    [128,128] db     vs torch max_abs=9.225e-04  max_rel=2.473e-04  ref_max=3.730e+00
+    [128,128] dApre  vs torch max_abs=4.464e-04  max_rel=9.240e-05  ref_max=4.832e+00
+    [128,128] dqg    vs torch max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.770e+00
+    [128,128] dkg    vs torch max_abs=9.537e-07  max_rel=4.333e-08  ref_max=2.201e+01
+    [128,128] dg     vs torch max_abs=9.537e-07  max_rel=2.168e-07  ref_max=4.399e+00
+
+#### K = 256  V = 256 ####
+
+# B2 T1024 H8  grid=(64, 16)
+    [256,256] dgk    vs torch max_abs=3.815e-06  max_rel=2.072e-07  ref_max=1.841e+01
+    [256,256] dv2    vs torch max_abs=1.220e-04  max_rel=2.851e-04  ref_max=4.280e-01
+    [256,256] dvb    vs torch max_abs=1.484e-04  max_rel=2.826e-04  ref_max=5.250e-01
+    [256,256] dkgb   vs torch max_abs=1.811e-03  max_rel=3.978e-04  ref_max=4.552e+00
+    [256,256] db     vs torch max_abs=1.450e-03  max_rel=1.985e-04  ref_max=7.302e+00
+    [256,256] dApre  vs torch max_abs=7.995e-04  max_rel=9.359e-05  ref_max=8.543e+00
+    [256,256] dqg    vs torch max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.420e+00
+    [256,256] dkg    vs torch max_abs=1.907e-06  max_rel=5.277e-08  ref_max=3.614e+01
+    [256,256] dg     vs torch max_abs=9.537e-07  max_rel=1.498e-07  ref_max=6.365e+00
+
+# T512 H4  grid=(32, 4)
+    [256,256] dgk    vs torch max_abs=2.861e-06  max_rel=1.628e-07  ref_max=1.758e+01
+    [256,256] dv2    vs torch max_abs=1.131e-04  max_rel=3.024e-04  ref_max=3.741e-01
+    [256,256] dvb    vs torch max_abs=1.313e-04  max_rel=2.830e-04  ref_max=4.639e-01
+    [256,256] dkgb   vs torch max_abs=1.685e-03  max_rel=4.331e-04  ref_max=3.892e+00
+    [256,256] db     vs torch max_abs=1.321e-03  max_rel=2.050e-04  ref_max=6.443e+00
+    [256,256] dApre  vs torch max_abs=6.950e-04  max_rel=9.906e-05  ref_max=7.016e+00
+    [256,256] dqg    vs torch max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.898e+00
+    [256,256] dkg    vs torch max_abs=1.907e-06  max_rel=5.795e-08  ref_max=3.291e+01
+    [256,256] dg     vs torch max_abs=1.192e-06  max_rel=1.906e-07  ref_max=6.254e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    [256,256] dgk    vs torch max_abs=2.861e-06  max_rel=1.716e-07  ref_max=1.667e+01
+    [256,256] dv2    vs torch max_abs=1.114e-04  max_rel=3.324e-04  ref_max=3.350e-01
+    [256,256] dvb    vs torch max_abs=1.263e-04  max_rel=2.883e-04  ref_max=4.382e-01
+    [256,256] dkgb   vs torch max_abs=1.704e-03  max_rel=4.598e-04  ref_max=3.706e+00
+    [256,256] db     vs torch max_abs=1.115e-03  max_rel=2.191e-04  ref_max=5.088e+00
+    [256,256] dApre  vs torch max_abs=6.608e-04  max_rel=8.441e-05  ref_max=7.828e+00
+    [256,256] dqg    vs torch max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.898e+00
+    [256,256] dkg    vs torch max_abs=1.907e-06  max_rel=5.664e-08  ref_max=3.368e+01
+    [256,256] dg     vs torch max_abs=7.153e-07  max_rel=1.446e-07  ref_max=4.947e+00
+
+#### K = 64  V = 128 ####
+
+# B2 T1024 H8  grid=(64, 16)
+    [64,128] dgk    vs torch max_abs=1.907e-06  max_rel=1.543e-07  ref_max=1.236e+01
+    [64,128] dv2    vs torch max_abs=1.143e-04  max_rel=2.920e-04  ref_max=3.915e-01
+    [64,128] dvb    vs torch max_abs=1.282e-04  max_rel=2.552e-04  ref_max=5.023e-01
+    [64,128] dkgb   vs torch max_abs=1.428e-03  max_rel=4.909e-04  ref_max=2.910e+00
+    [64,128] db     vs torch max_abs=1.044e-03  max_rel=2.067e-04  ref_max=5.053e+00
+    [64,128] dApre  vs torch max_abs=5.657e-04  max_rel=9.703e-05  ref_max=5.830e+00
+    [64,128] dqg    vs torch max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.107e+00
+    [64,128] dkg    vs torch max_abs=9.537e-07  max_rel=3.466e-08  ref_max=2.752e+01
+    [64,128] dg     vs torch max_abs=1.192e-06  max_rel=1.640e-07  ref_max=7.268e+00
+
+# T512 H4  grid=(32, 4)
+    [64,128] dgk    vs torch max_abs=1.907e-06  max_rel=1.628e-07  ref_max=1.172e+01
+    [64,128] dv2    vs torch max_abs=1.099e-04  max_rel=2.802e-04  ref_max=3.923e-01
+    [64,128] dvb    vs torch max_abs=1.279e-04  max_rel=2.795e-04  ref_max=4.578e-01
+    [64,128] dkgb   vs torch max_abs=1.208e-03  max_rel=4.303e-04  ref_max=2.808e+00
+    [64,128] db     vs torch max_abs=8.316e-04  max_rel=2.097e-04  ref_max=3.965e+00
+    [64,128] dApre  vs torch max_abs=4.645e-04  max_rel=9.326e-05  ref_max=4.981e+00
+    [64,128] dqg    vs torch max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.783e+00
+    [64,128] dkg    vs torch max_abs=4.768e-07  max_rel=1.873e-08  ref_max=2.546e+01
+    [64,128] dg     vs torch max_abs=9.537e-07  max_rel=1.197e-07  ref_max=7.967e+00
+
+# T250 H3 (non-div)  grid=(16, 3)
+    [64,128] dgk    vs torch max_abs=1.192e-06  max_rel=1.114e-07  ref_max=1.070e+01
+    [64,128] dv2    vs torch max_abs=1.067e-04  max_rel=2.923e-04  ref_max=3.652e-01
+    [64,128] dvb    vs torch max_abs=1.234e-04  max_rel=2.769e-04  ref_max=4.455e-01
+    [64,128] dkgb   vs torch max_abs=1.208e-03  max_rel=4.217e-04  ref_max=2.864e+00
+    [64,128] db     vs torch max_abs=8.365e-04  max_rel=2.155e-04  ref_max=3.882e+00
+    [64,128] dApre  vs torch max_abs=4.652e-04  max_rel=1.021e-04  ref_max=4.554e+00
+    [64,128] dqg    vs torch max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.671e+00
+    [64,128] dkg    vs torch max_abs=4.768e-07  max_rel=1.776e-08  ref_max=2.685e+01
+    [64,128] dg     vs torch max_abs=7.153e-07  max_rel=1.301e-07  ref_max=5.496e+00
+
+worst max_rel over all cases:
+      K     V  field       vs torch
+     64    64  dgk        1.215e-07
+     64    64  dv2        3.529e-04
+     64    64  dvb        2.889e-04
+     64    64  dkgb       4.712e-04
+     64    64  db         2.509e-04
+     64    64  dApre      1.207e-04
+     64    64  dqg        0.000e+00
+     64    64  dkg        5.524e-08
+     64    64  dg         2.117e-07
+    128   128  dgk        1.628e-07
+    128   128  dv2        2.923e-04
+    128   128  dvb        2.795e-04
+    128   128  dkgb       4.735e-04
+    128   128  db         2.473e-04
+    128   128  dApre      1.319e-04
+    128   128  dqg        0.000e+00
+    128   128  dkg        4.333e-08
+    128   128  dg         2.168e-07
+    256   256  dgk        2.072e-07
+    256   256  dv2        3.324e-04
+    256   256  dvb        2.883e-04
+    256   256  dkgb       4.598e-04
+    256   256  db         2.191e-04
+    256   256  dApre      9.906e-05
+    256   256  dqg        0.000e+00
+    256   256  dkg        5.795e-08
+    256   256  dg         1.906e-07
+     64   128  dgk        1.628e-07
+     64   128  dv2        2.923e-04
+     64   128  dvb        2.795e-04
+     64   128  dkgb       4.909e-04
+     64   128  db         2.155e-04
+     64   128  dApre      1.021e-04
+     64   128  dqg        0.000e+00
+     64   128  dkg        3.466e-08
+     64   128  dg         1.640e-07
+
+============================================================================================
+Part C: stage-layout identity -- prod vs prod+TMA at K!=128 (bit-identical)
+============================================================================================
+
+#### K = 64  V = 64 ####
+    B2 T1024 H8 dv2                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dvb                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dkgb               max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 db                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dApre              max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dA                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dqg                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dkg                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dg                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dgk                max_abs=0.000e+00  [OK ]
+    T512 H4 dv2                    max_abs=0.000e+00  [OK ]
+    T512 H4 dvb                    max_abs=0.000e+00  [OK ]
+    T512 H4 dkgb                   max_abs=0.000e+00  [OK ]
+    T512 H4 db                     max_abs=0.000e+00  [OK ]
+    T512 H4 dApre                  max_abs=0.000e+00  [OK ]
+    T512 H4 dA                     max_abs=0.000e+00  [OK ]
+    T512 H4 dqg                    max_abs=0.000e+00  [OK ]
+    T512 H4 dkg                    max_abs=0.000e+00  [OK ]
+    T512 H4 dg                     max_abs=0.000e+00  [OK ]
+    T512 H4 dgk                    max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dv2          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dvb          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dkgb         max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) db           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dApre        max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dA           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dqg          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dkg          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dg           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dgk          max_abs=0.000e+00  [OK ]
+
+#### K = 128  V = 128 ####
+    B2 T1024 H8 dv2                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dvb                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dkgb               max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 db                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dApre              max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dA                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dqg                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dkg                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dg                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dgk                max_abs=0.000e+00  [OK ]
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+    T512 H4 dv2                    max_abs=0.000e+00  [OK ]
+    T512 H4 dvb                    max_abs=0.000e+00  [OK ]
+    T512 H4 dkgb                   max_abs=0.000e+00  [OK ]
+    T512 H4 db                     max_abs=0.000e+00  [OK ]
+    T512 H4 dApre                  max_abs=0.000e+00  [OK ]
+    T512 H4 dA                     max_abs=0.000e+00  [OK ]
+    T512 H4 dqg                    max_abs=0.000e+00  [OK ]
+    T512 H4 dkg                    max_abs=0.000e+00  [OK ]
+    T512 H4 dg                     max_abs=0.000e+00  [OK ]
+    T512 H4 dgk                    max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dv2          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dvb          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dkgb         max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) db           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dApre        max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dA           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dqg          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dkg          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dg           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dgk          max_abs=0.000e+00  [OK ]
+
+#### K = 256  V = 256 ####
+    B2 T1024 H8 dv2                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dvb                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dkgb               max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 db                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dApre              max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dA                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dqg                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dkg                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dg                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dgk                max_abs=0.000e+00  [OK ]
+    T512 H4 dv2                    max_abs=0.000e+00  [OK ]
+    T512 H4 dvb                    max_abs=0.000e+00  [OK ]
+    T512 H4 dkgb                   max_abs=0.000e+00  [OK ]
+    T512 H4 db                     max_abs=0.000e+00  [OK ]
+    T512 H4 dApre                  max_abs=0.000e+00  [OK ]
+    T512 H4 dA                     max_abs=0.000e+00  [OK ]
+    T512 H4 dqg                    max_abs=0.000e+00  [OK ]
+    T512 H4 dkg                    max_abs=0.000e+00  [OK ]
+    T512 H4 dg                     max_abs=0.000e+00  [OK ]
+    T512 H4 dgk                    max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dv2          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dvb          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dkgb         max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) db           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dApre        max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dA           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dqg          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dkg          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dg           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dgk          max_abs=0.000e+00  [OK ]
+
+#### K = 64  V = 128 ####
+    B2 T1024 H8 dv2                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dvb                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dkgb               max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 db                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dApre              max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dA                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dqg                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dkg                max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dg                 max_abs=0.000e+00  [OK ]
+    B2 T1024 H8 dgk                max_abs=0.000e+00  [OK ]
+    T512 H4 dv2                    max_abs=0.000e+00  [OK ]
+    T512 H4 dvb                    max_abs=0.000e+00  [OK ]
+    T512 H4 dkgb                   max_abs=0.000e+00  [OK ]
+    T512 H4 db                     max_abs=0.000e+00  [OK ]
+    T512 H4 dApre                  max_abs=0.000e+00  [OK ]
+    T512 H4 dA                     max_abs=0.000e+00  [OK ]
+    T512 H4 dqg                    max_abs=0.000e+00  [OK ]
+    T512 H4 dkg                    max_abs=0.000e+00  [OK ]
+    T512 H4 dg                     max_abs=0.000e+00  [OK ]
+    T512 H4 dgk                    max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dv2          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dvb          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dkgb         max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) db           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dApre        max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dA           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dqg          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dkg          max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dg           max_abs=0.000e+00  [OK ]
+    T250 H3 (non-div) dgk          max_abs=0.000e+00  [OK ]
+
+Part C worst max_abs: 0.000e+00
+
+============================================================================================
+Part D: static cost (regs / spill / smem vs K; V=K)
+============================================================================================
+      K   regs   spill    smem(B) smem(KB)
+     64     64       0      79744     77.9
+    128    112       0     129152    126.1
+    256    147       0     227968    222.6
+     64     90       0      79744     77.9
+
+============================================================================================
+Part E: kernel-only timing -- prod(HDW) dev vs K (V=K), full production launch
+============================================================================================
+  case                   K     V |   prod dev
+  B2 T1024 H8           64    64 |     66.4 us
+  T512 H4               64    64 |     11.3 us
+  T250 H3 (non-div)     64    64 |     11.0 us
+  B2 T1024 H8          128   128 |    174.6 us
+  T512 H4              128   128 |     21.5 us
+  T250 H3 (non-div)    128   128 |     19.9 us
+  B2 T1024 H8          256   256 |    426.5 us
+  T512 H4              256   256 |     55.9 us
+  T250 H3 (non-div)    256   256 |     43.7 us
+  B2 T1024 H8           64   128 |     88.3 us
+  T512 H4               64   128 |     15.4 us
+  T250 H3 (non-div)     64   128 |     15.3 us
+
+DONE
