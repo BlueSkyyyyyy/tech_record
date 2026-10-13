@@ -1,0 +1,80 @@
+device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0  L2=50 MB  optin=232448  SMEM/SM=233472  maxThreads/SM=2048
+SMEM ring: K=16 ⇒ 11280 B  (maxBlocks/SM @T256=8 @T128=16) | K=128 ⇒ 90128 B  (maxBlocks/SM @T256=2)
+
+===== §A 正确性：K=16 下 D=1..4，EDW=8，R=0，G=1056，sink 逐位一致 =====
+  EDW=8     K=16   D=1   R=0      G=1056   T=256   fetch=1    0.1046 ms/rep  desc=   27.6 data=    2.5 tot=   30.1 GB/s  got=843955613189851
+      -> D=1 == reference   (expect=843955613189851)
+  EDW=8     K=16   D=2   R=0      G=1056   T=256   fetch=1    0.1024 ms/rep  desc=   28.2 data=    2.6 tot=   30.7 GB/s  got=843955613189851
+      -> D=2 == reference   (expect=843955613189851)
+  EDW=8     K=16   D=3   R=0      G=1056   T=256   fetch=1    0.1024 ms/rep  desc=   28.2 data=    2.6 tot=   30.7 GB/s  got=843955613189851
+      -> D=3 == reference   (expect=843955613189851)
+  EDW=8     K=16   D=4   R=0      G=1056   T=256   fetch=1    0.1025 ms/rep  desc=   28.1 data=    2.6 tot=   30.7 GB/s  got=843955613189851
+      -> D=4 == reference   (expect=843955613189851)
+
+===== §B 数据面(exec_only)饱和旋钮：K=16,D=2 扫 (B=blocks/SM, T) —— 总线程 vs 块内线程 =====
+  B   T     G       thr/SM    blk/SM     exec_only   data GB/s
+  EDW=4096  K=16   D=2   R=0      G=132    T=256   fetch=0    5.1854 ms/rep  desc=   26.7 data= 1242.4 tot= 1269.1 GB/s  got=30058886680368582
+  1   256   132     256       8             5.1854      1242.4
+  EDW=4096  K=16   D=2   R=0      G=132    T=512   fetch=0    2.9862 ms/rep  desc=   46.3 data= 2157.4 tot= 2203.7 GB/s  got=60271041108071878
+  1   512   132     512       4             2.9862      2157.4
+  EDW=4096  K=16   D=2   R=0      G=132    T=1024  fetch=0    2.2005 ms/rep  desc=   62.9 data= 2927.7 tot= 2990.6 GB/s  got=120697536101832134
+  1   1024  132     1024      2             2.2005      2927.7
+  EDW=4096  K=16   D=2   R=0      G=264    T=256   fetch=0    2.9169 ms/rep  desc=   47.5 data= 2208.6 tot= 2256.1 GB/s  got=30021652150806088
+  2   256   264     512       8             2.9169      2208.6
+  EDW=4096  K=16   D=2   R=0      G=264    T=512   fetch=0    2.1597 ms/rep  desc=   64.1 data= 2983.0 tot= 3047.1 GB/s  got=60232328497880378
+  2   512   264     1024      4             2.1597      2983.0
+  EDW=4096  K=16   D=2   R=0      G=528    T=256   fetch=0    2.1414 ms/rep  desc=   64.6 data= 3008.6 tot= 3073.2 GB/s  got=30022173944806306
+  4   256   528     1024      8             2.1414      3008.6
+  EDW=4096  K=16   D=2   R=0      G=1056   T=128   fetch=0    2.1647 ms/rep  desc=   63.9 data= 2976.2 tot= 3040.1 GB/s  got=14903984682479806
+  8   128   1056    1024      16            2.1647      2976.2
+  EDW=4096  K=16   D=2   R=0      G=1056   T=256   fetch=0    2.1851 ms/rep  desc=   63.3 data= 2948.4 tot= 3011.8 GB/s  got=30018145257266428
+  8   256   1056    2048      8             2.1851      2948.4
+  EDW=4096  K=16   D=2   R=0      G=2112   T=128   fetch=0    2.1708 ms/rep  desc=   63.8 data= 2967.7 tot= 3031.5 GB/s  got=14908481760888730
+  16  128   2112    2048      16            2.1708      2967.7
+
+===== §C 控制面(fetch_only, EDW=0)取数带宽：小 K vs 大 K，高占用率 vs 1 blk/SM =====
+  K    B   T     blk/SM    fetch_only   desc GB/s
+  EDW=0     K=8    D=2   R=0      G=1056   T=256   fetch=1    0.2582 ms/rep  desc=  536.0 data=    0.0 tot=  536.0 GB/s  got=83463440434978860
+  8    8   256   8             0.2582       536.0
+  EDW=0     K=8    D=2   R=0      G=132    T=256   fetch=1    0.3168 ms/rep  desc=  436.9 data=    0.0 tot=  436.9 GB/s  got=83463440434978860
+  8    1   256   1             0.3168       436.9
+  EDW=0     K=16   D=2   R=0      G=1056   T=256   fetch=1    0.2517 ms/rep  desc=  550.0 data=    0.0 tot=  550.0 GB/s  got=41257602718097452
+  16   8   256   8             0.2517       550.0
+  EDW=0     K=16   D=2   R=0      G=132    T=256   fetch=1    0.2003 ms/rep  desc=  691.0 data=    0.0 tot=  691.0 GB/s  got=41257602718097452
+  16   1   256   1             0.2003       691.0
+  EDW=0     K=32   D=2   R=0      G=1056   T=256   fetch=1    0.2513 ms/rep  desc=  550.9 data=    0.0 tot=  550.9 GB/s  got=20154739694231596
+  32   8   256   8             0.2513       550.9
+  EDW=0     K=32   D=2   R=0      G=132    T=256   fetch=1    0.1478 ms/rep  desc=  936.6 data=    0.0 tot=  936.6 GB/s  got=20154739694231596
+  32   1   256   1             0.1478       936.6
+  EDW=0     K=128  D=2   R=0      G=264    T=256   fetch=1    0.0998 ms/rep  desc= 1387.2 data=    0.0 tot= 1387.2 GB/s  got=4327622088450092
+  128  2   256   2             0.0998      1387.2
+  EDW=0     K=128  D=2   R=0      G=132    T=256   fetch=1    0.0777 ms/rep  desc= 1782.2 data=    0.0 tot= 1782.2 GB/s  got=4327622088450092
+  128  1   256   1             0.0777      1782.2
+
+===== §D 多 block/SM + 小 K 下预取是否仍藏住控制面：G=1056,B=8,T=256,K=16,D=2 =====
+  EDW      exec_only     D=1(ms)     D=2(ms)   fetch_ref |  p/max  p/(f+e)  s1/exec  p-exec
+  EDW=0     K=16   D=2   R=0      G=1056   T=256   fetch=1    0.2520 ms/rep  desc=  549.3 data=    0.0 tot=  549.3 GB/s  got=41257602718097452
+  EDW=0     K=16   D=2   R=0      G=1056   T=256   fetch=0    0.2431 ms/rep  desc=  569.4 data=    0.0 tot=  569.4 GB/s  got=41251288370825542
+  EDW=0     K=16   D=1   R=0      G=1056   T=256   fetch=1    0.2559 ms/rep  desc=  540.9 data=    0.0 tot=  540.9 GB/s  got=41257602718097452
+  EDW=0     K=16   D=2   R=0      G=1056   T=256   fetch=1    0.2522 ms/rep  desc=  548.8 data=    0.0 tot=  548.8 GB/s  got=41257602718097452
+  0           0.2431      0.2559      0.2522      0.2520 |  1.001   0.509    1.053   0.0091
+  EDW=16    K=16   D=2   R=0      G=1056   T=256   fetch=0    0.2450 ms/rep  desc=  565.0 data=  102.7 tot=  667.7 GB/s  got=39012282448895915
+  EDW=16    K=16   D=1   R=0      G=1056   T=256   fetch=1    0.2671 ms/rep  desc=  518.3 data=   94.2 tot=  612.5 GB/s  got=39010046781899797
+  EDW=16    K=16   D=2   R=0      G=1056   T=256   fetch=1    0.2644 ms/rep  desc=  523.5 data=   95.2 tot=  618.7 GB/s  got=39010046781899797
+  16          0.2450      0.2671      0.2644      0.2520 |  1.049   0.532    1.090   0.0194
+  EDW=64    K=16   D=2   R=0      G=1056   T=256   fetch=0    0.2506 ms/rep  desc=  552.3 data=  401.7 tot=  954.0 GB/s  got=30012169583725715
+  EDW=64    K=16   D=1   R=0      G=1056   T=256   fetch=1    0.2855 ms/rep  desc=  484.7 data=  352.5 tot=  837.3 GB/s  got=30013508293477373
+  EDW=64    K=16   D=2   R=0      G=1056   T=256   fetch=1    0.2837 ms/rep  desc=  487.8 data=  354.8 tot=  842.6 GB/s  got=30013508293477373
+  64          0.2506      0.2855      0.2837      0.2520 |  1.126   0.565    1.139   0.0332
+  EDW=256   K=16   D=2   R=0      G=1056   T=256   fetch=0    0.3395 ms/rep  desc=  407.7 data= 1185.9 tot= 1593.6 GB/s  got=30012544228735431
+  EDW=256   K=16   D=1   R=0      G=1056   T=256   fetch=1    0.3847 ms/rep  desc=  359.8 data= 1046.7 tot= 1406.4 GB/s  got=30012860299223523
+  EDW=256   K=16   D=2   R=0      G=1056   T=256   fetch=1    0.3691 ms/rep  desc=  375.0 data= 1091.0 tot= 1466.1 GB/s  got=30012860299223523
+  256         0.3395      0.3847      0.3691      0.2520 |  1.087   0.624    1.133   0.0295
+  EDW=1024  K=16   D=2   R=0      G=1056   T=256   fetch=0    0.6932 ms/rep  desc=  199.7 data= 2323.3 tot= 2522.9 GB/s  got=30010109974692125
+  EDW=1024  K=16   D=1   R=0      G=1056   T=256   fetch=1    0.7363 ms/rep  desc=  188.0 data= 2187.6 tot= 2375.6 GB/s  got=30012861625687485
+  EDW=1024  K=16   D=2   R=0      G=1056   T=256   fetch=1    0.7360 ms/rep  desc=  188.1 data= 2188.3 tot= 2376.4 GB/s  got=30012861625687485
+  1024        0.6932      0.7363      0.7360      0.2520 |  1.062   0.779    1.062   0.0428
+  EDW=4096  K=16   D=2   R=0      G=1056   T=256   fetch=0    2.1822 ms/rep  desc=   63.4 data= 2952.2 tot= 3015.6 GB/s  got=30013010925965994
+  EDW=4096  K=16   D=1   R=0      G=1056   T=256   fetch=1    2.2275 ms/rep  desc=   62.1 data= 2892.2 tot= 2954.4 GB/s  got=30011240912019458
+  EDW=4096  K=16   D=2   R=0      G=1056   T=256   fetch=1    2.2254 ms/rep  desc=   62.2 data= 2895.0 tot= 2957.1 GB/s  got=30011240912019458
+  4096        2.1822      2.2275      2.2254      0.2520 |  1.020   0.914    1.021   0.0432
