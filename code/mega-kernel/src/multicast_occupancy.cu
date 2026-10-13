@@ -28,12 +28,18 @@
 //   O <L> <padKB>                 打印 mcast_nat 及各 __maxnreg__ 变体在该 SMEM 下的实测占用率
 //   B <C> <grid> <KB> <R> <mode> <L> <padKB> <maxr>
 //   P <C> <grid> <KB> <L> <padKB> <maxr>   cluster 感知占用率 API 读数（P175-1 §100，只读）
+//   T <C> <grid> <KB> <R> <mode> <L> <padKB> <maxr> [warm]
+//                                         逐块时间线：记录每块 (smid, t0, t1)，聚合出
+//                                         起始/结束分位与驻留块时间线（P176-1 §101，
+//                                         坐实/修正 §100 的「尾波」解释）。**不改既有语义**
 //   目标卡 H100 / sm90a。
 // ============================================================================
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cstdint>
+#include <vector>
+#include <algorithm>
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cooperative_groups.h>
@@ -105,6 +111,15 @@ __device__ __forceinline__ void tma_load_mcast_2d(const CUtensorMap* tmap, uint3
       : "memory");
 }
 
+// ---------------- 时间线探针（P176-1 §101） ----------------
+// %globaltimer = 全局 synchronized 的纳秒计数器；%smid = 物理 SM id。
+__device__ __forceinline__ unsigned long long gtimer_ns() {
+  unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t;
+}
+__device__ __forceinline__ unsigned int sm_id() {
+  unsigned int s; asm volatile("mov.u32 %0, %%smid;" : "=r"(s)); return s;
+}
+
 // ---------------- kernel body（模板参数只是为了让 __maxnreg__ 变体实例化） ----------------
 template <int DUMMY>
 __device__ __forceinline__ void mcast_body(const CUtensorMap& tmap,
@@ -162,6 +177,58 @@ __global__ void mcast_nat(const __grid_constant__ CUtensorMap tmap, float* __res
     mcast_body<MAXR>(tmap, out, R, box1, L, mode);                                     \
   }
 DEF_MR(24) DEF_MR(32) DEF_MR(40) DEF_MR(64) DEF_MR(96)
+
+// 逐块时间线版本（P176-1 §101）：语义与 mcast_body 逐字相同，只多记 (smid,t0,t1)。
+// rec 布局：rec[3*blk+0]=smid, rec[3*blk+1]=t0(ns, 调度即测), rec[3*blk+2]=t1(ns, 循环结束)。
+__global__ void mcast_tl(const __grid_constant__ CUtensorMap tmap, float* __restrict__ out,
+                         unsigned long long* __restrict__ rec,
+                         int R, int box1, int L, int mode) {
+  extern __shared__ __align__(128) unsigned char smem_raw[];
+  float* buf = reinterpret_cast<float*>(smem_raw);
+  __shared__ __align__(8) uint64_t mbar;
+  unsigned long long t0 = gtimer_ns();
+  unsigned int sm = sm_id();
+
+  cg::cluster_group cl = cg::this_cluster();
+  int C = cl.num_blocks();
+  int rank = cl.block_rank();
+  int chunk = 256 * box1;
+  uint32_t chunk_bytes = (uint32_t)chunk * 4u;
+
+  if (threadIdx.x == 0) { mbar_init(&mbar, 1); mbar_init_fence(); }
+  cl.sync();
+
+  uint16_t mask = (uint16_t)((1u << C) - 1u);
+  float acc = 0.f;
+  uint32_t phase = 0;
+  for (int r = 0; r < R; r++) {
+    if (threadIdx.x == 0) {
+      mbar_expect_tx(&mbar, chunk_bytes * (uint32_t)L);
+      if (mode == 1) {
+        if (rank == 0)
+          for (int j = 0; j < L; j++)
+            tma_load_mcast_2d(&tmap, smem_u32(buf + (size_t)j * chunk), &mbar, mask,
+                              0, (r * L + j) * box1);
+      } else {
+        for (int j = 0; j < L; j++)
+          tma_load_2d(&tmap, smem_u32(buf + (size_t)j * chunk), &mbar, 0,
+                      (r * L + j) * box1);
+      }
+    }
+    mbar_wait(&mbar, phase);
+    phase ^= 1u;
+    acc += buf[threadIdx.x];
+    acc += buf[threadIdx.x + TH];
+    cl.sync();
+  }
+  if (threadIdx.x == 0) {
+    unsigned long long t1 = gtimer_ns();
+    out[blockIdx.x] = acc;
+    rec[(size_t)blockIdx.x * 3 + 0] = (unsigned long long)sm;
+    rec[(size_t)blockIdx.x * 3 + 1] = t0;
+    rec[(size_t)blockIdx.x * 3 + 2] = t1;
+  }
+}
 
 static void* pick_kernel(int maxr) {
   switch (maxr) {
@@ -343,6 +410,130 @@ int main(int argc, char** argv) {
            "maxActiveClusters=%d (%s) | clusters_req=%.0f | cluster_occ_blocks/SM=%.2f\n",
            C, grid, KB, L, padKB, maxr, smem / 1024, occ, nclu,
            e == cudaSuccess ? "ok" : cudaGetErrorString(e), req_clu, blk_sm);
+  } else if (!strcmp(cmd, "T")) {
+    // P176-1（§101）：逐块时间线。参数/语义与 B 相同，唯一新增 = 记录每块 (smid,t0,t1)。
+    // 用于坐实/修正 §100 的「尾波」解释（§100.8(5)）。
+    int C = atoi(argv[2]), grid = atoi(argv[3]), KB = atoi(argv[4]), R = atoi(argv[5]),
+        mode = atoi(argv[6]), L = atoi(argv[7]), padKB = atoi(argv[8]), maxr = atoi(argv[9]);
+    int warm = argc > 10 ? atoi(argv[10]) : 5;
+    int box1 = KB * 1024 / 4 / 256;
+    int chunk = 256 * box1;
+    if (L < 1) L = 1;
+    long ntot = 256L * (long)box1 * (long)R * L;
+    float *src, *out; unsigned long long* rec;
+    CE(cudaMalloc(&src, ntot * 4));
+    CE(cudaMalloc(&out, (size_t)grid * sizeof(float)));
+    CE(cudaMalloc(&rec, (size_t)grid * 3 * sizeof(unsigned long long)));
+    {
+      float* h = (float*)malloc(ntot * 4);
+      for (long i = 0; i < ntot; i++) h[i] = (float)((i % 251) - 125) * 1e-3f;
+      CE(cudaMemcpy(src, h, ntot * 4, cudaMemcpyHostToDevice)); free(h);
+    }
+    CUtensorMap tmap = make_tmap_2d(src, 256, ntot / 256, 256, box1);
+    size_t smem = (size_t)L * chunk * 4 + (size_t)padKB * 1024;
+    cudaFuncSetAttribute((const void*)mcast_tl,
+                         cudaFuncAttributeNonPortableClusterSizeAllowed, 1);
+    if (smem >= 48 * 1024)
+      cudaFuncSetAttribute((const void*)mcast_tl,
+                           cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+    int occ = 0;
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, (const void*)mcast_tl, TH, smem);
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(grid); cfg.blockDim = dim3(TH);
+    cfg.dynamicSmemBytes = smem; cfg.stream = 0;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = C; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+    cfg.attrs = at; cfg.numAttrs = 1;
+    int nclu = -1; cudaOccupancyMaxActiveClusters(&nclu, (const void*)mcast_tl, &cfg);
+
+    void* args[] = {(void*)&tmap, (void*)&out, (void*)&rec,
+                    (void*)&R, (void*)&box1, (void*)&L, (void*)&mode};
+    int fail = 0;
+    for (int i = 0; i < warm + 1; i++) {
+      cudaError_t e = launch_cluster(C, dim3(grid), dim3(TH), smem, (void*)mcast_tl, args);
+      if (e != cudaSuccess) { printf("T C=%d grid=%d [launch FAIL %s]\n",
+                                     C, grid, cudaGetErrorString(e)); fail = 1; break; }
+      CE(cudaDeviceSynchronize());
+    }
+    if (fail) { cudaFree(src); cudaFree(out); cudaFree(rec); return 0; }
+
+    std::vector<unsigned long long> r((size_t)grid * 3);
+    CE(cudaMemcpy(r.data(), rec, (size_t)grid * 3 * sizeof(unsigned long long),
+                  cudaMemcpyDeviceToHost));
+    // 正确性哨兵（与 B 命令同式）：out[blk] = sum_r (buf[0] + buf[TH])，buf 首两行来自 src
+    double err = 0;
+    {
+      std::vector<float> o(grid);
+      CE(cudaMemcpy(o.data(), out, (size_t)grid * sizeof(float), cudaMemcpyDeviceToHost));
+      for (int g = 0; g < grid; g++) {
+        double exp = 0;
+        for (int rr = 0; rr < R; rr++) {
+          long base = (long)rr * L * chunk;
+          exp += (double)((base % 251) - 125) * 1e-3;
+          exp += (double)(((base + 128) % 251) - 125) * 1e-3;
+        }
+        double d = o[g] - exp; if (d < 0) d = -d;
+        if (d > err) err = d;
+      }
+    }
+    int nsm = num_sm();
+    unsigned long long tmin = r[1], tmax = r[2];
+    unsigned maxsm = 0;
+    for (int b = 0; b < grid; b++) {
+      unsigned long long a = r[(size_t)b * 3 + 1], z = r[(size_t)b * 3 + 2];
+      if (a < tmin) tmin = a; if (z > tmax) tmax = z;
+      unsigned sm = (unsigned)r[(size_t)b * 3 + 0]; if (sm > maxsm) maxsm = sm;
+    }
+    unsigned long long span = tmax > tmin ? tmax - tmin : 1;
+    std::vector<unsigned long long> st(grid), en(grid);
+    for (int b = 0; b < grid; b++) {
+      st[b] = r[(size_t)b * 3 + 1] - tmin; en[b] = r[(size_t)b * 3 + 2] - tmin;
+    }
+    int peak_req_clu = (nclu > 0) ? nclu : -1;
+    printf("T C=%2d grid=%4d KB=%2d L=%2d pad=%3dKB maxr=%3d mode=%d warm=%d | occ=%2d "
+           "maxActiveClusters=%d | numSM=%d span=%llu ns (%.2f us) maxerr=%.5f\n",
+           C, grid, KB, L, padKB, maxr, mode, warm, occ, peak_req_clu, nsm, span, span / 1e3, err);
+    {
+      std::vector<unsigned long long> s = st; std::sort(s.begin(), s.end());
+      printf("  start-decile(us):");
+      for (int p = 10; p <= 100; p += 10) {
+        int idx = (int)((long long)p * grid / 100) - 1; if (idx < 0) idx = 0;
+        printf(" p%03d=%.2f", p, s[idx] / 1e3);
+      }
+      printf("\n");
+      std::vector<unsigned long long> f = en; std::sort(f.begin(), f.end());
+      printf("  finish-decile(us):");
+      for (int p = 10; p <= 100; p += 10) {
+        int idx = (int)((long long)p * grid / 100) - 1; if (idx < 0) idx = 0;
+        printf(" p%03d=%.2f", p, f[idx] / 1e3);
+      }
+      printf("\n");
+    }
+    // 驻留块时间线：50 桶，统计每桶内 [t0,t1) 覆盖的块数
+    const int NB = 50;
+    std::vector<int> res(NB, 0);
+    for (int b = 0; b < grid; b++) {
+      int i0 = (int)((unsigned long long)st[b] * NB / span);
+      int i1 = (int)((unsigned long long)en[b] * NB / span);
+      if (i0 > NB - 1) i0 = NB - 1;
+      if (i1 > NB - 1) i1 = NB - 1;
+      for (int k = i0; k <= i1; k++) res[k]++;
+    }
+    int peak = 0; for (int k = 0; k < NB; k++) if (res[k] > peak) peak = res[k];
+    printf("  resident(blocks)/50bins (peak=%d = %.2f blk/SM):", peak,
+           peak ? (double)peak / nsm : 0.0);
+    for (int k = 0; k < NB; k++) printf(" %d", res[k]);
+    printf("\n");
+    std::vector<int> smc(maxsm + 1, 0);
+    for (int b = 0; b < grid; b++) smc[(unsigned)r[(size_t)b * 3 + 0]]++;
+    int used = 0, max_per_sm = 0;
+    for (unsigned k = 0; k <= maxsm; k++) if (smc[k]) { used++; if (smc[k] > max_per_sm) max_per_sm = smc[k]; }
+    int late = 0; unsigned long long thr = (unsigned long long)(span * 0.2);
+    for (int b = 0; b < grid; b++) if (st[b] > thr) late++;
+    printf("  sm_used=%d/%d | max_blocks_per_SM=%d | late_start(>20%%span)=%d/%d (%.1f%%)\n",
+           used, nsm, max_per_sm, late, grid, 100.0 * late / grid);
+    cudaFree(src); cudaFree(out); cudaFree(rec);
   } else { printf("unknown cmd %s\n", cmd); return 1; }
   return 0;
 }
