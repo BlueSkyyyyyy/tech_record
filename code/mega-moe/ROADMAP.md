@@ -2027,7 +2027,37 @@
       （512MB copy 0.392ms ∥ FFMA 7.79ms → 串行 8.173 / 重叠 8.263 / **0.989×**），
       通信腿缩到 1/4 SM（33 blocks）则**真重叠**（2.025ms ∥ 7.79ms → 串行 14.534 / 重叠 8.186 /
       **1.776×**）——正面坐实第 63 篇「半卡 SM 上限」的必要性。配套博客
-      `content/posts/mega-moe-75-deepep-stream-event-overlap`（索引页新增第 75 篇）。
+       `content/posts/mega-moe-75-deepep-stream-event-overlap`（索引页新增第 75 篇）。
+
+### P66 增量（opt-in，补齐 einsum 家族一直缺席的「验收测试即正确性规范」）
+
+- [x] **P66-1** **DeepGEMM einsum 家族的验收测试即正确性规范**（`tests/test_einsum.py` 276 行；
+      `csrc/apis/einsum.hpp` 四分派；`tests/utils.py` 的逐位 oracle；`deep_gemm/utils/math.py`
+      的参考量化器）。第 40/41/43 篇拆了测试基座/生成器/逐位断言，第 41/47/50/57/64 篇拆了
+      Mega MoE / Mega Gate / MQA logits / Mega mHC / 稠密 GEMM 的端到端测试，但把整个
+      **einsum 家族**（`bmk,bnk->mn` + MLA 双向投影 + 权重梯度 + FP8 block-scale 变体）判据集中
+      定义的 `tests/test_einsum.py` 一直只被顺带引用。本篇把它当**「einsum 算什么对」的可执行规格**。
+      H100 上真正跑五个函数，两个 FP8 反向/投影被 `@test_filter(arch>=10)` 门控（仅分析）。
+      → `docs/76-einsum-test-oracle.md`（真实行号核对）：**顶层结构** `:21-259`（七个函数）+ `__main__`
+      `:262-276` 无条件调用七个；门控 `:194`/`:236`；`test_fp8_bhr_hdr_bhd` 无装饰器（bf16 路径
+      sm90 可跑）。**逐函数**：`test_bmk_bnk_mn:21-41`（`s=129` 非对齐、fp32 强制 `c=d`（`:29`）、
+      参考 `bmm.sum(0)`）、`test_bhr_hdr_bhd:44-72`（**带 padding 权重** `fy[:,:,:r]`（`:49-50`）、
+      `deterministic` 双向切「自研 vs cuBLASLt」（`:54-65`）、`assert_direct_output_...`（`:60`））、
+      `test_bhd_hdr_bhr:75-104`、`test_bhd_bhr_hdr:107-125`（**`z_0*10` 放大 C 累积**（`:113`））、
+      FP8 `test_fp8_bhr_hdr_bhd:128-191`（A per-token 1D + B per-128×128 2D SF；输出 dtype 分岔
+      `:144`；**FP8 输出对必须逐位 == 「先 BF16 D 再 per-token 量化」**（`:159-164`，仅 SM100））、
+      `test_fp8_bhd_hdr_bhr:194-233` / `test_fp8_bhd_bhr_hdr:236-259`（SM100）。
+      **判据清单**：`calc_diff` 阈值 `:34`=1e-5 / `:58/89/118`=1e-10 / `:181`=2e-3(fp8)、1e-3(bf16) /
+      `:213/252`=1e-3；逐位 oracle `:60/91`（direct==FP32 累积）、`:63/94/179/223`（随机舍入哈希）、
+      `:163/164`（FP8 输出对逐位）。
+      **H100 真机** `harness/exp_einsum_test_oracle.{sh,py,out.txt}`：直接 `import test_einsum` 调用
+      **真实测试体**（只打桩 `bench_kineto`，测试体一行未改）**15 PASS / 0 FAIL**——五个可跑函数断言
+      全过、两个 SM100 函数当场打印 `Filtered`；D 负样本：`bhr,hdr->bhd` **`calc_diff=0` 且逐位**、
+      `bhd,bhr->hdr` 丢 C 从 1.2e-13 变 4.7e-2、`bmk,bnk->mn` 两条等价 ~1e-14；E profiler 抓确定性开关
+      两侧真实 kernel（`sm90_bf16_gemm_impl<...GemmType)4...>` vs `nvjet_sm90_tst_128x256...`）；
+      F 真实吞吐 `bhr,hdr->bhd` 96（h=128,b=8192）/ `bmk,bnk->mn` **124 TFLOPS**。
+      真机坑：fp32 `bmk,bnk->mn` 不传 `c` 段错误（契约 `einsum.hpp:25-26`）。配套博客
+      `content/posts/mega-moe-76-einsum-test-oracle`（索引页新增第 76 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2053,8 +2083,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P65 各增量完成（P15-1…P41-1、P42-1…P65-1）。**
-  本轮 P65-1：新建 `docs/75-deepep-stream-event-overlap.md`
+- 当前进度：**P0~P14 全部完成；P15~P66 各增量完成（P15-1…P41-1、P42-1…P66-1）。**
+  本轮 P66-1：新建 `docs/76-einsum-test-oracle.md`
+  （+`harness/exp_einsum_test_oracle.{sh,py,out.txt}`）——补上 DeepGEMM **einsum 家族**一直缺席的
+  「验收测试即正确性规范」：`tests/test_einsum.py`（276 行）作为「einsum 算什么对」的可执行规格。
+  拆透七个函数（`bmk,bnk->mn` 批归约 / MLA 双向投影 / 权重梯度 / 三个 FP8 变体）、两个
+  `@test_filter(arch>=10)` 门控、`calc_diff` 阈值表（1e-5/1e-10/1e-3/2e-3）、逐位 oracle
+  （direct==FP32 累积、随机舍入 quartet 哈希、**FP8 输出对==「先 BF16 D 再 per-token 量化」管线**）；
+  einsum 特有规格点——带 padding 的权重视图 `fy[:,:,:r]`、`z_0*10` 放大 C 累积语义、fp32
+  `bmk,bnk->mn` 强制 `c=d`（否则段错误）。**H100 真机直接 import 真实测试模块调用真实测试体
+  15 PASS / 0 FAIL**（两个 SM100 函数当场打印 `Filtered`），profiler 抓确定性开关两侧真实 kernel。
+  配套博客 `content/posts/mega-moe-76-einsum-test-oracle`（索引页新增第 76 篇）。
+  上一轮 P65-1：新建 `docs/75-deepep-stream-event-overlap.md`
   （+`harness/exp_deepep_stream_event_overlap.{sh,py,out.txt}`、`src/deepep_stream_event.cu`）
   ——补上「通信—计算重叠」一直缺席的 **Python / host 调度地基**：`EventOverlap`
   （`deep_ep/utils/event.py:8-106`）、`get_comm_stream`（通信流 static 单例 + 高优先级 +
@@ -2808,7 +2848,11 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P65 已完成（最新 **P65-1 DeepEP 的通信—计算重叠「Python 调度地基」**：
+- **下一步**：P0~P66 已完成（最新 **P66-1 DeepGEMM einsum 家族的验收测试即正确性规范**：
+  `tests/test_einsum.py`——七个函数 / 两个 arch 门控 / `calc_diff` 阈值表 / 逐位 oracle（direct==FP32
+  累积、随机舍入哈希、FP8 输出对==生产管线）；H100 真机直接驱动真实测试体 **15 PASS / 0 FAIL**；
+  详见上）。
+  上一轮 P65-1：**DeepEP 的通信—计算重叠「Python 调度地基」**：
   `EventOverlap` / `get_comm_stream` / `BufferBase` + C++ 孪生 `EventHandle` / `stream_wait` +
   交接点 `stream_control_prologue/_epilogue`；纯 host/Python，H100 真机 exec 真实代码 **21 PASS / 0 FAIL**；
   核心实测：全卡通信+全卡计算**不重叠**（0.989×）、通信缩到 1/4 SM 则 **1.776×**，坐实第 63 篇半卡上限；

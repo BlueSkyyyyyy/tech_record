@@ -1,0 +1,158 @@
+
+==============================================================================
+Part A：test_einsum.py 的顶层结构（真机 introspection）
+==============================================================================
+get_arch_major() = 9  (本机 H100 = sm90)
+
+test_einsum.py: functions = ['test_bhd_bhr_hdr', 'test_bhd_hdr_bhr', 'test_bhr_hdr_bhd', 'test_bmk_bnk_mn', 'test_filter', 'test_fp8_bhd_bhr_hdr', 'test_fp8_bhd_hdr_bhr', 'test_fp8_bhr_hdr_bhd']
+__main__ 调用序列：
+  torch.manual_seed(0)
+  random.seed(0)
+  test_bmk_bnk_mn()
+  test_bhr_hdr_bhd()
+  test_bhd_hdr_bhr()
+  test_bhd_bhr_hdr()
+  test_fp8_bhr_hdr_bhd()
+  test_fp8_bhd_hdr_bhr()
+  test_fp8_bhd_bhr_hdr()
+
+@test_filter 装饰器（源码逐行）：['@test_filter(lambda: get_arch_major() >= 10)', '@test_filter(lambda: get_arch_major() >= 10)']
+  -> test_fp8_bhd_hdr_bhr / test_fp8_bhd_bhr_hdr 在 H100 被门控跳过；
+     test_fp8_bhr_hdr_bhd 无装饰器（bf16 输出路径 sm90 可跑）。
+[PASS] A: 模块可 import 且入口/门控可见: 8 个 test_* 函数，2 个 arch 门控
+
+==============================================================================
+Part B：验收「利齿」阈值表（真机读文件字面量）
+==============================================================================
+calc_diff 阈值（行号 -> 值）：
+  test_einsum.py:34: calc_diff(...) < 1e-5
+  test_einsum.py:58: calc_diff(...) < 1e-10
+  test_einsum.py:89: calc_diff(...) < 1e-10
+  test_einsum.py:118: calc_diff(...) < 1e-10
+  test_einsum.py:213: calc_diff(...) < 1e-3
+  test_einsum.py:252: calc_diff(...) < 1e-3
+
+逐位 oracle（tests/utils.py，第 43 篇）：
+  assert_direct_output_matches_fp32_accumulation  <-  test_einsum.py:60 / :91
+  assert_stochastic_bf16_matches_fp32_accumulation <-  test_einsum.py:63 / :94 / :179 / :223 (SM100-only)
+[PASS] B: 阈值表提取: 6 处 calc_diff 阈值
+
+==============================================================================
+Part C：直接调用真实测试体（只打桩 bench_kineto，测试体不改）
+==============================================================================
+Testing "bmk, bnk -> mn":
+ > Perf (b= 129, m=128, n=384, k=128, FP32):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b= 129, m=128, n=384, k=128, BF16):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b= 129, m=256, n=256, k=256, FP32):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b= 129, m=256, n=256, k=256, BF16):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b= 129, m=384, n=128, k=384, FP32):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b= 129, m=384, n=128, k=384, BF16):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b=4096, m=128, n=384, k=128, FP32):  1000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (b=4096, m=128, n=384, k=128, BF16):  1000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (b=4096, m=256, n=256, k=256, FP32):  1000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (b=4096, m=256, n=256, k=256, BF16):  1000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (b=4096, m=384, n=128, k=384, FP32):  1000000 us |    0 TFLOPS |    2 GB/s
+ > Perf (b=4096, m=384, n=128, k=384, BF16):  1000000 us |    0 TFLOPS |    2 GB/s
+ > Perf (b=8192, m=128, n=384, k=128, FP32):  1000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (b=8192, m=128, n=384, k=128, BF16):  1000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (b=8192, m=256, n=256, k=256, FP32):  1000000 us |    0 TFLOPS |    2 GB/s
+ > Perf (b=8192, m=256, n=256, k=256, BF16):  1000000 us |    0 TFLOPS |    2 GB/s
+ > Perf (b=8192, m=384, n=128, k=384, FP32):  1000000 us |    0 TFLOPS |    3 GB/s
+ > Perf (b=8192, m=384, n=128, k=384, BF16):  1000000 us |    0 TFLOPS |    3 GB/s
+
+[PASS] C: test_einsum.test_bmk_bnk_mn: no assertion violated
+Testing "bhr, hdr -> bhd":
+ > Perf (b=   4, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=  32, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b= 128, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=4096, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    1 GB/s | 1.00 x
+ > Perf (b=8192, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    1 GB/s | 1.00 x
+ > Perf (b=   4, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=  32, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b= 128, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=4096, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=8192, h=8, r=4096, d=1024):  1000000 us |    1 TFLOPS |    1 GB/s | 1.00 x
+
+[PASS] C: test_einsum.test_bhr_hdr_bhd: no assertion violated
+Testing "bhd, hdr -> bhr":
+ > Perf (b=   4, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=  32, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b= 128, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=4096, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    1 GB/s | 1.00 x
+ > Perf (b=8192, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    1 GB/s | 1.00 x
+ > Perf (b=   4, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=  32, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b= 128, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=4096, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=8192, h=8, r=4096, d=1024):  1000000 us |    1 TFLOPS |    1 GB/s | 1.00 x
+
+[PASS] C: test_einsum.test_bhd_hdr_bhr: no assertion violated
+Testing "bhd, bhr -> hdr":
+ > Perf (b=   4, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b=  32, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b= 128, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b=4096, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (b=8192, h=128, r=512, d=128):  1000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (b=   4, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b=  32, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b= 128, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s
+ > Perf (b=4096, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    1 GB/s
+ > Perf (b=8192, h=8, r=4096, d=1024):  1000000 us |    1 TFLOPS |    1 GB/s
+
+[PASS] C: test_einsum.test_bhd_bhr_hdr: no assertion violated
+Testing FP8 "bhr, hdr -> bhd":
+ > Perf (b=   4, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=  32, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b= 128, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=4096, h=8, r=4096, d=1024):  1000000 us |    0 TFLOPS |    0 GB/s | 1.00 x
+ > Perf (b=8192, h=8, r=4096, d=1024):  1000000 us |    1 TFLOPS |    0 GB/s | 1.00 x
+
+[PASS] C: test_einsum.test_fp8_bhr_hdr_bhd: no assertion violated
+test_fp8_bhd_hdr_bhr:
+ > Filtered by <function <lambda> at 0x7f72eec059e0>
+
+[PASS] C: test_einsum.test_fp8_bhd_hdr_bhr: no assertion violated
+test_fp8_bhd_bhr_hdr:
+ > Filtered by <function <lambda> at 0x7f72eec05a80>
+
+[PASS] C: test_einsum.test_fp8_bhd_bhr_hdr: no assertion violated
+
+==============================================================================
+Part D：einsum 特有的「利齿与盲区」负样本控制
+==============================================================================
+D1) "bhr,hdr->bhd" 一个真实形状：calc_diff(<1e-10) 与逐位判据的差别
+    calc_diff(z, ref) = 0.000e+00  (<1e-10 -> PASS)
+    torch.equal(z, ref) = True   (逐位比 calc_diff 严格)
+[PASS] D1: 紧 calc_diff + 逐位关系已记录: calc_diff=0.00e+00, bitwise=True
+
+D2) "bhd,bhr->hdr" 的 C-累积：漏掉 C（写成覆盖）会被大初始值放大暴露
+    D=C=z0 累积 : calc_diff = 1.203e-13  (阈值 1e-10)
+    D=0 覆盖    : calc_diff = 4.652e-02  <- 丢 C 立即暴露
+[PASS] D2: C-累积语义被测试严判: 1.20e-13 vs 4.65e-02
+
+D3) "bmk,bnk->mn" 的语义：批归约 == 把 batch 并进收缩轴的 GEMM
+    vs 折叠 batch 的 fp32 GEMM : calc_diff = 3.952e-14
+    vs 逐 batch 部分和          : calc_diff = 2.076e-14
+[PASS] D3: 批归约语义等价已坐实: 
+[PASS] D: einsum 利齿与盲区负样本控制: D1/D2/D3
+
+==============================================================================
+Part E：确定性开关切换真实 kernel（profiler 抓名字）
+==============================================================================
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+deterministic=True  抓到的 GEMM kernel: ['void deep_gemm::sm90_bf16_gemm_impl<(cute::UMMA::Major)0, (cute::UMMA::Major)0, 0u, 128u, 512u, 128u, 256u, 128u, 64u, 128u, 128u, 128u, 3u, 128u, 256u, 1u, false, 132u, (deep_gemm::GemmType)4, false, cutlass::bfloat16_t>(int*, unsigned int, unsigned int, unsigned int, CUtensorMap_st, CUtensorMap_st, CUtensorMap_st)']
+deterministic=False 抓到的 GEMM kernel: ['nvjet_sm90_tst_128x256_64x4_1x2_h_bz_coopA_TNN']
+[PASS] E: 确定性开关切换 kernel（测试用其抓两根路径）: det=True, cublaslt=True
+
+==============================================================================
+Part F：测试自带 perf 路径的真实吞吐（真实 bench_kineto）
+==============================================================================
+   "bhr,hdr->bhd" (b=8, h=4096, r=4096, d=1024): 37709.0 us |      7 TFLOPS
+   "bhr,hdr->bhd" (b=8192, h=128, r=512, d=128):  1425.0 us |     96 TFLOPS
+   "bmk,bnk->mn"  (s=8192, m=n=k=256):  2211.0 us |    124 TFLOPS
+[PASS] F: 真实 bench_kineto 吞吐: bhr,hdr->bhd / bmk,bnk->mn
+
+==============================================================================
+总计：15 PASS / 0 FAIL  (共 15 项)
+==============================================================================
