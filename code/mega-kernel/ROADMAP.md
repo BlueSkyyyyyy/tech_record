@@ -4097,8 +4097,39 @@
   对 megakernel 的负面含义：**多加/改一个 task 可能改动态 SMEM 基址、静默破坏邻居 TMA swizzle**，
   故生产每个 TMA task 各自兜底上取整（去中心化 SMEM 地址 ABI，预算代价每 task ≤~1 KB）。
   配套博客 post `mega-kernel-59-mpk-tma-smem-layout`（weight 60）并更新 `mega-kernel-00-index` 第 59 项。
-  P144-1 新留尾巴见文档 §8（只测 B=3/128B 与单 box；10 消费者只核 2 处；未跑 MPK 本体；
-  `tma_2d/3d/4d` wrapper 语义未逐行；对齐坑对生产路径的实证留待可编译 SM100 时）。**本轮新增增量。**
+   P144-1 新留尾巴见文档 §8（只测 B=3/128B 与单 box；10 消费者只核 2 处；未跑 MPK 本体；
+   `tma_2d/3d/4d` wrapper 语义未逐行；对齐坑对生产路径的实证留待可编译 SM100 时）。**本轮新增增量。**
+
+### P145 SM100 TMEM 列布局与 UTCCP 重排走读（`docs/59-mpk-tmem-utccp-layout.md`）
+
+- [x] **P145-1** 补掉 `docs/57` §3 只给摘要（「scale 先 stage 到 SMEM、再经 UTCCP 拷进 TMEM scale 列」）
+  的下一层，并把本专题存储层级布局契约补齐第三段（`docs/51` SMEM 软件、`docs/58` SMEM TMA 之外的
+  **TMEM**），逐层打开「SMEM 行主序 → warp 转置 → UTCCP → TMEM 列」。见
+  `docs/59-mpk-tmem-utccp-layout.md`（MPK `f9eb70c`；纯源码走读 + 1 个 H100 微实验）。三条 headline：
+  **(A)（headline）TMEM 是第三种「布局即 ABI」，比 SMEM 更贵**——per-SM 显式资源、须 `alloc/free` 且
+  列数为 2 的幂（CUTLASS `tmem_allocator_sm100.hpp` 契约「`32 ≤ n ≤ 512` 且 2 的幂」、且 `@pre 同一 warp
+  重复分配」）；一次 block-scaled FP8 GEMM 把**累加器+SFA+SFB 三段**塞进同一段 TMEM 列空间（`[ACC|SFA|SFB]`
+  列偏移 `kTmemStartColOfSFA/SFB`），MPK 三套公式各算一遍（`linear_fp8_sm100.cuh:159-171`、
+  `fp8_group_gemm_sm100.cuh:486-508`、`linear_fp8_1d2d_sm100.cuh:115-119`）、**两份** `get_num_aligned_tmem_cols`
+  各 round 一遍；`linear_fp8_1d2d_sm100.cuh:118` 的分配列数**未 round**（`// TODO`，因该身体全仓无调用者
+  才静默）。**(B)（headline）UTCCP = `tcgen05.cp.cta_group::1.32x128b.warpx4`，一次搬 128 个 uint32 =
+  4 列 × 32 dp × 128 bit**（`copy_sm100.hpp:482-498`），源 SWIZZLE_NONE 描述符（`make_sf_desc`，SBO=128 B）、
+  目标列 `+i*4`；UMMA 的 `sf_id`（`InstrDescriptorBlockScaled` 字段）选每 32-K 子块的 scale 列，
+  `kNumMWaves>1` 时每 M-wave 的 SFA 占 4 列（`+w*4`）。因为 scale 加载按「一行一个 uint32」行主序写，
+  而 UTCCP 要 4×32 列块，中间**必须插一次 warp 内转置**。**(C)（headline）目标卡 H100/sm90a 实测**
+  （新 `src/tmem_utccp_layout.cu` + `harness/tmem_utccp_layout.sh` + `harness/tmem_utccp_layout.out.txt`，
+  device 3、nvcc 13.2；**转置 arch-agnostic 故真跑，UTCCP/TMEM 指令本体 SM100 专属只建模**）：快照里
+  **三份转置写法**（`fp8_group_gemm_sm100.cuh:322-336` 与 `linear_fp8_sm100.cuh:536-546` 带 `(i^(lane>>3))`
+  XOR、`linear_fp8_1d2d_sm100.cuh:50-65`/DeepGEMM 无 XOR）对 host 参考 `out[l*4+k]=in[k*32+l]` **逐位相等**
+  （三份 mismatches=0）；XOR 是**功能中性的迭代序置换**（读集/写集不变），MPK 注释自称「identical to
+  DeepGEMM」但 DeepGEMM 自身用**无 XOR** 版（算法等价、代码序列不同）；隔离微基准 `plain` 59.5 vs
+  `xor` 91.0 / `v4` 87.0 cycles/转置（XOR/v4 慢 ~1.5×，真实 kernel 每 SF block 一次、可忽略）；并给出
+  「4×32 连续读」列块视图（第 g 列收 `{8g+j,32+8g+j,64+8g+j,96+8g+j}`，是 0..127 的置换）与
+  「UTCCP 经 SBO 的精确 dp↔深度映射**未验证**、只记不判」的诚实边界。判据贡献 **C3**（device body 内
+  SMEM→TMEM 的布局/数据流契约）。配套博客 post `mega-kernel-60-mpk-tmem-utccp-layout`（weight 61）
+  并更新 `mega-kernel-00-index` 第 60 项。P145-1 新留尾巴见文档 §8（UTCCP/TMEM 本体未在 SM100 上跑、
+  计时是隔离微基准、`1d2d` 未 round 列数 CUTLASS 是否容忍未核、未走 `mma_traits_sm100.hpp` 的
+  block-scaled scale TMEM 布局 trait）。**本轮新增增量。**
 
 ## 每轮增量流程（autopilot）
 
@@ -4458,11 +4489,51 @@
   `(ptr+1023)/1024*1024` 上取整（`linear_hopper.cuh:88` + 每 stage 偏移 1024 上取整、
   `linear_fp8_sm100.cuh:146-149` 用 `%1024==0` 静态断言）。**含义**：常驻 megakernel 里加/改一个 task
   可能改动态 SMEM 基址、**静默**破坏别的 TMA task 的 swizzle——写/移植 TMA task 时基址必须自己对齐，
-  别指望邻居或框架。这是 `docs/51`「布局类型即 SMEM 的 ABI」的**地址侧**补充。
-
+   别指望邻居或框架。这是 `docs/51`「布局类型即 SMEM 的 ABI」的**地址侧**补充。
+- **TMEM 列数是 2 的幂、且必须由同一 warp alloc/free**（P145-1/`docs/59` §2）：CUTLASS
+  `Allocator1Sm/2Sm::allocate` 的文档注释写死 `32 ≤ num_columns ≤ 512` **且为 2 的幂**，且 `@pre
+  For repeated allocations, the same warp must be used to issue all allocations`（`deps/cutlass@f3fde583`
+  的 `cute/arch/tmem_allocator_sm100.hpp`）。故给 SM100 block-scaled task 算 TMEM 列预算时**必须
+  round 到 2 的幂**——`linear_fp8_1d2d_sm100.cuh:115-119` 的 `num_tmem_columns = acc + SFA + SFB`
+  **没 round**（源码留 `// TODO`），只因该身体全仓无调用者（`docs/32` §3）才静默；移植它前先补 round。
+  两次「alloc 必须同 warp」是 `docs/57` §4「常驻 kernel 内 TMEM alloc 同 warp」的 CUTLASS 侧原文。
+- **UTCCP 的 SMEM 源必须先是「4 列 × 32 行」列块——行主序必须显式 warp 转置**（P145-1/`docs/59` §3/§4）：
+  `SM100_UTCCP_4x32dp128bit_1cta`（=`tcgen05.cp...32x128b.warpx4`）一次搬 **4 列 × 32 dp × 128 bit = 128 个
+  uint32**，源描述符 SWIZZLE_NONE、SBO=128 B（`sm100_utils.cuh:51-63` 的 `make_sf_desc`）。scale 加载按
+  「一行一个 uint32」行主序写，故**每个 SF block 都必须先做一次 warp 内转置**（这是 `docs/51`/`docs/58`
+  之外的第三处 SMEM 布局约定，消费者是 UTCCP 不是 `ldsm`/wgmma）。快照里该转置有**三份等价写法**：
+  `fp8_group_gemm_sm100.cuh:322-336` 与 `linear_fp8_sm100.cuh:536-546` 带一个 `(i ^ (lane>>3))` 的
+  **功能中性**置换（读集/写集不变，注释自称「identical to DeepGEMM」但 DeepGEMM 自身用无 XOR 版），
+  `linear_fp8_1d2d_sm100.cuh:50-65` 无 XOR。**别按「注释说 identical」推断代码序列相同**（又一处
+  「按注释/名字推断会错」）；三份在目标卡 H100 实测输出逐位相同（本文 §5）。
+  
 ## 当前进度 / 下一步
 
-- 当前进度：**P144-1 完成（1/1）**。补掉 `docs/51-mpk-smem-layout.md` §6 明留的尾巴——把
+- 当前进度：**P145-1 完成（1/1）**。补掉 `docs/57` §3 只给摘要的「scale 先 stage 到 SMEM、再经 UTCCP
+  拷进 TMEM scale 列」，并把本专题存储层级布局契约补齐第三段（`docs/51` SMEM 软件、`docs/58` SMEM TMA
+  之外的 **TMEM**）。见 `docs/59-mpk-tmem-utccp-layout.md`（MPK `f9eb70c`；纯源码走读 + 1 个 H100 微实验）。
+  三条 headline：**(A)（headline）TMEM 是第三种「布局即 ABI」，且比 SMEM 更贵**——per-SM 显式资源、须
+  `alloc/free`、列数须 2 的幂（CUTLASS `Allocator1Sm/2Sm` 契约「`32≤n≤512` 且 2 的幂」）；一次 block-scaled
+  FP8 GEMM 把**累加器 + SFA + SFB 三段**塞进同一段 TMEM 列空间用列偏移区分，MPK 三套公式各算一遍、两份
+  `get_num_aligned_tmem_cols` 各 round 一遍（`docs/57`「实现不止一遍」族）；`linear_fp8_1d2d_sm100.cuh:118`
+  的分配列数**未 round**（`// TODO`，因身体全仓无调用者才静默，只记不判）。**(B)（headline）scale 走
+  「SMEM 行主序 → warp 转置 → UTCCP → TMEM 列」三段**：UTCCP 一次搬 128 uint32 = **4 列 × 32 dp × 128 bit**
+  （`SM100_UTCCP_4x32dp128bit_1cta` = `tcgen05.cp.cta_group::1.32x128b.warpx4`），源 SWIZZLE_NONE 描述符
+  （SBO=128 B），UMMA 的 `sf_id` 选每 32-K 子块的 scale 列、`kNumMWaves>1` 时每 M-wave SFA 占 4 列。
+  **(C)（headline）目标卡 H100/sm90a 实测**（新 `src/tmem_utccp_layout.cu` + `harness/tmem_utccp_layout.sh`
+  + `.out.txt`，device 3）：**三份转置写法**（带 `(i^(lane>>3))` XOR 的两份 vs DeepGEMM/`1d2d` 无 XOR 版）
+  对 host 参考 `out[l*4+k]=in[k*32+l]` **逐位相等**（mismatches=0），XOR 是**功能中性的迭代序置换**（注释
+  自称「identical to DeepGEMM」但 DeepGEMM 用无 XOR 版）；隔离微基准 `plain` 59.5 vs `xor` 91.0 / `v4` 87.0
+  cycles/转置。判据贡献 **C3**（device body 内 SMEM→TMEM 的布局/数据流契约）。配套博客 post
+  `mega-kernel-60-mpk-tmem-utccp-layout`（weight 61）并更新 `mega-kernel-00-index` 第 60 项。
+  P145-1 新留尾巴见文档 §8。
+- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计
+  （注：该 kernel 名 `eagle3_draft_chain_step_attn` 快照里 `grep` 零命中，**可能不可走**，须先核 demo
+  引用是否指向别处）；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或 SM100 专属布局的其余面
+  （`mma_traits_sm100.hpp` 的 block-scaled scale TMEM 布局 trait、`linear_fp8_1d2d_sm100_cute_tie.cuh`
+  的 CuTe UTCCP 路径）逐行。**TMEM 列布局 / UTCCP 重排已由 P145-1/`docs/59` 补掉**；TMA 版 SMEM 布局
+  已由 P144-1/`docs/58` 补掉；SM100 共享原语层已由 P143-1/`docs/57` 补掉。
+- 此前：**P144-1 完成（1/1）**。补掉 `docs/51-mpk-smem-layout.md` §6 明留的尾巴——把
   `tasks/hopper/smem_layout_tma.cuh`（`smem_tma`，129 行，被 10 个 Hopper/Blackwell 身体共用）逐行打开，
   并**在目标卡 H100/sm90a 上用真实 TMA 实测**它与硬件 128 B swizzle 的一致性与其**1024 B 基址对齐契约**。
   见 `docs/58-mpk-tma-smem-layout.md`（MPK `f9eb70c`；纯源码走读 + 1 个新实验）。三条 headline：
@@ -4475,11 +4546,6 @@
   `fp8_group_gemm_sm100.cuh:606-612`/`mla_prefill_tp8_sm100.cuh:223-229` 源码注释互相印证。判据只 C3。
   配套博客 post `mega-kernel-59-mpk-tma-smem-layout`（weight 60）并更新 `mega-kernel-00-index` 第 59 项。
   P144-1 新留尾巴见文档 §8。
-- 下一步候选：可继续走「其余未走读相邻层」的残留——`docs/46` §6 的 FLAT-CACHE draft attention 设计的完整
-  追述；或 `docs/44`/`docs/45` 的 SMEM 片段仍余的内部未逐行处；或 SM100 专属布局（TMEM 列布局、UTCCP
-  重排细节）逐行。**TMA 版 SMEM 布局层（`smem_tma`）已由 P144-1/`docs/58` 补掉**；SM100 共享原语层
-  已由 P143-1/`docs/57` 补掉；采样链两段式已补完（P142-1/`docs/56`）；路由三兄弟全部补完
-  （P140-1/P141-1）。
 - 此前：**P143-1 完成（1/1）**。兑现阶段「下一步候选」第三条残留——`docs/22` §3.2 只给摘要、
   `docs/38` 只走 `tasks/common/*` 的缺口：把 `tasks/blackwell/` 那层「SM100 共享原语」当作一层逐行打开，
   重点兑现 ROADMAP 原话「**tcgen05 commit / TMEM 分配的运行期契约**」。见 `docs/57-mpk-sm100-primitives.md`
