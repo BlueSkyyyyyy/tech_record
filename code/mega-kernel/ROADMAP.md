@@ -2827,7 +2827,38 @@
   `docs/15` §7 的「工程落差」补运行期证据；§6 论文 §4.2 四项 intra-SM 优化逐条对照；§7 判据
   **只贡献 C3**；§8 局限（纯走读未跑、未逐句展开 CuTe 模板装配、`triton_kernels.py`/参数生成逻辑未走、
   Hopper/Blackwell 只给骨架）。**纯源码走读（资料分析），本轮无新实验。** 配套博客 post
-  `mega-kernel-20-mpk-runtime`（weight 21）并更新 `mega-kernel-00-index` 第 20 项。
+   `mega-kernel-20-mpk-runtime`（weight 21）并更新 `mega-kernel-00-index` 第 20 项。
+
+### P106 MPK 另一条 codegen 后端：Triton 路径源码走读（`docs/20-mpk-triton-backend.md`）
+
+- [x] **P106-1** 补齐 `docs/19`（P105-1）**§8 明留的尾巴**——「`triton_kernels.py`（Python 侧）未走」。
+  顺这条尾巴往上，发现它是一整条**平行于 NVCC/CUDA transpiler 的第二条 codegen 后端**。见
+  `docs/20-mpk-triton-backend.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，与
+  `docs/06`–`docs/19` 同快照；纯源码走读、无新实验）：
+  §0 四坐标链路（`kernel.py:543/553/706-745` → `triton_profiler.py` → `core.pyx:1461-1469` →
+  `src/triton_transpiler/*` → 运行期 `triton_kernels.py`），并指出 `search_c.cc:16` 的 `backend`
+  参数**从未被引用**、只影响搜完后的编译支路；
+  §1 前端选择（`__call__`/`triton_call :300-315`、`KERNELS_PATH` 注入 `:711`、`importlib` 加载
+  `execute_mugraph` `:733-740`；`demo/triton_rms_norm.py` 为最小示例）+ `triton_profiler.py`
+  **每候选图起独立子进程 profile**（`:160-185` `subprocess` + 解析 stdout 的 `Average time`）；
+  §2 `TritonTranspiler` ctor（`transpile.cc:41-298`）**克隆新图**、`dtensor_mapping` 重建 op、
+  customized op 把复合 TB 算子**手工拆开**（`FORLOOP_ACCUM_RED_LD_RMS` `:228-241`、`TB_RMS_NORM`
+  `:251-261` 且 `:256` 的 reduction 被注释）、末尾后置校验（`:280-297`）；
+  §3 `transpile_ugraph`（`:299-565`）四段生成 Python 模块（header/inputs 硬编码 fp16/`execute_mugraph`
+  /逐 op 调用 `ops.matmul`·`elementwise_*_kernel`·`reduce_sum_kernel`·`custom_kernel_N`）与
+  `output_shapes`；§4 `transpile_kn_custom_op`（`transpile_tb.cc:209-643`）——**无 warp specialization/
+  TMA/wgmma**，纯 `tl.arange`+`program_id` 直译、形状**对齐到 2 的幂** + pad 掩码、累加器恒 fp32、
+  两遍（accum 前/后）遍历、`tl.dot` 恒 `.to(fp32)` 且 matmul 的 mask **算了没用**；
+  §5 运行期 `triton_kernels.py`（66 行，3 个 `@triton.jit`）——**OP 魔数 = C++ 枚举数值**（`type.h`
+  KN `:82-101`）形成隐式 ABI，`KN_POW=1203`/`KN_SILU=1104` 无分支只 device_print、`128` 硬编码；
+  §6 **headline——「Triton codegen」也实现了两遍**：旧 path `src/kernel/triton_code_gen.cc`
+  （`Graph::generate_triton_program`，序列化 `NewKernelParams`+`make_block_ptr`+`out_dtype=fp16`）已成
+  **事实死代码**（仅剩 `core.pyx:901-906` 定义、无 Python 调用者），新 path 直读图走 arange——附七维
+  对照表；另指出 `TritonTranspilerConfig.target_cc` **已接线未使用**（与 `docs/16` 同型）；
+  §7 与论文 §4.2 对照 + **C1–C5 只贡献 C3**（再次印证「换 codegen 目标语言拿不到 C1/C2/C4/C5，
+  必须改执行模型」）+ 生产 `mpk` 前端不调 superoptimize（接 `docs/15` §7）；
+  §8 局限。**纯源码走读（资料分析），本轮无新实验。** 配套博客 post
+  `mega-kernel-21-mpk-triton-backend`（weight 22）并更新 `mega-kernel-00-index` 第 21 项。
 
 ## 每轮增量流程（autopilot）
 
@@ -2990,7 +3021,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P105-1 完成（1/1）**。补齐 `docs/18`（P104-1）**§8 明留的尾巴**——「`include/mirage/
+- 当前进度：**P106-1 完成（1/1）**。补齐 `docs/19`（P105-1）**§8 明留的尾巴**——「`triton_kernels.py`
+  （Python 侧）未走」；顺这条尾巴往上是**一整个平行于 NVCC/CUDA transpiler 的第二条 codegen 后端**。
+  见 `docs/20-mpk-triton-backend.md`（快照 `f9eb70c`，纯源码走读无新实验）：把
+  `superoptimize(backend="triton")` → `triton_profiler.py`（**每候选图独立子进程** profile）→
+  `core.pyx:1461-1469` → `TritonTranspiler`（`src/triton_transpiler/transpile.cc` 579 行 +
+  `transpile_tb.cc` 645 行）→ 运行期 `triton_kernels.py`（66 行）逐层走通。headline：**「Triton
+  codegen」也实现了两遍**——旧 path `src/kernel/triton_code_gen.cc`（`NewKernelParams` 序列化 +
+  `make_block_ptr` + `out_dtype=fp16`，已成**事实死代码**、无 Python 调用者）vs 新 path（直读图、
+  `tl.arange`+`program_id` 直译、`tl.dot` 恒 `.to(fp32)`）；另记 `search_c.cc:16` 的 `backend` 参数
+  **未被引用**、`TritonTranspilerConfig.target_cc` **已接线未使用**（与 `docs/16` 同型的「已实现未
+  启用」）。判据 **C1–C5 只贡献 C3**（换 codegen 目标语言拿不到 C1/C2/C4/C5）；`mpk` 生产前端不调
+  superoptimize（接 `docs/15` §7）。配套博客 post `mega-kernel-21-mpk-triton-backend`（weight 22）、
+  更新 `mega-kernel-00-index` 第 21 项。
+- 此前：**P105-1 完成（1/1）**。补齐 `docs/18`（P104-1）**§8 明留的尾巴**——「`include/mirage/
   transpiler/runtime/**` 是被生成代码调用的库，只当黑盒引用」。见 `docs/19-mpk-runtime-templates.md`
   （快照 `f9eb70c`，纯源码走读无新实验）：把**被生成 CUDA 调用的 23 个 device/thread-block 模板头
   （3017 行）**逐层走通——§0 两层 namespace（`kn::` 整算子兜底 / `tb::` 在 `custom_kernel_N` 内按

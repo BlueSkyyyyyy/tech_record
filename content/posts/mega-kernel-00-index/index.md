@@ -38,5 +38,6 @@ categories: ["算子开发"]
 18. [MPK 多卡/NVSHMEM 路径源码走读：把通信编进同一个常驻 mega-kernel]({{< relref "mega-kernel-18-mpk-multigpu" >}}) —— 跨卡 event、两种 AllReduce（AllGather+Reduce / NVLS tile）与「多卡被迫单 kernel」
 19. [MPK 自动路径（下）源码走读：transpiler 如何把 thread-block 图编成 CUDA]({{< relref "mega-kernel-19-mpk-transpiler" >}}) —— 运行时/device/依赖分析/搜索之外的下半段：图归一化、五步 resolve、schedule/swizzle/memory plan 与 warp-specialized 代码生成
 20. [MPK 自动路径（runtime 库）源码走读：被生成 CUDA 调用的 device / thread-block 模板库]({{< relref "mega-kernel-20-mpk-runtime" >}}) —— `kn::`（整算子兜底，GEMM 走 cuBLAS）与 `tb::`（拷贝原子/epilogue 链/mbarrier 流水/wgmma·UMMA）两层，以及「同一套硬件惯用法在仓库里实现了两遍」
+21. [MPK 的另一条 codegen 后端源码走读：Triton transpiler 与 Triton 路径]({{< relref "mega-kernel-21-mpk-triton-backend" >}}) —— `superoptimize(backend="triton")` → 子进程 profile → `TritonTranspiler` → Python/Triton 模块，以及「Triton codegen 也实现了两遍」
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
