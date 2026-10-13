@@ -1189,7 +1189,36 @@
   含义：**选 `cp.async` 为载体在真实 352 B 描述符下是对的（2.3×），而论文说的 pre-fetch 相对快照的单缓冲
   `wait<0>` 还能再收 1.07–1.40×**；§38 用普通 load 的结论只在它的 128 B/大 `K` 口径下成立。判据不变
   （单常驻 kernel、设备侧推进 C1–C4，**无 C5**，与 §36–§38 同档）。**本轮新增实验**；P50-1 新留尾巴
-  （§39.7）：单 block 非多 worker 带宽口径、`mbarrier` 形态未测、未与 DeepGEMM SM100 路径对跑。
+   （§39.7）：单 block 非多 worker 带宽口径、`mbarrier` 形态未测、未与 DeepGEMM SM100 路径对跑。
+
+### P51 实验扩展 33：多 worker 取 task 带宽标度 + TMA/mbarrier 形态（`docs/04-experiments.md` §40）
+
+- [x] **P51-1** 补掉 P50-1（§39.7）明留的两条尾巴——「**单 block** ⇒ 测的是『取一批的延迟』而非
+  『访存带宽』，要多 worker 的带宽标度需另做多 block 实验」与「**`mbarrier` 形态未测**（`cp.async` 用
+  `commit_group`/`wait_group` 软件计数，未测硬件 mbarrier/TMA 风格）」：把 §39 的「单 block 消费者」
+  扩成 **G 个 worker block**，并新增两条 **TMA bulk + 硬件 mbarrier** 取数路径。见
+  `docs/04-experiments.md` **§40**，源码 `src/multi_worker_desc_fetch.cu`、脚本
+  `harness/multi_worker_desc_fetch.sh`、原始输出 `harness/multi_worker_desc_fetch.out.txt`
+  （目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、`-arch=sm_90a`，256 MB ≫ L2）。真实锚点：
+  worker 16 B `cp.async` 单缓冲（`persistent_kernel.cuh:1063-1078`）；硬件 mbarrier + TMA bulk 形态在
+  task 单体内部（`tasks/hopper/tma_2d.cuh:119`、`barrier.cuh:42/59/75`），本节搬到「取 task」层；
+  `TaskDesc` 352 B、论文 §5.3 pre-fetching（行 1364-1368）；worker 数按 SM（§5.1 行 1168）。六路径
+  `scalar`/`vec4`/`cpasync`/`cpasync_pf`/`bulk`(TMA+mbarrier 单)/`bulk_pf`(双)，全 `bad=0`。核心结论：
+  - **§B 多 worker 标度：aggregate 带宽随 G 近似严格线性、到 G=2×SM 仍未饱和**——`vec4` G=1 3.3→
+    G=264 **803 GB/s**（每 worker 恒 ~3.0 GB/s）、`cpasync` ~2.4 GB/s/worker；**取 task 是「per-worker
+    延迟绑定」，带宽只能靠堆 worker 换**（对上 MPK §5.1 worker 数按 SM）。128 B 下 `vec4` per-worker 最高。
+  - **§C TMA bulk 单缓冲 ≡ 16 B `cp.async`**（同 K 逐行相等，K=32 0.41 vs 0.40）——省指令不改吞吐；
+    **收益全在双缓冲预取**：`bulk_pf` 每个 K 最快（K=1 3.21 vs `cpasync` 4.90 = 1.53×）。
+  - **§D 真实 352 B 下 `bulk_pf` 独一档**：0.28 ns/item = **1263 GB/s**，比 `vec4`（1.05）快 **3.75×**、
+    比 `cpasync_pf`（0.42）快 **1.52×**（硬件 mbarrier 单线程 issue 让预取近乎免费）；`cpasync`/`bulk`
+    几乎不随 `DW` 变（复现 §39.2，但在多 worker + 绝对 GB/s 口径：`cpasync` 903.8 vs `vec4` 335.5）。
+  - **§E 多 worker 下线程数不再是变量**（并行度由 worker 数提供）。
+  - **踩坑（顺带修正 §39 潜在缺陷）**：`cpasync` 双缓冲**最后一批**用 `wait_group 1` 会立即返回、可能
+    读到未完成的 SMEM（首版 `K=4`/`DW=8` 各一例 `bad=1`，复现）；改成最后一批 `wait_group 0` 后全
+    `bad=0`。**§39 的 `cpasync_pf` 有同构写法**，当时 `bad=0` 是时序侥幸（与 §36.3 同源），结论不受
+    影响但记为待修隐患。
+  判据 C1–C4、无 C5（与 §36–§39 同档）。**本轮新增实验**；P51-1 新留尾巴（§40.8）：1D bulk 非
+  TensorMap、无动态生产者、未测 K×SMEM 联合约束、未与 DeepGEMM SM100 路径对跑。
 
 ## 每轮增量流程（autopilot）
 
@@ -1213,7 +1242,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P50-1 完成（1/1）**。补掉 P49-1（§38.7）明留的尾巴「`cp.async` 只是等效语义（§38 用
+- 当前进度：**P51-1 完成（1/1）**。补掉 P50-1（§39.7）明留的两条尾巴——「**单 block** 测的是『取一批
+  的延迟』而非『访存带宽』，要多 worker 的带宽标度需另做多 block 实验」与「**`mbarrier` 形态未测**」：
+  把 §39 的「单 block 消费者」扩成 **G 个 worker block**，并新增两条 **TMA bulk + 硬件 mbarrier** 取数
+  路径。`docs/04-experiments.md` 新增 **§40**，源码 `src/multi_worker_desc_fetch.cu`、脚本
+  `harness/multi_worker_desc_fetch.sh`、原始输出 `harness/multi_worker_desc_fetch.out.txt`（目标卡
+  H100/sm90a、**固定空闲 device 3**、nvcc 13.2、256 MB ≫ L2）。六路径 `scalar`/`vec4`/`cpasync`/
+  `cpasync_pf`/`bulk`(TMA+mbarrier 单)/`bulk_pf`(双)，全 `bad=0`。核心结论：
+  - **§B 多 worker 标度**：aggregate 带宽随 G 近似严格线性、到 G=2×SM 仍未饱和——`vec4` G=1 3.3→
+    G=264 **803 GB/s**（每 worker 恒 ~3.0 GB/s）；**取 task 是 per-worker 延迟绑定，带宽只能堆 worker**
+    （对上 MPK §5.1 worker 数按 SM）。128 B 下 `vec4` per-worker 最高。
+  - **§C** TMA bulk 单缓冲 **≡** 16 B `cp.async`（K=32 0.41 vs 0.40）；收益全在双缓冲预取
+    （`bulk_pf` K=1 3.21 vs `cpasync` 4.90 = 1.53×）。
+  - **§D 真实 352 B 下 `bulk_pf` 独一档**：0.28 ns/item = **1263 GB/s**，比 `vec4` 快 **3.75×**、
+    比 `cpasync_pf` 快 **1.52×**；`cpasync`/`bulk` 几乎不随 `DW` 变（`cpasync` 903.8 vs `vec4` 335.5）。
+  - **§E** 多 worker 下线程数不再是变量。**踩坑**：`cpasync` 双缓冲最后一批 `wait_group 1` 会漏等
+    （首版 `bad=1`），改 `wait_group 0` 修复；**§39 `cpasync_pf` 有同构写法**，当时 `bad=0` 是侥幸
+    （与 §36.3 同源），结论不受影响但记为待修隐患。
+  判据 C1–C4、无 C5。**本轮新增实验**；P51-1 新留尾巴（§40.8）：1D bulk 非 TensorMap、无动态生产者、
+  未测 K×SMEM 联合约束、未与 DeepGEMM SM100 路径对跑。**P0–P51 全部完成。**
+- 此前：**P50-1 完成（1/1）**。补掉 P49-1（§38.7）明留的尾巴「`cp.async` 只是等效语义（§38 用
   普通 `ld.relaxed` 读，**未实测 `cp.async` 批量加载本身的收益**——那是另一条线）」「`warp` 下
   `cp.async`/`mbarrier` 的批量加载形态」：把 worker「取 task」的**载体选择**单独量出来。
   `docs/04-experiments.md` 新增 **§39**，源码 `src/cpasync_desc_fetch.cu`、脚本
@@ -1233,7 +1281,7 @@
   - **§D 预取（双缓冲）** 相对单缓冲稳定收回 **7%–40%**（`K` 越小越多）——**`cp.async` 单用只是「换载体」，
     加预取才是「流水」**，对应论文 §5.3 pre-fetch。**§E 线程数是弱标度**（单 block 受延迟约束）。
   判据 C1–C4、无 C5（与 §36–§38 同档）。**本轮新增实验**；P50-1 新留尾巴（§39.7）：单 block 非多 worker
-  带宽口径、`mbarrier` 形态未测、未与 DeepGEMM SM100 路径对跑。**P0–P50 全部完成。**
+  带宽口径、`mbarrier` 形态未测、未与 DeepGEMM SM100 路径对跑。
 - 此前：**P49-1 完成（1/1）**。补掉 P48-1（§37.7）明留的两条尾巴——「消费者是**单线程**、
   每项 ~2.3µs 同步往返主导成本」（生产实现会批量取 task）与「payload 是纯 `uint32`、**未做真实 task
   描述符**」：把 §37 的 MPSC 队列升级为「**批量出队 + 一个 warp 的并行校验 + 128 B 真实 `TaskDesc`**」。

@@ -1,0 +1,150 @@
+device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0  L2=50 MB
+
+===== §A 正确性：六路径 checksum 一致（G=NSM, DW=32, K=32, lanes=128） =====
+  fetch scalar      G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.41 ns/item    309.5 GB/s  (0.867 ms/rep)
+  fetch vec4        G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.31 ns/item    409.2 GB/s  (0.656 ms/rep)
+  fetch cpasync     G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.41 ns/item    316.0 GB/s  (0.849 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.36 ns/item    354.4 GB/s  (0.757 ms/rep)
+  fetch bulk        G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.41 ns/item    312.5 GB/s  (0.859 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.33 ns/item    382.5 GB/s  (0.702 ms/rep)
+
+===== §B 多 worker 标度（DW=32=128B, K=32, lanes=128, 256MB；扫 G） =====
+  fetch vec4        G=1    K=32   DW=32(128B) lanes=128   bad=0  ~   38.98 ns/item      3.3 GB/s  (81.738 ms/rep)
+  fetch cpasync     G=1    K=32   DW=32(128B) lanes=128   bad=0  ~   52.61 ns/item      2.4 GB/s  (110.321 ms/rep)
+  fetch cpasync_pf  G=1    K=32   DW=32(128B) lanes=128   bad=0  ~   44.92 ns/item      2.8 GB/s  (94.195 ms/rep)
+  fetch bulk        G=1    K=32   DW=32(128B) lanes=128   bad=0  ~   53.22 ns/item      2.4 GB/s  (111.616 ms/rep)
+  fetch bulk_pf     G=1    K=32   DW=32(128B) lanes=128   bad=0  ~   43.23 ns/item      3.0 GB/s  (90.659 ms/rep)
+
+  fetch vec4        G=2    K=32   DW=32(128B) lanes=128   bad=0  ~   19.40 ns/item      6.6 GB/s  (40.678 ms/rep)
+  fetch cpasync     G=2    K=32   DW=32(128B) lanes=128   bad=0  ~   26.33 ns/item      4.9 GB/s  (55.220 ms/rep)
+  fetch cpasync_pf  G=2    K=32   DW=32(128B) lanes=128   bad=0  ~   22.46 ns/item      5.7 GB/s  (47.099 ms/rep)
+  fetch bulk        G=2    K=32   DW=32(128B) lanes=128   bad=0  ~   26.62 ns/item      4.8 GB/s  (55.831 ms/rep)
+  fetch bulk_pf     G=2    K=32   DW=32(128B) lanes=128   bad=0  ~   21.62 ns/item      5.9 GB/s  (45.337 ms/rep)
+
+  fetch vec4        G=4    K=32   DW=32(128B) lanes=128   bad=0  ~    9.84 ns/item     13.0 GB/s  (20.635 ms/rep)
+  fetch cpasync     G=4    K=32   DW=32(128B) lanes=128   bad=0  ~   13.17 ns/item      9.7 GB/s  (27.621 ms/rep)
+  fetch cpasync_pf  G=4    K=32   DW=32(128B) lanes=128   bad=0  ~   11.42 ns/item     11.2 GB/s  (23.946 ms/rep)
+  fetch bulk        G=4    K=32   DW=32(128B) lanes=128   bad=0  ~   13.36 ns/item      9.6 GB/s  (28.015 ms/rep)
+  fetch bulk_pf     G=4    K=32   DW=32(128B) lanes=128   bad=0  ~   10.81 ns/item     11.8 GB/s  (22.671 ms/rep)
+
+  fetch vec4        G=8    K=32   DW=32(128B) lanes=128   bad=0  ~    4.87 ns/item     26.3 GB/s  (10.221 ms/rep)
+  fetch cpasync     G=8    K=32   DW=32(128B) lanes=128   bad=0  ~    6.58 ns/item     19.4 GB/s  (13.803 ms/rep)
+  fetch cpasync_pf  G=8    K=32   DW=32(128B) lanes=128   bad=0  ~    5.80 ns/item     22.1 GB/s  (12.168 ms/rep)
+  fetch bulk        G=8    K=32   DW=32(128B) lanes=128   bad=0  ~    6.68 ns/item     19.2 GB/s  (14.002 ms/rep)
+  fetch bulk_pf     G=8    K=32   DW=32(128B) lanes=128   bad=0  ~    5.41 ns/item     23.7 GB/s  (11.339 ms/rep)
+
+  fetch vec4        G=16   K=32   DW=32(128B) lanes=128   bad=0  ~    2.43 ns/item     52.6 GB/s  (5.101 ms/rep)
+  fetch cpasync     G=16   K=32   DW=32(128B) lanes=128   bad=0  ~    3.27 ns/item     39.1 GB/s  (6.857 ms/rep)
+  fetch cpasync_pf  G=16   K=32   DW=32(128B) lanes=128   bad=0  ~    2.91 ns/item     44.0 GB/s  (6.094 ms/rep)
+  fetch bulk        G=16   K=32   DW=32(128B) lanes=128   bad=0  ~    3.31 ns/item     38.7 GB/s  (6.932 ms/rep)
+  fetch bulk_pf     G=16   K=32   DW=32(128B) lanes=128   bad=0  ~    2.70 ns/item     47.3 GB/s  (5.672 ms/rep)
+
+  fetch vec4        G=32   K=32   DW=32(128B) lanes=128   bad=0  ~    1.25 ns/item    102.4 GB/s  (2.622 ms/rep)
+  fetch cpasync     G=32   K=32   DW=32(128B) lanes=128   bad=0  ~    1.64 ns/item     78.0 GB/s  (3.442 ms/rep)
+  fetch cpasync_pf  G=32   K=32   DW=32(128B) lanes=128   bad=0  ~    1.47 ns/item     87.3 GB/s  (3.075 ms/rep)
+  fetch bulk        G=32   K=32   DW=32(128B) lanes=128   bad=0  ~    1.67 ns/item     76.9 GB/s  (3.493 ms/rep)
+  fetch bulk_pf     G=32   K=32   DW=32(128B) lanes=128   bad=0  ~    1.35 ns/item     94.5 GB/s  (2.839 ms/rep)
+
+  fetch vec4        G=64   K=32   DW=32(128B) lanes=128   bad=0  ~    0.62 ns/item    205.8 GB/s  (1.304 ms/rep)
+  fetch cpasync     G=64   K=32   DW=32(128B) lanes=128   bad=0  ~    0.83 ns/item    155.1 GB/s  (1.731 ms/rep)
+  fetch cpasync_pf  G=64   K=32   DW=32(128B) lanes=128   bad=0  ~    0.74 ns/item    172.9 GB/s  (1.553 ms/rep)
+  fetch bulk        G=64   K=32   DW=32(128B) lanes=128   bad=0  ~    0.83 ns/item    153.4 GB/s  (1.750 ms/rep)
+  fetch bulk_pf     G=64   K=32   DW=32(128B) lanes=128   bad=0  ~    0.68 ns/item    188.4 GB/s  (1.424 ms/rep)
+
+  fetch vec4        G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.31 ns/item    415.4 GB/s  (0.646 ms/rep)
+  fetch cpasync     G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.40 ns/item    318.6 GB/s  (0.843 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.36 ns/item    357.7 GB/s  (0.750 ms/rep)
+  fetch bulk        G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.41 ns/item    314.7 GB/s  (0.853 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.33 ns/item    386.4 GB/s  (0.695 ms/rep)
+
+  fetch vec4        G=264  K=32   DW=32(128B) lanes=128   bad=0  ~    0.16 ns/item    803.1 GB/s  (0.334 ms/rep)
+  fetch cpasync     G=264  K=32   DW=32(128B) lanes=128   bad=0  ~    0.25 ns/item    516.0 GB/s  (0.520 ms/rep)
+  fetch cpasync_pf  G=264  K=32   DW=32(128B) lanes=128   bad=0  ~    0.19 ns/item    661.5 GB/s  (0.406 ms/rep)
+  fetch bulk        G=264  K=32   DW=32(128B) lanes=128   bad=0  ~    0.21 ns/item    598.1 GB/s  (0.449 ms/rep)
+  fetch bulk_pf     G=264  K=32   DW=32(128B) lanes=128   bad=0  ~    0.22 ns/item    573.1 GB/s  (0.468 ms/rep)
+
+
+===== §C TMA bulk+mbarrier vs 16B cp.async：批量 K 扫描（G=NSM, DW=32=128B, lanes=128） =====
+  fetch cpasync     G=132  K=1    DW=32(128B) lanes=128   bad=0  ~    4.90 ns/item     26.1 GB/s  (10.285 ms/rep)
+  fetch cpasync_pf  G=132  K=1    DW=32(128B) lanes=128   bad=0  ~    3.50 ns/item     36.6 GB/s  (7.337 ms/rep)
+  fetch bulk        G=132  K=1    DW=32(128B) lanes=128   bad=0  ~    5.05 ns/item     25.4 GB/s  (10.588 ms/rep)
+  fetch bulk_pf     G=132  K=1    DW=32(128B) lanes=128   bad=0  ~    3.21 ns/item     39.9 GB/s  (6.728 ms/rep)
+
+  fetch cpasync     G=132  K=2    DW=32(128B) lanes=128   bad=0  ~    2.50 ns/item     51.3 GB/s  (5.236 ms/rep)
+  fetch cpasync_pf  G=132  K=2    DW=32(128B) lanes=128   bad=0  ~    1.78 ns/item     71.9 GB/s  (3.733 ms/rep)
+  fetch bulk        G=132  K=2    DW=32(128B) lanes=128   bad=0  ~    2.59 ns/item     49.4 GB/s  (5.432 ms/rep)
+  fetch bulk_pf     G=132  K=2    DW=32(128B) lanes=128   bad=0  ~    1.61 ns/item     79.3 GB/s  (3.387 ms/rep)
+
+  fetch cpasync     G=132  K=4    DW=32(128B) lanes=128   bad=0  ~    1.38 ns/item     93.0 GB/s  (2.887 ms/rep)
+  fetch cpasync_pf  G=132  K=4    DW=32(128B) lanes=128   bad=0  ~    0.98 ns/item    130.9 GB/s  (2.051 ms/rep)
+  fetch bulk        G=132  K=4    DW=32(128B) lanes=128   bad=0  ~    1.40 ns/item     91.3 GB/s  (2.940 ms/rep)
+  fetch bulk_pf     G=132  K=4    DW=32(128B) lanes=128   bad=0  ~    0.93 ns/item    137.8 GB/s  (1.948 ms/rep)
+
+  fetch cpasync     G=132  K=8    DW=32(128B) lanes=128   bad=0  ~    0.82 ns/item    156.3 GB/s  (1.717 ms/rep)
+  fetch cpasync_pf  G=132  K=8    DW=32(128B) lanes=128   bad=0  ~    0.62 ns/item    207.7 GB/s  (1.292 ms/rep)
+  fetch bulk        G=132  K=8    DW=32(128B) lanes=128   bad=0  ~    0.83 ns/item    153.5 GB/s  (1.749 ms/rep)
+  fetch bulk_pf     G=132  K=8    DW=32(128B) lanes=128   bad=0  ~    0.59 ns/item    218.1 GB/s  (1.231 ms/rep)
+
+  fetch cpasync     G=132  K=16   DW=32(128B) lanes=128   bad=0  ~    0.54 ns/item    236.1 GB/s  (1.137 ms/rep)
+  fetch cpasync_pf  G=132  K=16   DW=32(128B) lanes=128   bad=0  ~    0.44 ns/item    288.0 GB/s  (0.932 ms/rep)
+  fetch bulk        G=132  K=16   DW=32(128B) lanes=128   bad=0  ~    0.55 ns/item    231.9 GB/s  (1.157 ms/rep)
+  fetch bulk_pf     G=132  K=16   DW=32(128B) lanes=128   bad=0  ~    0.42 ns/item    306.6 GB/s  (0.876 ms/rep)
+
+  fetch cpasync     G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.40 ns/item    318.3 GB/s  (0.843 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.36 ns/item    357.7 GB/s  (0.751 ms/rep)
+  fetch bulk        G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.41 ns/item    314.6 GB/s  (0.853 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.33 ns/item    386.3 GB/s  (0.695 ms/rep)
+
+  fetch cpasync     G=132  K=64   DW=32(128B) lanes=128   bad=0  ~    0.21 ns/item    597.5 GB/s  (0.449 ms/rep)
+  fetch cpasync_pf  G=132  K=64   DW=32(128B) lanes=128   bad=0  ~    0.21 ns/item    621.6 GB/s  (0.432 ms/rep)
+  fetch bulk        G=132  K=64   DW=32(128B) lanes=128   bad=0  ~    0.22 ns/item    591.4 GB/s  (0.454 ms/rep)
+  fetch bulk_pf     G=132  K=64   DW=32(128B) lanes=128   bad=0  ~    0.17 ns/item    755.5 GB/s  (0.355 ms/rep)
+
+
+===== §D 描述符大小 DW 扫描（G=NSM, K=32, lanes=128；DW=88=352B 对齐 MPK §6.1） =====
+  fetch vec4        G=132  K=32   DW=8 ( 32B) lanes=128   bad=0  ~    0.13 ns/item    244.6 GB/s  (1.098 ms/rep)
+  fetch cpasync     G=132  K=32   DW=8 ( 32B) lanes=128   bad=0  ~    0.15 ns/item    214.2 GB/s  (1.253 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=8 ( 32B) lanes=128   bad=0  ~    0.09 ns/item    363.1 GB/s  (0.739 ms/rep)
+  fetch bulk        G=132  K=32   DW=8 ( 32B) lanes=128   bad=0  ~    0.16 ns/item    206.3 GB/s  (1.301 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=8 ( 32B) lanes=128   bad=0  ~    0.09 ns/item    339.0 GB/s  (0.792 ms/rep)
+
+  fetch vec4        G=132  K=32   DW=16( 64B) lanes=128   bad=0  ~    0.15 ns/item    423.9 GB/s  (0.633 ms/rep)
+  fetch cpasync     G=132  K=32   DW=16( 64B) lanes=128   bad=0  ~    0.20 ns/item    316.3 GB/s  (0.849 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=16( 64B) lanes=128   bad=0  ~    0.14 ns/item    457.5 GB/s  (0.587 ms/rep)
+  fetch bulk        G=132  K=32   DW=16( 64B) lanes=128   bad=0  ~    0.21 ns/item    306.6 GB/s  (0.876 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=16( 64B) lanes=128   bad=0  ~    0.14 ns/item    453.2 GB/s  (0.592 ms/rep)
+
+  fetch vec4        G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.31 ns/item    415.6 GB/s  (0.646 ms/rep)
+  fetch cpasync     G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.40 ns/item    319.1 GB/s  (0.841 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.36 ns/item    357.8 GB/s  (0.750 ms/rep)
+  fetch bulk        G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.41 ns/item    314.4 GB/s  (0.854 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.33 ns/item    386.4 GB/s  (0.695 ms/rep)
+
+  fetch vec4        G=132  K=32   DW=88(352B) lanes=128   bad=0  ~    1.05 ns/item    335.5 GB/s  (0.800 ms/rep)
+  fetch cpasync     G=132  K=32   DW=88(352B) lanes=128   bad=0  ~    0.39 ns/item    903.8 GB/s  (0.297 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=88(352B) lanes=128   bad=0  ~    0.42 ns/item    828.9 GB/s  (0.324 ms/rep)
+  fetch bulk        G=132  K=32   DW=88(352B) lanes=128   bad=0  ~    0.39 ns/item    903.7 GB/s  (0.297 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=88(352B) lanes=128   bad=0  ~    0.28 ns/item   1263.3 GB/s  (0.212 ms/rep)
+
+
+===== §E worker 线程数（warp 数）标度（G=NSM, DW=32, K=32） =====
+  fetch cpasync     G=132  K=32   DW=32(128B) lanes=32    bad=0  ~    0.43 ns/item    300.6 GB/s  (0.893 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=32(128B) lanes=32    bad=0  ~    0.39 ns/item    328.8 GB/s  (0.816 ms/rep)
+  fetch bulk        G=132  K=32   DW=32(128B) lanes=32    bad=0  ~    0.41 ns/item    316.0 GB/s  (0.849 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=32(128B) lanes=32    bad=0  ~    0.33 ns/item    386.4 GB/s  (0.695 ms/rep)
+
+  fetch cpasync     G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.40 ns/item    318.2 GB/s  (0.844 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.36 ns/item    358.6 GB/s  (0.749 ms/rep)
+  fetch bulk        G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.41 ns/item    315.1 GB/s  (0.852 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=32(128B) lanes=128   bad=0  ~    0.33 ns/item    386.4 GB/s  (0.695 ms/rep)
+
+  fetch cpasync     G=132  K=32   DW=32(128B) lanes=256   bad=0  ~    0.40 ns/item    317.6 GB/s  (0.845 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=32(128B) lanes=256   bad=0  ~    0.36 ns/item    355.3 GB/s  (0.756 ms/rep)
+  fetch bulk        G=132  K=32   DW=32(128B) lanes=256   bad=0  ~    0.41 ns/item    313.2 GB/s  (0.857 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=32(128B) lanes=256   bad=0  ~    0.33 ns/item    384.7 GB/s  (0.698 ms/rep)
+
+  fetch cpasync     G=132  K=32   DW=32(128B) lanes=512   bad=0  ~    0.40 ns/item    316.4 GB/s  (0.849 ms/rep)
+  fetch cpasync_pf  G=132  K=32   DW=32(128B) lanes=512   bad=0  ~    0.36 ns/item    358.2 GB/s  (0.750 ms/rep)
+  fetch bulk        G=132  K=32   DW=32(128B) lanes=512   bad=0  ~    0.42 ns/item    308.2 GB/s  (0.871 ms/rep)
+  fetch bulk_pf     G=132  K=32   DW=32(128B) lanes=512   bad=0  ~    0.34 ns/item    380.8 GB/s  (0.705 ms/rep)
+
