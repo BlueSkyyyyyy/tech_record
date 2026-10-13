@@ -707,6 +707,78 @@ DEF_MBARW0(1) DEF_MBARW0(2) DEF_MBARW0(4) DEF_MBARW0(8) DEF_MBARW0(16)
 DEF_MTEX(1) DEF_MTEX(2) DEF_MTEX(4) DEF_MTEX(8) DEF_MTEX(16)
 #undef DEF_MTEX
 
+// ---------- §98「双向全 TMA」（mtex2）：ready 与 ack 都由 TMA 事务计数表达 ----------
+// §97.9 明留的尾巴：`mtex` 只把 **ready 方向**的「数据交付 + done」交给 TMA 引擎（`cp.async.bulk`
+// + `arrive.expect_tx`），**ack（背压）方向仍是软件 arrive**（每线程远端 arrive 生产者的 ackBar，
+// count=TH）。本节把 **ack 方向也改成 TMA**——语义/拓扑/数据量/环深与 `mtex` 逐字相同，唯一变量 =
+// **ack 如何表达**：
+//   - `mtex`：消费者读完本槽后**全 block 每线程**远端 arrive 上游 `ackBar[j]`（count=TH，
+//     每 round 每 block TH 次跨 SM arrive；无需 __syncthreads，每线程自报「我读完了」）。
+//   - `mtex2`：消费者读完本槽后 `__syncthreads()`（全 block 读完才放行），再由 `tid0` 单点向上游
+//     `ackBar[j]` 做远端 `arrive.expect_tx`（登记到达 1 + 期望 16 B）+ 一笔 16 B 的
+//     `cp.async.bulk.shared::cluster.shared::cta`（把一小段 token 搬进上游的 `ackBuf[j]`），
+//     **ack 与 ready 一样按 TMA 事务字节数记账**（count=1）。ack 只承载「槽已空」信号，不承载
+//     真实数据，故 16 B 的 token 足够（TMA bulk 最小事务 16 B）。
+// 两笔待测代价：(a) 每 round 一次 `__syncthreads()`；(b) ack 方向的 TMA 往返是否比 TH 次软件 arrive
+// 更省。SMEM 增量 = `S` 个 16 B 的 `ackBuf`（对本实验 `sb` 可忽略）。
+#define DEF_MTEX2(U)                                                                    \
+  __global__ void mtex2_##U(float* __restrict__ out, int rounds, int sb, int Sr) {      \
+    extern __shared__ float sm[];                                                       \
+    int SEG = TH * U;                                                                   \
+    int tiles = sb / SEG;                                                               \
+    int S = Sr < tiles ? Sr : tiles;                                                    \
+    float* snd = sm;                                                                    \
+    float* rcv = sm + sb;                                                               \
+    float* ackBuf = rcv + (size_t)S * SEG;   /* S 个 16 B 槽，接收上游/下游的 ack token */  \
+    uint64_t* readyBar = (uint64_t*)(ackBuf + (size_t)S * 4);                           \
+    uint64_t* ackBar = readyBar + S;                                                    \
+    cg::cluster_group cl = cg::this_cluster();                                          \
+    int C = cl.num_blocks();                                                            \
+    int rank = cl.block_rank();                                                         \
+    int tid = threadIdx.x;                                                              \
+    for (int i = tid; i < sb; i += blockDim.x) snd[i] = fval(i, rank);                  \
+    if (tid == 0)                                                                      \
+      for (int j = 0; j < S; j++) { mbar_init(cvta_smem(&readyBar[j]), 1);             \
+                                    mbar_init(cvta_smem(&ackBar[j]), 1); }              \
+    __syncthreads();                                                                    \
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");                  \
+    cl.sync();                                                                          \
+    int dstRank = (rank + 1) % C, srcRank = (rank - 1 + C) % C;                         \
+    float* dst = (float*)cl.map_shared_rank(rcv, dstRank);                              \
+    float* srcAckBuf = (float*)cl.map_shared_rank(ackBuf, srcRank);                     \
+    unsigned rBar = cvta_smem(&readyBar[0]), aBar = cvta_smem(&ackBar[0]);              \
+    unsigned dstRBar0 = 0, srcABar0 = 0;                                                \
+    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(dstRBar0)               \
+                 : "r"(rBar), "r"((unsigned)dstRank));                                  \
+    asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(srcABar0)               \
+                 : "r"(aBar), "r"((unsigned)srcRank));                                  \
+    unsigned tokAddr = cvta_smem(&snd[0]);  /* 16 B token 源；内容与 ack 语义无关 */       \
+    long long acc = 0;                                                                  \
+    for (int r = 0; r < rounds; r++) {                                                  \
+      int j = r % S;                                                                    \
+      int off = (r % tiles) * SEG;                                                      \
+      int m = r / S;                                                                    \
+      if (m >= 1) mbar_wait(aBar + 8 * (unsigned)j, (unsigned)((m - 1) & 1));           \
+      if (tid == 0) {                                                                   \
+        mbar_arrive_expect_tx_remote(dstRBar0 + 8 * (unsigned)j, (unsigned)(SEG * 4));  \
+        bulk_s2s(cvta_smem(dst + (size_t)j * SEG), cvta_smem(snd + off),               \
+                 (unsigned)(SEG * 4), dstRBar0 + 8 * (unsigned)j);                      \
+      }                                                                                 \
+      mbar_wait(rBar + 8 * (unsigned)j, (unsigned)(m & 1));                             \
+      _Pragma("unroll") for (int u = 0; u < U; u++) acc += (long long)rcv[j * SEG + u * TH + tid]; \
+      __syncthreads();   /* 全 block 读完本槽，才能发单点 ack */                            \
+      if (tid == 0) {                                                                   \
+        mbar_arrive_expect_tx_remote(srcABar0 + 8 * (unsigned)j, 16u);                  \
+        bulk_s2s(cvta_smem(srcAckBuf + (size_t)j * 4), tokAddr, 16u,                    \
+                 srcABar0 + 8 * (unsigned)j);                                           \
+      }                                                                                 \
+    }                                                                                   \
+    cl.sync();   /* teardown：确保所有远端 arrive / bulk 落定、无人提前退出释放 SMEM */    \
+    if (tid == 0) out[blockIdx.x] = (float)acc;                                         \
+  }
+DEF_MTEX2(1) DEF_MTEX2(2) DEF_MTEX2(4) DEF_MTEX2(8) DEF_MTEX2(16)
+#undef DEF_MTEX2
+
 // ============================ host dispatch ============================
 static void* pick_pull(int U) {
 #define P(UU) if (U == UU) return (void*)pull_##UU;
@@ -774,6 +846,12 @@ static void* pick_mtex(int U) {
 #undef P
   return nullptr;
 }
+static void* pick_mtex2(int U) {
+#define P(UU) if (U == UU) return (void*)mtex2_##UU;
+  P(1) P(2) P(4) P(8) P(16)
+#undef P
+  return nullptr;
+}
 
 // out[bx] 只存 thread0 的 acc；参考取 tid=0。
 static void reference_t0(int grid, int C, int sb, int rounds, int U, int is_push,
@@ -815,6 +893,8 @@ static int run(const char* tag, int C, int grid, int sbKB, int rounds, int U, in
   if (path >= 5) S = (Sp > 0 && Sp < tiles) ? Sp : S;   // mbar/mbarb/mbarb0/mbarw/mbarw0 的环深 S 可独立指定
   size_t smem = path == 3
       ? (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * TH * 4   // snd + S*rcv + ready/ack
+      : (path == 11)
+      ? (size_t)(sb + (size_t)S * SEG + (size_t)S * 4) * 4 + (size_t)2 * S * 8  // + ackBuf(S*16B)
       : (path >= 5)
       ? (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * 8        // snd + S*rcv + ready/ack mbarrier
       : (size_t)2 * sb * 4;                                            // snd + rcv
@@ -823,7 +903,8 @@ static int run(const char* tag, int C, int grid, int sbKB, int rounds, int U, in
              : (path == 3 ? pick_ring(U) : (path == 4 ? pick_ring1(U)
              : (path == 5 ? pick_mbar(U) : (path == 6 ? pick_mbarb(U)
              : (path == 7 ? pick_mbarb0(U) : (path == 8 ? pick_mbarw(U)
-             : (path == 9 ? pick_mbarw0(U) : (path == 10 ? pick_mtex(U) : pick_pull(U))))))))));
+             : (path == 9 ? pick_mbarw0(U) : (path == 10 ? pick_mtex(U)
+             : (path == 11 ? pick_mtex2(U) : pick_pull(U)))))))))));
   float* out; CK(cudaMalloc(&out, (size_t)grid * sizeof(float)));
   cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   cudaFuncAttributes a; CK(cudaFuncGetAttributes(&a, fn));
@@ -840,7 +921,7 @@ static int run(const char* tag, int C, int grid, int sbKB, int rounds, int U, in
               : (path == 5 ? (void*)mbar_##UU : (path == 6 ? (void*)mbarb_##UU \
               : (path == 7 ? (void*)mbarb0_##UU : (path == 8 ? (void*)mbarw_##UU \
               : (path == 9 ? (void*)mbarw0_##UU : (path == 10 ? (void*)mtex_##UU \
-              : (void*)pull_##UU))))))))))
+              : (path == 11 ? (void*)mtex2_##UU : (void*)pull_##UU)))))))))))
 #define TIME(UU) if (U == UU) {                                                        \
     for (int i = 0; i < N; i++) {                                                      \
       cudaEventRecord(e0);                                                             \
@@ -881,12 +962,15 @@ static int probe(int C, int grid, int sbKB, int U, int reps, int path, int round
   if (path >= 5) S = (Sp > 0 && Sp < tiles) ? Sp : S;
   size_t smem = path == 3
       ? (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * TH * 4
+      : (path == 11)
+      ? (size_t)(sb + (size_t)S * SEG + (size_t)S * 4) * 4 + (size_t)2 * S * 8
       : (path >= 5)
       ? (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * 8
       : (size_t)2 * sb * 4;
   float* out; CK(cudaMalloc(&out, (size_t)grid * sizeof(float)));
   void* pfn = path == 5 ? pick_mbar(U) : path == 6 ? pick_mbarb(U) : path == 7 ? pick_mbarb0(U)
             : path == 8 ? pick_mbarw(U) : path == 9 ? pick_mbarw0(U) : path == 10 ? pick_mtex(U)
+            : path == 11 ? pick_mtex2(U)
             : path == 1 ? pick_push(U) : path == 2 ? pick_pulls(U)
             : path == 3 ? pick_ring(U) : path == 4 ? pick_ring1(U) : pick_pull(U);
   cudaFuncSetAttribute(pfn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
@@ -897,7 +981,8 @@ static int probe(int C, int grid, int sbKB, int U, int reps, int path, int round
     ? launch_cluster(C, dim3(grid), dim3(TH), smem, \
         path == 6 ? (void*)mbarb_##UU : (path == 7 ? (void*)mbarb0_##UU \
         : (path == 8 ? (void*)mbarw_##UU : (path == 9 ? (void*)mbarw0_##UU \
-        : (path == 10 ? (void*)mtex_##UU : (void*)mbar_##UU)))), \
+        : (path == 10 ? (void*)mtex_##UU : (path == 11 ? (void*)mtex2_##UU \
+        : (void*)mbar_##UU))))), \
         out, rounds, sb, S) \
     : launch_cluster(C, dim3(grid), dim3(TH), smem, \
     path == 1 ? (void*)push_##UU : (path == 2 ? (void*)pulls_##UU \
@@ -911,14 +996,14 @@ static int probe(int C, int grid, int sbKB, int U, int reps, int path, int round
   printf("%s C=%d grid=%4d U=%2d rounds=%3d | %d/%d ok\n",
          path == 1 ? "W" : path == 2 ? "S" : path == 3 ? "N" : path == 4 ? "M"
          : path == 5 ? "B" : path == 6 ? "Q" : path == 7 ? "Z" : path == 8 ? "V"
-         : path == 9 ? "U" : path == 10 ? "D" : "R",
+         : path == 9 ? "U" : path == 10 ? "D" : path == 11 ? "I" : "R",
          C, grid, U, rounds, ok, reps);
   cudaFree(out);
   return reps - ok;
 }
 
 int main(int argc, char** argv) {
-  if (argc < 2) { printf("usage: cluster_concurrency <A|R|W|S|N|M|B|Q|Z|V|U|D|F|G|K|O|L|P|Y|X|T|J|E> ...\n"); return 1; }
+  if (argc < 2) { printf("usage: cluster_concurrency <A|R|W|S|N|M|B|Q|Z|V|U|D|I|F|G|K|O|L|P|Y|X|T|J|E|H> ...\n"); return 1; }
   const char* cmd = argv[1];
   // path：0=pull（远端读），1=push（远端写+本地读），2=pulls（远端读串行），
   //       3=ring（无 cluster.sync 的每槽 release/done），4=ring1（环形槽 + 单次 cluster.sync/round），
@@ -927,6 +1012,8 @@ int main(int argc, char** argv) {
   //       7=mbarb0（同 mbarb，但单线程等待用 try_wait hint=0，消除 suspend-hint 造成的性能双模态）
   //       8=mbarw（同 mbar，但**每 warp 一次 arrive**（count=NW=blockDim/32）+ __syncwarp 包裹的中间形态）
   //       9=mbarw0（同 mbarw，但去掉 lane0 显式 `fence.acq_rel.cluster`，测每-warp 形态是否慢在 cluster fence）
+  //       10=mtex（ready/done 由 TMA 事务计数 expect_tx 表达；ack 仍软件 arrive）
+  //       11=mtex2（**双向全 TMA**：ready 与 ack 都由 TMA 事务计数表达）
   int path = 0;
   if (!strcmp(cmd, "W") || !strcmp(cmd, "G")) path = 1;
   else if (!strcmp(cmd, "S") || !strcmp(cmd, "K")) path = 2;
@@ -938,9 +1025,10 @@ int main(int argc, char** argv) {
   else if (!strcmp(cmd, "V") || !strcmp(cmd, "T")) path = 8;
   else if (!strcmp(cmd, "U") || !strcmp(cmd, "J")) path = 9;
   else if (!strcmp(cmd, "D") || !strcmp(cmd, "E")) path = 10;
+  else if (!strcmp(cmd, "I") || !strcmp(cmd, "H")) path = 11;
   const char* tag = path == 1 ? "W" : path == 2 ? "S" : path == 3 ? "N" : path == 4 ? "M"
              : path == 5 ? "B" : path == 6 ? "Q" : path == 7 ? "Z" : path == 8 ? "V"
-             : path == 9 ? "U" : path == 10 ? "D" : "R";
+             : path == 9 ? "U" : path == 10 ? "D" : path == 11 ? "I" : "R";
 
   if (!strcmp(cmd, "A")) {
     printf("# §87 §A / §88 §A 资源表（T=%d，sb=32KB；pull/push/pulls SMEM=64KB，ring 见下）\n", TH);
@@ -950,14 +1038,15 @@ int main(int argc, char** argv) {
       int SEG = TH * U, tiles = sb / SEG, S = tiles < 4 ? tiles : 4;
       size_t smem_r = (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * TH * 4;
       size_t smem_m = (size_t)(sb + (size_t)S * SEG) * 4 + (size_t)2 * S * 8;
-      for (int P = 0; P < 11; P++) {
-        size_t smem = P == 3 ? smem_r : ((P >= 5) ? smem_m : (size_t)2 * sb * 4);
+      size_t smem_m2 = (size_t)(sb + (size_t)S * SEG + (size_t)S * 4) * 4 + (size_t)2 * S * 8;
+      for (int P = 0; P < 12; P++) {
+        size_t smem = P == 3 ? smem_r : (P == 11 ? smem_m2 : ((P >= 5) ? smem_m : (size_t)2 * sb * 4));
         void* fn = P == 0 ? pick_pull(U) : (P == 1 ? pick_push(U)
                  : (P == 2 ? pick_pulls(U) : (P == 3 ? pick_ring(U)
                  : (P == 4 ? pick_ring1(U) : (P == 5 ? pick_mbar(U)
                  : (P == 6 ? pick_mbarb(U) : (P == 7 ? pick_mbarb0(U)
                  : (P == 8 ? pick_mbarw(U) : (P == 9 ? pick_mbarw0(U)
-                 : pick_mtex(U))))))))));
+                 : (P == 10 ? pick_mtex(U) : pick_mtex2(U)))))))))));
         cudaFuncSetAttribute(fn, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
         cudaFuncAttributes a; CK(cudaFuncGetAttributes(&a, fn));
         int occ = 0; CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, fn, TH, smem));
@@ -965,8 +1054,8 @@ int main(int argc, char** argv) {
                P == 0 ? "pull" : (P == 1 ? "push" : (P == 2 ? "pulls"
                : (P == 3 ? "ring" : (P == 4 ? "ring1" : (P == 5 ? "mbar"
                : (P == 6 ? "mbarb" : (P == 7 ? "mbarb0" : (P == 8 ? "mbarw"
-               : (P == 9 ? "mbarw0" : "mtex"))))))))), U,
-               a.numRegs, (size_t)a.localSizeBytes, occ,
+               : (P == 9 ? "mbarw0" : (P == 10 ? "mtex" : "mtex2")))))))))),
+               U, a.numRegs, (size_t)a.localSizeBytes, occ,
                (P == 3 || P >= 5) ? " (S=min(4,tiles))" : "");
       }
     }
@@ -974,7 +1063,7 @@ int main(int argc, char** argv) {
   }
   if (!strcmp(cmd, "R") || !strcmp(cmd, "W") || !strcmp(cmd, "S") || !strcmp(cmd, "N")
       || !strcmp(cmd, "M") || !strcmp(cmd, "B") || !strcmp(cmd, "Q") || !strcmp(cmd, "Z")
-      || !strcmp(cmd, "V") || !strcmp(cmd, "U") || !strcmp(cmd, "D")) {
+      || !strcmp(cmd, "V") || !strcmp(cmd, "U") || !strcmp(cmd, "D") || !strcmp(cmd, "I")) {
     int C = atoi(argv[2]), grid = atoi(argv[3]), sbKB = atoi(argv[4]);
     int rounds = atoi(argv[5]), U = atoi(argv[6]);
     int Sp = argc > 7 ? atoi(argv[7]) : 0;
@@ -982,7 +1071,7 @@ int main(int argc, char** argv) {
   }
   if (!strcmp(cmd, "F") || !strcmp(cmd, "G") || !strcmp(cmd, "K") || !strcmp(cmd, "O")
       || !strcmp(cmd, "L") || !strcmp(cmd, "P") || !strcmp(cmd, "Y") || !strcmp(cmd, "X")
-      || !strcmp(cmd, "T") || !strcmp(cmd, "J") || !strcmp(cmd, "E")) {
+      || !strcmp(cmd, "T") || !strcmp(cmd, "J") || !strcmp(cmd, "E") || !strcmp(cmd, "H")) {
     int C = atoi(argv[2]), grid = atoi(argv[3]), sbKB = atoi(argv[4]);
     int U = atoi(argv[5]), reps = atoi(argv[6]);
     int rounds = argc > 7 ? atoi(argv[7]) : 4;

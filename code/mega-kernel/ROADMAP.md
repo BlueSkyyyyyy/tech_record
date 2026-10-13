@@ -4924,7 +4924,35 @@
       ready 方向的交付手段、省不掉「ready 等 + ack 等」两条依赖往返；(4) §D 大 `grid` 同结论；
       (5) §E 环深 `S` 非一阶旋钮、§F 连跑 6 次无 `mbarb` 式双模态。判据 cluster C1+C2+C3、
       TMA 事务计数/`mbarrier` 细化 **C4**、**仍非 C5**。**本轮新增实验**；新留尾巴（§97.9）：只改
-      ready 方向、ack 仍软件 arrive，S2S 只搬连续段、未测 tensor/2D/`cta_group::2`、未做 ncu 归因。
+       ready 方向、ack 仍软件 arrive，S2S 只搬连续段、未测 tensor/2D/`cta_group::2`、未做 ncu 归因。
+
+### P173 实验扩展 74：双向全 TMA——ack 方向也改 TMA 事务计数（`docs/04-experiments.md` §98）
+
+- [x] **P173-1** 补掉 §97.9 明留的尾巴——`mtex`（§97）只把 **ready 方向**的「数据交付 + done」
+      交给 TMA 引擎，**ack（背压）方向仍是软件 arrive**（全 block 每线程远端 arrive 上游 `ackBar`，
+      `count=TH`）。本节把 **ack 方向也改成 TMA 事务计数**（`mtex2`，双向全 TMA）。见
+      `docs/04-experiments.md` **§98**，源码复用 `src/cluster_concurrency.cu`（**新增载体 `mtex2`/
+      path 11**，复用 §97 的 `mbar_arrive_expect_tx_remote`/`bulk_s2s`，不改既有语义）、脚本
+      `harness/cluster_mtex2.sh`、原始输出 `harness/cluster_mtex2.out.txt`（目标卡 H100/sm90a、
+      **固定空闲 device 6**、nvcc 13.2、每配置独立进程、计时 min-of-20 报 `ok/20`）。
+      语义/拓扑/数据量/环深与 §89 `mbar`/§97 `mtex` 逐字相同，唯一变量 = **ack 如何表达**：
+      `mtex` = 消费者全 block 每线程远端 arrive（每 round `TH=256` 次 + 每线程 cluster `fence`）；
+      `mtex2` = 消费者读完后 `__syncthreads()`，`tid0` 单点向上游 `ackBar` 做远端
+      `arrive.expect_tx`（到达 1 + 期望 16 B）+ 一笔 16 B `cp.async.bulk.shared::cluster` 把 token
+      搬进上游 `ackBuf[j]`，**按 TMA 事务字节数记账**（`count=1`）。五 Section 核心结论：
+      - **§A** `mtex2` 与 `mtex`/`mbar` **逐档同占用率**（U=1 都 18 regs/occ6、U=8 都 26/occ3、
+        U=16 都 32/occ3，`localB=0`）——单变量隔离；
+      - **§B** 稳到 `grid=1056`、逐位正确（`maxerr 0`）——`ackBuf` 只写不读、跨 round 复用无污染；
+      - **§C（headline）`mtex2 > mtex` 在每个 `U`/`C` 上成立**（`mtex2/mtex` C=2 = 1.17/1.16/1.14/1.09/1.06、
+        C=8 = 1.01/1.01/1.08/1.04/1.05），**比纯软件 arrive 的 `mbar` 快 7%–30%**——把每 round 256 次
+        远端 arrive + fence 换成「一次 `__syncthreads` + 一笔 16 B TMA」净赚，§90「会合贵」不足以
+        抵消 256 次 arrive/fence；但 **`ring1` 仍最快（`ring1/mtex2` 1.10×–1.56×）**——省两条往返的
+        交付手段、省不掉「ready 等 + ack 等」两条往返；
+      - **§D** 大 `grid` 同结论（`mtex2/mtex` 恒 1.03×、`ring1/mtex2` 1.13–1.30×）；**§E** 环深 `S`
+        非一阶旋钮（U=1 极差 0.2%、U=8 1.9%）；**§F** 连跑 6 次抖动 <0.8%、无双模态。
+      判据 cluster C1+C2+C3、TMA 事务计数/`mbarrier` 细化 **C4**、**仍非 C5**。**本轮新增实验**；
+      新留尾巴（§98.9）：ack 只搬 16 B token、S2S 只搬连续段、未测 tensor/2D/`cta_group::2`、
+      未做 ncu 归因。
 
 ## 每轮增量流程（autopilot）
 
@@ -5480,7 +5508,33 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P172-1 完成（1/1）**。补掉 §89.7 明留的尾巴——`mbar` 系列（§89/§90/§91/§92）只用
+- 当前进度：**P173-1 完成（1/1）**。补掉 §97.9 明留的尾巴——`mtex`（§97）只把 **ready 方向**的
+  「数据交付 + done」交给 TMA 引擎，**ack（背压）方向仍是软件 arrive**（全 block 每线程远端 arrive
+  上游 `ackBar`，`count=TH`）。本节把 **ack 方向也改成 TMA 事务计数**（`mtex2`，双向全 TMA）。见
+  `docs/04-experiments.md` **§98**，源码复用 `src/cluster_concurrency.cu`（**新增载体 `mtex2`/
+  path 11**，复用 §97 helper，不改既有语义）、脚本 `harness/cluster_mtex2.sh`、原始输出
+  `harness/cluster_mtex2.out.txt`（目标卡 H100/sm90a、**固定空闲 device 6**、nvcc 13.2、每配置独立
+  进程、计时 min-of-20 报 `ok/20`）。语义/拓扑/数据量/环深与 §89 `mbar`/§97 `mtex` 逐字相同，唯一
+  变量 = **ack 如何表达**：`mtex` = 每 round 256 次远端 arrive + 每线程 cluster `fence`；`mtex2` =
+  读完后 `__syncthreads()` + `tid0` 单点远端 `arrive.expect_tx`（16 B）+ 一笔 16 B
+  `cp.async.bulk.shared::cluster` 把 token 搬进上游 `ackBuf`（按 TMA 事务字节数记账，count=1）。
+  三条 headline：**(1)** 双向全 TMA **可行、稳定、逐位正确**（稳到 `grid=1056`、`maxerr 0`、
+  `ackBuf` 只写不读跨 round 复用无污染）；**(2)（定量）** **`mtex2 > mtex` 在每个 `U`/`C` 上成立、
+  快 1%–17%**（C=2 低 U 最大：U=1 210.6 vs 180.4、U=8 1335 vs 1220）、**比纯软件 arrive 的 `mbar`
+  快 7%–30%**——把 256 次远端 arrive + fence 换成「一次 `__syncthreads` + 一笔 16 B TMA」净赚；
+  **(3)（取舍）** 但 **`ring1` 仍最快（`ring1/mtex2` 1.10×–1.56×）**——双向 TMA 省两条往返的交付
+  手段、省不掉「ready 等 + ack 等」两条往返。判据 cluster C1+C2+C3、细化 **C4**、**仍非 C5**。
+  **本轮新增实验**；新留尾巴（§98.9）：ack 只搬 16 B token、S2S 只搬连续段、未测 tensor/2D/
+  `cta_group::2`、未做 ncu 归因。**构建验证**：`hugo --gc --minify` 唯一 ERROR 来自并行专题
+  `mega-moe` 的 `mega-moe-170`（`date` 为未来 ~24 min，Hugo 默认不构建 future → `relref`
+  `REF_NOT_FOUND`，见「已知坑」）；加 `--buildFuture` 后 **零 ERROR**，确认本专题 §98 内容无问题。
+- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §98）——如 **S2S bulk 的
+  tensor/2D 非连续搬运**（§97/§98 只搬连续段）、**multicast × 2SM（`cta_group::2`）**、
+  **2D/3D cluster × 重叠/非连续掩码**、**cluster × 端到端骨架**（把 §62/§74 的骨架放进 cluster）、
+  或 **ncu achieved occupancy 交叉验证**（§93–§98 用静态上界）；也可回到源码走读主线（`docs/35` §9
+  余的「`bf16` 之外 SM100 task 家族未逐一走读」）。**其余旧候选**：`docs/46` §6 的 FLAT-CACHE draft
+  attention（已核零命中、**不可走读**，仅供静态落差记录）。
+- 此前：**P172-1 完成（1/1）**。补掉 §89.7 明留的尾巴——`mbar` 系列（§89/§90/§91/§92）只用
   `ready`/`ack` 两枚 mbarrier 的**软件 arrive** 表达「数据写完（done）」，**未测用 `expect_tx`
   （TMA 事务计数）表达每槽 done** 的形态。见 `docs/04-experiments.md` **§97**，源码复用
   `src/cluster_concurrency.cu`（**新增载体 `mtex`/path 10 + helper `mbar_arrive_expect_tx_remote`/

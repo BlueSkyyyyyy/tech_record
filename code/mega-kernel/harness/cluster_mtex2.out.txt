@@ -1,0 +1,234 @@
+== A. 资源表：.../mbar/mtex/mtex2 各 U 的 numRegs / localB / 占用率（T=256）==
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 A
+# §87 §A / §88 §A 资源表（T=256，sb=32KB；pull/push/pulls SMEM=64KB，ring 见下）
+  pull   U= 1 regs=30 localB=0 occ=3 blk/SM
+  push   U= 1 regs=26 localB=0 occ=3 blk/SM
+  pulls  U= 1 regs=23 localB=0 occ=3 blk/SM
+  ring   U= 1 regs=27 localB=0 occ=5 blk/SM (S=min(4,tiles))
+  ring1  U= 1 regs=31 localB=0 occ=3 blk/SM
+  mbar   U= 1 regs=18 localB=0 occ=6 blk/SM (S=min(4,tiles))
+  mbarb  U= 1 regs=18 localB=0 occ=6 blk/SM (S=min(4,tiles))
+  mbarb0 U= 1 regs=18 localB=0 occ=6 blk/SM (S=min(4,tiles))
+  mbarw  U= 1 regs=20 localB=0 occ=6 blk/SM (S=min(4,tiles))
+  mbarw0 U= 1 regs=20 localB=0 occ=6 blk/SM (S=min(4,tiles))
+  mtex   U= 1 regs=18 localB=0 occ=6 blk/SM (S=min(4,tiles))
+  mtex2  U= 1 regs=18 localB=0 occ=6 blk/SM (S=min(4,tiles))
+  pull   U= 2 regs=32 localB=0 occ=3 blk/SM
+  push   U= 2 regs=26 localB=0 occ=3 blk/SM
+  pulls  U= 2 regs=23 localB=0 occ=3 blk/SM
+  ring   U= 2 regs=30 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  ring1  U= 2 regs=32 localB=0 occ=3 blk/SM
+  mbar   U= 2 regs=18 localB=0 occ=5 blk/SM (S=min(4,tiles))
+  mbarb  U= 2 regs=18 localB=0 occ=5 blk/SM (S=min(4,tiles))
+  mbarb0 U= 2 regs=18 localB=0 occ=5 blk/SM (S=min(4,tiles))
+  mbarw  U= 2 regs=20 localB=0 occ=5 blk/SM (S=min(4,tiles))
+  mbarw0 U= 2 regs=20 localB=0 occ=5 blk/SM (S=min(4,tiles))
+  mtex   U= 2 regs=18 localB=0 occ=5 blk/SM (S=min(4,tiles))
+  mtex2  U= 2 regs=18 localB=0 occ=5 blk/SM (S=min(4,tiles))
+  pull   U= 4 regs=32 localB=0 occ=3 blk/SM
+  push   U= 4 regs=28 localB=0 occ=3 blk/SM
+  pulls  U= 4 regs=23 localB=0 occ=3 blk/SM
+  ring   U= 4 regs=32 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  ring1  U= 4 regs=32 localB=0 occ=3 blk/SM
+  mbar   U= 4 regs=18 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  mbarb  U= 4 regs=20 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  mbarb0 U= 4 regs=20 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  mbarw  U= 4 regs=22 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  mbarw0 U= 4 regs=22 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  mtex   U= 4 regs=18 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  mtex2  U= 4 regs=18 localB=0 occ=4 blk/SM (S=min(4,tiles))
+  pull   U= 8 regs=32 localB=0 occ=3 blk/SM
+  push   U= 8 regs=32 localB=0 occ=3 blk/SM
+  pulls  U= 8 regs=30 localB=0 occ=3 blk/SM
+  ring   U= 8 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  ring1  U= 8 regs=32 localB=0 occ=3 blk/SM
+  mbar   U= 8 regs=26 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mbarb  U= 8 regs=25 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mbarb0 U= 8 regs=25 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mbarw  U= 8 regs=30 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mbarw0 U= 8 regs=28 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mtex   U= 8 regs=26 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mtex2  U= 8 regs=26 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  pull   U=16 regs=32 localB=0 occ=3 blk/SM
+  push   U=16 regs=32 localB=0 occ=3 blk/SM
+  pulls  U=16 regs=32 localB=0 occ=3 blk/SM
+  ring   U=16 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  ring1  U=16 regs=32 localB=0 occ=3 blk/SM
+  mbar   U=16 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mbarb  U=16 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mbarb0 U=16 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mbarw  U=16 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mbarw0 U=16 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mtex   U=16 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+  mtex2  U=16 regs=32 localB=0 occ=3 blk/SM (S=min(4,tiles))
+
+== B.（Q1 稳定性）mtex2（H）的 grid 标度（单发探针，U=8，rounds=64）==
+-- mtex2（H, 单发探针） --
+  I C=2 grid=   2 U= 8 rounds= 64 | 1/1 ok
+  I C=2 grid=  16 U= 8 rounds= 64 | 1/1 ok
+  I C=2 grid=  32 U= 8 rounds= 64 | 1/1 ok
+  I C=2 grid=  64 U= 8 rounds= 64 | 1/1 ok
+  I C=2 grid= 132 U= 8 rounds= 64 | 1/1 ok
+  I C=2 grid= 264 U= 8 rounds= 64 | 1/1 ok
+  I C=2 grid= 528 U= 8 rounds= 64 | 1/1 ok
+  I C=2 grid= 792 U= 8 rounds= 64 | 1/1 ok
+  I C=2 grid=1056 U= 8 rounds= 64 | 1/1 ok
+-- mtex2（H）重复 3 发，grid=264/528/1056 --
+  I C=2 grid= 264 U= 8 rounds= 64 | 3/3 ok
+  I C=2 grid= 528 U= 8 rounds= 64 | 3/3 ok
+  I C=2 grid=1056 U= 8 rounds= 64 | 3/3 ok
+-- mtex（E, 对照, 单发） --
+  D C=2 grid=   2 U= 8 rounds= 64 | 1/1 ok
+  D C=2 grid=  16 U= 8 rounds= 64 | 1/1 ok
+  D C=2 grid= 132 U= 8 rounds= 64 | 1/1 ok
+  D C=2 grid= 264 U= 8 rounds= 64 | 1/1 ok
+  D C=2 grid= 528 U= 8 rounds= 64 | 1/1 ok
+  D C=2 grid=1056 U= 8 rounds= 64 | 1/1 ok
+
+== C.（Q2 headline）吞吐：C=2/8，grid=264，扫 U（min-of-20，rounds=64）==
+-- C=2 mtex2（I） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 1
+I C=2 grid= 264 sb= 32KB U= 1 rounds= 64 regs=18 occ=6 | ok=20/20 maxerr 0 bad 0    82.144 us |    210.6 GB/s(远端) | 1283.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 2
+I C=2 grid= 264 sb= 32KB U= 2 rounds= 64 regs=18 occ=5 | ok=20/20 maxerr 0 bad 0    84.000 us |    411.9 GB/s(远端) | 1312.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 4
+I C=2 grid= 264 sb= 32KB U= 4 rounds= 64 regs=18 occ=4 | ok=20/20 maxerr 0 bad 0    89.376 us |    774.3 GB/s(远端) | 1396.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   103.680 us |   1335.0 GB/s(远端) | 1620.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 16
+I C=2 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   130.880 us |   2115.1 GB/s(远端) | 2045.000 ns/lap
+-- C=2 mtex（D） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 2 264 32 64 1
+D C=2 grid= 264 sb= 32KB U= 1 rounds= 64 regs=18 occ=6 | ok=20/20 maxerr 0 bad 0    95.904 us |    180.4 GB/s(远端) | 1498.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 2 264 32 64 2
+D C=2 grid= 264 sb= 32KB U= 2 rounds= 64 regs=18 occ=5 | ok=20/20 maxerr 0 bad 0    97.280 us |    355.7 GB/s(远端) | 1520.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 2 264 32 64 4
+D C=2 grid= 264 sb= 32KB U= 4 rounds= 64 regs=18 occ=4 | ok=20/20 maxerr 0 bad 0   102.048 us |    678.2 GB/s(远端) | 1594.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 2 264 32 64 8
+D C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   113.440 us |   1220.1 GB/s(远端) | 1772.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 2 264 32 64 16
+D C=2 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   138.272 us |   2002.0 GB/s(远端) | 2160.500 ns/lap
+-- C=2 mbar（B） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 B 2 264 32 64 1
+B C=2 grid= 264 sb= 32KB U= 1 rounds= 64 regs=18 occ=6 | ok=20/20 maxerr 0 bad 0   104.128 us |    166.2 GB/s(远端) | 1627.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 B 2 264 32 64 2
+B C=2 grid= 264 sb= 32KB U= 2 rounds= 64 regs=18 occ=5 | ok=20/20 maxerr 0 bad 0   107.936 us |    320.6 GB/s(远端) | 1686.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 B 2 264 32 64 4
+B C=2 grid= 264 sb= 32KB U= 4 rounds= 64 regs=18 occ=4 | ok=20/20 maxerr 0 bad 0   115.808 us |    597.6 GB/s(远端) | 1809.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 B 2 264 32 64 8
+B C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   127.040 us |   1089.5 GB/s(远端) | 1985.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 B 2 264 32 64 16
+B C=2 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   148.544 us |   1863.6 GB/s(远端) | 2321.000 ns/lap
+-- C=2 ring1（M） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 2 264 32 64 1
+M C=2 grid= 264 sb= 32KB U= 1 rounds= 64 regs=31 occ=3 | ok=20/20 maxerr 0 bad 0    52.832 us |    327.5 GB/s(远端) | 825.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 2 264 32 64 2
+M C=2 grid= 264 sb= 32KB U= 2 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    65.568 us |    527.7 GB/s(远端) | 1024.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 2 264 32 64 4
+M C=2 grid= 264 sb= 32KB U= 4 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    71.520 us |    967.6 GB/s(远端) | 1117.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 2 264 32 64 8
+M C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    85.376 us |   1621.2 GB/s(远端) | 1334.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 2 264 32 64 16
+M C=2 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   114.048 us |   2427.3 GB/s(远端) | 1782.000 ns/lap
+-- C=8 mtex2（I） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 8 264 32 64 1
+I C=8 grid= 264 sb= 32KB U= 1 rounds= 64 regs=18 occ=6 | ok=20/20 maxerr 0 bad 0    97.632 us |    177.2 GB/s(远端) | 1525.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 8 264 32 64 2
+I C=8 grid= 264 sb= 32KB U= 2 rounds= 64 regs=18 occ=5 | ok=20/20 maxerr 0 bad 0    98.560 us |    351.1 GB/s(远端) | 1540.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 8 264 32 64 4
+I C=8 grid= 264 sb= 32KB U= 4 rounds= 64 regs=18 occ=4 | ok=20/20 maxerr 0 bad 0   102.880 us |    672.7 GB/s(远端) | 1607.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 8 264 32 64 8
+I C=8 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   121.152 us |   1142.5 GB/s(远端) | 1893.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 8 264 32 64 16
+I C=8 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   146.336 us |   1891.7 GB/s(远端) | 2286.500 ns/lap
+-- C=8 mtex（D） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 8 264 32 64 1
+D C=8 grid= 264 sb= 32KB U= 1 rounds= 64 regs=18 occ=6 | ok=20/20 maxerr 0 bad 0    98.688 us |    175.3 GB/s(远端) | 1542.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 8 264 32 64 2
+D C=8 grid= 264 sb= 32KB U= 2 rounds= 64 regs=18 occ=5 | ok=20/20 maxerr 0 bad 0    99.968 us |    346.1 GB/s(远端) | 1562.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 8 264 32 64 4
+D C=8 grid= 264 sb= 32KB U= 4 rounds= 64 regs=18 occ=4 | ok=20/20 maxerr 0 bad 0   110.912 us |    624.0 GB/s(远端) | 1733.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 8 264 32 64 8
+D C=8 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   126.016 us |   1098.4 GB/s(远端) | 1969.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 8 264 32 64 16
+D C=8 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   153.280 us |   1806.0 GB/s(远端) | 2395.000 ns/lap
+-- C=8 mbar（B） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 B 8 264 32 64 1
+B C=8 grid= 264 sb= 32KB U= 1 rounds= 64 regs=18 occ=6 | ok=20/20 maxerr 0 bad 0   104.512 us |    165.5 GB/s(远端) | 1633.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 B 8 264 32 64 2
+B C=8 grid= 264 sb= 32KB U= 2 rounds= 64 regs=18 occ=5 | ok=20/20 maxerr 0 bad 0   108.480 us |    319.0 GB/s(远端) | 1695.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 B 8 264 32 64 4
+B C=8 grid= 264 sb= 32KB U= 4 rounds= 64 regs=18 occ=4 | ok=20/20 maxerr 0 bad 0   115.744 us |    597.9 GB/s(远端) | 1808.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 B 8 264 32 64 8
+B C=8 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   133.824 us |   1034.3 GB/s(远端) | 2091.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 B 8 264 32 64 16
+B C=8 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   166.016 us |   1667.5 GB/s(远端) | 2594.000 ns/lap
+-- C=8 ring1（M） --
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 8 264 32 64 1
+M C=8 grid= 264 sb= 32KB U= 1 rounds= 64 regs=31 occ=3 | ok=20/20 maxerr 0 bad 0    63.712 us |    271.6 GB/s(远端) | 995.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 8 264 32 64 2
+M C=8 grid= 264 sb= 32KB U= 2 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    69.024 us |    501.3 GB/s(远端) | 1078.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 8 264 32 64 4
+M C=8 grid= 264 sb= 32KB U= 4 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    74.336 us |    931.0 GB/s(远端) | 1161.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 8 264 32 64 8
+M C=8 grid= 264 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0    95.936 us |   1442.8 GB/s(远端) | 1499.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 8 264 32 64 16
+M C=8 grid= 264 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   133.408 us |   2075.0 GB/s(远端) | 2084.500 ns/lap
+
+== D.（Q3）大 grid：C=2，grid=528/1056，U=8/16（min-of-20）==
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 528 32 64 8
+I C=2 grid= 528 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   224.064 us |   1235.5 GB/s(远端) | 3501.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 528 32 64 16
+I C=2 grid= 528 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   278.688 us |   1986.6 GB/s(远端) | 4354.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 2 528 32 64 8
+D C=2 grid= 528 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   230.400 us |   1201.5 GB/s(远端) | 3600.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 2 528 32 64 16
+D C=2 grid= 528 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   288.480 us |   1919.2 GB/s(远端) | 4507.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 2 528 32 64 8
+M C=2 grid= 528 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   173.312 us |   1597.3 GB/s(远端) | 2708.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 2 528 32 64 16
+M C=2 grid= 528 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   246.080 us |   2249.9 GB/s(远端) | 3845.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 1056 32 64 8
+I C=2 grid=1056 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   336.352 us |   1646.0 GB/s(远端) | 5255.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 1056 32 64 16
+I C=2 grid=1056 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   418.272 us |   2647.3 GB/s(远端) | 6535.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 2 1056 32 64 8
+D C=2 grid=1056 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   346.208 us |   1599.2 GB/s(远端) | 5409.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 D 2 1056 32 64 16
+D C=2 grid=1056 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   433.952 us |   2551.7 GB/s(远端) | 6780.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 2 1056 32 64 8
+M C=2 grid=1056 sb= 32KB U= 8 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   257.856 us |   2147.1 GB/s(远端) | 4029.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 M 2 1056 32 64 16
+M C=2 grid=1056 sb= 32KB U=16 rounds= 64 regs=32 occ=3 | ok=20/20 maxerr 0 bad 0   367.200 us |   3015.5 GB/s(远端) | 5737.500 ns/lap
+
+== E.（Q4）环深 S 作为独立旋钮：mtex2 C=2 grid=264 U=1/U=8，S=1/2/4/8（min-of-20）==
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 1 1
+I C=2 grid= 264 sb= 32KB U= 1 rounds= 64 regs=18 occ=6 | ok=20/20 maxerr 0 bad 0    82.080 us |    210.8 GB/s(远端) | 1282.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 1 2
+I C=2 grid= 264 sb= 32KB U= 1 rounds= 64 regs=18 occ=6 | ok=20/20 maxerr 0 bad 0    82.176 us |    210.5 GB/s(远端) | 1284.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 1 4
+I C=2 grid= 264 sb= 32KB U= 1 rounds= 64 regs=18 occ=6 | ok=20/20 maxerr 0 bad 0    82.272 us |    210.3 GB/s(远端) | 1285.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 1 8
+I C=2 grid= 264 sb= 32KB U= 1 rounds= 64 regs=18 occ=5 | ok=20/20 maxerr 0 bad 0    82.208 us |    210.5 GB/s(远端) | 1284.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8 1
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=5 | ok=20/20 maxerr 0 bad 0   103.392 us |   1338.7 GB/s(远端) | 1615.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8 2
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=4 | ok=20/20 maxerr 0 bad 0   105.344 us |   1313.9 GB/s(远端) | 1646.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8 4
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   104.416 us |   1325.6 GB/s(远端) | 1631.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8 8
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   103.552 us |   1336.6 GB/s(远端) | 1618.000 ns/lap
+
+== F.（Q5 确定性）同一配置连跑 6 次：mtex2 C=2 grid=264 U=8（min-of-20）==
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   104.704 us |   1321.9 GB/s(远端) | 1636.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   104.256 us |   1327.6 GB/s(远端) | 1629.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   104.608 us |   1323.1 GB/s(远端) | 1634.500 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   103.936 us |   1331.7 GB/s(远端) | 1624.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   104.640 us |   1322.7 GB/s(远端) | 1635.000 ns/lap
+$ CUDA_VISIBLE_DEVICES=6 /tmp/cluster_mtex2 I 2 264 32 64 8
+I C=2 grid= 264 sb= 32KB U= 8 rounds= 64 regs=26 occ=3 | ok=20/20 maxerr 0 bad 0   104.576 us |   1323.6 GB/s(远端) | 1634.000 ns/lap

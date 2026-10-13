@@ -14786,7 +14786,161 @@ cp.async.bulk.shared::cluster.shared::cta.mbarrier::complete_tx::bytes          
 - **局限（诚实标注）**：只测 H100/sm90a（DSM 的真正家是 SM100 2SM，本机不可执行）；只改了 **ready
   方向**的交付/done，**ack 方向仍为软件 arrive**（保证单变量隔离），故量的是「done 表达方式」而非
   「双向全 TMA」；`cp.async.bulk.shared::cluster.shared::cta` 的 S2S 形态只搬**连续** SEG 段（本
-  实验布局恰连续），未测 TMA tensor/2D 或非连续搬运；搬运的是合成 `float`、非真实 task tile；
-  计时取 min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；未做 ncu 归因
-  （结论二的「省 store/arrive」是「资源同档 + 单变量改变」的对照推断，未用 `gpu__time_duration`
-  拆分单次 mbarrier 往返与 TMA 交付各自占比）；未测 `tensormap` 版 multicast/`cta_group::2`。
+   实验布局恰连续），未测 TMA tensor/2D 或非连续搬运；搬运的是合成 `float`、非真实 task tile；
+   计时取 min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；未做 ncu 归因
+   （结论二的「省 store/arrive」是「资源同档 + 单变量改变」的对照推断，未用 `gpu__time_duration`
+   拆分单次 mbarrier 往返与 TMA 交付各自占比）；未测 `tensormap` 版 multicast/`cta_group::2`。
+
+## 98. cluster 跨 SM 交换：双向全 TMA（`mtex2`）——ack 也交给 TMA 事务计数后比 `mtex` 再快 6–17%、更接近 `ring1`（P173-1）
+
+本节补掉 §97.9 明留的尾巴——`mtex`（§97）只把 **ready 方向**的「数据交付 + done」交给 TMA 引擎
+（`cp.async.bulk` + `arrive.expect_tx`），**ack（背压）方向仍是软件 arrive**（消费者全 block 每线程
+远端 arrive 上游 `ackBar`，`count=TH`）。本节把 **ack 方向也改成 TMA**（`mtex2`），问：**把「槽已空」
+这个背压信号也用 TMA 事务计数表达（读完 `__syncthreads` 会合 → `tid0` 单点发一笔 16 B bulk +
+`arrive.expect_tx`），相比「全 block 每线程远端 arrive」，是更快还是更慢？**
+
+### 98.1 问题
+
+§89–§97 在「cluster 跨 SM 交换」上排出一条光谱：`ring1`（环形槽 + 单次 `cluster.sync`/round）最快，
+`mtex`（ready 由 TMA 事务计数表达、ack 软件 arrive）次之，`mbar`/`mbarb`/`mbarw` 更慢。这些载体的
+握手都**不对称**：§97 只优化了 ready 方向，ack 方向仍保留「全 block 每线程远端 `mbarrier.arrive`」。
+而 §90 已证「会合（`__syncthreads`）比 arrive 条数贵」——于是本节的取舍很微妙：**把 ack 的 256 次
+远端 arrive 换成 1 次 TMA，代价是每 round 多一个 `__syncthreads`**。谁占上风是纯经验问题。
+
+### 98.2 方法
+
+源码复用 `src/cluster_concurrency.cu`（**新增载体 `mtex2`（path 11）+ 复用 §97 的
+`mbar_arrive_expect_tx_remote`/`bulk_s2s`**，不改既有 `pull`/`push`/`ring`/`ring1`/`mbar`/`mbarb`/
+`mbarw`/`mtex` 语义），脚本 `harness/cluster_mtex2.sh`，原始输出 `harness/cluster_mtex2.out.txt`
+（目标卡 H100 / sm90a、**固定空闲 device 6**、nvcc 13.2、每配置独立进程以规避 sticky context；
+计时项 min-of-20 且报 `ok/20`、探针报 `ok/N`）。
+
+语义/拓扑/数据量/环深与 §89 `mbar`/§97 `mtex` 逐字相同（每 block 有 `snd`/`rcv` 两块 SMEM；每 block
+每 round 把 `SEG = TH·U = 256·U` 个 `float` 推给 `(rank+1)%C` 的 `rcv` 第 `j=r%S` 槽、读回后 ack 给
+上游），**唯一设计变量 = ack（背压）方向如何表达**：
+
+- `mtex`（§97 对照）：ready 由 TMA 事务计数表达；消费者读完后**全 block 每线程**远端 arrive 上游
+  `ackBar[j]`（`count=TH`，每 round 每 block `TH=256` 次跨 SM arrive，**无需会合**——每线程自报
+  「我读完我那段」）。
+- `mtex2`（**新**）：ready 与 `mtex` 逐字相同；消费者读完本槽后先 `__syncthreads()`（全 block 读完
+  才放行），再由 `tid0` 单点向上游 `ackBar[j]` 做远端 `mbarrier.arrive.expect_tx`（登记到达 1 +
+  期望 16 B）+ 一笔 16 B 的 `cp.async.bulk.shared::cluster.shared::cta`（把一小段 token 搬进上游的
+  `ackBuf[j]`），**ack 与 ready 一样按 TMA 事务字节数记账**（`count=1`）。ack 只承载「槽已空」信号、
+  不承载真实数据，故 16 B 的 token 足够（TMA bulk 最小事务 16 B）。
+
+`mtex2` 相对 `mtex` 的 SMEM 增量 = `S` 个 16 B 的 `ackBuf`（`sb=32KB` 时可忽略，见 §A 占用率逐档相同）。
+
+### 98.3 §A 资源表：`mtex2` 与 `mtex`/`mbar` **逐档同占用率**
+
+`sb=32KB, T=256`（完整表见 `.out.txt` §A）：
+
+```
+  载体    U=1            U=2            U=4            U=8            U=16
+  mtex   regs=18 occ=6  regs=18 occ=5  regs=18 occ=4  regs=26 occ=3  regs=32 occ=3
+  mtex2  regs=18 occ=6  regs=18 occ=5  regs=18 occ=4  regs=26 occ=3  regs=32 occ=3
+  mbar   regs=18 occ=6  regs=18 occ=5  regs=18 occ=4  regs=26 occ=3  regs=32 occ=3
+```
+
+`mtex2` 与 `mtex`/`mbar` **资源逐档相同**（`U=1` 都 18 regs/occ=6、`U=8` 都 26/occ=3、`U=16` 都
+32/occ=3，`localB=0` 无溢出）。故 `mtex2` vs `mtex` 的吞吐差**只能归因「ack 的表达方式」**。
+
+### 98.4 §B（Q1）`mtex2` 稳定到 `grid=1056`，逐位正确
+
+`C=2, U=8, rounds=64`，单发探针扫 `grid`：`mtex2`（`H`）在
+`grid=2/16/32/64/132/264/528/792/1056` **全部 `1/1 ok`**、重复 3 发 `3/3 ok`，与 `mtex`（`E`）
+逐点同档。每个 `ok` 的 case 都经 `check()` 逐位对参考（`maxerr 0 bad 0`）。
+
+⇒ **把 ack 也从软件 arrive 换成 TMA 事务计数，同样可行且稳定**，没有引入 §88 `ring`（纯 `volatile`
+握手）那类 `unspecified launch failure`；`mtex2` 的 `ackBuf[j]`（S 个 16 B 槽）**只写不读**，跨 round
+复用无数据污染。
+
+### 98.5 §C（Q2 headline）`mtex2` 在每个 `U` 上都比 `mtex` 更快，且比 `mbar` 快 7%–30%
+
+`grid=264`，min-of-20，四载体对跑（单位 GB/s 远端，完整见 `.out.txt` §C）：
+
+```
+  C=2      U=1     U=2     U=4     U=8     U=16
+  mtex2    210.6   411.9   774.3   1335.0  2115.1
+  mtex     180.4   355.7   678.2   1220.1  2002.0
+  mbar     166.2   320.6   597.6   1089.5  1863.6
+  ring1    327.5   527.7   967.6   1621.2  2427.3
+
+  C=8      U=1     U=2     U=4     U=8     U=16
+  mtex2    177.2   351.1   672.7   1142.5  1891.7
+  mtex     175.3   346.1   624.0   1098.4  1806.0
+  mbar     165.5   319.0   597.9   1034.3  1667.5
+  ring1    271.6   501.3   931.0   1442.8  2075.0
+```
+
+- **`mtex2 > mtex` 在每个 `U`、每个 `C` 上成立**：`mtex2/mtex` = 1.17/1.16/1.14/1.09/1.06（C=2）、
+  1.01/1.01/1.08/1.04/1.05（C=8），量级 **+1%–17%**。即**把 ack 方向的每 round `TH=256` 次远端
+  `arrive`（+每线程 `fence.acq_rel.cluster`）换成「一次 `__syncthreads` + 一笔 16 B TMA」，净省最多
+  ~17%**——**「全 block 每线程远端 arrive」的条数与 fence 成本压过了 §90「块内会合贵」那一笔**。
+- **`mtex2 > mbar` 更大**：`mtex2/mbar` = 1.27/1.28/1.30/1.23/1.14（C=2）、1.07/1.10/1.13/1.10/1.13
+  （C=8）——**ready 与 ack 双向都 TMA 化**，相对纯软件 arrive 的 `mbar` 累计省 **7%–30%**。
+- **但 `ring1` 在每个 `U` 上仍最快**：`ring1/mtex2` = 1.56/1.28/1.25/1.21/1.15（C=2）、
+  1.53/1.43/1.38/1.26/1.10（C=8），即 **1.10×–1.56×**。低 `U`（延迟受限、每 round 同步开销占比高）
+  差距最大，高 `U`（带宽受限、每 round 固定代价被摊薄）差距收窄——**与 §89.6/§90.3/§97.5 的
+  「`mtex2` 仍有『ready 等一次 + ack 等一次』两条依赖往返 vs `ring1` 只有一条 `cluster.sync`」
+  机制一致**：双向 TMA 省的是**两条往返各自的交付手段**，省不掉「两条往返」本身。
+
+### 98.6 §D（Q3）大 `grid` 下同一结论成立（`C=2`）
+
+```
+  U=8     mtex2    mtex     ring1        U=16    mtex2    mtex     ring1
+  g=528   1235.5   1201.5   1597.3       g=528   1986.6   1919.2   2249.9
+  g=1056  1646.0   1599.2   2147.1       g=1056  2647.3   2551.7   3015.5
+```
+
+- `mtex2/mtex` 在 `grid=528/1056`、`U=8/16` 上恒 **1.03×**；`ring1/mtex2` 在 `U=8` 恒 **1.29–1.30×**、
+  `U=16` 恒 **1.13–1.14×**。⇒ **§C 的两条排序（`mtex2 > mtex`、`ring1 > mtex2`）在大 `grid` 下不翻盘**。
+
+### 98.7 §E（Q4）环深 `S` 不是一阶旋钮（与 §89.5/§90.5/§91.5/§97.7 同结论）
+
+`mtex2`，`C=2, grid=264, rounds=64`，扫 `S∈{1,2,4,8}`：
+
+```
+   U=1   S=1 210.8 | S=2 210.5 | S=4 210.3 | S=8 210.5  GB/s
+   U=8   S=1 1338.7 | S=2 1313.9 | S=4 1325.6 | S=8 1336.6  GB/s
+```
+
+吞吐几乎不动（`U=1` 极差 0.2%、`U=8` 1.9%）——每 round 的固定代价仍是「ready 等 + ack 等」的跨 SM
+依赖往返，`S` 摊薄不了它；`ackBuf` 的 16 B 槽随 `S` 增大也只多占 16·S B SMEM（§A 的占用率在
+`U=8/S=8` 仍 occ=3）。
+
+### 98.8 §F（Q5）确定性：同一配置连跑 6 次无性能双模态
+
+`C=2, grid=264, U=8` 连跑 6 次：**1331.7 / 1327.6 / 1323.1 / 1321.9 / 1322.7 / 1323.6 GB/s**
+（抖动 <0.8%，每次 `ok=20/20`、`maxerr 0`）。`mtex2` 的 ack 等待发生在**全 block**（消费者
+`mbar_wait` 上游 `ackBar`），ready 等待亦全 block，且 `expect_tx` 完成来自硬件 TMA 引擎，故与
+§97.8 一样不涉及 §90.4 `mbarb` 那种「单线程等待 + 长 suspend-hint」耦合，未观察到双模态。
+
+### 98.9 结论、判据与局限
+
+- **结论一（headline，肯定性）**：**ack 方向也用 TMA 事务计数表达（`mtex2`，双向全 TMA）在 H100 DSM
+  上可行、稳定、逐位正确**——稳到 `grid=1056`、`U≤16`、`maxerr 0`、无性能双模态。§97.9「ack 方向
+  仍为软件 arrive」的尾巴补掉：**双向都 TMA 完全能用**，且 `ackBuf` 只写不读、跨 round 复用无污染。
+- **结论二（headline，定量）**：**`mtex2` 比 `mtex` 快 1%–17%（C=2 低 `U` 最大）、比纯软件 arrive 的
+  `mbar` 快 7%–30%**。机制：把 ack 方向每 round `TH=256` 次远端 `arrive`（+每线程 cluster `fence`）
+  换成「一次 `__syncthreads` + `tid0` 一笔 16 B TMA」——**§90「块内会合贵」并不足以抵消 256 次远端
+  arrive + fence**，故加一笔会合仍是净赚（与 §91「每 warp 会合 + fence 反而更慢」形成对照：那里的
+  fence 是 16 条/round、这里只需 1 条/round）。
+- **结论三（工程取舍）**：**但仍慢于单次 `cluster.sync` 的 `ring1`（1.10×–1.56×）**。⇒ 双向 TMA 只能
+  省「两条依赖往返各自的交付手段」，省不掉「好 ready 等一次 + ack 等一次」的**两条往返**；`ring1`
+  每 round 只有一条 `cluster.sync`。**「保留一个便宜的每步同步点」的结论（§89.7/§90.6/§97.9）再次
+  不受影响**，且这把「每槽握手」这条最硬的路线（双向都交给 TMA 引擎）也推到其上限，仍 `ring1` 之下。
+- **对生产实现的印证**：DeepGEMM symmetric memory / MPK ring barrier（`docs/02` §1.5、`docs/11`
+  §7）用「每步一个同步点 + 环形槽降频 + 批量搬运」。`mtex2` 是「**批量搬运 + 硬件记账**」这条路的
+  完整形态（ready/ack 双向），本节量化它相对纯软件 arrive 的累计收益（+7%–30%）与相对每步同步点的
+  差距（−10%–35%），给「为何不把 done/back-pressure 细化到每槽、而要留一个每步同步点」以**第三条**
+  独立理由（前两条在 §89/§90、§97）。
+- **判据（C1–C5，`docs/00` §3）**：`mtex2` 单常驻 kernel、设备侧推进、`cluster.sync`/`mbarrier`/
+  TMA 事务计数/`cp.async.bulk.shared::cluster` 细化 **C4**；**仍不是 C5**（无固定角色 worker/scheduler
+  动态派发，与 §18–§23/§86–§97 同档）。
+- **局限（诚实标注）**：只测 H100/sm90a（DSM 的真正家是 SM100 2SM，本机不可执行）；ack 只搬 16 B
+  **token**（不含真实数据；真实 megakernel 的 ack 也只需「槽已空」信号，故这是合理建模，但未测
+  「ack 顺带回传数据」的形态）；`cp.async.bulk.shared::cluster.shared::cta` 的 S2S 形态只搬**连续**
+  段（本实验布局恰连续），未测 TMA tensor/2D 或非连续搬运；搬运的是合成 `float`、非真实 task tile；
+  计时取 min-of-20，绝对值受同机 HBM/调度噪声影响，**只采信同族内相对排序**；未做 ncu 归因（结论二
+  的「省 arrive/fence」是「资源同档 + 单变量改变」的对照推断，未用 `gpu__time_duration` 拆分单次
+  mbarrier 往返与 TMA 交付各自占比）；未测 `tensormap` 版 multicast/`cta_group::2`。
