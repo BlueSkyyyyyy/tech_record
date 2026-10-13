@@ -3866,7 +3866,33 @@
       `all_gather_into_tensor` shard∈{8,8192,524288} **逐位**、all_gather 逐位、reduce_scatter 反序环
       重建 relerr **0.000e+00**（该机 8×NVLink 恰好逐位、测试仍保守用 1e-5）、all_reduce `sum*scale`
       匹配；坐实 `dist.all_gather_single` 在 stock torch 2.12 **不存在**。配套博客
-      `content/posts/mega-moe-134-deepep-bucket-test-oracle`（索引页新增第 134 篇）。
+       `content/posts/mega-moe-134-deepep-bucket-test-oracle`（索引页新增第 134 篇）。
+
+### P125 增量（opt-in，收口 P122 结尾的目标卡单 kernel 接线：真实 H=7168 的 Post worker 网格）
+
+- [x] **P125-1** **Mega mHC 反向的目标卡单 kernel 接线（下）：真实前向 Post worker 网格 + G0 累加器直喂 K1**
+      （`deep_gemm/include/deep_gemm/impls/sm100_mega_mhc.cuh`；
+      `deep_gemm/include/deep_gemm/layout/mega_mhc.cuh`；
+      `deep_gemm/include/deep_gemm/common/{math,utils}.cuh`；对照 `epilogue/sm100_mega_mhc.cuh`）。
+      第 132 篇（P122-1）的融合 worker 是**粗粒度**的（一 block 一 token、`threadIdx.x = h`），只答了
+      「省多少中间张量」，没答「目标卡上 lane 到底谁拥有哪几行、归约在哪几条 lane 之间」。本篇把几何钉死。
+      **主 kernel SM100 专属、仅分析**；架构无关的几何/归约/TMEM 列预算/元素级吞吐 H100(sm90) 真机实测。
+      → `docs/135-mhc-backward-sm100-worker-wiring.md`（真实行号核对）：**几何**（`impls:30-31/56/108-113`：
+      `kNumRowsPerWarp=16`/`kNumRowGroupsPerWarp=8`/`kNumLanesPerRowGroup=4`，lane `(w,l)` 拥有行
+      `(w%4)·16+⌊l/4⌋` 与 `+8`）；**关键反直觉点**——两个 Post worker **按 UMMA 原子切、不按行切**
+      （`impls:458-459`），**每个 worker 覆盖全部 64 行**，最后 WG3 相加（`impls:639-640`）；
+      **逐行归约** `math::warp_reduce_sum<4>`（只 `xor 2`+`xor 1`，`common/math.cuh:217-218`，别名 `:225`）
+      → `smem.hc_norm_sqr_sums[worker][row]`（`layout:138`）。**反向六段 → 前向机器对偶表**
+      （K0/G1a/K2 复用 Post/Normal worker；G0 复用同一条 TF32 TS UMMA `impls:235-238/273-275`；
+      G1b `dfn` 落全局；`dz[T,D]` 按 `BLOCK_K` 流式）。**G0 直喂 K1 的硬前提**：TMEM 列预算
+      前向 `176→256` + 反向 G0 `24→32` = **288 < 512**（真实 `get_num_aligned_tmem_cols` `utils:43-50`）；
+      K1 用与 Post 相同的 `first_row_idx`/`col_pair_idx` 读 `SM100_TMEM_LOAD_16dp256b2x`（前向 WG3 同款 `impls:602-606`）。
+      H100 实测 `src/mhc_backward_segment.cu` + `harness/exp_mhc_backward_segment.{sh,py,out.txt}`
+      （**直接 include 真实头文件**）：① 几何核对 0 错误；② 分段归约 vs host double **rel 4–6e-8**，
+      **全 32-lane 归约 rel=2.47**（结构性错误）；③ TMEM 判定 ALL OK；④ 分段网格 vs 朴素吞吐
+      **2.03×–10.93×**（H=512 **~860 GB/s**）；真实形状 `T=4096` 的 `u0` scratch 仅 **6.3 MB**、
+      「直喂」省 12.6 MB——收益是**省 1024 次 global round-trip 的延迟**，K1+G1a **AI≈0.75** → 访存受限。
+      配套博客 `content/posts/mega-moe-135-mhc-backward-worker-geometry`（索引页新增第 135 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3893,8 +3919,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P124 各增量完成（P15-1…P41-1、P42-1…P124-1）。**
-  本轮 P124-1：新建 `docs/134-deepep-bucket-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P125 各增量完成（P15-1…P41-1、P42-1…P125-1）。**
+  本轮 P125-1：新建 `docs/135-mhc-backward-sm100-worker-wiring.md`
+  （+`harness/exp_mhc_backward_segment.{sh,py,out.txt}`、`src/mhc_backward_segment.cu`）——收口 P122 结尾
+  「真实 H=7168 warp-pair 分段」这句：把 mHC 反向单 kernel 接线的**几何**钉死。**前向 Post worker 网格**
+  （`impls:108-113`：`kNumRowsPerWarp=16`/`kNumRowGroupsPerWarp=8`/`kNumLanesPerRowGroup=4`；lane 拥有
+  行 `(w%4)·16+⌊l/4⌋` 与 `+8`；hidden `hidden_pair_idx` `:460-461`）；**反直觉点**——两 worker **按
+  UMMA 原子切、不按行切**、各覆盖全部 64 行最后由 WG3 相加（`:639-640`）；归约 `warp_reduce_sum<4>`
+  （`common/math.cuh:217-218`）。**G0 直喂 K1 硬前提**：TMEM `256+32=288<512`；K1 与 Post 同网格读
+  `SM100_TMEM_LOAD_16dp256b2x`。H100(sm90) 真机（直接 include 真实头文件）：几何 0 错误、分段归约
+  **rel 4–6e-8** vs 全 32-lane **rel 2.47**（结构性错误）、TMEM ALL OK、分段网格 vs 朴素 **2.03–10.93×**；
+  真实形状 `u0` scratch 仅 6.3 MB、「直喂」省 12.6 MB（收益是省 1024 次 round-trip 延迟）、K1+G1a
+  **AI≈0.75** 访存受限。主 kernel SM100 专属、仅分析。索引页新增第 135 篇。
+  上一轮 P124-1：新建 `docs/134-deepep-bucket-test-oracle.md`
   （+`harness/exp_deepep_bucket_tests.{py,sh,out.txt}`）——收口 DeepEP 验收测试栈最后三份：
   `tests/bucket/test_all_gather.py`、`tests/bucket/test_session.py`、`tests/buffer/test_allocation.py`。
   **① all-gather 纯 NVLink copy-engine 语义**（原地 `data_ptr` 判据 + `torch.equal`、`num_sms=0`、
@@ -5256,17 +5293,19 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P124 已完成（最新 **P124-1 DeepEP 验收测试栈最后三份收口**：
-  `test_all_gather`/`test_session`/`test_allocation`——all-gather 纯 NVLink copy-engine 语义、
-  会话内 bump 分配 + 容差梯度（all_gather `rtol=0` vs reduce_scatter/all_reduce `1e-5`）、
-  `BufferAllocator` meta→cuda 物化 + 多 group；H100 8 卡真机 ALL PASS（`plan.num_bytes=4194304`、
-  2 MiB 偏移、all_gather 逐位、reduce_scatter 反序环重建 relerr 0.000e+00）；至此 DeepEP 七个子目录
-  验收测试全部被单独拆过；索引页新增第 134 篇。
-  可继续（均为增量、非承诺）：
-  两条门控反向（Mega Gate、mHC）的数学、算子账与目标卡接线已齐；剩余可选：把融合 worker 在 SM100 上的
-  「真实 H=7168 warp-pair 分段 + TMEM 累加器直喂 K1」写成可核对的 mbarrier/TMEM 接线图。
-  另外，若后续新增/改动大量行号引用，可把 `harness/check_refs.py` 接进 CI（退出码已就绪），并定期重跑
-  `triage_refs.py` 复核 `adjacent_code` 队列。DeepEP 端到端仍需 NCCL≥2.32.3（见「阻塞」）。详见上）。
+- **下一步**：P0~P125 已完成（最新 **P125-1 Mega mHC 反向的目标卡单 kernel 接线（下）**：
+   把第 132 篇结尾的「真实 H=7168 warp-pair 分段 + G0 累加器直喂 K1」坐实成可核对几何——
+   前向 Post worker 网格（`kNumRowsPerWarp=16`/`kNumRowGroupsPerWarp=8`/`kNumLanesPerRowGroup=4`、
+   两 worker 按 UMMA 原子切、各覆盖全 64 行、WG3 相加）、`warp_reduce_sum<4>` 归约树、TMEM 列预算
+   `256+32=288<512`。H100(sm90) 真机（**直接 include 真实头文件**）：几何 0 错误、分段归约 vs double
+   **rel 4–6e-8** vs 全 32-lane **rel 2.47**（结构性错误）、分段网格 vs 朴素 **2.03–10.93×**；
+   真实形状 K1+G1a **AI≈0.75** 访存受限。主 kernel SM100 专属、仅分析。索引页新增第 135 篇。
+   可继续（均为增量、非承诺）：
+   两条门控反向（Mega Gate、mHC）的数学、算子账、目标卡几何现已齐；剩余可选：把 `harness/check_refs.py`
+   接进 CI（退出码已就绪）、定期重跑 `triage_refs.py` 复核 `adjacent_code` 队列，或选 DeepGEMM/DeepEP
+   `csrc/utils/` 剩余小角落做定点复核。DeepEP 端到端仍需 NCCL≥2.32.3（见「阻塞」）。详见上）。
+   上一轮 P124-1：P0~P124 已完成（最新 **P124-1 DeepEP 验收测试栈最后三份收口**：
+   `test_all_gather`/`test_session`/`test_allocation`；H100 8 卡真机 ALL PASS、索引页新增第 134 篇）。
   上一轮 P122-1：P0~P122 已完成（最新 **P122-1 Mega mHC 反向的目标卡接线 + per-token 融合 worker**
   上一轮 P121-1：P0~P121 已完成（最新 **P121-1 Mega mHC 反向的 H100 融合账**：
   把第 130 篇那条反向当成待部署算子流水拆成**六段**（K0/G0/K1/G1a/G1b/K2），量化 roofline：整条反向
