@@ -1,0 +1,407 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+============================================================================================
+Part A: bf16-native operand staging at K!=V -- prod_bf16 vs prod (bit-identity)
+============================================================================================
+
+#### V = 64  (K = 128 fixed) ####
+
+# B2 T1024 H8  grid=(64, 16)
+    V=64 bf16.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dvb vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    V=64 bf16.db vs prod               max_abs=0.000e+00  [OK ]
+    V=64 bf16.dApre vs prod            max_abs=0.000e+00  [OK ]
+    V=64 bf16.dA vs prod               max_abs=0.000e+00  [OK ]
+    V=64 bf16.dqg vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dkg vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dg vs prod               max_abs=0.000e+00  [OK ]
+    V=64 bf16.dgk vs prod              max_abs=0.000e+00  [OK ]
+    V=64 mma.dv2 vs bf16               max_abs=0.000e+00  [OK ]
+    V=64 mma.dvb vs bf16               max_abs=0.000e+00  [OK ]
+    V=64 mma.dApre vs bf16             max_abs=4.768e-07  [DIFF]
+    V=64 mma.dA vs bf16                max_abs=4.768e-07  [DIFF]
+    V=64 mma.db vs bf16                max_abs=2.500e-05  [DIFF]
+    V=64 mma.dqg vs bf16               max_abs=2.384e-07  [DIFF]
+    V=64 mma.dkg vs bf16               max_abs=7.248e-05  [DIFF]
+    V=64 mma.dg vs bf16                max_abs=7.920e-06  [DIFF]
+    V=64 mma.dgk vs bf16               max_abs=0.000e+00  [OK ]
+
+# T512 H4  grid=(32, 4)
+    V=64 bf16.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dvb vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    V=64 bf16.db vs prod               max_abs=0.000e+00  [OK ]
+    V=64 bf16.dApre vs prod            max_abs=0.000e+00  [OK ]
+    V=64 bf16.dA vs prod               max_abs=0.000e+00  [OK ]
+    V=64 bf16.dqg vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dkg vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dg vs prod               max_abs=0.000e+00  [OK ]
+    V=64 bf16.dgk vs prod              max_abs=0.000e+00  [OK ]
+    V=64 mma.dv2 vs bf16               max_abs=0.000e+00  [OK ]
+    V=64 mma.dvb vs bf16               max_abs=0.000e+00  [OK ]
+    V=64 mma.dApre vs bf16             max_abs=4.768e-07  [DIFF]
+    V=64 mma.dA vs bf16                max_abs=2.384e-07  [DIFF]
+    V=64 mma.db vs bf16                max_abs=1.401e-05  [DIFF]
+    V=64 mma.dqg vs bf16               max_abs=1.788e-07  [DIFF]
+    V=64 mma.dkg vs bf16               max_abs=3.615e-04  [DIFF]
+    V=64 mma.dg vs bf16                max_abs=1.131e-05  [DIFF]
+    V=64 mma.dgk vs bf16               max_abs=0.000e+00  [OK ]
+
+# T250 H3 (non-div)  grid=(16, 3)
+    V=64 bf16.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dvb vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    V=64 bf16.db vs prod               max_abs=0.000e+00  [OK ]
+    V=64 bf16.dApre vs prod            max_abs=0.000e+00  [OK ]
+    V=64 bf16.dA vs prod               max_abs=0.000e+00  [OK ]
+    V=64 bf16.dqg vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dkg vs prod              max_abs=0.000e+00  [OK ]
+    V=64 bf16.dg vs prod               max_abs=0.000e+00  [OK ]
+    V=64 bf16.dgk vs prod              max_abs=0.000e+00  [OK ]
+    V=64 mma.dv2 vs bf16               max_abs=0.000e+00  [OK ]
+    V=64 mma.dvb vs bf16               max_abs=0.000e+00  [OK ]
+    V=64 mma.dApre vs bf16             max_abs=4.768e-07  [DIFF]
+    V=64 mma.dA vs bf16                max_abs=4.768e-07  [DIFF]
+    V=64 mma.db vs bf16                max_abs=5.960e-06  [DIFF]
+    V=64 mma.dqg vs bf16               max_abs=1.788e-07  [DIFF]
+    V=64 mma.dkg vs bf16               max_abs=5.192e-05  [DIFF]
+    V=64 mma.dg vs bf16                max_abs=3.679e-06  [DIFF]
+    V=64 mma.dgk vs bf16               max_abs=0.000e+00  [OK ]
+
+#### V = 128  (K = 128 fixed) ####
+
+# B2 T1024 H8  grid=(64, 16)
+    V=128 bf16.dv2 vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dvb vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dkgb vs prod            max_abs=0.000e+00  [OK ]
+    V=128 bf16.db vs prod              max_abs=0.000e+00  [OK ]
+    V=128 bf16.dApre vs prod           max_abs=0.000e+00  [OK ]
+    V=128 bf16.dA vs prod              max_abs=0.000e+00  [OK ]
+    V=128 bf16.dqg vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dkg vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dg vs prod              max_abs=0.000e+00  [OK ]
+    V=128 bf16.dgk vs prod             max_abs=0.000e+00  [OK ]
+    V=128 mma.dv2 vs bf16              max_abs=0.000e+00  [OK ]
+    V=128 mma.dvb vs bf16              max_abs=0.000e+00  [OK ]
+    V=128 mma.dApre vs bf16            max_abs=9.537e-07  [DIFF]
+    V=128 mma.dA vs bf16               max_abs=7.153e-07  [DIFF]
+    V=128 mma.db vs bf16               max_abs=5.460e-05  [DIFF]
+    V=128 mma.dqg vs bf16              max_abs=4.768e-07  [DIFF]
+    V=128 mma.dkg vs bf16              max_abs=1.589e-04  [DIFF]
+    V=128 mma.dg vs bf16               max_abs=3.667e-05  [DIFF]
+    V=128 mma.dgk vs bf16              max_abs=0.000e+00  [OK ]
+
+# T512 H4  grid=(32, 4)
+    V=128 bf16.dv2 vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dvb vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dkgb vs prod            max_abs=0.000e+00  [OK ]
+    V=128 bf16.db vs prod              max_abs=0.000e+00  [OK ]
+    V=128 bf16.dApre vs prod           max_abs=0.000e+00  [OK ]
+    V=128 bf16.dA vs prod              max_abs=0.000e+00  [OK ]
+    V=128 bf16.dqg vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dkg vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dg vs prod              max_abs=0.000e+00  [OK ]
+    V=128 bf16.dgk vs prod             max_abs=0.000e+00  [OK ]
+    V=128 mma.dv2 vs bf16              max_abs=0.000e+00  [OK ]
+    V=128 mma.dvb vs bf16              max_abs=0.000e+00  [OK ]
+    V=128 mma.dApre vs bf16            max_abs=4.768e-07  [DIFF]
+    V=128 mma.dA vs bf16               max_abs=4.768e-07  [DIFF]
+    V=128 mma.db vs bf16               max_abs=1.025e-05  [DIFF]
+    V=128 mma.dqg vs bf16              max_abs=3.576e-07  [DIFF]
+    V=128 mma.dkg vs bf16              max_abs=7.766e-05  [DIFF]
+    V=128 mma.dg vs bf16               max_abs=2.753e-06  [DIFF]
+    V=128 mma.dgk vs bf16              max_abs=0.000e+00  [OK ]
+
+# T250 H3 (non-div)  grid=(16, 3)
+    V=128 bf16.dv2 vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dvb vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dkgb vs prod            max_abs=0.000e+00  [OK ]
+    V=128 bf16.db vs prod              max_abs=0.000e+00  [OK ]
+    V=128 bf16.dApre vs prod           max_abs=0.000e+00  [OK ]
+    V=128 bf16.dA vs prod              max_abs=0.000e+00  [OK ]
+    V=128 bf16.dqg vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dkg vs prod             max_abs=0.000e+00  [OK ]
+    V=128 bf16.dg vs prod              max_abs=0.000e+00  [OK ]
+    V=128 bf16.dgk vs prod             max_abs=0.000e+00  [OK ]
+    V=128 mma.dv2 vs bf16              max_abs=0.000e+00  [OK ]
+    V=128 mma.dvb vs bf16              max_abs=0.000e+00  [OK ]
+    V=128 mma.dApre vs bf16            max_abs=4.768e-07  [DIFF]
+    V=128 mma.dA vs bf16               max_abs=3.576e-07  [DIFF]
+    V=128 mma.db vs bf16               max_abs=7.868e-06  [DIFF]
+    V=128 mma.dqg vs bf16              max_abs=2.384e-07  [DIFF]
+    V=128 mma.dkg vs bf16              max_abs=3.517e-05  [DIFF]
+    V=128 mma.dg vs bf16               max_abs=2.038e-06  [DIFF]
+    V=128 mma.dgk vs bf16              max_abs=0.000e+00  [OK ]
+
+#### V = 256  (K = 128 fixed) ####
+
+# B2 T1024 H8  grid=(64, 16)
+    V=256 bf16.dv2 vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dvb vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dkgb vs prod            max_abs=0.000e+00  [OK ]
+    V=256 bf16.db vs prod              max_abs=0.000e+00  [OK ]
+    V=256 bf16.dApre vs prod           max_abs=0.000e+00  [OK ]
+    V=256 bf16.dA vs prod              max_abs=0.000e+00  [OK ]
+    V=256 bf16.dqg vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dkg vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dg vs prod              max_abs=0.000e+00  [OK ]
+    V=256 bf16.dgk vs prod             max_abs=0.000e+00  [OK ]
+    V=256 mma.dv2 vs bf16              max_abs=0.000e+00  [OK ]
+    V=256 mma.dvb vs bf16              max_abs=0.000e+00  [OK ]
+    V=256 mma.dApre vs bf16            max_abs=9.537e-07  [DIFF]
+    V=256 mma.dA vs bf16               max_abs=7.153e-07  [DIFF]
+    V=256 mma.db vs bf16               max_abs=1.476e-04  [DIFF]
+    V=256 mma.dqg vs bf16              max_abs=9.537e-07  [DIFF]
+    V=256 mma.dkg vs bf16              max_abs=9.025e-04  [DIFF]
+    V=256 mma.dg vs bf16               max_abs=1.068e-04  [DIFF]
+    V=256 mma.dgk vs bf16              max_abs=0.000e+00  [OK ]
+
+# T512 H4  grid=(32, 4)
+    V=256 bf16.dv2 vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dvb vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dkgb vs prod            max_abs=0.000e+00  [OK ]
+    V=256 bf16.db vs prod              max_abs=0.000e+00  [OK ]
+    V=256 bf16.dApre vs prod           max_abs=0.000e+00  [OK ]
+    V=256 bf16.dA vs prod              max_abs=0.000e+00  [OK ]
+    V=256 bf16.dqg vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dkg vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dg vs prod              max_abs=0.000e+00  [OK ]
+    V=256 bf16.dgk vs prod             max_abs=0.000e+00  [OK ]
+    V=256 mma.dv2 vs bf16              max_abs=0.000e+00  [OK ]
+    V=256 mma.dvb vs bf16              max_abs=0.000e+00  [OK ]
+    V=256 mma.dApre vs bf16            max_abs=9.537e-07  [DIFF]
+    V=256 mma.dA vs bf16               max_abs=7.153e-07  [DIFF]
+    V=256 mma.db vs bf16               max_abs=5.817e-05  [DIFF]
+    V=256 mma.dqg vs bf16              max_abs=7.153e-07  [DIFF]
+    V=256 mma.dkg vs bf16              max_abs=1.197e-04  [DIFF]
+    V=256 mma.dg vs bf16               max_abs=1.558e-05  [DIFF]
+    V=256 mma.dgk vs bf16              max_abs=0.000e+00  [OK ]
+
+# T250 H3 (non-div)  grid=(16, 3)
+    V=256 bf16.dv2 vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dvb vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dkgb vs prod            max_abs=0.000e+00  [OK ]
+    V=256 bf16.db vs prod              max_abs=0.000e+00  [OK ]
+    V=256 bf16.dApre vs prod           max_abs=0.000e+00  [OK ]
+    V=256 bf16.dA vs prod              max_abs=0.000e+00  [OK ]
+    V=256 bf16.dqg vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dkg vs prod             max_abs=0.000e+00  [OK ]
+    V=256 bf16.dg vs prod              max_abs=0.000e+00  [OK ]
+    V=256 bf16.dgk vs prod             max_abs=0.000e+00  [OK ]
+    V=256 mma.dv2 vs bf16              max_abs=0.000e+00  [OK ]
+    V=256 mma.dvb vs bf16              max_abs=0.000e+00  [OK ]
+    V=256 mma.dApre vs bf16            max_abs=9.537e-07  [DIFF]
+    V=256 mma.dA vs bf16               max_abs=4.768e-07  [DIFF]
+    V=256 mma.db vs bf16               max_abs=2.408e-05  [DIFF]
+    V=256 mma.dqg vs bf16              max_abs=8.345e-07  [DIFF]
+    V=256 mma.dkg vs bf16              max_abs=1.768e-04  [DIFF]
+    V=256 mma.dg vs bf16               max_abs=6.218e-06  [DIFF]
+    V=256 mma.dgk vs bf16              max_abs=0.000e+00  [OK ]
+
+Part A: prod_bf16 vs prod  worst max_abs = 0.000e+00  [BIT-IDENTICAL]
+Part A: mma vs bf16 (straight outputs) worst max_abs = 1.476e-04
+
+DONE
+
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+
+============================================================================================
+Part B: folded intra diagonal at K!=V -- prod_intra vs prod + standalone b3intra
+============================================================================================
+
+#### V = 64  (K = 128 fixed) ####
+
+# B2 T1024 H8  grid=(64, 16)
+    (prod_intra - prod).dqg max_abs=1.231e+00 (intra contribution added)
+    fold.dqg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dkg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dg vs prod+b3                 max_abs=2.384e-07  [DIFF]
+    fold.db vs prod+b3                 max_abs=7.153e-07  [DIFF]
+    untouched.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dvb vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    untouched.dA vs prod               max_abs=0.000e+00  [OK ]
+    untouched.dApre vs prod            max_abs=0.000e+00  [OK ]
+    untouched.dgk vs prod              max_abs=0.000e+00  [OK ]
+
+# T512 H4  grid=(32, 4)
+    (prod_intra - prod).dqg max_abs=1.301e+00 (intra contribution added)
+    fold.dqg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dkg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dg vs prod+b3                 max_abs=2.384e-07  [DIFF]
+    fold.db vs prod+b3                 max_abs=7.153e-07  [DIFF]
+    untouched.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dvb vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    untouched.dA vs prod               max_abs=0.000e+00  [OK ]
+    untouched.dApre vs prod            max_abs=0.000e+00  [OK ]
+    untouched.dgk vs prod              max_abs=0.000e+00  [OK ]
+
+# T250 H3 (non-div)  grid=(16, 3)
+    (prod_intra - prod).dqg max_abs=1.106e+00 (intra contribution added)
+    fold.dqg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dkg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dg vs prod+b3                 max_abs=2.384e-07  [DIFF]
+    fold.db vs prod+b3                 max_abs=4.768e-07  [DIFF]
+    untouched.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dvb vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    untouched.dA vs prod               max_abs=0.000e+00  [OK ]
+    untouched.dApre vs prod            max_abs=0.000e+00  [OK ]
+    untouched.dgk vs prod              max_abs=0.000e+00  [OK ]
+
+#### V = 128  (K = 128 fixed) ####
+
+# B2 T1024 H8  grid=(64, 16)
+    (prod_intra - prod).dqg max_abs=1.325e+00 (intra contribution added)
+    fold.dqg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dkg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dg vs prod+b3                 max_abs=4.768e-07  [DIFF]
+    fold.db vs prod+b3                 max_abs=7.153e-07  [DIFF]
+    untouched.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dvb vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    untouched.dA vs prod               max_abs=0.000e+00  [OK ]
+    untouched.dApre vs prod            max_abs=0.000e+00  [OK ]
+    untouched.dgk vs prod              max_abs=0.000e+00  [OK ]
+
+# T512 H4  grid=(32, 4)
+    (prod_intra - prod).dqg max_abs=1.301e+00 (intra contribution added)
+    fold.dqg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dkg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dg vs prod+b3                 max_abs=4.768e-07  [DIFF]
+    fold.db vs prod+b3                 max_abs=4.768e-07  [DIFF]
+    untouched.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dvb vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    untouched.dA vs prod               max_abs=0.000e+00  [OK ]
+    untouched.dApre vs prod            max_abs=0.000e+00  [OK ]
+    untouched.dgk vs prod              max_abs=0.000e+00  [OK ]
+
+# T250 H3 (non-div)  grid=(16, 3)
+    (prod_intra - prod).dqg max_abs=1.106e+00 (intra contribution added)
+    fold.dqg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dkg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dg vs prod+b3                 max_abs=4.768e-07  [DIFF]
+    fold.db vs prod+b3                 max_abs=4.768e-07  [DIFF]
+    untouched.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dvb vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    untouched.dA vs prod               max_abs=0.000e+00  [OK ]
+    untouched.dApre vs prod            max_abs=0.000e+00  [OK ]
+    untouched.dgk vs prod              max_abs=0.000e+00  [OK ]
+
+#### V = 256  (K = 128 fixed) ####
+
+# B2 T1024 H8  grid=(64, 16)
+    (prod_intra - prod).dqg max_abs=1.230e+00 (intra contribution added)
+    fold.dqg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dkg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dg vs prod+b3                 max_abs=4.768e-07  [DIFF]
+    fold.db vs prod+b3                 max_abs=1.431e-06  [DIFF]
+    untouched.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dvb vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    untouched.dA vs prod               max_abs=0.000e+00  [OK ]
+    untouched.dApre vs prod            max_abs=0.000e+00  [OK ]
+    untouched.dgk vs prod              max_abs=0.000e+00  [OK ]
+
+# T512 H4  grid=(32, 4)
+    (prod_intra - prod).dqg max_abs=1.301e+00 (intra contribution added)
+    fold.dqg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dkg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dg vs prod+b3                 max_abs=4.768e-07  [DIFF]
+    fold.db vs prod+b3                 max_abs=9.537e-07  [DIFF]
+    untouched.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dvb vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    untouched.dA vs prod               max_abs=0.000e+00  [OK ]
+    untouched.dApre vs prod            max_abs=0.000e+00  [OK ]
+    untouched.dgk vs prod              max_abs=0.000e+00  [OK ]
+
+# T250 H3 (non-div)  grid=(16, 3)
+    (prod_intra - prod).dqg max_abs=1.106e+00 (intra contribution added)
+    fold.dqg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dkg vs prod+b3                max_abs=0.000e+00  [OK ]
+    fold.dg vs prod+b3                 max_abs=4.768e-07  [DIFF]
+    fold.db vs prod+b3                 max_abs=4.768e-07  [DIFF]
+    untouched.dv2 vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dvb vs prod              max_abs=0.000e+00  [OK ]
+    untouched.dkgb vs prod             max_abs=0.000e+00  [OK ]
+    untouched.dA vs prod               max_abs=0.000e+00  [OK ]
+    untouched.dApre vs prod            max_abs=0.000e+00  [OK ]
+    untouched.dgk vs prod              max_abs=0.000e+00  [OK ]
+
+worst over all V/cases (0 == bit-identical):
+  V= 64 fold.dqg  0.000e+00
+  V= 64 fold.dkg  0.000e+00
+  V= 64 fold.dg   2.384e-07
+  V= 64 fold.db   7.153e-07
+  V= 64 un.dv2    0.000e+00
+  V= 64 un.dvb    0.000e+00
+  V= 64 un.dkgb   0.000e+00
+  V= 64 un.dA     0.000e+00
+  V= 64 un.dApre  0.000e+00
+  V= 64 un.dgk    0.000e+00
+  V=128 fold.dqg  0.000e+00
+  V=128 fold.dkg  0.000e+00
+  V=128 fold.dg   4.768e-07
+  V=128 fold.db   7.153e-07
+  V=128 un.dv2    0.000e+00
+  V=128 un.dvb    0.000e+00
+  V=128 un.dkgb   0.000e+00
+  V=128 un.dA     0.000e+00
+  V=128 un.dApre  0.000e+00
+  V=128 un.dgk    0.000e+00
+  V=256 fold.dqg  0.000e+00
+  V=256 fold.dkg  0.000e+00
+  V=256 fold.dg   4.768e-07
+  V=256 fold.db   1.431e-06
+  V=256 un.dv2    0.000e+00
+  V=256 un.dvb    0.000e+00
+  V=256 un.dkgb   0.000e+00
+  V=256 un.dA     0.000e+00
+  V=256 un.dApre  0.000e+00
+  V=256 un.dgk    0.000e+00
+
+DONE
+
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+
+============================================================================================
+Part C: resources (registers / spill / smem) at K!=V
+============================================================================================
+  build              V     regs   spill       smem
+  prod              64      113       0     125056
+  prod_bf16         64      106       0      86144
+  prod_bf16_mma     64      106       0      86144
+  prod_intra        64      128       0     151168
+  prod             128      112       0     129152
+  prod_bf16        128      104       0      90240
+  prod_bf16_mma    128      102       0      90240
+  prod_intra       128      128       4     155264
+  prod             256      144       0     137344
+  prod_bf16        256      128      20      98432
+  prod_bf16_mma    256      128      16      98432
+  prod_intra       256      146       0     163456
+
+DONE
+
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+
+============================================================================================
+Part D: timing -- kernel-only CUPTI `dev` (one launch) at K!=V
+============================================================================================
+  V= 64 B2 T1024 H8          prod=   127.8  bf16=    90.5 (0.709x)  bf16mma=    86.6 (0.678x)  intra=   173.6 (1.359x)
+  V= 64 T512 H4              prod=    14.0  bf16=    13.9 (0.990x)  bf16mma=    13.2 (0.936x)  intra=    17.7 (1.257x)
+  V= 64 T250 H3 (non-div)    prod=    13.3  bf16=    13.7 (1.031x)  bf16mma=    12.9 (0.968x)  intra=    16.9 (1.272x)
+  V=128 B2 T1024 H8          prod=   170.9  bf16=   122.2 (0.715x)  bf16mma=   115.8 (0.677x)  intra=   214.6 (1.256x)
+  V=128 T512 H4              prod=    19.7  bf16=    19.6 (0.992x)  bf16mma=    18.1 (0.920x)  intra=    23.8 (1.209x)
+  V=128 T250 H3 (non-div)    prod=    18.7  bf16=    19.4 (1.038x)  bf16mma=    18.2 (0.973x)  intra=    22.2 (1.186x)
+  V=256 B2 T1024 H8          prod=   261.8  bf16=   193.7 (0.740x)  bf16mma=   180.7 (0.690x)  intra=   308.9 (1.180x)
+  V=256 T512 H4              prod=    35.3  bf16=    33.8 (0.955x)  bf16mma=    29.9 (0.847x)  intra=    40.9 (1.157x)
+  V=256 T250 H3 (non-div)    prod=    31.0  bf16=    31.9 (1.029x)  bf16mma=    28.5 (0.917x)  intra=    34.3 (1.107x)
+
+DONE

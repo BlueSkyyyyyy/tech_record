@@ -1126,6 +1126,23 @@
         `122.1/126.1/134.1 KB`（V=64/128/256）、`NBV=1/2/4`。**结论**：P7-81 两条遗留全关；K≠V 对
         `V=128` **零行为差异**；默认部署仍 §45 的 `cf`。**边界**＝`K` 固定 128、只 `BT=16/BVK=32/fp32/
         HDW`、bf16 入口或 `intra` 折叠叠 K≠V 未复测（待验证）、未做 ncu。
+- [x] **P7-83** 关闭 §85.4（P7-82）剩下的两条 **K≠V 交叉待验证**：六段核的 **bf16 入口 × K≠V** 与
+        **`intra` 折叠 × K≠V**（§85 只证了 fp32/非折叠；两条与 §85 的 `BVW` 泛化机制正交但从未复测）。
+        **新增** `harness/check_bwd_b2_bf16_kv.py`（`harness/check_bwd_b2_bf16_kv.out.txt`，空闲卡）；
+        **`b2_mma_probe.cu` 一行未改**。**Part A**：`K=128`、`V∈{64,128,256}`、三组 shape（含非整除
+        `T=250`），`-DB2M_PROD -DB2M_HDW -DB2M_BF16`（吃 bf16 操作数）vs `-DB2M_PROD -DB2M_HDW`
+        （吃同值的 fp32 拷贝）**10 项输出全部逐位（`max_abs=0`）**——由「bf16⊂tf32 + bf16→fp32 widening
+        精确」推出（论证里根本不出现 `V`），实测证实 §85 的 `BVW` 泛化**在 V 轴段无 `BW=16` 残留**
+        （`NBV=1/2/4` 三档）。`-DB2M_BF16MMA` 叠加只改 GEMM 累加序（`dv2/dvb/dgk` 逐位；`dApre/dA/dqg`
+        ~9e-7、`db 1.5e-4/dg 1.1e-4/dkg 9.0e-4`）。**Part B**：`prod_intra`（`+ -DB2M_INTRA`）vs
+        `prod` + 独立 `b3_intra_probe.cu`（参考取 `prod` 核内 `dA`，同 §63 口径）——**`dqg/dkg` 逐位 0**、
+        `dg ≤4.8e-7/db ≤1.4e-6`（fp32 加法序，同 §63）、6 项未触及输出（`dv2/dvb/dkgb/dA/dApre/dgk`）
+        **逐位 0**。**Part C**：smem `prod` `125.1/129.2/137.3 KB`、`prod_bf16` **`86.1/90.2/98.4 KB`
+        （−30%）**、`prod_intra` `151.2/155.3/163.5 KB`（V=64/128/256）。**Part D**：kernel-only dev 形态与
+        `K=V` 一致——bf16 大 shape **0.68–0.74×**、小 shape 打平，`intra` 折叠大 shape **1.18–1.36×**。
+        **结论**：§85.4 两条交叉全关、逐位无损、可叠加；目标卡 CUDA B2 的 K≠V 研究形态现同时支持 bf16
+        与 intra 折叠。见 `docs/07` §86。**边界**＝`K` 固定 128、只 `BT=16/BVK=32/HDW`、未测 `BF16_VDW`
+        叠 K≠V、未做 ncu。默认部署仍 §45 的 `cf`。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1632,8 +1649,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-82 补测 + P8-3**。
-  - P7-82（本轮）：**关闭 §84（P7-81）的两条遗留——(a) base GEMM core 的 TMA×K≠V 复测、(b) 六段非 GEMM
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-83 补测 + P8-3**。
+  - P7-83（本轮）：**关闭 §85.4（P7-82）剩下的两条 K≠V 交叉待验证——(a) 六段核的 bf16 入口 × K≠V、
+    (b) `intra` 折叠 × K≠V**。新增 `harness/check_bwd_b2_bf16_kv.py`（`..._bf16_kv.out.txt`，空闲卡）；
+    **`b2_mma_probe.cu` 一行未改**。**(a)**：`K=128/V∈{64,128,256}`、三组 shape（含非整除 T=250），
+    `-DB2M_BF16`（吃 bf16 操作数）vs `prod`（吃同值 fp32 拷贝）**10 项输出全部逐位（max_abs=0）**——
+    论证由「bf16⊂tf32 + widening 精确」给出（不出现 `V`），实测证 §85 的 `BVW` 泛化在 V 轴段无 `BW` 残留
+    （`NBV=1/2/4`）；`BF16MMA` 叠加只改累加序（`dv2/dvb/dgk` 逐位、`db 1.5e-4/dkg 9.0e-4`）。**(b)**：
+    `prod_intra` vs `prod`+独立 `b3intra`——`dqg/dkg` **逐位 0**、`dg ≤4.8e-7/db ≤1.4e-6`、6 项未触及输出
+    逐位 0。**(c)** smem `prod_bf16` 比 `prod` 省 30%、`prod_intra` 反大；kernel-only dev 形态与 `K=V`
+    同向（bf16 大 shape 0.68–0.74×、intra 折叠 1.18–1.36×）。见 `docs/07` §86。**边界**＝`K` 固定 128、
+    只 `BT=16/BVK=32/HDW`、`BF16_VDW` 叠 K≠V 未测、未做 ncu。**下一步**：专题维持维护态——§45 的 `cf`
+    仍是目标卡反向默认；CUDA B2 研究形态的 K≠V × {TMA, bf16, BF16MMA, intra 折叠} 交叉至此全部复测且
+    逐位无损，有明确新需求（**K≠V 上做 ncu 归因**、`dw` 写侧端到端 bf16、`K≠128` 的 lane 布局重写、
+    真落目标卡 CUDA）再动。
+  - P7-82（上轮）：**关闭 §84（P7-81）的两条遗留——(a) base GEMM core 的 TMA×K≠V 复测、(b) 六段非 GEMM
     段的 K≠V 泛化**。新增 `harness/check_bwd_b2_kv_prod.py`（`..._kv_prod.out.txt`，空闲卡）+ 补
     `check_bwd_b2_kv.py` 的 `-lcuda`（TMA 缺驱动链接会 `undefined symbol: cuTensorMapEncodeTiled`）并出
     `..._kv_tma.out.txt`；`docs/07` §85。**(a)**：TMA×K≠V 正确性 worst 表与 §84.1 **逐值相同**、TMA smem
