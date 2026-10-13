@@ -3849,10 +3849,37 @@
       不存在。判据**只贡献 C3**（device body 内部砖块）。配套博客 post
       `mega-kernel-52-mpk-smem-layout`（weight 53）并更新 `mega-kernel-00-index` 第 52 项；把
       「`smem_layout.cuh` 三套 swizzle 并存 + `dmem_*`/`smem_*` 参数序不同」补进「已知坑」。
-      P137-1 新留尾巴（文档 §8）：未构建；三套 swizzle 的数值等价性只按公式推断、未逐地址比对；
-      `smem_col` 消费者未全表；`SwizzleOffsetCalculator` 与 CUTLASS 未拉 commit 逐行比对；
-      `smem_row` 辅助 API（`get_phy_offset` 等）无外部调用者只记不判；未测 swizzle 对 bank 冲突/
-      `ldmatrix` 吞吐的量化影响。**本轮新增增量。**
+       P137-1 新留尾巴（文档 §8）：未构建；三套 swizzle 的数值等价性只按公式推断、未逐地址比对；
+       `smem_col` 消费者未全表；`SwizzleOffsetCalculator` 与 CUTLASS 未拉 commit 逐行比对；
+       `smem_row` 辅助 API（`get_phy_offset` 等）无外部调用者只记不判；未测 swizzle 对 bank 冲突/
+       `ldmatrix` 吞吐的量化影响。**本轮新增增量。**
+- [x] **P138-1** 补掉 `docs/36` §8 明留的尾巴「QK/PV 的 `CollectiveMmaQK/PV` 内部（TMA 描述符布局、
+      `AtomThrShapeMNK` 的 CuTe atom、UMMA 指令序列）来自 CUTLASS `collective_builder`，未展开
+      CUTLASS 侧（`deps/cutlass`）实现」——把 `mla_sm100_2sm.cuh` 的**依赖方** CUTLASS 打开。见
+      `docs/52-mpk-mla-2sm-cutlass.md`（MPK 快照 `f9eb70c`；CUTLASS `deps/cutlass` submodule 钉死
+      commit `f3fde583`，`git submodule status` 可核；**纯源码走读、无新实验**）。三条 headline：
+      **(A)（headline）MPK 把 `CollectiveBuilder` 当「类型工厂 + 参数打包器」而非拿来就跑的 mainloop**——
+      `mla_sm100_2sm.cuh` 对 `CollectiveMmaQK/PV` 的全部 21 处引用只有 `using`/`static_assert`/
+      `to_underlying_arguments`/`Params::TMA_*`（`:707-784`/`:903-907`/`:954-1000`），**从不调用**
+      `CollectiveMma::load/mma/load_init/mma_init`；设备侧主循环（`load_tma`/`mma`）由它自己的
+      `TiledMmaQK/PV::make_fragment_A/B`（`:2221-2224`）+ `cute::gemm(tiled_mma_*, ...)`
+      （`:2269/2299/2329/2369`）驱动，与 CUTLASS `sm100_mma_warpspecialized.hpp:649-716` 的 `mma`
+      是**同一调用形状、两套编排**；**(B)** QK/PV 共用同一颗 2SM UMMA atom——
+      `Schedule=KernelTmaWarpSpecialized2SmSm100`（`:689-692`）→ builder `is_2sm`（`sm100_umma_builder.inl:204`）
+      → `SM100_MMA_F16BF16_2x1SM_SS<bf16,bf16,f32,M=128>`（`sm100_common.inl:388-395`），traits
+      `ThrID=Layout<_2>`（`mma_traits_sm100.hpp:1695`）⇒`AtomThrShapeMNK=Shape<2,_1,_1>`，设备侧落到
+      `tcgen05.mma.cta_group::2.kind::f16`（`mma_sm100_umma.hpp:446`）——这就是 MPK `:740-743`
+      「schedule must match」断言的 CUTLASS 侧根；**(C)** TMA 走 `SM100_TMA_2SM_LOAD`
+      （builder `sm100_common.inl:207/243` → `cute/arch/copy_sm100_tma.hpp:92`
+      `cp.async.bulk.tensor.Nd.cta_group::2.shared::cluster.global...`），mainloop `TmaTransactionBytes`
+      显式乘 `size(AtomThrShapeMNK)`（`:235-237`）、`PipelineTmaUmmaAsync` 的 `producer_arv_cnt=1`
+      （`sm100_pipeline.hpp:566`），与 MPK `is_mma_leader_cta` 门控（`:1102-1104`/`:1134-1135`）同义。
+      判据**只贡献 C3**（编译期类型展开、无运行期协调）；并与 `docs/22`（Blackwell transpiler 2SM
+      codegen）、`docs/33`/`docs/34`（手写 SM100 task）合成「SM100 2SM 原语」在 MPK 的**三条来源**。
+      配套博客 post `mega-kernel-53-mpk-mla-2sm-cutlass`（weight 54）并更新 `mega-kernel-00-index`
+      第 53 项。P138-1 新留尾巴（文档 §9）：未构建/未模板实例化打印核对 TMA box；只追到 atom/描述符
+      产生、未逐位展开 `InstrDescriptor`/TMA descriptor 编码；`B2B` 仍未细究；MPK 自建 mainloop 与
+      CUTLASS `CollectiveMma::mma` 的数值等价未验证。**本轮新增增量。**
 
 ## 每轮增量流程（autopilot）
 
@@ -4157,11 +4184,41 @@
   「恒等/线性无 swizzle」**（`smem_row<T,0,0,0,…>` 给出 identity 映射，用于 `cp.async` 直写的输入缓冲
   与 `zero_buffer`），`B=S=3` 才是 128 B swizzle（给 `ldsm`/`ldmatrix` 读）。另 **`smem_row` 的模板参数
   是 `<T,B,M,S,ROW,COL,STRIDE>`、`dmem_row` 是 `<T,ROW,COL,STRIDE>`**（少三个 swizzle 参数、顺序也不同）
-  ——读/移植 device body 前先看它的 `using …Smem`/`…Dmem` 别名，别按名字猜参数序，否则静默算错 SMEM 地址。
+   ——读/移植 device body 前先看它的 `using …Smem`/`…Dmem` 别名，别按名字猜参数序，否则静默算错 SMEM 地址。
+- **MPK 生产 task 用 CUTLASS `CollectiveBuilder` 是「只用类型/参数，不跑它的 mainloop」**（P138-1/`docs/52`）：
+  `mla_sm100_2sm.cuh` 从 `CollectiveMmaQK/PV` 只取 `TiledMma`/`CtaShape_MNK`/`SmemLayout*`/`Params::TMA_*`/
+  `AtomThrShapeMNK` 等**类型**，外加一个 host 侧 `to_underlying_arguments`；设备侧 `load_tma`/`mma`/
+  `softmax` 都是手写的，**从不调用** `CollectiveMma::load/mma/load_init/mma_init`。读生产 task 时**不要**
+  假设它在跑 CUTLASS 的 mainloop（也不能拿 `CollectiveMma` 的成员函数行为去解释它的时序）；要解释
+  2SM 语义，得回 `deps/cutlass@f3fde583` 看 `sm100_umma_builder.inl`/`sm100_common.inl`（atom 选择）、
+  `mma_traits_sm100.hpp`（`ThrID=Layout<_2>` ⇒ `AtomThrShapeMNK=Shape<2,_1,_1>`）、`sm100_pipeline.hpp`
+  （`producer_arv_cnt=1` ⇒ 单 leader）。另：`/tmp` 里几份 MPK checkout 的 `deps/cutlass` **submodule 未
+  checkout（空目录）**，CUTLASS 侧走读须用带完整 deps 的 checkout（钉死 commit `f3fde583`，`git submodule
+  status` 可核）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P137-1 完成（1/1）**。补掉 `docs/44` §10 / `docs/48` §7 / P135-1 §10 **三处同时留的
+- 当前进度：**P138-1 完成（1/1）**。兑现阶段「下一步候选」第一条——补掉 `docs/36` §8 明留的尾巴
+  「CUTLASS `collective_builder` 侧 QK/PV atom（`mla_sm100_2sm.cuh` 的 CUTLASS 内部）未展开」，
+  把 `mla_sm100_2sm.cuh` 的**依赖方** `deps/cutlass`（submodule 钉死 `f3fde583`）打开。见
+  `docs/52-mpk-mla-2sm-cutlass.md`（MPK `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
+  **(A)（headline）MPK 把 `CollectiveBuilder` 当「类型工厂 + 参数打包器」而非拿来就跑的 mainloop**
+  ——对 `CollectiveMmaQK/PV` 只有 `using`/`static_assert`/`to_underlying_arguments`/`Params::TMA_*`，
+  **从不调用** `CollectiveMma::load/mma`；设备侧主循环由自己的 `make_fragment_A/B` + `cute::gemm` 驱动；
+  **(B)** QK/PV 共用同一颗 2SM UMMA atom（`KernelTmaWarpSpecialized2SmSm100` →
+  `SM100_MMA_F16BF16_2x1SM_SS<M=128>` → `tcgen05.mma.cta_group::2.kind::f16`、`AtomThrShapeMNK=Shape<2,_1,_1>`，
+  这就是「schedule must match」的 CUTLASS 侧根）；**(C)** TMA 走 `SM100_TMA_2SM_LOAD`
+  （`cta_group::2` bulk tensor）、`TmaTransactionBytes` 乘 `size(AtomThrShapeMNK)`、`producer_arv_cnt=1`，
+  与 MPK `is_mma_leader_cta` 同义。判据只贡献 C3。配套博客 post `mega-kernel-53-mpk-mla-2sm-cutlass`
+  （weight 54）并更新 `mega-kernel-00-index` 第 53 项。P138-1 新留尾巴见文档 §9（未构建/未模板实例化
+  打印、descriptor 位编码未展开、`B2B` 未细究、自建 mainloop 数值等价未验证）。
+- 下一步候选：可继续走其一——`docs/35` §9 遗留的其它未走读相邻层（CUTLASS `collective_builder` 侧
+  **QK/PV atom** 已由 **P138-1/`docs/52`** 补掉）；`docs/46` §6 的 FLAT-CACHE draft attention 设计的
+  完整追述；或 `docs/45`/`docs/44` 的 SMEM 片段仍余的内部未逐行处、以及 `docs/38` §8 记的
+  `rotary_embedding_sm100`（`docs/45` 已修）之外的 device 内部。**`docs/48` §7 的「`my_gpu_id==0`
+  作 residual 的 TP 语义追链」已由 P136-1/`docs/50` 补掉**；**`docs/44` §10 / `docs/48` §7 的布局层
+  尾巴已由 P137-1/`docs/51` 补掉**（「无生产者融合算子扫描」已由 **P135-1/`docs/49`** 全仓覆盖）。
+- 此前：**P137-1 完成（1/1）**。补掉 `docs/44` §10 / `docs/48` §7 / P135-1 §10 **三处同时留的
   尾巴**「`smem_row`/`ldsm`/`dmem_row` 布局定义未逐行」，把 `tasks/ampere/smem_layout.cuh`（514 行）
   逐段打开。见 `docs/51-mpk-smem-layout.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。三条 headline：
   **(A)（headline）同一个 128 B swizzle 有三套并行写法**——位切片 `smem_row`/`smem_col`（`B/M/S`
@@ -4173,12 +4230,6 @@
   逻辑包装 + 记两处坑（`dmem_*`/`smem_*` 参数序不同、`smem_row_tiled_new` 快照不存在）。判据只贡献 C3。
   配套博客 post `mega-kernel-52-mpk-smem-layout`（weight 53）并更新 `mega-kernel-00-index` 第 52 项；
   并把「三套 swizzle 并存 + `dmem_*`/`smem_*` 参数序」补进「已知坑」。
-- 下一步候选：可继续走其一——`docs/35` §9 遗留的其它未走读相邻层（CUTLASS `collective_builder` 侧
-  QK/PV atom——`mla_sm100_2sm.cuh` 的 CUTLASS 内部，`docs/36` §8 明留）；`docs/46` §6 的 FLAT-CACHE
-  draft attention 设计的完整追述；或 `docs/45`/`docs/44` 的 SMEM 片段仍余的内部未逐行处。
-  **`docs/48` §7 的「`my_gpu_id==0` 作 residual 的 TP 语义追链」已由 P136-1/`docs/50` 补掉**；
-  **`docs/44` §10 / `docs/48` §7 的布局层尾巴已由 P137-1/`docs/51` 补掉**（「无生产者融合算子扫描」
-  已由 **P135-1/`docs/49`** 全仓覆盖）。
 - 此前：**P136-1 完成（1/1）**。兑现阶段「下一步候选」——补掉 `docs/48` **§7 明留的尾巴**「`my_gpu_id==0`
   作 `residual` 的 TP 语义：未追 `runtime_config.my_gpu_id` 在多卡下的赋值链」。见
   `docs/50-mpk-multigpu-residual.md`（快照 `f9eb70c`，**纯源码走读、无新实验**——多卡需 ≥2 张 NVLink 卡 +
