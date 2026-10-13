@@ -1163,6 +1163,34 @@
   P49-1 新留尾巴（§38.7）：描述符仍是 `mix` 合成布局、未实测 `cp.async` 批量加载本身收益、未扫更大 `P`/
   多消费者 block、未与 DeepGEMM SM100 路径对跑；§37.7 的「litmus 扫 SM 距离/`ncu`」仍余。
 
+### P50 实验扩展 32：worker 取 task 的载体——`cp.async` 批量加载 TaskDesc（`docs/04-experiments.md` §39）
+
+- [x] **P50-1** 补掉 P49-1（§38.7）明留的尾巴「`cp.async` 只是等效语义（§38 用普通 `ld.relaxed` 读，
+  **未实测 `cp.async` 批量加载本身的收益**——那是另一条线）」「`warp` 下 `cp.async`/`mbarrier` 的批量
+  加载形态」：把 worker「取 task」的**载体选择**单独量出来。真实锚点（快照 `f9eb70c`）：worker 用所有
+  线程协作、每次 16 B 的 `cp.async` 把 `TaskDesc` 批量搬进 SMEM（`persistent_kernel.cuh:1063-1078`；
+  单缓冲 `cp_async_wait<0>` `:1076-1077`）；`load_smem` = `cp.async.ca.shared.global.L2::128B`
+  （16 B、预取 128 B、绕过寄存器；`tasks/common/copy_sm80.cuh:44-57`）；`TaskDesc`
+  （`runtime_header.h:296-336`）真实 **352 B**（论文 §6.1 行 1365）；论文 §5.3「Pre-fetching task
+  descriptions」（行 1364-1368）。见 `docs/04-experiments.md` **§39**，源码 `src/cpasync_desc_fetch.cu`、
+  脚本 `harness/cpasync_desc_fetch.sh`、原始输出 `harness/cpasync_desc_fetch.out.txt`（目标卡 H100/sm90、
+  **固定空闲 device 3**、nvcc 13.2、单 block 持久化消费者、256 MB ≫ L2）。四取数路径公平对照
+  `scalar`（4 B 寄存器）/`vec4`（128-bit 寄存器）/`cpasync`（SMEM 单缓冲）/`cpasync_pf`（双缓冲预取）。核心结论：
+  - **§A/§B 载体不动数值**（四路径 checksum 全 `bad=0`）。**`cp.async` 的杀手锏是「成本与描述符大小
+    无关」**：小描述符（≤128 B）时单缓冲 `cpasync` 反比 `vec4` 慢 1.15–1.44×；**到真实 352 B（`DW=88`）
+    翻盘——`cpasync` 58.0 vs `vec4` 132.9（2.29×）、vs `scalar` 167.1（2.88×）**，因寄存器读被寄存器压力
+    拖垮（`vec4` ns/字 1.21→1.51、`scalar` 1.87→1.90），而 `cpasync` 从 128 B→352 B 几乎不动（55.7→58.0）。
+  - **§C 批量大小 `K`**：`cp.async` 的价值集中在**任务稀疏（`K` 小）**——`K=1` 时 `cpasync_pf` 474.5 vs
+    `vec4` 1030.3（2.17×）、`K=4` 127.9 vs 264.6（2.07×）；`K≥32`（task 足够多）则 `vec4` 反超
+    （38.6 vs 55.7），只有加预取才追到 ~44.9。
+  - **§D 预取（双缓冲）** 相对单缓冲的 `cpasync` 稳定收回 **7%–40%**（`K` 越小越多：`K=4` 1.40×、
+    `K=64` 1.07×）——**`cp.async` 单用只是「换载体」，加预取才是「流水」**，对应论文 §5.3 的 pre-fetch。
+  - **§E 线程数是弱标度**（单 block 受延迟约束；扩展维度是多 worker，未测）。
+  含义：**选 `cp.async` 为载体在真实 352 B 描述符下是对的（2.3×），而论文说的 pre-fetch 相对快照的单缓冲
+  `wait<0>` 还能再收 1.07–1.40×**；§38 用普通 load 的结论只在它的 128 B/大 `K` 口径下成立。判据不变
+  （单常驻 kernel、设备侧推进 C1–C4，**无 C5**，与 §36–§38 同档）。**本轮新增实验**；P50-1 新留尾巴
+  （§39.7）：单 block 非多 worker 带宽口径、`mbarrier` 形态未测、未与 DeepGEMM SM100 路径对跑。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1185,7 +1213,28 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P49-1 完成（1/1）**。补掉 P48-1（§37.7）明留的两条尾巴——「消费者是**单线程**、
+- 当前进度：**P50-1 完成（1/1）**。补掉 P49-1（§38.7）明留的尾巴「`cp.async` 只是等效语义（§38 用
+  普通 `ld.relaxed` 读，**未实测 `cp.async` 批量加载本身的收益**——那是另一条线）」「`warp` 下
+  `cp.async`/`mbarrier` 的批量加载形态」：把 worker「取 task」的**载体选择**单独量出来。
+  `docs/04-experiments.md` 新增 **§39**，源码 `src/cpasync_desc_fetch.cu`、脚本
+  `harness/cpasync_desc_fetch.sh`、原始输出 `harness/cpasync_desc_fetch.out.txt`（目标卡 H100/sm90、
+  **固定空闲 device 3**、nvcc 13.2、单 block 持久化消费者、256 MB ≫ L2）。四取数路径 `scalar`（4 B
+  寄存器）/`vec4`（128-bit 寄存器）/`cpasync`（SMEM 单缓冲）/`cpasync_pf`（双缓冲预取）。真实锚点：
+  worker 协作 16 B `cp.async` 批量搬 `TaskDesc` 进 SMEM（`persistent_kernel.cuh:1063-1078`；单缓冲
+  `cp_async_wait<0>` `:1076-1077`）；`load_smem` = `cp.async.ca.shared.global.L2::128B`
+  （`tasks/common/copy_sm80.cuh:44-57`）；`TaskDesc` 真实 **352 B**（论文 §6.1 行 1365）；论文 §5.3
+  「Pre-fetching task descriptions」（行 1364-1368）。核心结论：
+  - **§A/§B 载体不动数值**（四路径全 `bad=0`）。**`cp.async` 的杀手锏是「成本与描述符大小无关」**：
+    小描述符（≤128 B）单缓冲 `cpasync` 反比 `vec4` 慢 1.15–1.44×；**真实 352 B（`DW=88`）翻盘——
+    `cpasync` 58.0 vs `vec4` 132.9（2.29×）、vs `scalar` 167.1（2.88×）**（寄存器读被寄存器压力拖垮，
+    `cpasync` 从 128 B→352 B 几乎不动 55.7→58.0）。
+  - **§C 批量大小 `K`**：`cp.async` 价值集中在**任务稀疏（`K` 小）**——`K=1` 474.5（pf）vs 1030.3（vec4，
+    2.17×）、`K=4` 127.9 vs 264.6（2.07×）；`K≥32` 则 `vec4` 反超（38.6 vs 55.7）。
+  - **§D 预取（双缓冲）** 相对单缓冲稳定收回 **7%–40%**（`K` 越小越多）——**`cp.async` 单用只是「换载体」，
+    加预取才是「流水」**，对应论文 §5.3 pre-fetch。**§E 线程数是弱标度**（单 block 受延迟约束）。
+  判据 C1–C4、无 C5（与 §36–§38 同档）。**本轮新增实验**；P50-1 新留尾巴（§39.7）：单 block 非多 worker
+  带宽口径、`mbarrier` 形态未测、未与 DeepGEMM SM100 路径对跑。**P0–P50 全部完成。**
+- 此前：**P49-1 完成（1/1）**。补掉 P48-1（§37.7）明留的两条尾巴——「消费者是**单线程**、
   每项 ~2.3µs 同步往返主导成本」（生产实现会批量取 task）与「payload 是纯 `uint32`、**未做真实 task
   描述符**」：把 §37 的 MPSC 队列升级为「**批量出队 + 一个 warp 的并行校验 + 128 B 真实 `TaskDesc`**」。
   `docs/04-experiments.md` 新增 **§38**，源码 `src/mpsc_batch.cu`、脚本 `harness/mpsc_batch.sh`、原始输出
@@ -1753,6 +1802,16 @@
        **P48-1 新留尾巴**（`docs/04` §37.7）：消费者单线程致每项 ~2.3µs 往返主导（§C 只看差值）、
        `stall0` 为人为扰动、未做真实 task 描述符、litmus 仍未扫 SM 距离/`ncu` 内存序事件、未与
        DeepGEMM SM100 路径对跑。
+- **本轮（P50-1）**：`docs/04-experiments.md` 新增 **§39**「worker 侧取 task 的载体：`cp.async` 批量
+  加载 TaskDesc 值多少」——新源码 `src/cpasync_desc_fetch.cu`、脚本 `harness/cpasync_desc_fetch.sh`、
+  原始输出 `harness/cpasync_desc_fetch.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
+  单 block、256 MB ≫ L2）。补 §38.7「未实测 `cp.async` 批量加载本身收益 / `warp` 下 `cp.async` 形态」：
+  四取数路径 `scalar`/`vec4`/`cpasync`（SMEM 单缓冲）/`cpasync_pf`（双缓冲预取），描述符 `DW∈{8,16,32,88}`、
+  `DW=88`=**352 B 对齐论文 §6.1**。核心结论：**(1) 四路径全 `bad=0`**；**(2) `cp.async` 的成本与描述符
+  大小无关——真实 352 B 下 `cpasync` 58.0 vs `vec4` 132.9（2.29×）、vs `scalar` 167.1（2.88×）**，小描述符
+  （≤128 B）时反而略慢于 `vec4`；**(3) `cp.async` 价值集中在任务稀疏（`K` 小）**：`K=1` pf 474.5 vs vec4
+  1030.3（2.17×），`K≥32` 则 `vec4` 反超；**(4) 双缓冲预取相对单缓冲稳定收回 7%–40%**（= 论文 §5.3
+  pre-fetch；快照 worker 却是单缓冲 `wait<0>`）。判据 C1–C4、无 C5。**本轮新增实验**；收口 §38.7 载体线。
 - **本轮（P49-1）**：`docs/04-experiments.md` 新增 **§38**「MPSC 批量出队 + 多线程消费者 + 真实描述符」——
   新源码 `src/mpsc_batch.cu`、脚本 `harness/mpsc_batch.sh`、原始输出 `harness/mpsc_batch.out.txt`（目标卡
   H100/sm90、**固定空闲 device 3**、nvcc 13.2、grid=P+1）。补 §37.7「单线程消费者 ~2.3µs/项往返」
