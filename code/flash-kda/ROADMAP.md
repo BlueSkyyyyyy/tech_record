@@ -1105,8 +1105,27 @@
        （`B8` CUDA 517.7 vs Triton 567.4=`0.91×`、`B2` 0.87×）；大 shape dev `V:64→128→256 =
        297.3→517.7→994.5µs`（近似线性）；`V=256` 无 Triton 对照（其 OOM）。**Part D**：smem
        `87552 B` 三档恒定。**结论**：base GEMM core 对 `K≠V` 泛化且默认零行为差异；**边界**＝只参数化
-       V（K 固定 128）、只覆盖 base GEMM core（六段核仍 `VD==KD`，未做）；TMA 分支未随 V 复测（待验证）。
-       默认部署仍 §45 的 `cf`。见 `docs/07` §84。
+        V（K 固定 128）、只覆盖 base GEMM core（六段核仍 `VD==KD`，未做）；TMA 分支未随 V 复测（待验证）。
+        默认部署仍 §45 的 `cf`。见 `docs/07` §84。
+- [x] **P7-82** 关闭 §84（P7-81）的两条遗留：(a) base GEMM core 的 **TMA×K≠V** 复测（待验证）；
+        (b) 六段非 GEMM 段的 **K≠V** 泛化。**新增** `harness/check_bwd_b2_kv_prod.py`
+        （`harness/check_bwd_b2_kv_prod.out.txt`，空闲卡）、补 `check_bwd_b2_kv.py` 的 `-lcuda`
+        （TMA 走 `cuTensorMapEncodeTiled`，缺则 `undefined symbol`）并出 `harness/check_bwd_b2_kv_tma.out.txt`；
+        `docs/07` §85。**(a)**：TMA×K≠V 正确性 worst 表与 §84.1（cp.async）**逐值相同**（`dq/dk/dw`
+        3.1–4.0e-4、`dgk` 1.6–2.1e-7，含非整除 T=250）、TMA smem **恒 76.1 KB 与 V 无关**、`B8T2048H8`
+        dev `278/494/925 µs`（V=64/128/256，随 V 近似线性）——**TMA 只换 stage 布局、逐值成立**。**(b)**：
+        把六段的 V 轴组（`OUT` 的 `dv2/dvb`、`DA` 的 `dv@v^T`、`DB` raw-v 镜像）warp 宽度从 `BW=KD/NW`
+        换成 **`BVW=VD/NW`**（`b2_mma_probe.cu:75-83/558/974` + 四处 `local0`/循环界 `:1197/1255/1274/1299`
+        + store `:1380` + DB 归约拆两项 `:1807-1822`，**算术一字未动**）；K 轴组（`dkgb`/门控/`dgk`/`dw@kg^T`/
+        `intra`）保持 `BW`。`#error` 收窄为唯一真实耦合：**全局 `dw` 的 DKGB staging 骑 V 循环**，故
+        `DKGB&&!HDW&&K≠V` 仍禁（生产核一律 `-DB2M_PROD -DB2M_HDW`，不受影响）。**Part A**：K==V
+        （VD=128）改后 vs 改前源码 `-DB2M_PROD -DB2M_HDW` **10 项输出逐位（max_abs=0）**（首版把 DB 归约
+        拆两个循环致 `db` 差 7e-7，改 `max(NBV,2)` 单循环回逐位）。**Part B**：K≠V 三组 shape，V 轴三项
+        vs torch 落 tf32 底噪（`dv2≤3.5e-4/dvb≤4.5e-4/db≤2.6e-4/dApre≤1.4e-4`，含非整除 T=250）。
+        **Part C**：`prod` vs `prod+TMA` **十项逐位（max_abs=0）**，V∈{64,128,256}。**Part D**：smem
+        `122.1/126.1/134.1 KB`（V=64/128/256）、`NBV=1/2/4`。**结论**：P7-81 两条遗留全关；K≠V 对
+        `V=128` **零行为差异**；默认部署仍 §45 的 `cf`。**边界**＝`K` 固定 128、只 `BT=16/BVK=32/fp32/
+        HDW`、bf16 入口或 `intra` 折叠叠 K≠V 未复测（待验证）、未做 ncu。
 - [x] **P7-73** 兑现 ROADMAP 列出的「**bf16 原生入口**」真需求：给 K2 形状的 **B2 GEMM 核**
        （`b2_mma_probe.cu`）加 `-DB2M_BF16`——五个 streamed 操作数 `do/vn/dv/h/dh` 改 **bf16 staging**
        （`Stage` 数组 `float→__nv_bfloat16`、行距 `BVP=BVK+4→OPS=BVK+8`、每 `cp.async` 搬 8 个 bf16=16 B），
@@ -1613,8 +1632,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-81 补测 + P8-3**。
-  - P7-81（本轮）：**关闭「只测 `K=V=128`」边界（K2 形状 CUDA B2 **base GEMM core**）**——`KD`/`VD`
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-82 补测 + P8-3**。
+  - P7-82（本轮）：**关闭 §84（P7-81）的两条遗留——(a) base GEMM core 的 TMA×K≠V 复测、(b) 六段非 GEMM
+    段的 K≠V 泛化**。新增 `harness/check_bwd_b2_kv_prod.py`（`..._kv_prod.out.txt`，空闲卡）+ 补
+    `check_bwd_b2_kv.py` 的 `-lcuda`（TMA 缺驱动链接会 `undefined symbol: cuTensorMapEncodeTiled`）并出
+    `..._kv_tma.out.txt`；`docs/07` §85。**(a)**：TMA×K≠V 正确性 worst 表与 §84.1 **逐值相同**、TMA smem
+    **恒 76.1 KB 与 V 无关**、`B8T2048H8` dev `278/494/925µs`（V=64/128/256）。**(b)**：六段 V 轴组
+    （`OUT` `dv2/dvb`、`DA` `dv@v^T`、`DB` raw-v 镜像）warp 宽度由 `BW=KD/NW` 改 **`BVW=VD/NW`**
+    （`b2_mma_probe.cu:75-83/558/974` + `local0`/循环界 `:1197/1255/1274/1299` + store `:1380` +
+    DB 归约拆两项 `:1807-1822`，**算术一字未动**），K 轴组保持 `BW`；`#error` 收窄为「全局 `dw` 的 DKGB
+    staging 骑 V 循环 → `DKGB&&!HDW&&K≠V` 仍禁」（生产核一律 `-DB2M_PROD -DB2M_HDW`）。**Part A**：K==V
+    改后 vs 改前（`git HEAD`）源码 **10 项输出逐位（max_abs=0）**；**Part B**：K≠V vs torch 落 tf32 底噪
+    （`dv2≤3.5e-4/dvb≤4.5e-4/db≤2.6e-4/dApre≤1.4e-4`，含非整除 T=250）；**Part C**：`prod` vs `prod+TMA`
+    十项逐位；**Part D**：smem `122.1/126.1/134.1 KB`、`NBV=1/2/4`。**结论**：两条遗留全关、K≠V 对
+    `V=128` 零行为差异；默认部署仍 §45 的 `cf`。**边界**＝`K` 固定 128、只 `BT=16/BVK=32/fp32/HDW`、
+    bf16 入口或 `intra` 折叠叠 K≠V 未复测（待验证）、未做 ncu。**下一步**：专题维持维护态——§45 的 `cf`
+    仍是目标卡反向默认；CUDA B2 研究形态在 `K≠V` 上**已无 `#error`**（唯一禁项＝非 HDW 的 K≠V DKGB，
+    生产形态不用）；明确新需求（**六段核 bf16/intra×K≠V 复测**、`dw` 写侧端到端 bf16、`K≠128` 的 lane
+    布局重写、真落目标卡 CUDA）再动。
+  - P7-81（上轮）：**关闭「只测 `K=V=128`」边界（K2 形状 CUDA B2 **base GEMM core**）**——`KD`/`VD`
     宏参数化（`b2_mma_probe.cu:64-74`）+ 两条守卫（`static_assert(KD==128)`、非 GEMM 段开即 `#error`
     要求 `VD==KD`，`:469-478`），**算术一字未动**。新增 `harness/check_bwd_b2_kv.py`（`..._kv.out.txt`，
     空闲卡）。**Part A**：`K=128`、`V∈{64,128,256}`（含非整除 `T=250`）`dq/dk/dw` 落 tf32 底噪

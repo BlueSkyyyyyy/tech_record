@@ -65,8 +65,10 @@ def so_path(V):
 def build(V):
     src = os.path.join(HARNESS, "b2_mma_probe.cu")
     extra = ["-DB2M_VD=%d" % V] + os.environ.get("B2KV_CFLAGS", "").split()
+    # -lcuda is needed whenever the TMA path (`-DB2M_TMA`) is on (cuTensorMapEncodeTiled);
+    # harmless otherwise.
     cmd = ["nvcc", "-std=c++17", "-O3", "-arch=sm_90a", "-Xcompiler", "-fPIC",
-           "-shared"] + extra + [src, "-o", so_path(V)]
+           "-shared"] + extra + ["-lcuda", src, "-o", so_path(V)]
     print("build:", " ".join(cmd))
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:

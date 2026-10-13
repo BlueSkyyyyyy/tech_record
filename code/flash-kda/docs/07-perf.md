@@ -8779,3 +8779,95 @@ Triton core（`check_bwd_b2_core.py`，本就泛化于 `K,V`）。全表最坏 `
 - **目标卡 CUDA B2 部署输入（不变）**：默认部署仍是 §45 的 `cf`；本轮的宏是**为泛化/健壮性**而加，
   对 `V=128` 部署**零行为差异**。若未来 KDA 出现 `V≠K` 的 head 配置，base GEMM core 可直接编出
   （K2 形状流式 V-tile 是必要条件），但六段非 GEMM 段须一并改造。
+
+## 85. 关闭 P7-81 的两条遗留：base GEMM core 的 **TMA×K≠V** 复测 + 六段非 GEMM 段的 **K≠V** 泛化（P7-82）
+
+§84（P7-81）把 CUDA B2 的 `K`/`V` 参数化并证了 **base GEMM core** 对 `K≠V` 泛化，但明确留了两条边界：
+(a) **TMA 分支未随 `V` 复测（待验证）**；(b) **六段非 GEMM 段仍 `VD==KD`（未做）**——因为那六段按 warp
+输出宽度 `BW=KD/NW` 切 V 轴。本轮把两条一并关闭，其中 (b) 是本轮的主要结构改动。
+
+### 85.1 P7-81 待验证 (a)：base GEMM core 的 TMA×K≠V —— **成立且布局无关**
+
+`check_bwd_b2_kv.py` 之前把 TMA 的构建漏了驱动库链接（TMA 走 `cuTensorMapEncodeTiled`，需 `-lcuda`），
+`ctypes.CDLL` 直接报 `undefined symbol: cuTensorMapEncodeTiled`——已给 build 命令补 `-lcuda`
+（`check_bwd_b2_kv.py:68-72`，对非 TMA 无害）。补上后以 `B2KV_CFLAGS=-DB2M_TMA` 重跑（`harness/
+check_bwd_b2_kv_tma.out.txt`）：
+
+- **正确性**：`K=128`、`V∈{64,128,256}`、四组 shape（含非整除 `T=250`），`dq/dk/dw` 全落 tf32 底噪
+  **3.1–4.0e-4**、`dgk` **1.6–2.1e-7**；且 **worst 表与 §84.1（cp.async 版）逐值完全相同**
+  （`V=64 dq 3.282e-04 … V=256 dgk 1.901e-07`）——TMA 只换 stage 布局，连 tf32 累加序都不动。
+- **计时**（identical-op kernel，`B8T2048H8`）：CUDA dev `278.4 (V=64) / 493.6 (V=128) / 924.8 (V=256) µs`，
+  随 V 近似线性；`V=128` 对 Triton core **0.90×**（§84.2 非 TMA 为 0.91×，一致）；`V=256` 无 Triton
+  对照（其 smem OOM）。
+- **静态**：TMA 的 smem **恒 77952 B（76.1 KB），与 V 完全无关**（同样只摆一个 `BVK` 宽 stage，
+  `V` 只改 `nvt`）。对照 §84.3 非 TMA 的 87552 B——TMA 的 atom 布局更省。
+
+**结论**：`make_map_dov`/`make_map_hdh` 本就各带 `VD`/`KD`（§84 已核），TMA×K≠V **随即可用、逐值正确、
+与 stage 布局无关**；P7-81 的待验证 (a) 关闭。
+
+### 85.2 六段非 GEMM 段 K≠V 泛化：把 V 轴段的 warp 宽度从 `BW` 换成 `BVW`
+
+六段可分成两组：
+
+- **K 轴组**（按 `K` 分区，`BW=KD/NW` 不变）：`DKGB` 的 `dkgb`、门控链的 `dqg/dkg/dg`、`dgk` 的列归约、
+  `DA` 的 `dw@kg^T`、以及折叠进来的 B3 `intra`。
+- **V 轴组**（按 `V` 分区，本轮改用 **`BVW = VD/NW`**）：`OUT` 的 `dv2/dvb`、`DA` 的 `dv@v^T`
+  （标量与 mma 两支）、`DB` 的 raw-v 镜像。
+
+改动（`b2_mma_probe.cu`，**算术一字未动**，只换 warp 宽度与循环界）：
+
+- `:75-83`：新增 `BVW = VD/NW`、`NBV = BVW/8`（每 warp 的 mma `n=8` tile 数）与两条 `static_assert`
+  （`VD % NW == 0`、`BVW % 8 == 0`）。
+- `:558`：`dbv[NW][BT][BW]` → `[BVW]`；`:974`：`acc2[2][4]` → `acc2[NBV][4]`。
+- V 轴段四处把 `local0 = warp*BW - it*BVK` / `local0+BW<=BVK` 换成 `BVW`（`:1197/1255/1274/1299`），
+  mma 的 `nt<2` → `nt<NBV`（OUT，`:1209`）、`for j<BW` → `<BVW`（DA 标量，`:1259`）、
+  `for kk<BW/8` → `<BVW/8`（DA mma，`:1277`）；`dv2/dvb` 的 store 也改 `BVW`/`nt<NBV`（`:1380-1381`）。
+- `:1807-1822`：`DB` 的归约**拆成两项**——`dvb*v`（V 轴，`nt<NBV`）与 `dkgb*kg`（K 轴，`nt<2`）。
+  为**保住 K==V 的逐位回归**，改成 `nt < max(NBV,2)` 的单一循环、按 `if (nt<NBV)`/`if (nt<2)` 分别加，
+  在 `NBV==2` 时**逐字复现**原来的 acc2/acc3 交错序。
+- `:482-490`：把 P7-81 那条「非 GEMM 段一律要求 `VD==KD`」的 `#error` **收窄**为唯一真实耦合——
+  **全局 `dw` 的 DKGB staging（`dwm`）是 K-tiled 但骑在 V-tile 循环 `it` 上**，故
+  `-DB2M_DKGB` 且**不带** `-DB2M_HDW` 时仍要求 `VD==KD`；`-DB2M_HDW` 的同 CTA 交接读核内 `swall`
+  （K 轴、`BW` 分区），对 `K≠V` 是干净的。生产核的每个变体都用 `-DB2M_PROD -DB2M_HDW`，故不受影响。
+
+### 85.3 核验（`harness/check_bwd_b2_kv_prod.py` + `..._kv_prod.out.txt`）
+
+**Part A（回归，关键）**：K==V（`VD=128`）下，**改后源码 vs 改前源码（`git HEAD`）编译的
+`-DB2M_PROD -DB2M_HDW` 核，在 10 项输出上逐位相同（`max_abs=0`，三组 shape 含非整除 `T=250`）**。
+（首版 DB 归约拆成两个独立循环，`db` 差 ~7e-7 的 fp32 结合序；改成 §85.2 的 `max(NBV,2)` 单循环后
+K==V 回归到**逐位 0**——这正是「泛化不得改变既有 `K=V=128` 路径」的可核验保证。）
+
+**Part B（K≠V 正确性，`-DB2M_PROD -DB2M_HDW`，`dw` 由 torch 从操作数重算 `dw[t,k]=Σ_v dv[t,v]h[k,v]`）**：
+V 轴三项 vs torch fp32 的 worst `max_rel`：
+
+| V | dv2 (vs torch) | dvb (vs torch) | dvb (vs torch-ops) | db | dApre |
+|---|---|---|---|---|---|
+| 64 | 3.529e-04 | 2.889e-04 | 2.889e-04 | 2.629e-04 | 1.413e-04 |
+| 128 | 2.923e-04 | 2.795e-04 | 2.795e-04 | 2.473e-04 | 1.319e-04 |
+| 256 | 3.324e-04 | 4.456e-04 | 4.456e-04 | 2.430e-04 | 1.081e-04 |
+
+全部落 **tf32 底噪**（对照 §55 `dvb` 3.6e-4、§56 `dkgb` 3.6e-4、§57 `dApre` 5.3e-7——本轮 `dvb`/`db`
+同阶；`V=256` 的 `dvb` 略抬到 4.5e-4 仍是 tf32 级）。含非整除 `T=250` 与 `B=2`。
+
+**Part C（stage 布局恒等）**：`prod` vs `prod + TMA`，`V∈{64,128,256}` × 三组 shape，**10 项输出全部
+`max_abs=0`**——与 §85.1/§84 同结论（TMA 只换布局）。
+
+**Part D（静态）**：`prod(HDW)` 的 smem `122.1 KB (V=64) / 126.1 KB (V=128) / 134.1 KB (V=256)`，
+`NBV = 1/2/4`。比 base GEMM core（§84.3 的 87.5 KB）大，正是六段的 `dbv/swall/skg/da16` 等常驻缓冲；
+`V` 增大的那部分来自 `dbv`（`[NW][BT][BVW]`）。
+
+### 85.4 结论与边界
+
+- **P7-81 的两条遗留全部关闭**：(a) base GEMM core 的 TMA×K≠V **成立且布局无关**；(b) 六段非 GEMM 段
+  **对 K≠V 泛化**（V 轴段改 `BVW=VD/NW`），K==V 路径**逐位不变**、K≠V 落 tf32 底噪、TMA 版逐位同。
+- **设计输入**：`K≠V` 时「六段核」唯一的结构耦合是**全局 `dw` 的 DKGB staging**——它必须改用
+  同 CTA 交接（`-DB2M_HDW`）或对 `dwm` 单独做 K-tiling；目标卡 CUDA B2 的生产形态本就是
+  `-DB2M_PROD -DB2M_HDW`（§64），故 **K≠V 部署无需额外工作**。
+- **边界（诚实）**：
+  - 仍 **`K` 固定 128**（`static_assert(KD==128)`：`dgk` 列归约 `l&15`、门控链 16 宽 lane 布局写死）；
+    只扫 `V∈{64,128,256}`。`K≠128` 需重写这些 lane 布局，未做。
+  - 只测 `BT=16`、`BVK=32`、fp32/tf32 mma、`-DB2M_HDW`（生产形态）；非 HDW 的 K≠V 由 `#error` 挡住。
+    六段核的 bf16 入口（§78）叠 K≠V、以及 `-DB2M_INTRA` 折叠叠 K≠V 未逐一复测（两侧机制正交，**待验证**）。
+  - 未做 `ncu`（本轮是泛化/正确性收口，性能结论沿用 §64/§67）。
+- **目标卡部署输入（不变）**：默认部署仍是 §45 的 `cf`（`dAv→CUDA-B1→融合 Triton B2/B3→cumsum`）；
+  本轮的 K≠V 泛化对 `V=128` **零行为差异**（Part A 逐位），仅拓宽了研究核能表达的 head 配置。

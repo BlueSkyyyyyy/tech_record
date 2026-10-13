@@ -72,6 +72,15 @@ constexpr int BT = 16;    // chunk rows (M)
 constexpr int NW = 8;     // warps
 constexpr int BW = KD / NW;    // output columns per warp = KD / NW
 static_assert(BW * NW == KD, "KD must equal NW*BW (warp output-column partition)");
+// P7-82: the six non-GEMM segments split into a **K-axis** group (`DKGB`'s `dkgb`, the gate
+// chain's `dqg/dkg/dg`, the `dgk` column reduction, `DA`'s `dw@kg^T`, the folded `intra`) that
+// partitions K by `BW = KD/NW`, and a **V-axis** group (`OUT`'s `dv2/dvb`, `DA`'s `dv@v^T`,
+// `DB`'s raw-v mirror) that partitions V.  The V-axis group gets its own warp width `BVW`, so
+// the six segments are generic in K != V (P7-81 only covered the base GEMM core).
+constexpr int BVW = VD / NW;   // V columns per warp, for the V-axis non-GEMM segments
+constexpr int NBV = BVW / 8;   // mma `n=8` tiles per warp over V
+static_assert(VD % NW == 0, "VD must be a multiple of NW (V-axis warp partition)");
+static_assert(BVW % 8 == 0, "warp V-slice must be a multiple of the mma n=8");
 
 #ifndef B2M_BVK
 #define B2M_BVK 32
@@ -470,12 +479,14 @@ static_assert(VD % BVK == 0, "BVK must divide V");
 // P7-81: only the contraction dim `V` is scanned (K != V).  `K` stays 128 because the 16-wide
 // warp lane layouts are baked into the `dgk` column reduction (`l & 15`) and the gate chain.
 static_assert(KD == 128, "P7-81: only V is parameterized; K=128 is baked into the 16-wide warp reductions");
-// P7-81: the base GEMM core is generic in K != V (K-dim outputs/indexing use KD, V-dim
-// operands use VD).  The six non-GEMM B2 segments instead partition the V axis by the
-// warp output width `BW = KD/NW`, so they are only valid when VD == KD -- guard it.
-#if (B2M_OUT || B2M_DB || B2M_DA || B2M_INTRA || B2M_GATE || B2M_DKGB || B2M_HDW || B2M_VV_KG_ON) \
-    && (B2M_VD != B2M_KD)
-#error "P7-81: non-GEMM B2 segments partition V by BW=KD/NW; compile them with VD==KD (only the base GEMM core supports K!=V)"
+// P7-82: the six non-GEMM segments are now generic in K != V as well (the V-axis ones use
+// `BVW = VD/NW`, the K-axis ones keep `BW = KD/NW`).  The single remaining K/V coupling is the
+// **global-`dw` DKGB staging** (`-DB2M_DKGB` without `-DB2M_HDW`): its `dwm` operand is K-tiled
+// but rides the V-tile loop `it` (nvt = VD/BVK), so it only addresses the right K range when
+// K == V.  The same-CTA handoff (`-DB2M_HDW`) reads the in-kernel `swall`, which is K-axis and
+// BW-partitioned, so it is K!=V-clean -- require it for the non-GEMM build when K != V.
+#if B2M_DKGB && !B2M_HDW && (B2M_VD != B2M_KD)
+#error "P7-82: non-GEMM B2 segments with K!=V require -DB2M_HDW (the global `dw` DKGB staging is K-tiled via the V loop)"
 #endif
 #if B2M_BF16MMA
 static_assert(BVK % 16 == 0, "B2M_BF16MMA contracts 16 V-columns per mma");
@@ -541,10 +552,10 @@ struct alignas(128) Shared {
 #endif
 #if B2M_DB
     // `db` cross-warp reduction: per-warp per-row partials (`dbrow[NW][BT]`) plus the raw-v
-    // mirror of each warp's owned V columns (`dbv[NW][BT][BW]`), since the staged `vv` tile is
+    // mirror of each warp's owned V columns (`dbv[NW][BT][BVW]`), since the staged `vv` tile is
     // overwritten before the output branch's `acc2` is complete.
     float dbrow[NW][BT];
-    float dbv[NW][BT][BW];
+    float dbv[NW][BT][BVW];   // P7-82: V-axis mirror -> per-warp V columns (BVW wide)
 #endif
 #if B2M_SAND
     // b_A[p][j] = A[o_t=j, o_A=p]  (P7-55 sandwich operand; loaded once per chunk)
@@ -960,9 +971,9 @@ b2mma_kernel(
     float idq[2][4], idk[2][4], idg[2][4];
 #endif
 #if B2M_OUT
-    float acc2[2][4];     // dvb[o_A, v] output tile (m16 x 2*n8), warp-private V columns
+    float acc2[NBV][4];   // dvb[o_A, v] output tile (m16 x NBV*n8), warp-private V columns
     #pragma unroll
-    for (int nt = 0; nt < 2; ++nt)
+    for (int nt = 0; nt < NBV; ++nt)
         #pragma unroll
         for (int x = 0; x < 4; ++x) acc2[nt][x] = 0.f;
 #endif
@@ -1179,12 +1190,12 @@ b2mma_kernel(
 #endif
 #if B2M_OUT && !B2M_OFF_OUT
         // ---- output branch (P7-52): dvb = A @ dv, contraction over chunk rows o_t ----
-        // Warp `w` owns V columns [w*BW, w*BW+BW); only the stage whose V-tile contains
-        // them contributes.  A[o_A,o_t] = Akk[token=i_t*BT+o_t, o_A] (index remap, no
-        // transpose); the B operand is the already-staged `dv` tile.
+        // Warp `w` owns V columns [w*BVW, w*BVW+BVW) (P7-82: V-axis warp width); only the stage
+        // whose V-tile contains them contributes.  A[o_A,o_t] = Akk[token=i_t*BT+o_t, o_A]
+        // (index remap, no transpose); the B operand is the already-staged `dv` tile.
         {
-            const int local0 = warp * BW - it * BVK;
-            if (local0 >= 0 && local0 + BW <= BVK) {
+            const int local0 = warp * BVW - it * BVK;
+            if (local0 >= 0 && local0 + BVW <= BVK) {
                 #pragma unroll
                 for (int kk = 0; kk < BT / 8; ++kk) {
                     const int kc = kk * 8;
@@ -1195,7 +1206,7 @@ b2mma_kernel(
                     const float a11 = (i_t * BT + ot1) < T ? A4[a_base + (int64_t)ot1 * (H * BT) + g + 8] : 0.f;
                     const uint32_t af[4] = {to_tf32(a00), to_tf32(a10), to_tf32(a01), to_tf32(a11)};
                     #pragma unroll
-                    for (int nt = 0; nt < 2; ++nt) {
+                    for (int nt = 0; nt < NBV; ++nt) {
                         const int lc = local0 + nt * 8 + g;
                         uint32_t bf[2];
                         bf[0] = to_tf32(rd((const float*)st->dv, ot0, lc, BT));
@@ -1238,14 +1249,14 @@ b2mma_kernel(
 #endif
 #if B2M_DA && !B2M_DAMMA && !B2M_OFF_DA
         // ---- P7-54 base dA: dApre[o_t,o_u] += sum_{v in warp V cols} dv[o_t,v]*v[o_u,v] ----
-        // Warp `w` owns V columns [w*BW, w*BW+BW) (only its matching stage contributes).
+        // Warp `w` owns V columns [w*BVW, w*BVW+BVW) (P7-82 V-axis width, only matching stage).
         // Lane `l` owns the 8 entries (r = l>>1, c = (l&1)*8 + i, i=0..7) of the [BT,BT] partial.
         {
-            const int local0 = warp * BW - it * BVK;
-            if (local0 >= 0 && local0 + BW <= BVK) {
+            const int local0 = warp * BVW - it * BVK;
+            if (local0 >= 0 && local0 + BVW <= BVK) {
                 const int r = l >> 1, c0 = (l & 1) * 8;
                 #pragma unroll
-                for (int j = 0; j < BW; ++j) {
+                for (int j = 0; j < BVW; ++j) {
                     const float dvr = rd((const float*)st->dv, r, local0 + j, BT);
                     #pragma unroll
                     for (int i = 0; i < 8; ++i)
@@ -1257,12 +1268,13 @@ b2mma_kernel(
 #if B2M_DA && B2M_DAMMA && !B2M_OFF_DA
         // ---- P7-66 base dA via mma: dApre[o_t,o_u] += dv @ v^T over the warp's V slice ----
         // A = dv[o_t, v], B = v[o_u, v] (row.col -> B is read as v[o_u,k]); contraction = warp's
-        // BW=16 V columns (2 mma k-steps of 8); the whole [BT,BT] partial lives in 2 n-tiles.
+        // BVW V columns (P7-82 V-axis width; BVW/8 mma k-steps of 8); the whole [BT,BT] partial
+        // lives in 2 n-tiles (output axes are o_t/o_u, not V).
         {
-            const int local0 = warp * BW - it * BVK;
-            if (local0 >= 0 && local0 + BW <= BVK) {
+            const int local0 = warp * BVW - it * BVK;
+            if (local0 >= 0 && local0 + BVW <= BVK) {
                 #pragma unroll
-                for (int kk = 0; kk < BW / 8; ++kk) {
+                for (int kk = 0; kk < BVW / 8; ++kk) {
                     const int kc = local0 + kk * 8;
                     const uint32_t a[4] = {
                         to_tf32(rd((const float*)st->dv, g,     kc + t,     BT)),
@@ -1284,10 +1296,10 @@ b2mma_kernel(
         // ---- P7-56: mirror the raw `v` of this warp's owned V columns into `dbv` (the staged
         // `vv` tile is overwritten before `acc2` is complete, so `db`'s `dvb*v` term needs a copy).
         {
-            const int local0 = warp * BW - it * BVK;
-            if (local0 >= 0 && local0 + BW <= BVK) {
-                for (int idx = l; idx < BT * BW; idx += 32) {
-                    const int r = idx / BW, j = idx % BW;
+            const int local0 = warp * BVW - it * BVK;
+            if (local0 >= 0 && local0 + BVW <= BVK) {
+                for (int idx = l; idx < BT * BVW; idx += 32) {
+                    const int r = idx / BVW, j = idx % BVW;
                     sh->dbv[warp][r][j] = rds(st->vv, r, local0 + j, BT);
                 }
             }
@@ -1363,10 +1375,10 @@ b2mma_kernel(
     }
   #endif
 #if B2M_OUT && !B2M_OFF_OUT
-    // ---- store `dv2` (complete B2 output) and `dvb` = A@dv ----
+    // ---- store `dv2` (complete B2 output) and `dvb` = A@dv (P7-82: V-axis warp width) ----
     #pragma unroll
-    for (int nt = 0; nt < 2; ++nt) {
-        const int col = warp * BW + nt * 8 + 2 * t;
+    for (int nt = 0; nt < NBV; ++nt) {
+        const int col = warp * BVW + nt * 8 + 2 * t;
         const int tr0 = t0 + g, tr1 = t0 + g + 8;
         const int64_t o0 = ((int64_t)(n * T + tr0) * H + hh) * VD + col;
         const int64_t o1 = ((int64_t)(n * T + tr1) * H + hh) * VD + col;
@@ -1792,14 +1804,23 @@ b2mma_kernel(
     // warp's V columns of raw `v` for the `dvb*v` term.
     {
         float p0 = 0.f, p1 = 0.f;
+        // P7-82: the two terms are on different axes -- `acc2` (dvb) is V-axis, `acc3` (dkgb) is
+        // K-axis -- so with K != V they have different per-warp widths (`BVW` vs `BW`).  At K==V
+        // (NBV==2) the NBV-major loop below reproduces the original interleave acc2/acc3/acc2/acc3
+        // exactly, so the reduction is bit-identical to the pre-P7-82 kernel.
+        constexpr int NM = NBV > 2 ? NBV : 2;
         #pragma unroll
-        for (int nt = 0; nt < 2; ++nt) {
-            const int cl = nt * 8 + 2 * t;          // column within the warp's owned 16-wide slice
-            const int ck = warp * BW + cl;          // absolute k column (== V column index)
-            p0 += acc2[nt][0] * sh->dbv[warp][g][cl]     + acc2[nt][1] * sh->dbv[warp][g][cl + 1];
-            p0 += acc3[nt][0] * sh->skg[g][ck]           + acc3[nt][1] * sh->skg[g][ck + 1];
-            p1 += acc2[nt][2] * sh->dbv[warp][g + 8][cl] + acc2[nt][3] * sh->dbv[warp][g + 8][cl + 1];
-            p1 += acc3[nt][2] * sh->skg[g + 8][ck]       + acc3[nt][3] * sh->skg[g + 8][ck + 1];
+        for (int nt = 0; nt < NM; ++nt) {
+            const int cl = nt * 8 + 2 * t;
+            if (nt < NBV) {   // dvb * raw-v : V columns [warp*BVW, +BVW)
+                p0 += acc2[nt][0] * sh->dbv[warp][g][cl]     + acc2[nt][1] * sh->dbv[warp][g][cl + 1];
+                p1 += acc2[nt][2] * sh->dbv[warp][g + 8][cl] + acc2[nt][3] * sh->dbv[warp][g + 8][cl + 1];
+            }
+            if (nt < 2) {     // dkgb * kg : K columns [warp*BW, +BW)
+                const int ck = warp * BW + cl;
+                p0 += acc3[nt][0] * sh->skg[g][ck]           + acc3[nt][1] * sh->skg[g][ck + 1];
+                p1 += acc3[nt][2] * sh->skg[g + 8][ck]       + acc3[nt][3] * sh->skg[g + 8][ck + 1];
+            }
         }
         p0 += __shfl_xor_sync(0xffffffffu, p0, 1); p0 += __shfl_xor_sync(0xffffffffu, p0, 2);
         p1 += __shfl_xor_sync(0xffffffffu, p1, 1); p1 += __shfl_xor_sync(0xffffffffu, p1, 2);
