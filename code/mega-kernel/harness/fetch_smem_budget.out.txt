@@ -1,0 +1,87 @@
+device 0: NVIDIA H100 80GB HBM3  SMs=132  cc=9.0  L2=50 MB  SMEM/block(req)=49152 optin=232448  SMEM/SM=233472
+
+===== §A 正确性：环形缓冲（多 worker）checksum 一致（DW=88=352B, G=NSM, lanes=128） =====
+  ring K=1    D=1    SMEM=   360B(  0.4KB) G=132  lanes=128   bad=0  ~   6.527 ns/item     53.9 GB/s  (4.976 ms/rep)
+  ring K=1    D=2    SMEM=   720B(  0.7KB) G=132  lanes=128   bad=0  ~   4.764 ns/item     73.9 GB/s  (3.633 ms/rep)
+  ring K=1    D=4    SMEM=  1440B(  1.4KB) G=132  lanes=128   bad=0  ~   4.764 ns/item     73.9 GB/s  (3.633 ms/rep)
+  ring K=1    D=8    SMEM=  2880B(  2.8KB) G=132  lanes=128   bad=0  ~   4.764 ns/item     73.9 GB/s  (3.632 ms/rep)
+  ring K=4    D=1    SMEM=  1416B(  1.4KB) G=132  lanes=128   bad=0  ~   1.694 ns/item    207.8 GB/s  (1.291 ms/rep)
+  ring K=4    D=2    SMEM=  2832B(  2.8KB) G=132  lanes=128   bad=0  ~   1.197 ns/item    294.0 GB/s  (0.913 ms/rep)
+  ring K=4    D=4    SMEM=  5664B(  5.5KB) G=132  lanes=128   bad=0  ~   1.197 ns/item    294.1 GB/s  (0.913 ms/rep)
+  ring K=4    D=8    SMEM= 11328B( 11.1KB) G=132  lanes=128   bad=0  ~   1.197 ns/item    294.1 GB/s  (0.913 ms/rep)
+  ring K=16   D=1    SMEM=  5640B(  5.5KB) G=132  lanes=128   bad=0  ~   0.545 ns/item    646.2 GB/s  (0.415 ms/rep)
+  ring K=16   D=2    SMEM= 11280B( 11.0KB) G=132  lanes=128   bad=0  ~   0.392 ns/item    897.3 GB/s  (0.299 ms/rep)
+  ring K=16   D=4    SMEM= 22560B( 22.0KB) G=132  lanes=128   bad=0  ~   0.392 ns/item    898.2 GB/s  (0.299 ms/rep)
+  ring K=16   D=8    SMEM= 45120B( 44.1KB) G=132  lanes=128   bad=0  ~   0.392 ns/item    897.7 GB/s  (0.299 ms/rep)
+  ring K=64   D=1    SMEM= 22536B( 22.0KB) G=132  lanes=128   bad=0  ~   0.213 ns/item   1652.4 GB/s  (0.162 ms/rep)
+  ring K=64   D=2    SMEM= 45072B( 44.0KB) G=132  lanes=128   bad=0  ~   0.168 ns/item   2095.3 GB/s  (0.128 ms/rep)
+  ring K=64   D=4    SMEM= 90144B( 88.0KB) G=132  lanes=128   bad=0  ~   0.167 ns/item   2104.2 GB/s  (0.128 ms/rep)
+  ring K=64   D=8    SMEM=180288B(176.1KB) G=132  lanes=128   bad=0  ~   0.166 ns/item   2116.4 GB/s  (0.127 ms/rep)
+
+===== §B 环形深度 D 扫描（K=8 固定, DW=88, G=NSM, lanes=128, 256MB） =====
+  ring K=8    D=1    SMEM=  2824B(  2.8KB) G=132  lanes=128   bad=0  ~   0.874 ns/item    402.8 GB/s  (0.666 ms/rep)
+  ring K=8    D=2    SMEM=  5648B(  5.5KB) G=132  lanes=128   bad=0  ~   0.607 ns/item    579.9 GB/s  (0.463 ms/rep)
+  ring K=8    D=3    SMEM=  8472B(  8.3KB) G=132  lanes=128   bad=0  ~   0.607 ns/item    580.0 GB/s  (0.463 ms/rep)
+  ring K=8    D=4    SMEM= 11296B( 11.0KB) G=132  lanes=128   bad=0  ~   0.607 ns/item    580.3 GB/s  (0.463 ms/rep)
+  ring K=8    D=6    SMEM= 16944B( 16.5KB) G=132  lanes=128   bad=0  ~   0.607 ns/item    580.1 GB/s  (0.463 ms/rep)
+  ring K=8    D=8    SMEM= 22592B( 22.1KB) G=132  lanes=128   bad=0  ~   0.607 ns/item    580.1 GB/s  (0.463 ms/rep)
+  ring K=8    D=12   SMEM= 33888B( 33.1KB) G=132  lanes=128   bad=0  ~   0.607 ns/item    580.0 GB/s  (0.463 ms/rep)
+  ring K=8    D=16   SMEM= 45184B( 44.1KB) G=132  lanes=128   bad=0  ~   0.607 ns/item    580.0 GB/s  (0.463 ms/rep)
+  ring K=8    D=24   SMEM= 67776B( 66.2KB) G=132  lanes=128   bad=0  ~   0.607 ns/item    579.8 GB/s  (0.463 ms/rep)
+  ring K=8    D=32   SMEM= 90368B( 88.2KB) G=132  lanes=128   bad=0  ~   0.607 ns/item    579.6 GB/s  (0.463 ms/rep)
+
+===== §C K×SMEM 联合约束：固定 SMEM 预算 S 扫 (K,D)（DW=88, G=NSM, lanes=128） =====
+  --- S=65536 B (64.0 KB) ---
+  ring K=1    D=186  SMEM= 66960B( 65.4KB) G=132  lanes=128   bad=0  ~   4.769 ns/item     73.8 GB/s  (3.636 ms/rep)
+  ring K=2    D=93   SMEM= 66216B( 64.7KB) G=132  lanes=128   bad=0  ~   2.388 ns/item    147.4 GB/s  (1.821 ms/rep)
+  ring K=4    D=46   SMEM= 65136B( 63.6KB) G=132  lanes=128   bad=0  ~   1.198 ns/item    293.8 GB/s  (0.914 ms/rep)
+  ring K=8    D=23   SMEM= 64952B( 63.4KB) G=132  lanes=128   bad=0  ~   0.607 ns/item    579.7 GB/s  (0.463 ms/rep)
+  ring K=16   D=11   SMEM= 62040B( 60.6KB) G=132  lanes=128   bad=0  ~   0.392 ns/item    896.9 GB/s  (0.299 ms/rep)
+  ring K=32   D=5    SMEM= 56360B( 55.0KB) G=132  lanes=128   bad=0  ~   0.284 ns/item   1239.5 GB/s  (0.217 ms/rep)
+  ring K=64   D=2    SMEM= 45072B( 44.0KB) G=132  lanes=128   bad=0  ~   0.168 ns/item   2096.5 GB/s  (0.128 ms/rep)
+  ring K=128  D=1    SMEM= 45064B( 44.0KB) G=132  lanes=128   bad=0  ~   0.189 ns/item   1862.7 GB/s  (0.144 ms/rep)
+  --- S=131072 B (128.0 KB) ---
+  ring K=1    D=372  SMEM=133920B(130.8KB) G=132  lanes=128   bad=0  ~   4.774 ns/item     73.7 GB/s  (3.640 ms/rep)
+  ring K=2    D=186  SMEM=132432B(129.3KB) G=132  lanes=128   bad=0  ~   2.391 ns/item    147.2 GB/s  (1.823 ms/rep)
+  ring K=4    D=93   SMEM=131688B(128.6KB) G=132  lanes=128   bad=0  ~   1.200 ns/item    293.5 GB/s  (0.915 ms/rep)
+  ring K=8    D=46   SMEM=129904B(126.9KB) G=132  lanes=128   bad=0  ~   0.608 ns/item    579.1 GB/s  (0.464 ms/rep)
+  ring K=16   D=23   SMEM=129720B(126.7KB) G=132  lanes=128   bad=0  ~   0.393 ns/item    896.3 GB/s  (0.299 ms/rep)
+  ring K=32   D=11   SMEM=123992B(121.1KB) G=132  lanes=128   bad=0  ~   0.284 ns/item   1239.2 GB/s  (0.217 ms/rep)
+  ring K=64   D=5    SMEM=112680B(110.0KB) G=132  lanes=128   bad=0  ~   0.167 ns/item   2108.4 GB/s  (0.127 ms/rep)
+  ring K=128  D=2    SMEM= 90128B( 88.0KB) G=132  lanes=128   bad=0  ~   0.132 ns/item   2666.6 GB/s  (0.101 ms/rep)
+  --- S=196608 B (192.0 KB) ---
+  ring K=1    D=558  SMEM=200880B(196.2KB) G=132  lanes=128   bad=0  ~   4.779 ns/item     73.7 GB/s  (3.644 ms/rep)
+  ring K=2    D=279  SMEM=198648B(194.0KB) G=132  lanes=128   bad=0  ~   2.393 ns/item    147.1 GB/s  (1.825 ms/rep)
+  ring K=4    D=139  SMEM=196824B(192.2KB) G=132  lanes=128   bad=0  ~   1.201 ns/item    293.2 GB/s  (0.915 ms/rep)
+  ring K=8    D=69   SMEM=194856B(190.3KB) G=132  lanes=128   bad=0  ~   0.608 ns/item    578.6 GB/s  (0.464 ms/rep)
+  ring K=16   D=34   SMEM=191760B(187.3KB) G=132  lanes=128   bad=0  ~   0.393 ns/item    895.9 GB/s  (0.300 ms/rep)
+  ring K=32   D=17   SMEM=191624B(187.1KB) G=132  lanes=128   bad=0  ~   0.284 ns/item   1239.2 GB/s  (0.217 ms/rep)
+  ring K=64   D=8    SMEM=180288B(176.1KB) G=132  lanes=128   bad=0  ~   0.166 ns/item   2117.0 GB/s  (0.127 ms/rep)
+  ring K=128  D=4    SMEM=180256B(176.0KB) G=132  lanes=128   bad=0  ~   0.131 ns/item   2693.5 GB/s  (0.100 ms/rep)
+
+===== §D SMEM 上限：总 SMEM 逼近 opt-in（K=1, 扫 D；DW=88, G=NSM, lanes=128） =====
+  ring K=1    D=64   SMEM= 23040B( 22.5KB) G=132  lanes=128   bad=0  ~   4.765 ns/item     73.9 GB/s  (3.634 ms/rep)
+  ring K=1    D=128  SMEM= 46080B( 45.0KB) G=132  lanes=128   bad=0  ~   4.767 ns/item     73.8 GB/s  (3.635 ms/rep)
+  ring K=1    D=256  SMEM= 92160B( 90.0KB) G=132  lanes=128   bad=0  ~   4.771 ns/item     73.8 GB/s  (3.638 ms/rep)
+  ring K=1    D=384  SMEM=138240B(135.0KB) G=132  lanes=128   bad=0  ~   4.774 ns/item     73.7 GB/s  (3.640 ms/rep)
+  ring K=1    D=512  SMEM=184320B(180.0KB) G=132  lanes=128   bad=0  ~   4.778 ns/item     73.7 GB/s  (3.643 ms/rep)
+  ring K=1    D=600  SMEM=216000B(210.9KB) G=132  lanes=128   bad=0  ~   4.780 ns/item     73.6 GB/s  (3.645 ms/rep)
+  ring K=1    D=640  SMEM=230400B(225.0KB) G=132  lanes=128   bad=0  ~   4.781 ns/item     73.6 GB/s  (3.646 ms/rep)
+
+===== §E 与 task 执行争 SMEM：每 block SMEM 预算 S → 占用率 → aggregate 带宽（DW=88, lanes=128, 256MB） =====
+  [K=1 D=2 SMEM=0.7KB] occ=16 block/SM -> G=2112
+  ring K=1    D=2    SMEM=   720B(  0.7KB) G=2112 lanes=128   bad=0  ~   0.558 ns/item    631.3 GB/s  (0.425 ms/rep)
+  [K=2 D=2 SMEM=1.4KB] occ=16 block/SM -> G=2112
+  ring K=2    D=2    SMEM=  1424B(  1.4KB) G=2112 lanes=128   bad=0  ~   0.284 ns/item   1240.0 GB/s  (0.216 ms/rep)
+  [K=4 D=2 SMEM=2.8KB] occ=16 block/SM -> G=2112
+  ring K=4    D=2    SMEM=  2832B(  2.8KB) G=2112 lanes=128   bad=0  ~   0.148 ns/item   2385.8 GB/s  (0.112 ms/rep)
+  [K=8 D=2 SMEM=5.5KB] occ=16 block/SM -> G=2112
+  ring K=8    D=2    SMEM=  5648B(  5.5KB) G=2112 lanes=128   bad=0  ~   0.132 ns/item   2671.7 GB/s  (0.100 ms/rep)
+  [K=16 D=2 SMEM=11.0KB] occ=16 block/SM -> G=2112
+  ring K=16   D=2    SMEM= 11280B( 11.0KB) G=2112 lanes=128   bad=0  ~   0.142 ns/item   2476.5 GB/s  (0.108 ms/rep)
+  [K=32 D=2 SMEM=22.0KB] occ=9 block/SM -> G=1188
+  ring K=32   D=2    SMEM= 22544B( 22.0KB) G=1188 lanes=128   bad=0  ~   0.148 ns/item   2375.6 GB/s  (0.113 ms/rep)
+  [K=64 D=2 SMEM=44.0KB] occ=5 block/SM -> G=660
+  ring K=64   D=2    SMEM= 45072B( 44.0KB) G=660  lanes=128   bad=0  ~   0.152 ns/item   2323.1 GB/s  (0.116 ms/rep)
+  [K=128 D=2 SMEM=88.0KB] occ=2 block/SM -> G=264
+  ring K=128  D=2    SMEM= 90128B( 88.0KB) G=264  lanes=128   bad=0  ~   0.143 ns/item   2453.6 GB/s  (0.109 ms/rep)

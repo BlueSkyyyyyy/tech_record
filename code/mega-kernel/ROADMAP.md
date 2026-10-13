@@ -1220,6 +1220,34 @@
   判据 C1–C4、无 C5（与 §36–§39 同档）。**本轮新增实验**；P51-1 新留尾巴（§40.8）：1D bulk 非
   TensorMap、无动态生产者、未测 K×SMEM 联合约束、未与 DeepGEMM SM100 路径对跑。
 
+### P52 实验扩展 34：取 task 的 SMEM 预算 K × 环形深度 D（`docs/04-experiments.md` §41）
+
+- [x] **P52-1** 补掉 P51-1（§40.8）明留的第一条尾巴「**未测 `K` 与 SMEM 容量的联合约束**」：
+      把 §40 的「双缓冲」推广成 **D 深环形缓冲**（每槽 K 条 `TaskDesc`），于是描述符暂存的 SMEM
+      = `D·K·352 B`，`K` 与 `D` 是一对联合参数；量「同等 SMEM 预算下大批量浅环 vs 小批量深环」。
+      见 `docs/04-experiments.md` **§41**，源码 `src/fetch_smem_budget.cu`、脚本
+      `harness/fetch_smem_budget.sh`、原始输出 `harness/fetch_smem_budget.out.txt`（目标卡 H100/sm90a、
+      **固定空闲 device 3**、nvcc 13.2、DW=88=352 B 对齐 MPK §6.1、载体=TMA bulk+硬件 mbarrier）。
+      核心结论：
+      - **§A 任意 (K,D) 多 worker 下 `bad=0`**（16 组）；**§B 环深 D：1→2 拿到全部预取收益、`D≥2`
+        完全平坦**（K=8：402.8→579.9 GB/s 后恒 ~580）；§D（K=1 扫 D=64…640）同证吞吐与 D 无关。
+      - **§C（headline）K×SMEM 联合约束**：同等 SMEM 下吞吐**单调取决于 K**（每批一次 mbarrier 等待 +
+        两次 `__syncthreads()` 的固定开销摊到 `K` 条）——`K=1,D=186`（用满 64 KB）73.8 GB/s vs
+        `K=64,D=2`（只用 44 KB）**2096 GB/s（28×）**；`K=128,D=2` 达 **2667 GB/s**（S=128KB）、
+        `K=128,D=4` **2693**（S=192KB，逼近 HBM ~80%）。**最优 = 大 K + D=2**，深环是浪费；也把
+        §40 §D 的 K 上限从 32 推到 128（K=32/D=2 的 1239 与 §40 的 1263 一致）。
+      - **§D**：环可长到 225 KB（占满一整个 SM 的 SMEM）仍正确（opt-in=232448 B），但深环无用。
+      - **§E 与 task 执行争 SMEM**：每 block SMEM 从 0.7→88 KB 把占用率从 **16→2 block/SM**，
+        aggregate 带宽却守住 **2.3–2.7 TB/s**（大 K 的在飞字节补偿 worker 数下降）；最优在
+        **K=8（5.5 KB、16 block/SM）2672 GB/s**——「中等 K + 高占用率」略胜「大 K + 低占用率」。
+      - 含义：取 task 的 SMEM 是**软约束**（可换 worker 数、总带宽守恒）；正确姿势是**把预算堆到
+        批量 K（K≈32–128）、预取深度只要 2**，对应 MPK §5.3 paged shared memory（行 1313-1325）
+        的「描述符暂存页」应按一整批开。判据 C1–C4、无 C5（与 §36–§40 同档）。踩坑：`NDESC` 未按
+        `K` 截断致 `bad=1`/假 41 TB/s；mbarrier 数组放静态 `__shared__` 与动态 SMEM 叠加超 opt-in
+        报 `invalid argument`（改放动态 SMEM 尾部）。**本轮新增实验**；P52-1 新留尾巴（§41.8）：
+        未跑 16 B `cp.async` 深环载体、无动态生产者、未测 `cp.async` 释放寄存器对下游 task 的收益、
+        未与 DeepGEMM SM100 路径对跑。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -1242,7 +1270,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P51-1 完成（1/1）**。补掉 P50-1（§39.7）明留的两条尾巴——「**单 block** 测的是『取一批
+- 当前进度：**P52-1 完成（1/1）**。补掉 P51-1（§40.8）明留的第一条尾巴「**未测 `K` 与 SMEM 容量的
+  联合约束**」：把 §40 的「双缓冲」推广成 **D 深环形缓冲**（每槽 K 条 `TaskDesc`），描述符暂存 SMEM
+  = `D·K·352 B`，量「同等 SMEM 预算下大批量浅环 vs 小批量深环」。`docs/04-experiments.md` 新增 **§41**，
+  源码 `src/fetch_smem_budget.cu`、脚本 `harness/fetch_smem_budget.sh`、原始输出
+  `harness/fetch_smem_budget.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、DW=88=352 B）。
+  载体 = TMA bulk + 硬件 mbarrier。核心结论：
+  - **§A 任意 (K,D) 多 worker `bad=0`**；**§B 环深 D：1→2 拿到全部预取收益、D≥2 完全平坦**
+    （K=8：402.8→579.9 GB/s 后恒 ~580）；§D（K=1 扫 D=64…640）同证吞吐与 D 无关。
+  - **§C（headline）K×SMEM 联合约束**：同等 SMEM 下吞吐**单调取决于 K**（每批同步开销摊到 K 条）——
+    `K=1,D=186`（用满 64 KB）73.8 GB/s vs `K=64,D=2`（只用 44 KB）**2096 GB/s（28×）**；`K=128,D=2`
+    达 **2667**、`K=128,D=4` **2693 GB/s**（逼近 HBM ~80%）。**最优 = 大 K + D=2**，深环是浪费。
+  - **§D** 环可长到 225 KB（占满一整个 SM）仍正确（opt-in=232448 B），但深环无用。
+  - **§E 与 task 执行争 SMEM**：每 block SMEM 0.7→88 KB 把占用率从 **16→2 block/SM**，aggregate
+    带宽守住 **2.3–2.7 TB/s**（大 K 在飞字节补偿 worker 数下降）；最优 K=8（5.5 KB、16 block/SM）
+    2672 GB/s。⇒ 取 task 的 SMEM 是**软约束**，正确姿势是**堆到批量 K（≈32–128）、预取深度只 2**，
+    对应 MPK §5.3 paged SMEM（行 1313-1325）。判据 C1–C4、无 C5。**本轮新增实验**；P52-1 新留尾巴
+    （§41.8）：未跑 16 B `cp.async` 深环载体、无动态生产者、未测 `cp.async` 释放寄存器对下游 task 的
+    收益、未与 DeepGEMM SM100 路径对跑。
+- 此前：**P51-1 完成（1/1）**。补掉 P50-1（§39.7）明留的两条尾巴——「**单 block** 测的是『取一批
   的延迟』而非『访存带宽』，要多 worker 的带宽标度需另做多 block 实验」与「**`mbarrier` 形态未测**」：
   把 §39 的「单 block 消费者」扩成 **G 个 worker block**，并新增两条 **TMA bulk + 硬件 mbarrier** 取数
   路径。`docs/04-experiments.md` 新增 **§40**，源码 `src/multi_worker_desc_fetch.cu`、脚本
@@ -1260,7 +1306,8 @@
     （首版 `bad=1`），改 `wait_group 0` 修复；**§39 `cpasync_pf` 有同构写法**，当时 `bad=0` 是侥幸
     （与 §36.3 同源），结论不受影响但记为待修隐患。
   判据 C1–C4、无 C5。**本轮新增实验**；P51-1 新留尾巴（§40.8）：1D bulk 非 TensorMap、无动态生产者、
-  未测 K×SMEM 联合约束、未与 DeepGEMM SM100 路径对跑。**P0–P51 全部完成。**
+  未测 K×SMEM 联合约束、未与 DeepGEMM SM100 路径对跑。**P0–P51 全部完成。**（P51-1 尾巴的
+  「K×SMEM 联合约束」已由 **P52-1** 补掉，见上「当前进度」。）
 - 此前：**P50-1 完成（1/1）**。补掉 P49-1（§38.7）明留的尾巴「`cp.async` 只是等效语义（§38 用
   普通 `ld.relaxed` 读，**未实测 `cp.async` 批量加载本身的收益**——那是另一条线）」「`warp` 下
   `cp.async`/`mbarrier` 的批量加载形态」：把 worker「取 task」的**载体选择**单独量出来。
@@ -1847,9 +1894,14 @@
        **MPK 连续 CAS 放行 / 逐槽 release 在多生产者下全对**，而「非连续完成计数 / 占位即就绪」在决定性
        正对照 `stall0` 下必错（bad=8），「自然时序 0 错」只是侥幸；放行代价 ≈ +0.38 µs/项（与 §36.4 一致），
        并指出 **MPK 的两类队列对应两种协议（MPSC→连续 CAS、SPSC→单条 release）由生产者个数决定**。
-       **P48-1 新留尾巴**（`docs/04` §37.7）：消费者单线程致每项 ~2.3µs 往返主导（§C 只看差值）、
-       `stall0` 为人为扰动、未做真实 task 描述符、litmus 仍未扫 SM 距离/`ncu` 内存序事件、未与
-       DeepGEMM SM100 路径对跑。
+        **P48-1 新留尾巴**（`docs/04` §37.7）：消费者单线程致每项 ~2.3µs 往返主导（§C 只看差值）、
+        `stall0` 为人为扰动、未做真实 task 描述符、litmus 仍未扫 SM 距离/`ncu` 内存序事件、未与
+        DeepGEMM SM100 路径对跑。**P49-1（§38）/P50-1（§39）/P51-1（§40）** 续接取 task 通路
+        （批量出队+多线程消费者+真实描述符 / `cp.async` 载体 / 多 worker 带宽标度 + TMA/mbarrier），
+        最新 **P52-1（§41）** 补掉 P51-1 §40.8 的「K × SMEM 联合约束」：**环深 D≥2 无益、批量 K 才是
+        主旋钮**（大 K + D=2 最优，K=128/D=2 达 2667 GB/s），取 task 的 SMEM 是**软约束**（换 worker
+        数、总带宽守恒）。仍余「未跑 16 B `cp.async` 深环 / 无动态生产者 / `cp.async` 释放寄存器对
+        下游 task 的收益 / 与 DeepGEMM SM100 对跑」。
 - **本轮（P50-1）**：`docs/04-experiments.md` 新增 **§39**「worker 侧取 task 的载体：`cp.async` 批量
   加载 TaskDesc 值多少」——新源码 `src/cpasync_desc_fetch.cu`、脚本 `harness/cpasync_desc_fetch.sh`、
   原始输出 `harness/cpasync_desc_fetch.out.txt`（目标卡 H100/sm90、**固定空闲 device 3**、nvcc 13.2、
