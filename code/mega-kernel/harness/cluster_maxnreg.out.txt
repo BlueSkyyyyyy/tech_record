@@ -1,0 +1,154 @@
+== A. 资源表：__maxnreg__(R) → numRegs / 占用率（T=256）；hreadp=同 body 无属性 ==
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg A
+# §86 §A 资源表：__maxnreg__(R) → numRegs / 占用率（T=256）
+# DSM read 载体 SMEM=16KB/block；shift 载体 SMEM=8KB/block
+  read     R=32  numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  hread    R=32  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  hreadp   R=32  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  shift    R=32  numRegs=26  localB=32   occ=8 blk/SM (T=256, SMEM=8192 B)
+  csync    R=32  numRegs=6   localB=0    occ=8 blk/SM (T=256, SMEM=0 B)
+  read     R=40  numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  hread    R=40  numRegs=40  localB=0    occ=6 blk/SM (T=256, SMEM=16384 B)
+  hreadp   R=40  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  shift    R=40  numRegs=26  localB=32   occ=8 blk/SM (T=256, SMEM=8192 B)
+  csync    R=40  numRegs=6   localB=0    occ=8 blk/SM (T=256, SMEM=0 B)
+  read     R=48  numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  hread    R=48  numRegs=48  localB=0    occ=5 blk/SM (T=256, SMEM=16384 B)
+  hreadp   R=48  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  shift    R=48  numRegs=26  localB=32   occ=8 blk/SM (T=256, SMEM=8192 B)
+  csync    R=48  numRegs=6   localB=0    occ=8 blk/SM (T=256, SMEM=0 B)
+  read     R=64  numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  hread    R=64  numRegs=48  localB=0    occ=5 blk/SM (T=256, SMEM=16384 B)
+  hreadp   R=64  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  shift    R=64  numRegs=26  localB=32   occ=8 blk/SM (T=256, SMEM=8192 B)
+  csync    R=64  numRegs=6   localB=0    occ=8 blk/SM (T=256, SMEM=0 B)
+  read     R=96  numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  hread    R=96  numRegs=48  localB=0    occ=5 blk/SM (T=256, SMEM=16384 B)
+  hreadp   R=96  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  shift    R=96  numRegs=26  localB=32   occ=8 blk/SM (T=256, SMEM=8192 B)
+  csync    R=96  numRegs=6   localB=0    occ=8 blk/SM (T=256, SMEM=0 B)
+  read     R=128 numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  hread    R=128 numRegs=48  localB=0    occ=5 blk/SM (T=256, SMEM=16384 B)
+  hreadp   R=128 numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  shift    R=128 numRegs=26  localB=32   occ=8 blk/SM (T=256, SMEM=8192 B)
+  csync    R=128 numRegs=6   localB=0    occ=8 blk/SM (T=256, SMEM=0 B)
+  read     R=168 numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  hread    R=168 numRegs=48  localB=0    occ=5 blk/SM (T=256, SMEM=16384 B)
+  hreadp   R=168 numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  shift    R=168 numRegs=26  localB=32   occ=8 blk/SM (T=256, SMEM=8192 B)
+  csync    R=168 numRegs=6   localB=0    occ=8 blk/SM (T=256, SMEM=0 B)
+  read     R=232 numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  hread    R=232 numRegs=48  localB=0    occ=5 blk/SM (T=256, SMEM=16384 B)
+  hreadp   R=232 numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  shift    R=232 numRegs=26  localB=32   occ=8 blk/SM (T=256, SMEM=8192 B)
+  csync    R=232 numRegs=6   localB=0    occ=8 blk/SM (T=256, SMEM=0 B)
+  read     R=255 numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  hread    R=255 numRegs=48  localB=0    occ=5 blk/SM (T=256, SMEM=16384 B)
+  hreadp   R=255 numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+  shift    R=255 numRegs=26  localB=32   occ=8 blk/SM (T=256, SMEM=8192 B)
+  csync    R=255 numRegs=6   localB=0    occ=8 blk/SM (T=256, SMEM=0 B)
+
+== B.（headline）重 DSM 读（同一 body）在 1–2 块/SM 区间的 R 敏感性：grid=132/264，R=32(occ8)/R=48(occ5)/hreadp(occ8) ==
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg H 2 132 4096 2048 32   (try 1)
+  hread    R=32  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+H C= 2 grid= 132 sb= 16KB R= 32 |    72.837 us/launch | 3800607.1 GB/s(远程读) |  35.565 ns/lap
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg H 2 264 4096 2048 32   (try 1)
+  hread    R=32  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+H C= 2 grid= 264 sb= 16KB R= 32 |   138.075 us/launch | 4009757.9 GB/s(远程读) |  67.420 ns/lap
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg H 2 132 4096 2048 48   (try 1)
+  hread    R=48  numRegs=48  localB=0    occ=5 blk/SM (T=256, SMEM=16384 B)
+H C= 2 grid= 132 sb= 16KB R= 48 |    74.571 us/launch | 3712211.5 GB/s(远程读) |  36.412 ns/lap
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg H 2 264 4096 2048 48   !! ALLFAIL x5
+  hread    R=48  numRegs=48  localB=0    occ=5 blk/SM (T=256, SMEM=16384 B)
+[FAIL:unspecified launch failure] H C= 2 grid= 264 sb= 16KB R= 48 | FAILED
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg P 2 132 4096 2048   (try 1)
+  hreadp   R=32  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+P C= 2 grid= 132 sb= 16KB |    72.491 us/launch | 3818726.5 GB/s(远程读) |  35.396 ns/lap
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg P 2 264 4096 2048   (try 1)
+  hreadp   R=32  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+P C= 2 grid= 264 sb= 16KB |   138.496 us/launch | 3997574.5 GB/s(远程读) |  67.625 ns/lap
+
+== C. __maxnreg__ 对轻 DSM kernel（自然 13 regs）是 no-op：R=32 vs R=255 ==
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg R 2 132 4096 2048 32   (try 1)
+  read     R=32  numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+R C= 2 grid= 132 sb= 16KB R= 32 |    14.725 us/launch | 18799851.8 GB/s(远程读) |   7.190 ns/lap
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg R 2 132 4096 2048 255   (try 1)
+  read     R=255 numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+R C= 2 grid= 132 sb= 16KB R=255 |    14.534 us/launch | 19046128.4 GB/s(远程读) |   7.097 ns/lap
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg R 2 528 4096 2048 32   (try 1)
+  read     R=32  numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+R C= 2 grid= 528 sb= 16KB R= 32 |    21.629 us/launch | 51195453.1 GB/s(远程读) |  10.561 ns/lap
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg R 2 528 4096 2048 255   (try 1)
+  read     R=255 numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+R C= 2 grid= 528 sb= 16KB R=255 |    21.274 us/launch | 52050252.9 GB/s(远程读) |  10.387 ns/lap
+
+== D. 占用率旋钮 = SMEM 预算（grid=528, C=2, R=32, 轻 kernel）：16/48/96/224 KB/block ==
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg R 2 528 4096 2048 32   (try 1)
+  read     R=32  numRegs=13  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+R C= 2 grid= 528 sb= 16KB R= 32 |    21.366 us/launch | 51824187.5 GB/s(远程读) |  10.433 ns/lap
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg R 2 528 12288 2048 32   (try 1)
+  read     R=32  numRegs=13  localB=0    occ=4 blk/SM (T=256, SMEM=49152 B)
+R C= 2 grid= 528 sb= 48KB R= 32 |    22.571 us/launch | 49057924.8 GB/s(远程读) |  11.021 ns/lap
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg R 2 528 24576 2048 32   (try 1)
+  read     R=32  numRegs=13  localB=0    occ=0 blk/SM (T=256, SMEM=98304 B)
+R C= 2 grid= 528 sb= 96KB R= 32 |    26.462 us/launch | 41844135.2 GB/s(远程读) |  12.921 ns/lap
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg R 2 528 57344 2048 32   (try 1)
+  read     R=32  numRegs=13  localB=0    occ=0 blk/SM (T=256, SMEM=229376 B)
+R C= 2 grid= 528 sb=224KB R= 32 |    46.307 us/launch | 23911968.1 GB/s(远程读) |  22.611 ns/lap
+
+== E. cluster.sync() 成本 vs cluster 大小 C 与 R（grid=128, reps=200）==
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg C 2 128 200 32   (try 1)
+C C= 2 grid= 128 R= 32 | cluster.sync   501.3 ns/sync
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg C 4 128 200 32   (try 1)
+C C= 4 grid= 128 R= 32 | cluster.sync   704.6 ns/sync
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg C 8 128 200 32   (try 1)
+C C= 8 grid= 128 R= 32 | cluster.sync   731.2 ns/sync
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg C 16 128 200 32   (try 1)
+C C=16 grid= 128 R= 32 | cluster.sync   764.9 ns/sync
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg C 2 128 200 255   (try 1)
+C C= 2 grid= 128 R=255 | cluster.sync   498.0 ns/sync
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg C 4 128 200 255   (try 1)
+C C= 4 grid= 128 R=255 | cluster.sync   704.5 ns/sync
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg C 8 128 200 255   (try 1)
+C C= 8 grid= 128 R=255 | cluster.sync   732.1 ns/sync
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg C 16 128 200 255   (try 1)
+C C=16 grid= 128 R=255 | cluster.sync   768.8 ns/sync
+
+== F. 可行性：cluster launch vs (C, grid=512, T, R)（确定性，无重试）==
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg F 2 512 256 32
+  hread    R=32  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+F C= 2 grid= 512 T= 256 R= 32 SMEM=16KB | ok
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg F 4 512 256 32
+CUDA ERROR ~/proj/tech_record/code/mega-kernel/src/cluster_maxnreg.cu:234: unspecified launch failure
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg F 8 512 256 32
+CUDA ERROR ~/proj/tech_record/code/mega-kernel/src/cluster_maxnreg.cu:234: unspecified launch failure
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg F 16 512 256 32
+CUDA ERROR ~/proj/tech_record/code/mega-kernel/src/cluster_maxnreg.cu:234: unspecified launch failure
+-- 硬边界复现：C=32 非法；grid 非 C 倍数非法 --
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg F 32 32 256 32
+  hread    R=32  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+F C=32 grid=  32 T= 256 R= 32 SMEM=16KB | a kernel launch error has occurred due to cluster misconfiguration
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg F 8 132 256 32
+  hread    R=32  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+F C= 8 grid= 132 T= 256 R= 32 SMEM=16KB | a kernel launch error has occurred due to cluster misconfiguration
+$ CUDA_VISIBLE_DEVICES=3 /tmp/cluster_maxnreg F 16 64 256 32
+  hread    R=32  numRegs=32  localB=0    occ=8 blk/SM (T=256, SMEM=16384 B)
+F C=16 grid=  64 T= 256 R= 32 SMEM=16KB | ok
+
+== G.（headline 二）重 DSM + cluster 的可靠区边界：C=1 无限制；C≥2 在中等 grid 稳定失败 ==
+-- C=1（无 cluster）--
+H C= 1 grid= 264 sb= 16KB R= 32 |    46.840 us/launch | 11819985.4 GB/s(远程读) |  22.871 ns/lap   -> ok 3/3
+H C= 1 grid= 528 sb= 16KB R= 32 |    81.966 us/launch | 13509148.3 GB/s(远程读) |  40.023 ns/lap   -> ok 3/3
+H C= 1 grid=1056 sb= 16KB R= 32 |   152.077 us/launch | 14562328.8 GB/s(远程读) |  74.256 ns/lap   -> ok 3/3
+-- C=2 --
+H C= 2 grid= 132 sb= 16KB R= 32 |    72.480 us/launch | 3819316.5 GB/s(远程读) |  35.391 ns/lap   -> ok 3/3
+H C= 2 grid= 264 sb= 16KB R= 32 |   138.264 us/launch | 4004282.6 GB/s(远程读) |  67.512 ns/lap   -> ok 3/3
+   -> ok 0/3
+   -> ok 0/3
+-- C=4 --
+   -> ok 0/3
+   -> ok 0/3
+-- 轻 DSM 对照（C=2）--
+R C= 2 grid= 264 sb= 16KB R= 32 |    16.282 us/launch | 34004526.1 GB/s(远程读) |   7.950 ns/lap   -> ok 3/3
+R C= 2 grid= 528 sb= 16KB R= 32 |    21.237 us/launch | 52140448.4 GB/s(远程读) |  10.370 ns/lap   -> ok 3/3
+R C= 2 grid=1056 sb= 16KB R= 32 |    32.178 us/launch | 68824040.4 GB/s(远程读) |  15.712 ns/lap   -> ok 3/3

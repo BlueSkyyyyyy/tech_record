@@ -4588,6 +4588,40 @@
   P160-1 新留尾巴（§8）：纯 host 文本审计（strip_mask 是启发式、operand 计数含掩码）、`verbatim=Y`
   不含 struct 外围、caller audit 是 grep 级、未主张 MPK 与 DeepGEMM 自建层的派生关系。**本轮新增增量。**
 
+### P161 实验扩展 62：`__maxnreg__` 寄存器预算 × Thread Block Cluster（`docs/04-experiments.md` §86）
+
+- [x] **P161-1** 补掉「下一步候选」明留的**未叠加组合** §68–§85 的**占用率/寄存器预算** ×
+  §18–§23 的 **cluster/DSM**，回答「megakernel 把寄存器堆满（低占用率）会不会成为 cluster 跨 SM
+  交换的旋钮、甚至 cluster launch 的约束」。见 `docs/04-experiments.md` **§86**，源码
+  `src/cluster_maxnreg.cu`、脚本 `harness/cluster_maxnreg.sh`、原始输出
+  `harness/cluster_maxnreg.out.txt`（目标卡 H100/sm90a、**固定空闲 device 3**、nvcc 13.2、
+  每配置独立进程、计时项最多重试 5 次以规避共享卡并发 context 的间歇失败）。三载体：`read`
+  （轻 DSM 1 笔在飞）/`hread`（重 DSM 8 路在飞，挂 `__maxnreg__(R)`）/`hreadp`（与 `hread` 逐字
+  相同、**不挂**属性）。核心结论：
+  - **§A `__maxnreg__` 在 cluster 原语上的三种行为**：轻 body（13 regs）`R∈{32..255}` 全 no-op；
+    重 body `R=32→32(occ8)/40→40(occ6)/≥48→48(occ5)`；**`__maxnreg__(255)`（不封顶）≠ 无属性**——
+    挂属性的 `hread` 自然 48 regs、逐字相同的 `hreadp` 无属性自然 32 regs（occ 8→5）。即属性本身
+    改 ptxas 调度（细化 §69「R≥自然需求即失效」）。
+  - **§B（headline 一）cluster 交换不吃占用率**：同一 body `occ8`(R=32) vs `occ5`(R=48) 在
+    `grid=132` 只差 ~3%（35.2→36.4 ns/lap），`hreadp`(occ8) 与 R=32 逐点重合——与 HBM 数据面
+    §61/§62「占用率是第一约束」**相反**；且占用率真咬合的区间（`grid>660`）恰落在失稳区（§G）。
+  - **§C** 轻 cluster 原语 `R=32` vs `R=255` 逐点相同（`__maxnreg__` 纯 no-op）。**§D** 真正决定
+    DSM 聚合吞吐的是**驻留块数/波次**（SMEM 旋钮）：`grid=528` 下 16/48/96/224 KB/block →
+    occ 8/4/2/1 → 10.5/10.8/12.7/22.4 ns/lap（低占用率=波次=负资产）。**§E** `cluster.sync`
+    只认 C（498→767 ns @C=2→16）、**与 R 无关**。**§F** cluster launch 可行性**不受寄存器预算约束**
+    （R=32/48 同结果），硬边界仍是 C≤16 + grid 逐维整除（同 §18）。
+  - **§G（headline 二）重（多笔在飞）× cluster 跨 SM DSM 很脆弱**：`probe` 每配置 3 次——
+    重 DSM **C=1** 稳到 grid=1056（3/3），**C=2** 仅 grid≤2×SM 稳（132/264 3/3、396/528 **0/3**），
+    **C=4** 连 1×SM 都 0/3；轻 DSM C=2 稳到 1056（3/3）。失败是 `unspecified launch failure`、
+    memcheck 不报越界/竞争、**边界对 body codegen 敏感**（改索引写法边界移动）→ 落在
+    `ld.shared::cluster` 多笔在飞的 driver/编译器实现，记为**本快照/驱动/H100 的工程约束**、
+    不判上游 bug。含义：**跨 SM 交换必须低并发/批量/环形化（MPK ring barrier / event queue），
+    不能把每线程多笔 DSM 读当常规通信**——硬件原语侧又一印证。
+  判据：`read`/`hread`/`hreadp` 单常驻 kernel、`cluster.sync` 细化 **C4**，**仍非 C5**（与 §18–§23
+  同档）。**本轮新增实验**；P161-1 新留尾巴（§86.8）：只测 H100/sm90a（DSM 真正属 SM100 2SM，
+  本机不可执行）、`hread` 是合成多笔远端读、`__maxnreg__` 只到 R∈[32,255]、`shift` 只作资源表项、
+  并发 context 会让 cluster launch 间歇失败（靠重试/探针规避）。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -5003,10 +5037,40 @@
   `blackwell/sm100_ptx.cuh`、也不互相复用**（同 `docs/57` §2「blackwell 有两套互不共享的 SM100 原语」）。
   `make_desc` 等按「128B swizzle、K 主序、fp16」硬编码（`SBO=8*128` 等），改一处 swizzle 契约要改四处；
   引用某条 `tcgen05_*` 行为时先看它来自哪个文件/命名空间（同 `docs/22` §5「实现多遍」母题）。
+- **`__maxnreg__(R)` 挂不挂属性本身就是变量，不只是「上限」**（P161-1/§86.1）：对自然需求 32 regs
+  的重 DSM body，**逐字相同**的 kernel 挂 `__maxnreg__(255)`（远超需求、无效封顶）得 48 regs /
+  occ 5，**不挂属性**得 32 regs / occ 8——属性改变了 ptxas 调度。故 `docs/69`「`R≥自然需求即失效」
+  只说对了「封顶」：**要用无属性基线做对照，别把「挂无效 R」当作「无属性」**。
+- **跨 SM 的重（多笔在飞）DSM 读在 cluster 下很脆弱**（P161-1/§86.7）：H100/sm90a 上，每线程
+  多笔在飞的 `ld.shared::cluster` 远端读 + `C≥2` cluster，在 `grid≥~3×SM`（C=2）或 `C≥4`（任意
+  grid）稳定报 `unspecified launch failure`，而 `C=1`（读自己 SMEM）与单笔在飞的轻通道稳到
+  `grid=1056`；**边界随 body codegen 移动**（改索引写法边界就变），memcheck 不报越界/竞争 ⇒ 落在
+  驱动/编译器实现，不是程序越界。**跨 SM 交换应按 MPK 的做法低并发/批量/环形化**（ring barrier /
+  event queue），不要每线程开多笔 DSM 读。另：**共享卡上并发的其它 CUDA context 会让 cluster
+  launch 间歇性失败**——cluster 计时项要重试、可行性项要多发探针（本节 `try_run`/`probe`）。
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P160-1 完成（1/1）**。补掉「下一步候选」第一条点名的**三条「UMMA 原语对照」未完面**——
+- 当前进度：**P161-1 完成（1/1）**。兑现「下一步候选」的可选方向（3）「转实验侧——挑一条未叠加的
+  组合，如 `__maxnreg__` × cluster」：把 §68–§85 的**占用率/寄存器预算**与 §18–§23 的
+  **cluster/DSM** 叠加。见 `docs/04-experiments.md` **§86**，源码 `src/cluster_maxnreg.cu`、
+  脚本 `harness/cluster_maxnreg.sh`、原始输出 `harness/cluster_maxnreg.out.txt`（目标卡
+  H100/sm90a、**固定空闲 device 3**、nvcc 13.2、每配置独立进程、计时项重试 5 次）。两条 headline：
+  **(1) `__maxnreg__` 不是 cluster 交换的旋钮**——它能把占用率在 8↔5 间切（同 body），但 DSM lap
+  只差 ~3%（35.2 vs 36.4 ns/lap，与 HBM 数据面 §61/§62「占用率第一约束」相反）；`cluster.sync`
+  只认 C（498→767 ns）、与 R 无关；cluster launch 可行性不受寄存器预算约束。另记 `__maxnreg__`
+  语义细化：**不封顶的 `R=255` ≠ 无属性**（挂属性 48 regs/occ5 vs 无属性 32 regs/occ8）。
+  **(2) 重（多笔在飞）× cluster 的跨 SM DSM 很脆弱**：`C=1` 稳到 grid=1056（3/3），`C=2` 仅
+  grid≤2×SM 稳（396/528 **0/3**）、`C=4` 连 1×SM 都 0/3，轻 DSM 稳到 1056——`unspecified launch
+  failure`、memcheck 不报越界、边界对 codegen 敏感 ⇒ 跨 SM 交换必须**低并发/批量/环形化**（MPK
+  ring barrier/event queue），硬件原语侧又一印证。判据单常驻 kernel + `cluster.sync` 细化 **C4**、
+  **仍非 C5**。**本轮新增实验。**
+- 下一步候选：可继续走实验侧**未叠加的组合**（`docs/04` 微基准到 §86）——如 **`__maxnreg__` ×
+  TMA multicast**（§19 的 multicast 尚未与占用率叠加）、**cluster × 端到端骨架**（把 §62/§74 的
+  骨架放进 cluster）、或 **cluster.sync 的 batch/环形化替代**（对上 §86.7 的脆弱性）；也可回到源码
+  走读主线（`docs/35` §9 余的「`bf16` 之外 SM100 task 家族未逐一走读」）。**其余旧候选**：`docs/46`
+  §6 的 FLAT-CACHE draft attention（已核零命中、**不可走读**，仅供静态落差记录）。
+- 此前：**P160-1 完成（1/1）**。补掉「下一步候选」第一条点名的**三条「UMMA 原语对照」未完面**——
   `docs/72` 只对齐 opcode 集合、`docs/73` 只对齐描述符构造，从无一篇把 DeepGEMM 自建
   `ptx/tcgen05.cuh` 的每个 struct/helper 逐条对到 CUTLASS。见 `docs/74-umma-homegrown-layer.md`
   （快照 DeepGEMM `057ca59`、MPK `f9eb70c`、CUTLASS `f3fde583`；**纯源码走读 + 1 个 host 侧文本审计

@@ -12893,3 +12893,162 @@ CI95 都不含 1.0**。结合 §85.2 的跨进程 CI 也不含 1.0，可判定�
   - 只 4 块 H100 / 每卡 6 进程（24 进程）；进程间 CI 仍是有限重复的 bootstrap，未覆盖跨机器；
   - 固定 `U=8,R=32`、单 `Wsm=2048`、合成访存、`bind` 映射；只测 H100/sm90a；未与 DeepGEMM SM100 对跑；
   - device 3 的 offset 只由 6 个进程估得、无独立复核，仅作「存在卡间差」的定性证据。
+
+## 86. `__maxnreg__` 寄存器预算 × Thread Block Cluster：cluster 交换不吃占用率、且重跨 SM DSM 很脆弱（P161-1）
+
+本节补掉「下一步候选」明留的**未叠加组合**——把 §18–§23 的 **Thread Block Cluster / DSM**
+（跨 SM「不落 HBM」交换原语）与 §68–§85 的**占用率/寄存器预算**主题叠加，回答：常驻
+megakernel 里「寄存器被固定为各 task 最大值」（§8 §14）导致的低占用率，会不会成为 **cluster
+跨 SM 交换吞吐**的旋钮，甚至成为 **cluster 能否 launch** 的约束？
+
+真实锚点（快照 MPK `f9eb70c`、DeepGEMM `057ca59`）：MPK worker/scheduler 按物理 SM 数固定
+（§5.1，行 1168），worker 用 16 B `cp.async` 取 task（`persistent_kernel.cuh:1063-1078`）；
+DeepGEMM Mega MoE/Gate 用 `cluster_dim`（`impls/sm100_bf16_mega_moe.hpp:138`）在 2SM 间直读
+对方 SMEM。二者都要求**整机铺满 + cluster 原语共存**——本节的实验对象。源码
+`src/cluster_maxnreg.cu`，脚本 `harness/cluster_maxnreg.sh`，原始输出
+`harness/cluster_maxnreg.out.txt`（目标卡 H100 / sm90a、**固定空闲 device 3**、nvcc 13.2、
+每配置独立进程、计时项最多重试 5 次以规避共享卡上并发 context 的间歇性失败）。
+
+三个被测量载体（`__maxnreg__(R)` 精确钉每线程寄存器上限，同 §69）：
+- `read`：**轻** DSM 远端读——每线程每 lap 读邻居 SMEM 一个 `float`（1 笔在飞）；
+- `hread`：**重** DSM 远端读——同一地址集合改成 8 路 `#pragma unroll` 在飞（`READ_ILP=8`）；
+- `hreadp`：与 `hread` **逐字相同**、但**不挂 `__maxnreg__`**（自然寄存器）——把「属性」与
+  「寄存器数」分开的对照。
+
+### 86.1 §A 资源表：`__maxnreg__` 的三种行为（cluster 原语上）
+
+```
+  read     R=32  numRegs=13  occ=8 blk/SM (SMEM=16384 B)
+  hread    R=32  numRegs=32  occ=8
+  hread    R=40  numRegs=40  occ=6
+  hread    R=48  numRegs=48  occ=5
+  hread    R=255 numRegs=48  occ=5
+  hreadp   （无属性） numRegs=32  occ=8
+  shift    R=*   numRegs=26  localB=32  occ=8
+  csync    R=*   numRegs=6   occ=8
+```
+
+三点：
+- **轻 body（`read` 13 regs）**：`R∈{32..255}` 全是 13 regs / occ 8——`__maxnreg__` **是 no-op**，
+  因为在自然需求之上（复现 §69 的「cap 只在下压时生效」于 cluster 原语）。
+- **重 body（`hread`）**：`R=32`→32 regs（occ 8）、`R=40`→40（occ 6）、`R≥48`→48（occ 5）——
+  同一个 body **仅靠 `R` 就能把占用率在 8↔5 间切换**。
+- **`__maxnreg__(255)` ≠ 无属性**：`hread` 挂 `R=255`（远超自然需求）得 **48 regs / occ 5**，而
+  逐字相同的 `hreadp` **不挂属性**得 **32 regs / occ 8**。⇒ **`__maxnreg__` 不只是上限：挂上属性
+  本身就会改 ptxas 的寄存器分配**（本 body 上 32→48、占用率 8→5）。这是对「`R≥自然需求即失效」
+  说法的一条细化——**失效的是「封顶」，但属性的调度影响仍在**。
+
+### 86.2 §B（headline 一）cluster 交换不吃占用率：occ 8 vs 5 对 DSM lap 几乎无差
+
+同一 `hread` body，只改 `R`（⇒占用率 8 vs 5），`C=2` 扫 `grid`：
+
+```
+  R=32 (occ 8):  grid=132  35.2 ns/lap | grid=264  67.6 ns/lap
+  R=48 (occ 5):  grid=132  36.4 ns/lap | grid=264  FAILED（见 §86.7）
+  hreadp(occ 8): grid=132  35.3 ns/lap | grid=264  67.4 ns/lap
+```
+
+- 在能跑的 `grid=132` 处，**占用率从 8 掉到 5 只让 DSM lap 慢 ~3%**（35.2→36.4 ns/lap），
+  且 **`hreadp`（无属性、occ 8）与 `R=32`（occ 8）逐点重合**——可见差异来自占用率、且**占用率
+  对 DSM 交换几乎不构成性能项**。
+- **与 HBM 数据面（§61/§62）恰好相反**：那边「占用率是数据面天花板的第一约束」（`T=1024`
+  单 block/SM = 50% 占用把带宽卡在 85%）。DSM 远端读是**低并发、每线程 1 笔在飞**的延迟受限
+  通道，多几个在飞块并不抬吞吐——**给 cluster 交换堆占用量是错的投资方向**。
+- 且占用率真正会咬合的区间（`occ·SM < grid`，即 `grid>660`）**恰好落在 §86.7 的失稳区**——
+  在需要占用率起作用的地方，重 DSM 根本跑不起来。
+
+### 86.3 §C `__maxnreg__` 对轻 cluster 原语是纯 no-op
+
+`read`（自然 13 regs）`R=32` vs `R=255`：
+
+```
+  grid=132:  R=32 6.94 ns/lap  vs  R=255 6.93 ns/lap
+  grid=528:  R=32 10.52 ns/lap vs  R=255 10.31 ns/lap
+```
+
+逐点相同（噪声内）——**对不需要寄存器的 cluster 原语，`__maxnreg__` 完全无用**（同 §69 结论，
+在 DSM 通道上再证一遍）。
+
+### 86.4 §D 真正决定 DSM 聚合吞吐的是「驻留块数/波次」，而 SMEM 是它的旋钮
+
+固定 `grid=528, C=2`，只改**动态 SMEM/block**（占用率的第四个上限，§82.5），轻 `read`：
+
+```
+  16 KB/block occ=8: 10.46 ns/lap | 48 KB occ=4: 10.75 | 96 KB occ=2: 12.75 | 224 KB occ=1: 22.40
+```
+
+- 当 `occ·SM ≥ grid`（16/48 KB）**全 528 块一次驻留**，lap 几乎不变（10.5→10.8）；
+- 当 `occ·SM < grid`（96/224 KB）**出现波次**，lap 随总驻留块数下降**近线性变慢**
+  （10.5→12.7→22.4 ns/lap）。
+- ⇒ 对 cluster 交换，「多给 SMEM 换占用率」是**负资产**（波次惩罚），与本文 §8/§14 的「megakernel
+  的 SMEM 足迹拉低占用率」同向；而**寄存器预算（`R`）根本不是杠杆**（§86.2）。
+
+### 86.5 §E `cluster.sync()` 只认 cluster 大小、不认寄存器预算
+
+`grid=128, reps=200`：
+
+```
+  C=2  498 ns | C=4  703 ns | C=8  731 ns | C=16  767 ns   （R=32）
+  C=2  499 ns | C=4  705 ns | C=8  733 ns | C=16  768 ns   （R=255）
+```
+
+- 随 `C` 从 2→16 单调升（498→767 ns，+54%），**两列 `R` 逐行相同**——协调延迟与寄存器预算
+  无关。与 §18.4「cluster.sync 只与 block 数有关、与 cluster 形状无关」一致，并补上「与占用率/
+  寄存器无关」。
+
+### 86.6 §F cluster launch 可行性：不受寄存器预算约束，硬边界仍是 C≤16 + grid 是 C 的倍数
+
+`F`（重 body 单发短路，确定性错误不重试）：
+
+```
+  F C=2  grid=512  R=32  ok
+  F C=32 grid=32         cluster misconfiguration   （C 硬上限 16，同 §18）
+  F C=8  grid=132        cluster misconfiguration   （132 % 8 != 0，同 §18）
+  F C=16 grid=64         ok
+```
+
+- 寄存器预算（`R=32` vs `R=48`）**不改变可行性**：cluster 的约束是「C 个块同 GPC 共驻」，
+  而 H100 GPC ~18 SM 即使 occ=1 也装得下 C≤16——**megakernel 把寄存器堆满导致低占用率，不会
+  让 `C≤16` 的 cluster 变非法**。硬边界与 §18.2 完全一致（C≤16、grid 逐维整除）。
+
+### 86.7 §G（headline 二）重跨 SM DSM 在 cluster 下很脆弱：C≥2、中大规模稳定 `unspecified launch failure`
+
+`probe`（每配置试 3 次，报 ok/3；`iters=2048` 持续负载）：
+
+```
+  重 DSM C=1（无 cluster）: grid=264 3/3 | 528 3/3 | 1056 3/3
+  重 DSM C=2:              grid=132 3/3 | 264 3/3 | 396 0/3 | 528 0/3
+  重 DSM C=4:              grid=132 0/3 | 264 0/3
+  轻 DSM C=2（对照）:      grid=264 3/3 | 528 3/3 | 1056 3/3
+```
+
+- **同一个重 body，去掉 cluster（C=1，改读自己 SMEM）就一路稳到 `grid=1056`**（3/3）——问题
+  出在**跨 SM 的多笔在飞远端读**，不是 kernel 本身。
+- **C=2** 只在 `grid≤2×SM` 稳（132/264 3/3），到 **3×SM（396）起 0/3**；**C=4** 连 1×SM 都 0/3。
+- 轻 DSM（每线程 1 笔在飞）`C=2` 稳到 `grid=1056`——**脆弱的是「重（多笔在飞）× cluster」**。
+- 该失败是 `unspecified launch failure`（非 cluster misconfiguration），`compute-sanitizer
+  --tool memcheck` **不报任何越界/竞争**，C=1 无此现象；且**边界对 body codegen 敏感**（把索引从
+  `(b+u*T)&mask` 改成 `b+u*T` 后连 `grid=264` 都不稳）。⇒ 现象落在 **`ld.shared::cluster` 多笔
+  在飞的 driver/编译器实现**上，非本程序的越界；记为**本快照/驱动/H100 下的一条工程约束**，
+  不判上游 bug。
+
+### 86.8 结论、判据与局限
+
+- **结论一（headline）**：`__maxnreg__` **不是 cluster 交换的性能旋钮**——它能把占用率在 8↔5
+  间切（§86.1），但 DSM lap 只差 ~3%（§86.2）；真正会咬合的高 grid 又落在失稳区（§86.7）。
+  对 cluster 交换，**寄存器预算几乎无用，SMEM 预算只会带来波次负资产**（§86.4）。
+- **结论二（headline）**：**重（多笔在飞）× cluster 的跨 SM DSM 很脆弱**——`C≥2` 在中等规模
+  稳定 `unspecified launch failure`、`C=1` 却无限制、轻通道稳到 `grid=1056`（§86.7）。这从
+  硬件原语侧**又一次印证**生产 mega-kernel 的跨 SM 交换为何走**异步原子 ring / event 队列**
+  （MPK `docs/06` §3、DeepGEMM ring barrier `scheduler/mega_kernel.cuh`）：不是「DSM 不够快」，
+  而是**把每线程多笔 DSM 读当作常规通信是脆弱的**，必须**低并发、批量、环形化**。
+- **对 megakernel 的含义**：§18–§21 的 cluster/DSM/TMA-multicast 是 **C4 的更细实现**，但它们
+  与「整机铺满 + 寄存器足迹」并不冲突（可行性不受寄存器约束，§86.6、`cluster.sync` 不受占用率
+  影响，§86.5）；冲突只在**「每线程重型 DSM 交换」这一错误用法**上。
+- **判据**：`read`/`hread`/`hreadp` 均是单常驻 kernel、设备侧推进、`cluster.sync` 细化
+  **C4**，**仍非 C5**（无固定角色 worker/scheduler 动态派发，与 §18–§23 同档）。
+- **局限（诚实标注）**：只测 H100/sm90a（DSM 真正的家是 SM100 2SM，`docs/04` §22/§23；本机
+  不可执行）；`hread` 是合成「多笔远端读」、非真实 task 访存；`__maxnreg__` 只到 `R∈[32,255]`；
+  环境 caveat——**卡上并发的其它 CUDA context 会让 cluster launch 间歇性失败**，本节计时项靠
+  重试规避、边界项靠 3 次探针；`shift`（段位移）在 §18 已量、本节只作资源表项（26 regs + 32 B
+  局部内存、与 `R` 无关）。
