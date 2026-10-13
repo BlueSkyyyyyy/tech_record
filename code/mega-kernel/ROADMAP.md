@@ -2994,6 +2994,38 @@
       **判据映射（本层不拿任何 C1–C5，只划 C3 范围 / 为 C4/C5 备输入）**；§9 局限；§10 坐标。
       配套博客 post `mega-kernel-26-mpk-model-builder`（weight 27）并更新 `mega-kernel-00-index` 第 26 项。
 
+### P112 模型家族 builder 走读（`docs/26-mpk-family-builders.md`）
+
+- [x] **P112-1** 补齐 `docs/25`（P111-1）**§9 明留的尾巴**——「未逐行展开每个家族的 `_build_*`：
+      GLM/Inkling/DeepSeek-V3 的 MoE/MLA 管线只给算子名与文件头架构说明，未逐行走读其权重折叠/吸收
+      细节」。见 `docs/26-mpk-family-builders.md`（快照 `mirage-project/mirage` 分支 `mpk` commit
+      `f9eb70c`，与 `docs/06`–`docs/25` 同快照；**纯源码走读（资料分析），本轮无新实验**）。
+      headline——**模型家族的结构差异全部在 builder 层被手工「折平」成统一的标准 task 管线**（运行层
+      只认 `linear`/`rmsnorm`/`paged_attention`/`moe_w13`/`silu_mul`/`moe_w2`/`moe_mul_sum_add`/
+      `allreduce`）。结构：§0 定位（家族 builder 规模表：Qwen3 696 / DeepSeek-V3 **2255** / GLM 454 /
+      GPT-OSS 374 / Inkling 705；dflash/eagle3 不注册=草稿子图）；§1 **DeepSeek-V3** 主走读——
+      MLA 权重吸收（`kv_b_proj`→`q_b_proj`，docstring `:9-10`；V 反吸收融进 o_proj `:776-792`）、
+      FP8 UE8M0 重定标（`_requantize_fp8_for_ue8m0:475-542`：dequant float32 块 scale→2 的幂→
+      重新量化→打包 uint32 列主序）、`k_pe` pad 64→128 凑 `MMA_M`（`:636-653`）、
+      `_build_mla_attention_layer:563-792` 七步 + prefill/decode 双 dispatch + TP2/4/8 `mla_mtp_decode`
+      分支（`:743-774`）、`_build_moe_mlp:832-1160`（路由张量专家维在前 `:842-860`、sigmoid+bias
+      top-k `:898-911`、FP8 group GEMM + `moe_fp8_m_split` `:44-60`/`:961-984`、`scale_inv`
+      `repeat_interleave(128)` 展开逐行 `:920-931`、共享专家折叠 + TP row-parallel residual
+      `:1064-1159`）、MTP（`:1649-...`/`:1183-1261`，草稿步编译期静态展开、权重 modulo 复用）；
+      §2 **GLM-4.6**（fused-QKV+bias 作 residual `:193-218`、部分 RoPE `rotary_dim=64`+qk-norm
+      `:220-237`、`glm_moe_router_layer` `:305-311`、**共享专家折叠成 expert 160 slot 8 权重 1.0**
+      `:312-357`）；§3 **Inkling**(无 RoPE 相对位置+深度短卷积 `:594-614`、`inkling_moe_router_layer`
+      `:526-531`、**共享专家折叠成 256/257**、外层残差后置)；§4 **GPT-OSS**（`plan_kv_cache` 滑窗+全
+      attention 双 KV 流共享页池 `:17-47`、`gate_up` 交织布局重排 `:158-171`、sinks/window/group_id
+      `:302-312`、o_proj 残差/bias 拆位 `:314-330`、`moe_clamped_swiglu_layer` `:354-357`）；
+      §5 **投机 draft builder** DFlash/Eagle3（不注册、追加到目标图，DFlash 单次非因果前向 + 跨步
+      paged KV、Eagle3 K 步自回归）；§6 **家族差异→统一 task 管线的折叠表**（左=家族原样 / 右=折平后
+      标准算子 / 家族专用 `TaskType`），并给出 `docs/24` 家族 ID 块（350–399 Inkling / 400–449 GLM /
+      450–499 GPT-OSS，`runtime_header.h:207-225`）的**具体前端生产者函数**；§7 论文 §4.1/§4.2/§5.8
+      对照；§8 判据映射（**家族 builder 层只贡献 C3 范围**，家族专用 `TaskType` 的调度机制不分家族）；
+      §9 局限；§10 坐标。配套博客 post `mega-kernel-27-mpk-family-builders`（weight 28）并更新
+      `mega-kernel-00-index` 第 27 项。
+
 ## 每轮增量流程（autopilot）
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→…）。
@@ -3161,7 +3193,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P111-1 完成（1/1）**。补齐 `docs/14` §7 尾巴「未走读模型 builder 的完整组装逻辑
+- 当前进度：**P112-1 完成（1/1）**。补齐 `docs/25`（P111-1）**§9 明留的尾巴**「未逐行展开每个家族的
+  `_build_*`（GLM/Inkling/DeepSeek-V3 的 MoE/MLA 管线只给算子名与文件头架构说明）」——把「家族结构差异
+  如何在 builder 层被折平」打开：见 `docs/26-mpk-family-builders.md`（快照 `f9eb70c`，**纯源码走读、
+  无新实验**）。headline——**模型家族的结构差异全部在 builder 层被手工「折平」成统一的标准 task 管线**；
+  以 DeepSeek-V3（2255 行）为主走读 MLA 权重吸收、FP8 UE8M0 重定标、MoE group GEMM 与 MTP，对照
+  GLM-4.6（fused-QKV+bias、共享专家折叠成 expert 160）/ Inkling（无 RoPE 相对位置+短卷积、共享专家
+  256/257）/ GPT-OSS（双 KV 流共享页池、gate_up 交织重排、clamped SwiGLU）与 DFlash/Eagle3 草稿
+  builder；§6 折叠表给出 `docs/24` 家族 ID 块的**具体前端生产者函数**。判据映射：**家族 builder 层只贡献
+  C3 范围**，家族专用 `TaskType` 的调度机制不分家族。配套博客 post `mega-kernel-27-mpk-family-builders`
+  （weight 28）并更新 `mega-kernel-00-index` 第 27 项。
+- 此前：**P111-1 完成（1/1）**。补齐 `docs/14` §7 尾巴「未走读模型 builder 的完整组装逻辑
   （`models/*/builder.py`）、分布式/张量并行切分（`multigpu.py`）、请求/元数据管理（`mpk.py` 的
   `MPKMetadata`）」——把「谁把 95 个手工 `*_layer()` 拼成一个模型」这一层打开：见
   `docs/25-mpk-model-builder.md`（快照 `f9eb70c`，**纯源码走读、无新实验**）。headline——

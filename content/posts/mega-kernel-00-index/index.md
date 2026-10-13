@@ -44,5 +44,6 @@ categories: ["算子开发"]
 24. [MegaKernel 专题总纲 v2：结论地图、工程坑与实测校准]({{< relref "mega-kernel-24-capstone" >}}) —— 把 P0–P108 的 100+ 增量压成五层总图 + 六张实测校准表 + 工程坑清单 + 适用边界 v2
 25. [MPK 生产路径的 task 目录：`TaskType` 全表与代际 ID 分区]({{< relref "mega-kernel-25-mpk-task-catalog" >}}) —— 把 `register_task` 的 95 分支大表打开：116 条枚举、92 个被登记 `TaskType`、模型家族 ID 块与死码候选
 26. [MPK 前端的模型组装与请求/元数据管理层走读]({{< relref "mega-kernel-26-mpk-model-builder" >}}) —— 谁把 95 个 layer 拼成一个模型：builder 注册/组装、`MPKMetadata`、TP/EP 切分与集合通信选择
+27. [MPK 模型家族 builder 走读：MLA 吸收、FP8 UE8M0、MoE 与投机 draft]({{< relref "mega-kernel-27-mpk-family-builders" >}}) —— 家族结构差异如何在 builder 层被"折平"成标准 task 管线：DeepSeek-V3 / GLM-4.6 / Inkling / GPT-OSS 与 DFlash/Eagle3
 
 > 各篇正文由仓库 `code/mega-kernel/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。
