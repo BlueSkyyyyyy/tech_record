@@ -2612,3 +2612,129 @@ DRAM 28%→57%）：注意 DRAM%翻倍而 Duration 减半，二者相乘＝**总
 - **产物**：`harness/check_bwd_b3_mma.py`（`..._correctness/…_timing/…_chain.out.txt`）+
   `harness/ncu_b3_mma_driver.py` / `harness/probe_b3_mma_ncu.sh`（`..._b3_mma_ncu.out.txt`）。B3 这版
   可直接并入部署配置（`nw=2` 在大 shape 更好）。
+
+## 28. B2 `wy_dqkg` 的结构性重写：延后 `q/k/g` 加载消掉寄存器溢出（P7-25）
+
+§27.7 把链级瓶颈交回到 B2：§26 量出 B2 是 **DRAM-bound（59% SOL）+ 寄存器压占用**
+（`Registers/thread=247 → Block Limit Registers=2 → achieved occupancy 12.4%`），而 P7-24 又砍掉
+B3 一半，于是 B2 在链里更突出。本轮按 §26.6 第 (1) 条做 **B2 的结构性重写**——但先做最便宜、
+**算术完全不变**的那一种：**把 `q/k/g` 的加载从 `i_k` 循环顶部挪到 `i_v` 循环之后**。
+
+### 28.1 动机：部署配置下 B2 正在**溢出（spill）**
+
+对**未改动**的 B2 直接读编译期寄存器（`kernel[grid](...)` 返回的 handle 上的 `n_regs/n_spills`，
+BT=16、BK=BV=64、三种 shape 同值）：
+
+| `num_warps` | baseline `n_regs` / `n_spills` | late-load `n_regs` / `n_spills` |
+|---|---|---|
+| 2 | 255 / **190** | 255 / 82 |
+| 4（部署） | 255 / **12** | **252 / 0** |
+| 8 | 254 / 0 | 224 / 0 |
+
+部署用的 `nw=4` 正好卡在 Triton 的 255 寄存器上限并**溢出 12 个**，`nw=2` 更是溢出 190 个。
+`ncu` 侧独立回读也确认了压力（`nw=4`：247 regs/thread，`Block Limit Registers=2`）。这正是 §26.4
+「247 寄存器压占用」那句话背后更严重的事实——**它同时在往 local memory 打溢出流量**。
+
+**根因（读代码就能定位）**：baseline 在 `i_k` 循环**顶部**就加载 `q/k/g`（`check_bwd_dqkg_kernel.py:244-249`），
+但它们**只在 `i_v` 循环结束之后**才被用到（衰减重标定与门控链，`:290-305`）。于是 `b_q/b_k/b_g`
+（各 `[BT,BK]`）在整个 `i_v` 循环里**一直活着**——而那正是 `b_h/b_dh`（各 `[BV,BK]`）和三个
+`[BT,BK]` 累加器 `b_dq/b_dk/b_dw` 的活跃区。峰值压力落在 `i_v` 体里，超过 255 就溢出。
+
+### 28.2 改动：只挪位置，不动算术
+
+把三个 `tl.load(p_q/p_k/p_g, ...)` 从 `i_k` 循环顶部移到 `i_v` 循环**之后**（`b_gn` 的加载留在原处，
+它本来就在 `i_v` 之前、量也小）。运算顺序、累加次序、`tl.debug_barrier()` 位置**一字未改**，因此
+六个输出应**逐位相同**。实现见 `harness/check_bwd_b2_struct.py::build_dqkg_late`
+（对应 `_wy_dqkg_kernel_late`）。
+
+### 28.3 Part A：正确性——与 baseline **逐位相同**（含非整除 T、B=2、BT=16）
+
+`check_bwd_b2_struct.out.txt`，7 组 case（`BT=64/16`、`T=64…1024`、**非整除 T=250/513**、`B=2`）：
+
+| 对比 | `dq` | `dk` | `dv` | `db` | `dg` | `dA` |
+|---|---|---|---|---|---|---|
+| late vs baseline（最坏 `max_rel`） | 0 | 0 | 0 | 0 | 0 | 0 |
+| late vs FLA（最坏 `max_rel`） | 0 | 0 | 0 | 1.7e-7 | 6.1e-8 | 0 |
+
+**与 baseline 完全逐位相同（全部 `max_abs=0`）**，且与 baseline 一样，vs FLA 只在 `db/dg` 有
+~1e-7 的差（B2 `db` 的 `atomic_add`/跨块归约序，§26.3 已记）。即这次重写**没有引入任何数值变化**。
+
+### 28.4 Part B/C：孤立 kernel 快 **0.84–0.89×**（spill 消掉的直接收益）
+
+`nw=4`、`BT=16`，三种口径互相印证（CUPTI `dev` / event-pair `wall` / `triton.testing.do_bench`）：
+
+| case | dev base→late | dev 比 | wall 比 | do_bench base→late | bench 比 |
+|---|---|---|---|---|---|
+| T=512 H=4 | 14.9 → 12.7 µs | **0.85×** | 1.00× | 31.4 → 28.0 | **0.89×** |
+| B2 T=1024 H=8 | 121.9 → 108.4 | **0.89×** | 0.89× | 130.7 → 117.2 | 0.90× |
+| B8 T=2048 H=8 | 896.3 → 800.4 | **0.89×** | 0.89× | 905.4 → 809.5 | 0.89× |
+| T=250 H=3 非整除 | 13.9 → 11.7 | **0.84×** | 1.00× | 28.1 → 23.7 | 0.85× |
+
+即**纯粹消掉 12 个 spill 就近 11%**。`nw=4` 寄存器从 255→252（虽仍 >170，见 §28.6）但**零 spill**；
+`nw=8` 从 254→224。这是「live range 缩短 → 峰值寄存器下降 → 不再溢出」的直接体现。小 shape 的
+`wall` 不动是 host 派发主导（§26/§27 同现象）。
+
+### 28.5 Part D：落进真实组装链——梯度**逐值不变**、链 `dev` 降 **3–5%**
+
+把 late B2 替换进 §27 的组装链（P7-22 pipe B1 `NS=3` + P7-24 MMA B3），6 组 case（含非整除
+`T=250/513`、`g=0`、`B=2`）：
+
+- **vs FLA autograd 的六项最坏 `max_rel`**：`dq 3.42e-3 / dk 3.02e-3 / dv 6.80e-3 / dbeta 6.01e-3 /
+  dg 7.05e-3 / dh0 8.27e-3`——**与 §25.2、§26.3、§27.5 记录的 baseline 链逐值相同**（重写不改数值）。
+- **重写自身增量**（late 链 vs baseline 链）：`dq/dk/dv/dg` **`max_abs=0`（逐位）**、`dbeta ≤3.7e-8`
+  （`atomic_add` 序）。
+- **链级 `dev`**（CUPTI，µs；FLA 对照）：
+
+| case | FLA dev | base dev | late dev | late/base |
+|---|---|---|---|---|
+| T=512 H=4 | 206.2 | 88.0 | 85.4 | **0.97×** |
+| B2 T=1024 H=8 | 662.6 | 297.9 | 285.1 | **0.96×** |
+| B8 T=2048 H=8 | 4103.8 | 1961.4 | 1862.4 | **0.95×** |
+| T=250 H=3 非整除 | 141.4 | 61.1 | 58.7 | 0.96× |
+
+链降 **3–5%**（B2 占链 ~43%、kernel 快 ~11%，乘积吻合）；`B8T2048H8` 1961→**1862 µs**。小 shape
+`wall` 基本不动（host-bound）。
+
+### 28.6 Part E：`ncu` 复核——寄存器确实降下来，但占用率**没动**（口径提醒）
+
+`probe_b2_struct_ncu.out.txt`，`B8 T2048 H8 BT=16`：
+
+| 指标 | baseline | late-load |
+|---|---|---|
+| Registers/thread | **247** | **210**（`nw=8`：222→199） |
+| Block Limit Registers | 2 | **2**（未变） |
+| Achieved occupancy | 12.36% | 12.41% |
+| DRAM 读 / 写 | 777.6 / 270.0 MB | **778.0 / 269.9 MB（不变）** |
+| DRAM Throughput | 59.08% | 57.17% |
+| tensor pipe | 4.88% | 4.73% |
+| `stall long_scoreboard` | 6.61 | 6.85 |
+
+两点读法：
+
+- **字节数逐位不变**（`redirect` 只挪 live range，不挪数据）——确认这不是「少读」而是「少溢出」，
+  且证实了 §26.4「B2 DRAM 大头是 `h`/`dh`」的画像（每 chunk `h`+`dh` = `2·K·V·4B` = 128 KB；
+  `B8T2048H8` 有 `B·NT·H = 8192` 个 chunk）。
+- **占用率没有变**（仍 2 blocks/SM）：`210×128×3 = 80640 > 65536`，**需 ≤170 regs 才够 3 blocks**。
+  本轮的收益不是「占用率上来」，而是**去掉了溢出流量**。
+- **口径提醒（重要）**：本次 `ncu` 自报的 `Duration` 给 late **反而略慢**（546.8 vs 529.0 µs），与
+  CUPTI/`wall`/`do_bench` 三个独立口径（一致地 late 快 ~11%）**矛盾**。这与 §25.5「孤立小 grid 的
+  `ncu` 归因窗口与 CUPTI 不同源、不可混用绝对值」同源；**本轮结论只依赖 CUPTI/`do_bench` 的比值**，
+  `ncu` 仅取**静态寄存器回读**与**字节/SOL 比值类**指标。
+
+### 28.7 结论与下一步
+
+- **B2 的 register-spill 被消掉**：仅靠**把 `q/k/g` 的加载延后到 `i_v` 循环之后**（live range 缩短），
+  部署配置 `nw=4` 的溢出 12→0、`nw=8` 寄存器 254→224；孤立 kernel **0.84–0.89×**、组装链 **0.95–0.97×**
+  （`B8T2048H8` 1961→1862 µs），且**六项梯度逐位不变**（与 §25/§26/§27 baseline 链同值）。这是一次
+  **零数值代价的结构性收益**。
+- **它没有解决 B2 的根本 bound**：占用率仍被寄存器钉在 2 blocks/SM（需 ≤170 regs 才到 3），
+  DRAM 字节数不变、仍是 DRAM-bound（~59% SOL）。§26.6 第 (1) 条里剩下的是**真正的结构项**：
+  1. **把 `h/dh`/大 tile 的 live range 继续缩短或降精度**（`h/dh` bf16 在 §26.5 只值 1.08–1.16×）；
+  2. **去掉按 `i_k` 对 `do/vn/dv/v` 的重复读**（`K/BK` 次）——需要改累加结构（把 `i_v` 提到外层、
+     对 `dq/dk/dw` 用跨 `i_k` 的部分和落地），是下一轮的结构项；
+  3. **拆 tile 到 ≤170 regs 换 3 blocks/SM**——但 §26.2/§28.4 都实测 `BK=BV=32` 反而更慢
+     （MMA 效率/循环开销），故须配合别的改动；
+  4. 更彻底的是 **B1→B2 融合**，让 `dh` 不落盘、不重读。
+- **产物**：`harness/check_bwd_b2_struct.py`（`harness/check_bwd_b2_struct.out.txt`）+
+  `harness/ncu_b2_struct_driver.py` / `harness/probe_b2_struct_ncu.sh`
+  （`harness/probe_b2_struct_ncu.out.txt`）。这版 late-load B2 可直接并入部署配置。

@@ -1,0 +1,251 @@
+GPU: NVIDIA H100 80GB HBM3  torch=2.12.0a0+0291f960b6.nv26.04.48445190  triton=3.6.0
+==============================================================================
+Part A: isolated B2 -- late-load vs baseline (must be bit-identical) + FLA
+==============================================================================
+
+=== B=1 T=256 H=2 K=64 V=64 BT=64 seed=0 ===
+    late dq vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.511e+00
+    late dq vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.511e+00
+    late dk vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.239e+01
+    late dk vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.239e+01
+    late dv vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.413e-01
+    late dv vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.413e-01
+    late db vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.479e+00
+    late db vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.479e+00
+    late dg vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.440e+00
+    late dg vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.440e+00
+    late dA vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.922e+00
+    late dA vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.922e+00
+
+=== B=2 T=512 H=4 K=128 V=128 BT=64 seed=1 ===
+    late dq vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.693e+00
+    late dq vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.693e+00
+    late dk vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.441e+01
+    late dk vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.441e+01
+    late dv vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.126e-01
+    late dv vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.126e-01
+    late db vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.182e+00
+    late db vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.182e+00
+    late dg vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.670e+00
+    late dg vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.670e+00
+    late dA vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.281e+00
+    late dA vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.281e+00
+
+=== B=1 T=250 H=3 K=64 V=128 BT=64 seed=2 ===
+    late dq vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.110e+00
+    late dq vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.110e+00
+    late dk vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.907e+01
+    late dk vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.907e+01
+    late dv vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.206e-01
+    late dv vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.206e-01
+    late db vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.397e+00
+    late db vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.397e+00
+    late dg vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.701e+00
+    late dg vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.701e+00
+    late dA vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.626e+00
+    late dA vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.626e+00
+
+=== B=1 T=1024 H=8 K=128 V=128 BT=64 seed=3 ===
+    late dq vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.883e+00
+    late dq vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.883e+00
+    late dk vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.385e+01
+    late dk vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.385e+01
+    late dv vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.939e-01
+    late dv vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.939e-01
+    late db vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.925e+00
+    late db vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.925e+00
+    late dg vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.771e+00
+    late dg vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.771e+00
+    late dA vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.101e+00
+    late dA vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.101e+00
+
+=== B=2 T=513 H=2 K=64 V=64 BT=64 seed=4 ===
+    late dq vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.564e+00
+    late dq vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.564e+00
+    late dk vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.410e+01
+    late dk vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.410e+01
+    late dv vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.282e-01
+    late dv vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.282e-01
+    late db vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.760e+00
+    late db vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.760e+00
+    late dg vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.079e+00
+    late dg vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.079e+00
+    late dA vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.128e+00
+    late dA vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.128e+00
+
+=== B=1 T=128 H=2 K=128 V=128 BT=16 seed=5 ===
+    late dq vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.652e+00
+    late dq vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=1.652e+00
+    late dk vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.175e+01
+    late dk vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.175e+01
+    late dv vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.940e-01
+    late dv vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.940e-01
+    late db vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.733e+00
+    late db vs FLA           max_abs=4.768e-07  max_rel=1.745e-07  ref_max=2.733e+00
+    late dg vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.940e+00
+    late dg vs FLA           max_abs=2.384e-07  max_rel=6.051e-08  ref_max=3.940e+00
+    late dA vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.769e+00
+    late dA vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.769e+00
+
+=== B=1 T=250 H=3 K=128 V=128 BT=16 seed=6 ===
+    late dq vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.191e+00
+    late dq vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.191e+00
+    late dk vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.189e+01
+    late dk vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=2.189e+01
+    late dv vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.458e-01
+    late dv vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.458e-01
+    late db vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.137e+00
+    late db vs FLA           max_abs=4.768e-07  max_rel=1.153e-07  ref_max=4.137e+00
+    late dg vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.298e+00
+    late dg vs FLA           max_abs=2.384e-07  max_rel=5.548e-08  ref_max=4.298e+00
+    late dA vs base          max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.005e+00
+    late dA vs FLA           max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.005e+00
+
+worst-case max_rel (late vs baseline): {'dq': '0.0e+00', 'dk': '0.0e+00', 'dv': '0.0e+00', 'db': '0.0e+00', 'dg': '0.0e+00', 'dA': '0.0e+00'}
+worst-case max_rel (late vs FLA):      {'dq': '0.0e+00', 'dk': '0.0e+00', 'dv': '0.0e+00', 'db': '1.7e-07', 'dg': '6.1e-08', 'dA': '0.0e+00'}
+==============================================================================
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+Part B: register pressure / spills -- base vs late (deployed BT=16, BK=BV=64)
+==============================================================================
+
+# B=1 T=512 H=4:
+  nw=2: base regs=255 spill=190 | late regs=255 spill= 82
+  nw=4: base regs=255 spill= 12 | late regs=252 spill=  0
+  nw=8: base regs=254 spill=  0 | late regs=224 spill=  0
+
+# B=2 T=1024 H=8:
+  nw=2: base regs=255 spill=190 | late regs=255 spill= 82
+  nw=4: base regs=255 spill= 12 | late regs=252 spill=  0
+  nw=8: base regs=254 spill=  0 | late regs=224 spill=  0
+
+# B=8 T=2048 H=8:
+  nw=2: base regs=255 spill=190 | late regs=255 spill= 82
+  nw=4: base regs=255 spill= 12 | late regs=252 spill=  0
+  nw=8: base regs=254 spill=  0 | late regs=224 spill=  0
+==============================================================================
+Part C: isolated B2 timing -- base vs late (dev CUPTI + wall), BT=16
+==============================================================================
+  case             |  nw | base dev late dev  dev x | base wall late wall wall x | base bench late bench bench x
+  T=512 H=4        |   4 |     14.9     12.7  0.85x |      48.0      48.2  1.00x |       31.4       28.0   0.89x
+  B2 T=1024 H=8    |   4 |    121.9    108.4  0.89x |     124.2     110.6  0.89x |      130.7      117.2   0.90x
+  B8 T=2048 H=8    |   4 |    896.3    800.4  0.89x |     898.8     802.3  0.89x |      905.4      809.5   0.89x
+  T=250 H=3 nondiv |   4 |     13.9     11.7  0.84x |      48.1      47.9  1.00x |       28.1       23.7   0.85x
+
+==============================================================================
+Part D: land late B2 into the assembled chain -- correctness vs FLA and baseline
+==============================================================================
+
+# T=128 H=2
+  -- late chain vs FLA --
+    late dq vs FLA           max_abs=9.193e-04  max_rel=1.368e-03  ref_max=6.721e-01
+    late dk vs FLA           max_abs=8.084e-04  max_rel=1.188e-03  ref_max=6.802e-01
+    late dv vs FLA           max_abs=2.777e-04  max_rel=5.662e-03  ref_max=4.904e-02
+    late dbeta vs FLA        max_abs=1.732e-03  max_rel=4.354e-03  ref_max=3.977e-01
+    late dg vs FLA           max_abs=9.492e-05  max_rel=2.741e-03  ref_max=3.462e-02
+    late dh0 vs FLA          max_abs=2.068e-04  max_rel=4.982e-03  ref_max=4.150e-02
+  -- late chain vs baseline chain (rewrite's own delta) --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.722e-01
+    delta dk                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.801e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.915e-02
+    delta dbeta              max_abs=7.451e-09  max_rel=1.865e-08  ref_max=3.994e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.462e-02
+
+# T=256 H=4
+  -- late chain vs FLA --
+    late dq vs FLA           max_abs=1.441e-03  max_rel=2.087e-03  ref_max=6.908e-01
+    late dk vs FLA           max_abs=1.198e-03  max_rel=1.501e-03  ref_max=7.980e-01
+    late dv vs FLA           max_abs=2.517e-04  max_rel=4.128e-03  ref_max=6.098e-02
+    late dbeta vs FLA        max_abs=3.258e-03  max_rel=5.522e-03  ref_max=5.900e-01
+    late dg vs FLA           max_abs=2.124e-04  max_rel=6.184e-03  ref_max=3.436e-02
+    late dh0 vs FLA          max_abs=2.451e-04  max_rel=7.172e-03  ref_max=3.418e-02
+  -- late chain vs baseline chain (rewrite's own delta) --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.902e-01
+    delta dk                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=7.974e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.093e-02
+    delta dbeta              max_abs=3.725e-09  max_rel=6.295e-09  ref_max=5.918e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=3.437e-02
+
+# T=250 H=3 (non-div)
+  -- late chain vs FLA --
+    late dq vs FLA           max_abs=1.770e-03  max_rel=3.417e-03  ref_max=5.180e-01
+    late dk vs FLA           max_abs=7.749e-04  max_rel=1.488e-03  ref_max=5.206e-01
+    late dv vs FLA           max_abs=3.282e-04  max_rel=6.795e-03  ref_max=4.831e-02
+    late dbeta vs FLA        max_abs=2.716e-03  max_rel=5.586e-03  ref_max=4.863e-01
+    late dg vs FLA           max_abs=3.249e-04  max_rel=5.236e-03  ref_max=6.205e-02
+    late dh0 vs FLA          max_abs=2.924e-04  max_rel=5.322e-03  ref_max=5.493e-02
+  -- late chain vs baseline chain (rewrite's own delta) --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.177e-01
+    delta dk                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.203e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.824e-02
+    delta dbeta              max_abs=1.490e-08  max_rel=3.065e-08  ref_max=4.862e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.225e-02
+
+# T=512 H=4 g=2
+  -- late chain vs FLA --
+    late dq vs FLA           max_abs=1.711e-03  max_rel=2.583e-03  ref_max=6.623e-01
+    late dk vs FLA           max_abs=1.946e-03  max_rel=3.016e-03  ref_max=6.452e-01
+    late dv vs FLA           max_abs=3.343e-04  max_rel=4.933e-03  ref_max=6.776e-02
+    late dbeta vs FLA        max_abs=2.704e-03  max_rel=5.286e-03  ref_max=5.115e-01
+    late dg vs FLA           max_abs=2.313e-04  max_rel=3.409e-03  ref_max=6.785e-02
+    late dh0 vs FLA          max_abs=3.859e-04  max_rel=5.489e-03  ref_max=7.031e-02
+  -- late chain vs baseline chain (rewrite's own delta) --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.623e-01
+    delta dk                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.448e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.782e-02
+    delta dbeta              max_abs=1.490e-08  max_rel=2.928e-08  ref_max=5.090e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.781e-02
+
+# B2 T=513 H=2 (non-div)
+  -- late chain vs FLA --
+    late dq vs FLA           max_abs=1.779e-03  max_rel=2.954e-03  ref_max=6.022e-01
+    late dk vs FLA           max_abs=1.185e-03  max_rel=1.778e-03  ref_max=6.666e-01
+    late dv vs FLA           max_abs=3.409e-04  max_rel=6.243e-03  ref_max=5.460e-02
+    late dbeta vs FLA        max_abs=2.640e-03  max_rel=2.991e-03  ref_max=8.827e-01
+    late dg vs FLA           max_abs=2.905e-04  max_rel=7.053e-03  ref_max=4.118e-02
+    late dh0 vs FLA          max_abs=1.691e-04  max_rel=6.996e-03  ref_max=2.417e-02
+  -- late chain vs baseline chain (rewrite's own delta) --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.018e-01
+    delta dk                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.663e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.469e-02
+    delta dbeta              max_abs=2.980e-08  max_rel=3.380e-08  ref_max=8.817e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=4.118e-02
+
+# T=192 H=2 g=0
+  -- late chain vs FLA --
+    late dq vs FLA           max_abs=4.187e-04  max_rel=7.844e-04  ref_max=5.337e-01
+    late dk vs FLA           max_abs=4.725e-04  max_rel=8.169e-04  ref_max=5.784e-01
+    late dv vs FLA           max_abs=3.922e-04  max_rel=5.982e-03  ref_max=6.556e-02
+    late dbeta vs FLA        max_abs=2.434e-03  max_rel=6.012e-03  ref_max=4.048e-01
+    late dg vs FLA           max_abs=3.708e-05  max_rel=6.105e-03  ref_max=6.074e-03
+    late dh0 vs FLA          max_abs=5.197e-05  max_rel=8.267e-03  ref_max=6.287e-03
+  -- late chain vs baseline chain (rewrite's own delta) --
+    delta dq                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.337e-01
+    delta dk                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=5.784e-01
+    delta dv                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.577e-02
+    delta dbeta              max_abs=1.490e-08  max_rel=3.703e-08  ref_max=4.024e-01
+    delta dg                 max_abs=0.000e+00  max_rel=0.000e+00  ref_max=6.073e-03
+
+worst-case max_rel (late chain):
+  dbeta             6.012e-03
+  delta_dbeta       3.703e-08
+  delta_dg          0.000e+00
+  delta_dk          0.000e+00
+  delta_dq          0.000e+00
+  delta_dv          0.000e+00
+  dg                7.053e-03
+  dh0               8.267e-03
+  dk                3.016e-03
+  dq                3.417e-03
+  dv                6.795e-03
+
+==============================================================================
+Part D2: chain timing -- baseline B2 vs late B2 (dev CUPTI + wall), vs FLA
+==============================================================================
+  case               |  FLA dev base dev late dev late/base | base wall late wall
+  T=512 H=4          |    206.2     88.0     85.4    0.97x |     392.3     382.1
+  B2 T=1024 H=8      |    662.6    297.9    285.1    0.96x |     393.2     385.3
+  B8 T=2048 H=8      |   4103.8   1961.4   1862.4    0.95x |    1987.0    1891.7
+  T=250 H=3 nondiv   |    141.4     61.1     58.7    0.96x |     384.8     381.8
+
+DONE

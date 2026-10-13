@@ -377,6 +377,27 @@
       **减对角平铺重复读/L1 局部性**而非再加 MMA；链级瓶颈转到 **B2**（下一步＝§26.6 第 (1) 条）。
       **踩坑**：对角 `dAqk` 平铺的列是 **chunk-内局部**下标 `i_i*BC+o_i`（非绝对 `i_ti+o_i`），
       用错指纹=`i_t=0`（T≤BT 单 chunk）对、其余全错到 O(1)。
+- [x] **P7-25** 兑现 §26.6 第 (1) 条里最便宜、**算术不变**的那一项——**B2 `wy_dqkg` 的 register-spill**。
+      对未改动的 B2 直接读编译期寄存器：部署 `nw=4` 卡在 Triton 255 上限并**溢出 12 个**（`nw=2` 溢出
+      190；`ncu` 回读 247 regs/thread、`Block Limit Registers=2`）。根因＝`i_k` 循环**顶部**就加载
+      `q/k/g`（`check_bwd_dqkg_kernel.py:244-249`），但它们只在 `i_v` 循环**之后**才用到
+      （`:290-305`），故 `b_q/b_k/b_g` 在整个 `i_v` 循环里一直活着、与 `b_h/b_dh`+三累加器叠加超 255。
+      改法＝把这三个 `tl.load` 挪到 `i_v` 循环之后（**运算/累加序一字未改**）。新增
+      `harness/check_bwd_b2_struct.py`（`harness/check_bwd_b2_struct.out.txt`）+
+      `harness/ncu_b2_struct_driver.py` / `harness/probe_b2_struct_ncu.sh`
+      （`harness/probe_b2_struct_ncu.out.txt`）+ `docs/07` §28。**Part A**：late vs baseline
+      **逐位相同（六项 `max_abs=0`）**，7 组 case 含非整除 `T=250/513`、`B=2`、`BT=16/64`；
+      vs FLA 仍只在 `db 1.7e-7/dg 6.1e-8`（atomic 序）。**Part B/C**：`nw=4` 溢出 12→**0**、`nw=8`
+      254→224；孤立 kernel `dev` **0.84–0.89×**（`B8T2048H8` 896→800）、`do_bench` 0.89–0.90×。
+      **Part D**：落链（pipe B1 `NS=3`+MMA B3）vs FLA 六项最坏 `dq 3.42e-3…dh0 8.27e-3` **逐值同
+      §25/§26/§27**；自身增量 `dq/dk/dv/dg` **逐位 0**、`dbeta ≤3.7e-8`；链 `dev` **0.95–0.97×**
+      （`B8T2048H8` 1961→1862）。**Part E（ncu）**：regs/thread 247→**210**、但 `Block Limit
+      Registers` 仍 **2**（`210×128×3>65536`，须 ≤170 才到 3 blocks）、占用率 12.36→12.41% **未动**、
+      DRAM 字节**逐位不变**（777.6→778.0 MB）——收益是**去掉溢出流量**而非提占用/减字节。**口径提醒**：
+      ncu 自报 `Duration` 给 late 反而略慢（与 CUPTI/`wall`/`do_bench` 三口径一致反），同 §25.5
+      窗口不同源，故只用 CUPTI/do_bench 比值 + ncu 静态寄存器/字节。**结论**：零数值代价的 B2 结构性
+      收益（链 −3~5%）；B2 根本 bound（DRAM + 2 blocks/SM）未解，下一步＝去 `i_k` 重复读 / `dh` 不落盘
+      （B1→B2 融合）。
 
 ### P8 小结 / 一页纸
 
@@ -408,8 +429,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-24 补测**。
-  - P7-24（本轮）：兑现 §26.6 第 (2) 条——**B3 `intra` 对角块 MMA 化**。核心观察：部署粒度
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-8 / P7-3…P7-25 补测**。
+  - P7-25（本轮）：兑现 §26.6 第 (1) 条里最便宜、**算术不变**的 B2 结构项——**register-spill**。
+    未改动的 B2 部署 `nw=4` 卡 Triton 255 上限并溢出 12 个（`nw=2` 溢出 190；ncu 247 regs、
+    `Block Limit Registers=2`）；根因＝`q/k/g` 在 `i_k` 循环顶部加载却只在 `i_v` 循环**之后**才用
+    （`check_bwd_dqkg_kernel.py:244-249` vs `:290-305`），活得贯穿整个 `i_v` 体。改法＝把这三个
+    `tl.load` 挪到 `i_v` 循环之后（运算一字未改）。新增 `harness/check_bwd_b2_struct.py`
+    （`harness/check_bwd_b2_struct.out.txt`）+ `harness/ncu_b2_struct_driver.py` /
+    `harness/probe_b2_struct_ncu.sh`（`harness/probe_b2_struct_ncu.out.txt`）+ `docs/07` §28。
+    **Part A**：late vs baseline **六项逐位相同（`max_abs=0`）**（7 组含非整除 T=250/513、B=2、BT=16/64）。
+    **Part B/C**：`nw=4` 溢出 12→**0**、`nw=8` 254→224；孤立 kernel `dev` **0.84–0.89×**、`do_bench`
+    0.89–0.90×。**Part D**：落链 vs FLA 六项最坏 **逐值同 §25/§26/§27**；自身增量 `dq/dk/dv/dg`
+    **逐位 0**、`dbeta ≤3.7e-8`；链 `dev` **0.95–0.97×**（B8T2048H8 1961→1862）。**Part E（ncu）**：
+    regs 247→210、`Block Limit Registers` 仍 **2**（须 ≤170 才到 3 blocks）、占用率 **未动**、DRAM
+    字节**逐位不变**——收益＝去溢出流量。**结论**：零数值代价的 B2 收益（链 −3~5%）；B2 根本 bound
+    （DRAM + 2 blocks/SM）未解，下一步＝去 `i_k` 重复读 / B1→B2 融合。见 `docs/07` §28。
+  - P7-24（上轮）：兑现 §26.6 第 (2) 条——**B3 `intra` 对角块 MMA 化**。核心观察：部署粒度
     `BT=BC=16 ⟹ NC=1 ⟹ i_i≡0`，Parts A/C（B3 里仅有的 `tl.dot`）从不执行，B3 全部是对角 `for j`
     逐元素外积循环（=§26 的 `tensor 0.05%` 成因）。恒等式：门控指数移出收缩，`dq2=2^{g}⊙(Mq@(k·2^{-g}))`、
     `dkt=2^{-g}⊙(Sq@(q·2^{g}))`——FLA `SAFE_GATE=True` 分支早已这么做（`chunk_intra.py:520-526/620-637`），
