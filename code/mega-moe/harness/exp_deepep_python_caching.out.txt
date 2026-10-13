@@ -1,0 +1,81 @@
+== 环境坐标 ==
+93eb6eb Update README
+v1.2.1-41-g93eb6eb
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+torch 2.12.0a0+0291f960b6.nv26.04.48445190
+
+== 环境坐标 ==
+  DeepEP root: ~/github/DeepEP
+  semantic.py    sha256=8115b73e1ecaf1f5
+  find_pkgs.py   sha256=5464c1a307f36b5b
+  envs.py        sha256=23843e168a6f5d43
+  ep.py          sha256=a8f72c3975bbf043
+  engram.py      sha256=92d39d989af238dc
+  python 3.12.3
+  加载成功：semantic.['Any', 'Optional', 'functools', 'value_or', 'weak_lru', 'weakref']
+
+== Part A: value_or 语义（仅 None 回退）==
+  [PASS] value_or(None, 7) == 7 
+  [PASS] value_or(0, 7) == 0（0 是合法值） 
+  [PASS] value_or(False, 7) is False 
+  [PASS] value_or('', 7) == ''（空串合法） 
+  [PASS] value_or(None, None) is None 
+
+== Part B: 方法级 lru_cache 的泄漏 vs weak_lru 的可回收 ==
+  [PASS] plain lru_cache：del + gc 后实例仍存活（被缓存钉住） 
+  [PASS] plain lru_cache：缓存条目永久占位 currsize==1 CacheInfo(hits=0, misses=1, maxsize=None, currsize=1)
+  [PASS] weak_lru：del + gc 后实例被回收 
+  [PASS] weak_lru 保留 functools.wraps 的 __name__ 
+  [PASS] weak_lru 暴露 __wrapped__（原函数） 
+
+== Part C: weak_lru 缓存键语义 ==
+  [PASS] 同实例同参 → 命中（结果一致） 
+  [PASS] 同实例不同参 → 不同结果 
+  [PASS] 不同（身份）实例同参 → 互不串用 
+  [PASS] 不同实例各占一条：misses==3 CacheInfo(hits=1, misses=3, maxsize=None, currsize=3)
+  [PASS] weakref.ref 相等性委托：值相等实例 hash/eq 相同 
+  [PASS] 【陷阱】值相等但不同的实例撞同一条 → e2 拿到 e1 的结果 
+  [PASS] 死引用条目不会自动清：currsize 受 maxsize 限制 <=4 CacheInfo(hits=0, misses=20, maxsize=4, currsize=4)
+  [PASS] 20 个实例 20 次 miss（缓存键按实例不同） CacheInfo(hits=0, misses=20, maxsize=4, currsize=4)
+  [PASS] typed=True：1 与 1.0 区分 
+  [PASS] typed=False：1 与 1.0 等价共享（短路于第一个） 
+  [PASS] __slots__（无 __weakref__）抛 TypeError =cannot create weak reference to 'NoWeak' object
+
+== Part D: deep_ep 全库缓存装饰器普查 ==
+  relpath:line  kind  decorator
+  deep_ep/utils/semantic.py:17  definition  @functools.lru_cache(maxsize, typed)
+  deep_ep/utils/find_pkgs.py:58  module  @functools.lru_cache()
+  deep_ep/utils/envs.py:193  module  @functools.lru_cache()
+  deep_ep/utils/envs.py:200  module  @functools.lru_cache()
+  deep_ep/utils/envs.py:207  module  @functools.lru_cache()
+  deep_ep/utils/envs.py:237  module  @functools.lru_cache()
+  deep_ep/utils/envs.py:260  module  @functools.lru_cache()
+  deep_ep/buffers/ep.py:430  method(weak)  @weak_lru(maxsize=None)
+  deep_ep/buffers/ep.py:845  method(weak)  @weak_lru(maxsize=None)
+  deep_ep/buffers/engram.py:130  staticmethod  @functools.lru_cache(maxsize=None)
+  [PASS] weak_lru 仅 2 处消费（ep.py 两个方法） =[('deep_ep/buffers/ep.py', 'method(weak)'), ('deep_ep/buffers/ep.py', 'method(weak)')]
+  [PASS] 模块级 lru_cache 恰 6 处（envs 5 + find_pkgs 1） =[('deep_ep/utils/find_pkgs.py', 'module'), ('deep_ep/utils/envs.py', 'module'), ('deep_ep/utils/envs.py', 'module'), ('deep_ep/utils/envs.py', 'module'), ('deep_ep/utils/envs.py', 'module'), ('deep_ep/utils/envs.py', 'module')]
+  [PASS] 静态方法级 lru_cache 恰 1 处（engram.py） =[('deep_ep/buffers/engram.py', 'staticmethod')]
+  [PASS] 没有任何「实例方法直接用 functools.lru_cache」 
+
+== Part E: 真实模块级 lru_cache 的命中与副作用 ==
+  [PASS] find_nccl_root 带 lru_cache 
+  [PASS] find_nccl_root 第二次命中（hits==1） CacheInfo(hits=1, misses=1, maxsize=128, currsize=1)
+  [PASS] find_nccl_root 返回稳定 =/usr/local/lib/python3.12/dist-packages/nvidia/nccl
+  [PASS] get_nccl_lib_name 返回 libnccl.so* =libnccl.so.2
+  [PASS] get_sm_read_gbs()==180 
+  [PASS] get_sm_write_gbs()==45 
+  [PASS] get_sm_read_gbs 带 lru_cache（hits>=0） 
+  [PASS] nvlink 首次 = 200（2×100, factor=1） =200.0
+  [PASS] 【陷阱】换了环境输出仍返回旧值（缓存未清） =200.0
+  [PASS] cache_clear() 后才读到新值 20 =20.0
+
+== Part F: 真实 weak_lru 复刻 lb_get_theoretical_num_sms ==
+  [PASS] 同参第二次命中（只计算一次） calls=1
+  [PASS] 结果一致且为偶数 =10
+  [PASS] 改一个参 → 新条目再算一次 calls=2
+  [PASS] 写带宽变小 → SM 数不变大（ceil(430.3/30)=15→16） =16
+
+== 汇总 ==
+  FAILS = 0
+  ALL PASS

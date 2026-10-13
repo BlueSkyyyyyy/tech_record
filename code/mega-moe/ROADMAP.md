@@ -3534,8 +3534,43 @@
       容量溢出被击穿**、同步 RNG 后 send/recv 张量**逐位一致**；Part B 复刻 oracle——索引形状/范围/
       槽不相交/唯一、`owner=idx//ne`/`row=idx%ne` 逐元素远程读 == gather-oracle **逐位**、正逆序一致、
       FP8 SF 复制通路逐位；Part C 定位阻塞（`import deep_ep` 非零退出落在 `deep_ep._C`、
-      `dist.all_gather_single` 全仓无定义、由 DeepEP 补丁 torch 提供）。配套博客
-      `content/posts/mega-moe-122-deepep-pp-engram-test-oracle`（索引页新增第 122 篇）。
+       `dist.all_gather_single` 全仓无定义、由 DeepEP 补丁 torch 提供）。配套博客
+       `content/posts/mega-moe-122-deepep-pp-engram-test-oracle`（索引页新增第 122 篇）。
+
+### P113 增量（opt-in，补齐 DeepEP 反复引用却从没单独读过的 Python 缓存基座）
+
+- [x] **P113-1** **DeepEP 的 Python 缓存策略：方法级 `weak_lru` 弱引用缓存 vs 模块/静态级
+       `lru_cache`**（`deep_ep/utils/semantic.py`；消费点 `deep_ep/buffers/ep.py:430/845`；
+       对照 `deep_ep/utils/find_pkgs.py:58`、`envs.py:193/200/207/237/260`、
+       `buffers/engram.py:129-130`、`buffers/bucket.py:236`）。
+       前面 122 篇把 DeepEP 的 kernel、host 编排、测试基座都拆遍了，但有 27 行 Python 被反复引用
+       却从没单独讲过——`semantic.py` 的 `weak_lru`（`:9-26`），全仓库**唯一一个「方法级」缓存**。
+       **H100 可跑，真机实测**（纯 Python、架构无关）。
+       → `docs/123-deepep-python-caching.md`（真实行号核对）：`value_or:5-6`（**仅 `None` 回退**，
+       `0`/`False`/`''` 合法，`ep.py:656-676` 消费）；`weak_lru:9-26` 逐行——`:17`
+       `@functools.lru_cache(maxsize, typed)`、`:19` `func(_self(), …)` 解引用、`:21`
+       `functools.wraps`、`:23` **key 是 `weakref.ref(self)` 而非 `self`**。**为什么**：
+       `functools.lru_cache` 把调用参数整体当 key，实例方法第一个参数就是 `self` → 被强引用钉住、
+       buffer 永不回收（`ep.py:430/845` 的 `get_theoretical_num_sms`/`lb_get_theoretical_num_sms`，
+       后者默认 `subprocess.run(['nvidia-smi','nvlink','-s'])`，`envs.py:207-235`）。
+       **三个真实陷阱**（实验逐条坐实）：① `weakref.ref` 相等性/哈希**委托 referent** →
+       「值相等但不同」实例撞同一条缓存、第二个拿到第一个结果；② 死引用条目**不自动清**、只受
+       `maxsize`（`maxsize=4` 跑 20 临时实例 `currsize==4`、`misses==20`）；③ `__slots__`
+       （无 `__weakref__`）抛 `TypeError`。**全库普查**：**只有 key 含 `self` 的实例方法才需要
+       `weak_lru`**——模块级 6 处（`find_pkgs.py:58`+`envs.py` 5）与静态方法 1 处
+       （`engram.py:129-130` `@staticmethod`+`lru_cache`）都用标准库、全仓库**无「实例方法直接
+       `functools.lru_cache`」**；对照 `BucketBuffer.get_theoretical_num_sms`（`bucket.py:236`，
+       被 `:324/352/385` 每类集合通信调用）**刻意为不缓存**。**模块级缓存也咬人**：`envs.py:207`
+       的 `get_nvlink_gbs` 用假输出实测（200→改环境仍 200→`cache_clear()` 后 20），坐实**吞掉环境
+       变化**（与第 117 篇环境变量面互为脚注）。H100 实测
+       `harness/exp_deepep_python_caching.{sh,py,out.txt}`（按路径加载真实
+       `semantic/find_pkgs/envs.py`，`sys.modules` 注入合成 `deep_ep._C` 绕开 `check_nccl_so`）
+       **39 PASS / 0 FAIL**：Part A `value_or` 5 条；Part B 普通 `lru_cache` 泄漏复现（实例
+       `del+gc` 后仍存活、`currsize==1`）vs `weak_lru` 可回收；Part C 缓存键语义 11 条（含两个
+       陷阱与 `typed`/`__slots__`）；Part D 普查 4 条；Part E 真实模块级缓存 10 条（含
+       `find_nccl_root` 命中、`get_nvlink_gbs` 吞环境）；Part F 真实 `weak_lru` 复刻
+       `lb_get_theoretical_num_sms` 同参只算一次。配套博客
+       `content/posts/mega-moe-123-deepep-python-caching`（索引页新增第 123 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -3562,8 +3597,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P112 各增量完成（P15-1…P41-1、P42-1…P112-1）。**
-  本轮 P112-1：新建 `docs/122-deepep-pp-engram-test-oracle.md`
+- 当前进度：**P0~P14 全部完成；P15~P113 各增量完成（P15-1…P41-1、P42-1…P113-1）。**
+  本轮 P113-1：新建 `docs/123-deepep-python-caching.md`
+  （+`harness/exp_deepep_python_caching.{sh,py,out.txt}`）——补齐 DeepEP 反复引用却从没单独读过的
+  **Python 缓存基座**：`deep_ep/utils/semantic.py` 的 `weak_lru`（全仓库唯一的方法级缓存）。
+  要点：`value_or` 仅 `None` 回退；`weak_lru` 把 key 从 `self` 换成 `weakref.ref(self)`（`:23`），
+  让实例可被 GC（普通 `functools.lru_cache` 修饰方法会把 `self` 钉死 → buffer 泄漏）；
+  三个真实陷阱（`weakref.ref` 相等性委托 referent → 值相等实例撞同一条 / 死引用条目不自动清只受
+  `maxsize` / `__slots__` 抛 `TypeError`）；全库普查得判据「**只有 key 含 `self` 的实例方法才需要
+  `weak_lru`**」（模块级 6 + 静态 1 用标准库、无「实例方法直接 lru_cache」；`bucket.py:236` 刻意
+  不缓存）；模块级缓存**吞掉环境变化**需 `cache_clear()`。纯 Python、架构无关，H100(sm90) 真机
+  **39 PASS / 0 FAIL**。索引页新增第 123 篇。
+  上一轮 P112-1：新建 `docs/122-deepep-pp-engram-test-oracle.md`
   （+`harness/exp_deepep_pp_engram_test.{sh,py,out.txt}`）——补齐 DeepEP 两类非 all-to-all 通信原语
   （PP send/recv 与 Engram fetch）一直缺席的「验收测试即正确性规范」：`tests/pp/test_pp.py`（152 行）+
   `tests/engram/test_engram.py`（155 行）。要点：PP 测试定义的是**协议**——`generate_stress_ops`
@@ -4819,13 +4864,18 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P112 已完成（最新 **P112-1 DeepEP 两类非 all-to-all 原语（PP send/recv 与
+- **下一步**：P0~P113 已完成（最新 **P113-1 DeepEP 的 Python 缓存基座 `weak_lru`**：
+  方法级弱引用 LRU 把 key 从 `self` 换成 `weakref.ref(self)` 以防 buffer 泄漏；`value_or` 仅
+  `None` 回退；三个真实陷阱（ref 相等性委托 / 死引用条目不自动清 / `__slots__` 抛错）；全库普查判据
+  「只有 key 含 `self` 的实例方法才需要 `weak_lru`」；模块级缓存吞掉环境变化需 `cache_clear()`；
+  纯 Python、H100(sm90) 真机 **39 PASS / 0 FAIL**；索引页新增第 123 篇。
+  可继续（均为增量、非承诺）：
+  `find_pkgs.py` 构建期 setup 侧（`setup.py:18-20` 按路径 exec / `-l:libnccl.so.2 -Wl,-rpath`，
+  第 86 篇已覆盖大半）、或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
+  上一轮 P112-1：P0~P112 已完成（最新 **P112-1 DeepEP 两类非 all-to-all 原语（PP send/recv 与
   Engram fetch）的验收测试即正确性规范**：PP 的 `generate_stress_ops` 在途背压无死锁调度、
   Engram 的 all-gather+gather 参考 oracle 与 SF 复制；kernel 端到端仅分析、测试侧 H100(sm90)
   真机 **72 PASS / 0 FAIL**；索引页新增第 122 篇。
-  可继续（均为增量、非承诺）：
-  `semantic.py` 的 `weak_lru`/`find_pkgs` setup 侧（第 83/86 篇已覆盖大半）、
-  或从 P96/P97 的轻微漂移清单挑关键路径定点复核。详见上）。
   上一轮 P111-1：P0~P111 已完成（最新 **P111-1 DeepEP 四个 Buffer 家族共享的生命周期契约
   `BufferBase`**：Python ABC 与 C++ pybind **两条平行继承链**、`destroy_on_destruction` 三分支
   状态机、`~BufferBase() noexcept(false)` 的用意、二次 `destroy()` 的跨语言分歧（Python 幂等 /
