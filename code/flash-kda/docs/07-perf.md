@@ -12465,3 +12465,82 @@ B3  tf32=OFF + fp32 solve        o max_rel = 1.17e-07
 - **求逆路径免罪**：cuSOLVER（§116）与 kernel 8×8 前代（`docs/02` §11.4）都不受此影响；§7.4/§116
   的两条 `待验证` 至此**全部关闭**。
 - **对部署无后果**：默认部署仍 §45 的 `cf`；本节只修正一个**参考实现/测试口径**的归因。
+
+## 118. 把 §117 的 tf32 发现从「一个 case 的更正」扩成对**专题自身参考实现**的系统审计，并让随 P5-4 交付的 artifact 与之一致（P7-114）
+
+§117（P7-113）证明：本 NGC 容器（`nv26.04`）默认 `torch.backends.cuda.matmul.allow_tf32 = True`
+（env `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1`），于是 `kda_chunked_fwd`（纯 torch 参考）在 GPU 上的每个
+fp32 `@` 都走 tf32，使「分块参考 vs 逐 token 金标」出现 $\sim3\times10^{-4}$ 的人为底噪。§117 把它
+落成三条更正（`docs/05` §7.4 的归因、`check_bwd_chunked.py::forward_precision_note` 的文档串、以及
+一条设计输入）。但当时只覆盖了**一个** case，且留下两个尾巴：**(1)** 随 P5-4 交付的
+`harness/check_bwd_chunked.out.txt` 是用 tf32-ON 跑出来的（其 fp32 forward 行读
+`o 2.55e-04 / S 3.27e-04`），即**证据本身**仍带 tf32 地板；**(2)** 专题其它在 GPU 上跑的数值锚点
+从未被检查过是否也受影响。本轮新增 `harness/check_tf32_refs.py`
+（`harness/check_tf32_refs.out.txt`）把两条一起关掉，并顺手把 `check_bwd_chunked.py` 的 artifact
+重生成成 ieee 口径。**未改 `src/` 任何算术。**
+
+### 118.1 Part A：静态清点——GPU 数值脚本里 tf32 策略的空白面
+
+对 `harness/check_*.py` 全量扫描「是否 pin 了 tf32（`allow_tf32` / `float32_matmul_precision` /
+`fp32_precision`）」：
+
+```
+  total check_*.py                     : 127
+  pin tf32 (allow_tf32/..._precision)  : 57
+  do NOT pin tf32                      : 70
+```
+
+**这 70 个未 pin 的脚本里绝大多数不受影响**：它们是计时（`*_timing`）、`ncu` 剖析、
+workspace 布局账、或 **bf16-vs-bf16** 对拍——这些里 tf32 开关根本不出现（Triton `tl.dot` 走它自己的
+精度、bf16 乘加与 torch 的 `allow_tf32` 无关）。真正**有风险**的条件是两条同时成立：**(a)** 在 GPU 上
+跑、**(b)** 把**一个 fp32 torch 量**与一个 $\ge$fp32 的 oracle 比（即参考与被测里都有 fp32 `@`）。
+本专题满足这两条的「核心参考对拍」只有 P4/P5 的少数几个，且其中 `check_bwd_ref.py`（P5-2）是
+CPU 跑的（其 `check_bwd_ref.out.txt` fp32 行 $\sim10^{-7}$ 本就干净）；`check_three_way.py`（P4-3）/
+`check_fwd_numerics.py`（P4-2）比的是 **bf16 kernel vs fp64 golden**，tf32 不在底噪里。
+唯一真正被 tf32 污染的交付证据是 `check_bwd_chunked.out.txt`（P5-4）。
+
+### 118.2 Part B：核心参考对拍在 tf32 ON / OFF 两档下全跑（关键）
+
+同一批 `src/` 参考实现、同一批 case（含非整除 `T=33`、$g{=}0$、真实规模 `T512 D128`），只切
+`allow_tf32`。`max_rel`：
+
+| 口径 | forward `o` | forward `S` | bwd worst field |
+|---|---|---|---|
+| fp64（控制，tf32 无关） | 3.93e-16 | 4.32e-16 | 7.30e-16 |
+| fp32, **tf32 ON**（容器默认） | **7.39e-04** | **7.39e-04** | **1.01e-03** |
+| fp32, **tf32 OFF**（ieee） | **2.23e-07** | **5.40e-07** | **1.03e-06** |
+| ON/OFF 比值 | **×3312** | **×1371** | **×976** |
+
+- tf32-ON 的每一行都**落在 $\varepsilon_{tf32}\!\approx\!2^{-11}=4.9\times10^{-4}$ 量级**（forward
+  7.4e-4、bwd 最坏 `dbeta` 1.0e-3），tf32-OFF 的每一行都落在 **fp32 ulp（$\sim10^{-7}$）**。
+- 这说明：P5-4 想证的「分块 adjoint 与逐 token adjoint 代数等价」在 ieee 下是 $\sim10^{-7}$
+  的**序误差**；tf32-ON artifact 里的 $\sim10^{-3}$ 与推导**无关**，是纯 torch 参考自身被容器默认
+  tf32 污染的产物（§117 的单点结论现在有了 3 个数量级的比值背书）。
+- fp64 控制列 $\sim10^{-16}$ 证明脚手架本身干净（与 §116 Part C 一致）。
+
+### 118.3 交付物修正：artifact 与 prose 一致
+
+`harness/check_bwd_chunked.py` 在模块顶部加显式 `allow_tf32=False`（并更新
+`forward_precision_note` 文档串），在 `kernel_lab` 重跑重生成 `check_bwd_chunked.out.txt`：
+
+```
+  fp32 : dq=7.15e-07/2.53e-07  dk=5.72e-06/8.90e-07  dv=5.07e-07/5.23e-07
+         dg=1.19e-06/1.03e-06  dbeta=3.81e-06/5.03e-07  dh0=3.58e-07/3.68e-07
+  forward fp32 (device=cuda): o max_rel=1.03e-07  S max_rel=1.82e-07
+```
+
+即修复前 `worst-case fp32` 的 $\sim10^{-3}$ 现读 $\sim10^{-6}$、forward $\sim10^{-7}$；fp64 / bf16
+两行**逐位不变**（tf32 只管 fp32 matmul；bf16 用 bf16 乘加、fp64 本就不走 tf32）。`docs/05` §7.4
+的表同步拆成三行（ieee / tf32 默认 / bf16），并注明 artifact 现报 ieee 口径。
+
+### 118.4 结论与设计输入
+
+- **§117 的发现升级为系统结论**：凡「本容器 + GPU + fp32 torch 参考 vs 金标」的对拍，未显式关 tf32
+  者一律带 $\sim5\times10^{-4}$ 底噪；本专题核心参考里唯一被它污染的交付证据（P5-4 artifact）已修正。
+- **命名规范（新增）**：本文件此后凡列「fp32 (GPU)」行，必须标明是 **ieee** 还是 **tf32 默认**——
+  两者差 3 个数量级（本容器默认不是 PyTorch 上游默认）。
+- **对部署与算法结论无后果**：默认部署仍 §45 的 `cf`；§5/P5-4 的「分块 adjoint 代数等价」在 ieee 下
+  更干净地成立。用于**被测核**的对比（`b2_mma_probe` 等）本就与被测核同口径（同吃 tf32），不受影响。
+- **边界**：本轮只审「专题自身参考实现（`src/`）」的核心前/反向对拍；70 个未 pin 脚本里其余多为
+  计时/`ncu`/bf16-vs-bf16，未逐一改（属「无风险」类，而非已逐一验证）；未审 megatron-port 子树
+  （其端到端 fp32 数字由 FLA/Triton 核主导，torch 侧 tf32 不是主导项，标**待验证**是否零影响）。

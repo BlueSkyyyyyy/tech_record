@@ -19,6 +19,15 @@ import sys
 
 import torch
 
+# P7-114: pin tf32 OFF.  This container (NGC nv26.04) defaults
+# ``torch.backends.cuda.matmul.allow_tf32 = True``, which would run every fp32 ``@`` in the
+# *pure-torch reference* (``kda_chunked_fwd`` / ``kda_chunked_backward``) in tf32 and inflate
+# the fp32 GPU rows of this artifact from ~1e-7 to ~1e-3 (see ``check_tf32_refs.py`` for the
+# ON/OFF audit and ``docs/07`` §117/§118).  The algebraic-equivalence claim of P5-4 is only
+# crisp with ieee fp32.
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+
 SRC = "~/proj/tech_record/code/flash-kda/src"
 sys.path.insert(0, SRC)
 from kda_bwd_ref import kda_chunked_backward, kda_token_backward  # noqa: E402
@@ -83,11 +92,13 @@ def forward_precision_note(device):
     """Explain the fp32 gradient gap: the blocked reference's inverse solve.
 
     Compare ``kda_chunked_fwd`` vs ``kda_token_recurrent`` (same inputs) in fp32 and
-    fp64.  NOTE (corrected by P7-113 / docs/07 §117): the fp32 GPU gap (~3e-4) is
-    **not** the cuSOLVER ``(I+L)^-1`` -- it is the NGC container default
-    ``torch.backends.cuda.matmul.allow_tf32 = True`` making every fp32 matmul in the
-    blocked forward run in tf32.  cuSOLVER P is bit-identical CPU vs GPU; with
-    ``allow_tf32=False`` the gap drops to ~1e-7 (see harness/check_fwd_gpu_cpu.py).
+    fp64.  NOTE (corrected by P7-113 / docs/07 §117, and *pinned* by P7-114 / §118):
+    the fp32 GPU gap (~3e-4) is **not** the cuSOLVER ``(I+L)^-1`` -- it is the NGC
+    container default ``torch.backends.cuda.matmul.allow_tf32 = True`` making every fp32
+    matmul in the blocked forward run in tf32.  cuSOLVER P is bit-identical CPU vs GPU.
+    This artifact now sets ``allow_tf32 = False`` (module top), so the fp32 rows below are
+    ieee and the forward gap reads ~1e-7 instead of ~3e-4; the tf32-ON floor
+    (``o 7.39e-04``) is preserved in ``harness/check_tf32_refs.py`` / ``docs/07`` §118.
     """
     print("\n  forward chunked-vs-token precision (oracle conditioning, seed=0 T=16 D=16):")
     for dt in (torch.float32, torch.float64):

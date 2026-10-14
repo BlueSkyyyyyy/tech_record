@@ -1,6 +1,6 @@
 # KDA 前向 / 反向算子实现解析：一页纸汇总
 
-> 本文是「Kimi Delta Attention（KDA）前向 / 反向算子实现解析」的收尾篇（路线图 **P8-1…P8-19**）。
+> 本文是「Kimi Delta Attention（KDA）前向 / 反向算子实现解析」的收尾篇（路线图 **P8-1…P8-20**）。
 > 把前七篇（数学 `01`、K1 `02`、K2 `03`、数值 `04`、反向推导 `05`、反向 kernel `06`、
 > 性能 `07`）压成一张可独立阅读的速查表：**公式 → 结构 → 误差 → 性能 → 反向要点**。
 > 所有数字都来自本机实测，出处见各篇与 `code/flash-kda/harness/*.out.txt`。
@@ -773,6 +773,19 @@ cuSOLVER $P$ 在 CPU/GPU **逐位相同**（`max_rel=0`）、tf32 打开时求�
 $P$ 只 $\le10^{-8}$」）与 `harness/check_bwd_chunked.py` 文档串。**设计输入**：本容器里任何「torch fp32 参考
 vs 金标」对拍**前一律显式关 tf32**（`allow_tf32=False` 或 `fp32_precision='ieee'`），否则带 $\sim10^{-4}$ 底噪。
 对部署无后果（默认仍 §45 的 `cf`）。
+
+**§118（P7-114）把 §117 的 tf32 发现从「一个 case 的更正」升级为对专题自身参考实现的系统审计**，
+并让随 P5-4 交付的 artifact 与 prose 一致。`harness/check_tf32_refs.py`（`.out.txt`）：**(A)** 静态清点
+`check_*.py` 127 个里 57 个 pin 了 tf32、70 个没 pin——但未 pin 的绝大多数是计时/`ncu`/bf16-vs-bf16
+（tf32 开关不出现），真正「GPU + fp32 torch 量 vs ≥fp32 oracle」被污染的核心证据只有 P5-4 的
+`check_bwd_chunked.out.txt`（`check_bwd_ref.py` 是 CPU 跑的、`check_three_way`/`check_fwd_numerics` 比的是
+bf16 kernel vs fp64）。**(B)** 同一批 `src/` 参考、同 case 只切 `allow_tf32`：forward `o`/`S`
+**tf32-ON 7.39e-4 / 7.39e-4 → tf32-OFF 2.23e-7 / 5.40e-7**（$\times3312$/$\times1371$）、反向 worst field
+**1.01e-3 → 1.03e-6**（$\times976$），ON 全落 $\varepsilon_{tf32}\!\approx\!4.9\!\times\!10^{-4}$、OFF 全落
+fp32 ulp，fp64 控制 $\sim10^{-16}$。**(C)** `check_bwd_chunked.py` 顶部加显式 `allow_tf32=False` 并重跑，
+artifact 的 fp32 `worst` 由 $\sim10^{-3}$ 读回 $\sim10^{-6}$、forward $\sim10^{-7}$，fp64/bf16 两行逐位不变；
+`docs/05` §7.4 表拆成 ieee / tf32 默认 / bf16 三行。**命名规范（新增）**：此后正文凡列「fp32 (GPU)」必须
+标 ieee 还是 tf32 默认（本容器默认 ≠ PyTorch 上游默认）。对部署与算法结论无后果。
 
 - **（`docs/04` §9，P4-6）把 FlashKDA 自带的 *kernel-逐位* torch 参考作为第三个 oracle**：此前前向数值
   只用「fp64 逐 token golden」与「FLA」两方，均独立于 kernel；FlashKDA 仓库自带 `tests/torch_ref.py`

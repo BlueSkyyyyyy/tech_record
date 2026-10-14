@@ -427,8 +427,14 @@ chunked backward 能 block-parallel 的原因，也解释了 `03`/`05` §6 观�
 | dtype | dq | dk | dv | dg | dbeta | dh0 |
 |---|---|---|---|---|---|---|
 | **fp64** | 4.2e-16 | 6.4e-16 | 3.9e-16 | 7.3e-16 | 7.5e-16 | 6.1e-16 |
-| fp32 (GPU) | 6.5e-4 | 8.5e-4 | 5.7e-4 | 5.3e-4 | 1.0e-3 | 4.8e-4 |
+| fp32 (GPU, **ieee**) | 2.5e-7 | 8.9e-7 | 5.2e-7 | 1.0e-6 | 5.0e-7 | 3.7e-7 |
+| fp32 (GPU, tf32 默认) | 6.5e-4 | 8.5e-4 | 5.7e-4 | 5.3e-4 | 1.0e-3 | 4.8e-4 |
 | bf16 (GPU) | 1.8e-2 | 6.8e-2 | 2.4e-2 | 4.4e-2 | 2.3e-2 | 1.5e-2 |
+
+> **口径（P7-114 / `07` §118）**：`harness/check_bwd_chunked.py` 自本轮起在模块顶部显式
+> `allow_tf32=False`，故 `check_bwd_chunked.out.txt` 现报的是 **ieee fp32** 行（$\sim10^{-7}$）。
+> 上表「tf32 默认」行是修复前那份 artifact 的读数（本 NGC 容器默认 `allow_tf32=True`，把纯 torch
+> 参考的 fp32 `@` 全走 tf32）；tf32-ON / OFF 两档的完整审计见 `harness/check_tf32_refs.py`。
 
 关键结论：
 
@@ -438,7 +444,7 @@ chunked backward 能 block-parallel 的原因，也解释了 `03`/`05` §6 观�
 - fp32 的 $\sim10^{-3}$ 不是推导误差。~~而是**参考实现里块内求逆走的是 fp32 `torch.linalg.solve`**：
   同样输入下 `kda_chunked_fwd` 在 **GPU 上** 与逐 token 前向就差 $\sim3\times10^{-4}$（CPU 上仅
   $\sim2\times10^{-7}$，见 `harness/check_bwd_chunked.out.txt` 附注），梯度再放大到 $\sim10^{-3}$。~~
-  **——经 `07` §117 / P7-113 更正**：那 $\sim3\times10^{-4}$ 与本表 fp32 行的 $\sim10^{-3}$ **不是**求逆
+  **——经 `07` §117 / P7-113 更正**：那 $\sim3\times10^{-4}$ 与本表「tf32 默认」行的 $\sim10^{-3}$ **不是**求逆
   （本容器 NGC torch 默认 `allow_tf32=True`，分块前向的 fp32 matmul 全走 tf32）；关 tf32 后
   `kda_chunked_fwd` vs 逐 token 只剩 $\sim10^{-7}$、`kda_chunked_backward` vs 逐 token 只剩 $\sim10^{-6}$
   （`harness/check_fwd_gpu_cpu.py`/`.out.txt`）。cuSOLVER fp32 的 $P$ 在 CPU/GPU **逐位相同**（$\sim10^{-8}$）。

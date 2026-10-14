@@ -1989,7 +1989,26 @@
       `check_bwd_chunked.py` 的「GPU cuSOLVER 比 CPU LAPACK 差」均**错误**，已改；其 fp32 GPU 行
       $\sim10^{-3}$ 是容器默认 tf32 污染。**设计输入**：本容器里任何「torch fp32 参考 vs 金标」对拍
       **前一律显式关 tf32**（与 `已知坑` P7-44 同源，但本次定性为**参考实现自身**的污染）。默认部署仍
-      §45 的 `cf`。见 `docs/07` §117 + `docs/08` §117 bullet。
+       §45 的 `cf`。见 `docs/07` §117 + `docs/08` §117 bullet。
+- [x] **P7-114** 把 P7-113 的 tf32 发现从「**一个 case 的更正**」升级为对**专题自身参考实现**
+       （`src/kda_ref.py`/`src/kda_bwd_ref.py`）的系统审计，并让随 P5-4 交付的 artifact 与 prose 一致。
+       新增 `harness/check_tf32_refs.py`（`harness/check_tf32_refs.out.txt`）；**未改 `src/` 任何算术**
+       （只改 `harness/check_bwd_chunked.py` 顶部加显式 `allow_tf32=False`、重生成其 `.out.txt`）。
+       **Part A（静态清点）**：`harness/check_*.py` 127 个里 **57 个 pin 了 tf32、70 个没 pin**——但未 pin 的
+       绝大多数是计时/`ncu`/bf16-vs-bf16（tf32 开关根本不出现），真正满足「GPU + fp32 torch 量 vs ≥fp32
+       oracle」而被污染的**核心交付证据只有 P5-4 的 `check_bwd_chunked.out.txt`**（`check_bwd_ref.py` 是
+       CPU 跑的、`check_three_way`/`check_fwd_numerics` 比的是 bf16 kernel vs fp64 golden）。**Part B（关键）**：
+       同一批 `src/` 参考、同 case 只切 `allow_tf32`——forward `o`/`S` **tf32-ON 7.39e-04/7.39e-04 →
+       tf32-OFF 2.23e-07/5.40e-07**（$\times3312$/$\times1371$）、反向 worst field **1.01e-03 → 1.03e-06**
+       （$\times976$），ON 全落 $\varepsilon_{tf32}\!\approx\!4.9\!\times\!10^{-4}$、OFF 全落 fp32 ulp，**fp64 控制
+       $\sim10^{-16}$**（脚手架干净）。**Part C**：`check_bwd_chunked.py` 加 `allow_tf32=False` 并重跑——
+       artifact 的 fp32 `worst` 由 $\sim10^{-3}$ 读回 $\sim10^{-6}$、forward $\sim10^{-7}$，**fp64/bf16 两行逐位不变**
+       （tf32 只管 fp32 matmul）；`docs/05` §7.4 表拆成 ieee / tf32 默认 / bf16 三行 + 口径注。**命名规范
+       （新增）**：正文凡列「fp32 (GPU)」必须标 **ieee** 还是 **tf32 默认**（本容器默认 ≠ PyTorch 上游默认，
+       差 3 个数量级）。对部署与算法结论无后果（默认仍 §45 的 `cf`）。**边界**：只审专题自身 `src/` 参考的
+       核心前/反向对拍；70 个未 pin 脚本多为计时/`ncu`/bf16（未逐一改，属「无风险类」）；**未审 megatron-port
+       子树**（其端到端 fp32 由 FLA/Triton 核主导，torch 侧 tf32 是否零影响**待验证**）。见 `docs/07` §118 +
+       `docs/08` §118 bullet。
 
 
 ### P8 小结 / 一页纸
@@ -2134,6 +2153,13 @@
         梯度差 $6\times10^{-4}\!\to\!10^{-6}$；并给出「本容器 torch fp32 参考对拍前一律关 tf32」的设计
         输入），文档头 `P8-1…P8-18`→`P8-1…P8-19`。数字全部复用 `docs/07` §117 本机实测（同一轮新增实验）。
         见 `docs/08-summary.md`。
+- [x] **P8-20** 补全一页纸（`docs/08-summary.md`）——新增 **§118 bullet**（P7-114 把 §117 的 tf32 发现
+        升级为对专题自身参考实现的系统审计：静态清点 127 个 `check_*.py` 里 70 个未 pin tf32 但多为
+        计时/`ncu`/bf16、核心被污染证据只有 P5-4 artifact；动态 ON/OFF 3 个数量级比值
+        forward `7.39e-4→2.23e-7`、反向 `1.01e-3→1.03e-6`、fp64 控制 $\sim10^{-16}$；
+        `check_bwd_chunked.py` 加 `allow_tf32=False` 重生成、`docs/05` §7.4 表拆三行；新增「正文凡列
+        fp32 (GPU) 必须标 ieee/tf32 默认」命名规范），文档头 `P8-1…P8-19`→`P8-1…P8-20`。数字全部复用
+        `docs/07` §118 本机实测（与 P7-114 同一轮新增实验）。见 `docs/08-summary.md`。
 
 
 ## 每轮增量流程（autopilot）
@@ -2198,7 +2224,11 @@
   $\sim6\times10^{-4}$，关 tf32 后分别回到 $\sim10^{-7}$/$\sim10^{-6}$（cuSOLVER $P$ CPU/GPU **逐位相同**，
   求逆免罪）。即这 $\sim10^{-4}$ 底噪**不只是被测核的、也是 torch 参考的**；任何「torch fp32 vs 金标」
   对拍前一律显式 `allow_tf32=False`（或 `fp32_precision='ieee'`），否则会把 tf32 底噪当成算法/求逆误差
-  （`docs/05` §7.4 曾据此误归因到 cuSOLVER）。
+  （`docs/05` §7.4 曾据此误归因到 cuSOLVER）。**系统化（P7-114，§118）**：`harness/check_tf32_refs.py`
+  审计出核心参考里唯一被污染的交付证据是 P5-4 的 `check_bwd_chunked.out.txt`（已加 `allow_tf32=False`
+  重生成）；ON/OFF 比值达 3 个数量级（forward `7.39e-4→2.23e-7`、反向 `1.01e-3→1.03e-6`），fp64 控制
+  $\sim10^{-16}$。**命名规范**：正文凡列「fp32 (GPU)」必须标 **ieee** 还是 **tf32 默认**（本容器默认
+  ≠ PyTorch 上游默认）。
 - **FlashKDA 的 `StateFP32` 是 I/O dtype 壳、不是精度旋钮**（P4-5，`docs/04` §8）：K2 的递推状态
   `state_acc` 是 **`BF16`** smem 数组（`fwd_kernel2.cuh:82`），`StateFP32=true` 只是把入参 `initial_state`/
   出参 `final_state` 声明成 fp32——载入时 fp32→bf16 round（`:300-303`、`utils.cuh:378-407`）、落盘时
@@ -2411,10 +2441,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P4-4/P4-5/P4-6/P4-7 + P6-3…P6-9 / P7-3…P7-113 补测 + P8-3…P8-19**；子专题
+- 当前进度：**P0–P8 全部完成 + P4-4/P4-5/P4-6/P4-7 + P6-3…P6-9 / P7-3…P7-114 补测 + P8-3…P8-20**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
   M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成 + **M14-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - P4-7（本轮）：**把两条最近的前向线索——varlen（§7/P4-4）与 kernel-逐位 oracle（§9/P4-6）——在同一点交叉**。
+  - P7-114 + P8-20（本轮）：**把 P7-113 的 tf32 发现从「一个 case 的更正」升级为对专题自身参考实现的
+    系统审计，并让随 P5-4 交付的 artifact 与 prose 一致**。新增 `harness/check_tf32_refs.py`
+    （`harness/check_tf32_refs.out.txt`）；**未改 `src/` 任何算术**（只给 `harness/check_bwd_chunked.py`
+    顶部加显式 `allow_tf32=False` 并重生成其 `.out.txt`）+ `docs/07` §118 + `docs/08` §118 bullet +
+    `docs/05` §7.4 三行表 + 命名规范。**Part A**：`harness/check_*.py` 127 个里 57 pin tf32 / 70 未 pin，
+    未 pin 的绝大多数是计时/`ncu`/bf16-vs-bf16（tf32 开关不出现），被污染的**核心交付证据只有 P5-4 的
+    `check_bwd_chunked.out.txt`**（`check_bwd_ref.py` CPU 跑、`check_three_way`/`check_fwd_numerics` 比
+    bf16 vs fp64）。**Part B（关键）**：同一批 `src/` 参考、同 case 只切 `allow_tf32`——forward `o`/`S`
+    **tf32-ON 7.39e-04/7.39e-04 → OFF 2.23e-07/5.40e-07**（×3312/×1371）、反向 worst field
+    **1.01e-03 → 1.03e-06**（×976），ON 全落 $\varepsilon_{tf32}\!\approx\!4.9\!\times\!10^{-4}$、OFF 全落
+    fp32 ulp、fp64 控制 $\sim10^{-16}$。**Part C**：artifact 的 fp32 worst 由 $\sim10^{-3}$ 读回 $\sim10^{-6}$、
+    forward $\sim10^{-7}$，**fp64/bf16 两行逐位不变**；`docs/05` §7.4 表拆成 ieee / tf32 默认 / bf16 三行。
+    **命名规范（新增）**：正文凡列「fp32 (GPU)」必须标 ieee 还是 tf32 默认。对部署与算法结论无后果
+    （默认仍 §45 的 `cf`）。**边界**：只审专题自身 `src/` 参考；未审 megatron-port 子树（其端到端 fp32
+    由 FLA/Triton 核主导，torch 侧 tf32 是否零影响**待验证**）。**下一步（可选）**：专题维持维护态——
+    主系列 `P7`/`docs/05`/P4-4…P4-7 均无剩余 `待验证`；megatron-port 仅剩「把 shim 落成真实 Megatron
+    树分支」（需改 Megatron 树、历轮刻意不改）。
+  - P4-7（上轮）：**把两条最近的前向线索——varlen（§7/P4-4）与 kernel-逐位 oracle（§9/P4-6）——在同一点交叉**。
     §7 把 packed 锚到的是「另一个 kernel 运行」、§9 只用等长 batched；而 FlashKDA 自带的 kernel-逐位
     `tests/torch_ref.py` 有一条**专用 `cu_seqlens` 分支**（`torch_ref.py:141-142` 断言 `B==1`、`:178`
     `N=len(cu)-1`、`:185-193` 逐序列 `[bos,eos)` 循环 + 逐序列 `work_state[seq_idx]`、`:202-206` 按
