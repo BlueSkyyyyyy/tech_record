@@ -2227,9 +2227,21 @@
 ## 当前进度 / 下一步
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
-  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成**（见
+  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成**（见
   `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M8-2（本轮）：**补上 M8-1 只做前向的 CP 缺口——CP 反向 + `varlen×CP` 梯度锚定**。
+  - megatron-port M9-1（本轮）：**把 Megatron `kda.py` 的调用契约逐项对齐到 FLA `chunk_kda` / 参考**。
+    `harness/check_port_contract.py`（`check_port_contract.out.txt`）+ `docs/08-megatron-contract.md`。
+    用一个逐字复刻 `kda.py::pre_gated_delta_rule`+`common.py::_prepare_input_for_gated_delta_rule`
+    的 shim（SBHD→BHSD、切段、l2norm、GVA、beta sigmoid）再喂 FLA，真机 ALL PASS：Part A 转置
+    `max_abs=0`；Part B 原样参数调 `chunk_kda` vs fp64 参考 `rel|do|=1.9e-3/rel|dh|=1.1e-3`；
+    Part C beta 核外 sigmoid 逐位；Part D `A_log`/`dt_bias` bf16 化 → 门控 `max_abs=0.127`（证
+    `mark_keep_in_fp32` 必要）；Part E l2norm 核外 vs 核内 `rel|do|=2.5e-4`；Part G bf16 `initial_state`
+    被 FLA 拒；Part H 12 条静态契约行全命中。**契约更正**：FLA/参考支持 GVA，但 **Megatron KDA
+    不支持**（`_compute_gates` 只产 H-head `raw_g`，`kda.py:180` vs FLA `g.shape==(B,T,HV,K)`
+    `chunk.py:411`）→ `num_value_heads==num_key_heads` 硬约束；缺口 `gdn_pre_gated_delta_rule_fusion`
+    对 KDA 未实现（`kda.py:399-402`）。**边界**：容器内 Megatron 因 `nvidia-resiliency-ext` 版本断言
+    无法 import，故用 shim 核验契约、未实例化真实层。**下一步**：M10-1（端到端前反向对拍）。
+  - megatron-port M8-2：**补上 M8-1 只做前向的 CP 缺口——CP 反向 + `varlen×CP` 梯度锚定**。
     `harness/check_port_fla_m8b.py`（`check_port_fla_m8b.out.txt`）+ `docs/07-cp-backward.md`。
     **Part 0**（fp64 CPU）参考分块反向 == 逐 token 反向 `≤5.1e-16`；**Part A**（单序列等分，
     `world∈{1,2,3,4}×C∈{32,64}`，`world≥3` 走多级 `all_gather`+`merge`）、**Part B**（varlen×CP

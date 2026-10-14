@@ -1,0 +1,48 @@
+==============================================================================
+megatron-port M9-1: calling-contract alignment
+  shape B=2 S=256 H=4 HV=4 K=64 V=64  seed=0
+  Megatron root: ~/proj/Megatron-LM
+  FLA_DISABLE_BACKEND_DISPATCH=1
+==============================================================================
+
+[Part A] SBHD -> BHSD transpose (kda.py:533-535)
+  BHSD-built q/k vs SBHD-transposed q/k: max_abs=0.00e+00   OK
+
+[Part B] whole contract vs fp64 reference (gate-in-kernel, l2norm outside)
+  FLA(kernel) vs ref: rel|do|=1.92e-03  rel|dh|=1.11e-03   OK
+
+[Part C] beta sigmoid applied *outside* the kernel (kda.py:181)
+  sigmoid(raw_logits) vs shim beta max_abs=0.00e+00   OK
+
+[Part D] A_log/dt_bias must stay fp32 (kda.py:117-118 mark_keep_in_fp32)
+  gate bf16 params vs fp32: max_abs=1.27e-01 max_rel=4.96e-03  (g range [-25.610, -0.000])
+
+[Part E] l2norm outside the kernel (common.py:431 / kda.py:443)
+  l2norm(outside) vs l2norm(in-kernel): rel|do|=2.48e-04   OK
+
+[Part F] GVA: Megatron KDA emits H-head g; FLA needs [B,T,HV,K]
+  Megatron _compute_gates -> g.shape=(2, 256, 2, 64)  v.shape=(2, 256, 4, 64)
+  FLA rejects g.shape (2, 256, 2, 64) for HV=4: g must have shape [B, T, HV, K]=[2, 256, 4, 64], got [2, 256, 2, 64]   OK  => KDA-in-Megatron requires num_value_heads == num_key_heads
+
+[Part G] initial_state contract (kda.py:441 initial_state=None)
+  bf16 initial_state rejected: initial_state must be in float32.   OK
+  zero fp32 initial_state vs None: rel|do|=0.00e+00   OK
+
+[Part H] static contract audit + fusion gap
+  OK  raw g handed to kernel     <- kda.py: 'self.use_gate_in_kernel = True'
+  OK  dt_bias fp32               <- kda.py: 'mark_keep_in_fp32(self.dt_bias)'
+  OK  A_log fp32                 <- kda.py: 'mark_keep_in_fp32(self.A_log)'
+  OK  l2norm outside kernel      <- kda.py: 'use_qk_l2norm_in_kernel=False'
+  OK  fusion gap                 <- kda.py: 'is not implemented for KDA yet'
+  OK  kernel entry               <- kda.py: 'self.gated_delta_rule = chunk_kda'
+  OK  GVA not supported          <- kda.py: 'supports training with equal query/key and v'
+  OK  l2norm applied             <- common.py: 'query_key = l2norm(query_key.contiguous())'
+  OK  GVA q                      <- common.py: 'query = query.repeat_interleave(repeat_facto'
+  OK  GVA k                      <- common.py: 'key = key.repeat_interleave(repeat_factor, d'
+  OK  FLA fp32 state assert      <- chunk.py: 'initial_state must be in float32'
+  OK  FLA gate assert            <- chunk.py: 'A_log must be provided when use_gate_in_kern'
+  GDN fusion path present in gdn.py: True
+
+==============================================================================
+ALL PASS
+==============================================================================
