@@ -1,0 +1,22 @@
+fla 0.5.2 | torch 2.12.0a0+0291f960b6.nv26.04.48445190 | NVIDIA H100 80GB HBM3
+========================================================================================================================
+Kimi K3 KDA: B=1 H=96 K=128 V=128   (fwd / bwd / fwd+bwd measured separately, CUPTI device)
+========================================================================================================================
+    dtype      req      eff       T |   fwd dev  fwd wall   TF/s |   bwd dev |   f+b dev | note
+-----------------------------------------------------------------------------------------------
+<site-packages>/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+ bfloat16   triton   triton    1024 |     0.438     0.844   58.8 |     1.554 |     2.157 | 
+ bfloat16 flashkda flash_kda    1024 |     0.209     0.268  123.3 |       nan |       nan | ->flash_kda bwd n/a (inference-only)
+ bfloat16   triton   triton    4096 |     1.586     1.808   65.0 |     6.058 |     8.230 | 
+ bfloat16 flashkda flash_kda    4096 |     0.774     0.832  133.2 |       nan |       nan | ->flash_kda bwd n/a (inference-only)
+ bfloat16   triton   triton    8192 |     3.139     3.269   65.7 |    12.069 |    16.347 | 
+ bfloat16 flashkda flash_kda    8192 |     1.529     1.584  134.9 |       nan |       nan | ->flash_kda bwd n/a (inference-only)
+ bfloat16   triton   triton   16384 |     6.276     6.404   65.7 |    24.230 |    32.733 | 
+ bfloat16 flashkda flash_kda   16384 |     3.034     3.084  135.9 |       nan |       nan | ->flash_kda bwd n/a (inference-only)
+ bfloat16   triton   triton   32768 |    12.598    12.714   65.5 |    48.347 |    65.411 | 
+ bfloat16 flashkda flash_kda   32768 |     6.044     6.091  136.4 |       nan |       nan | ->flash_kda bwd n/a (inference-only)
+ bfloat16   triton   triton   65536 |    25.248    25.346   65.3 |       nan |       nan | 
+ bfloat16 flashkda flash_kda   65536 |    12.095    12.143  136.4 |       nan |       nan | ->flash_kda bwd n/a (inference-only)
+
+CSV written: kda_kimi_k3.csv

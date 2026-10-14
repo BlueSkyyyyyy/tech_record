@@ -1,0 +1,13 @@
+dtype,requested,effective,T,H,K,V,fwd_dev_ms,fwd_wall_ms,bwd_dev_ms,fwd_bwd_dev_ms,tflops,gb_s,note
+bfloat16,triton,triton,1024,96,128,128,0.438018,0.843693,1.554338,2.157277,58.833,287.7,
+bfloat16,flashkda,flash_kda,1024,96,128,128,0.208965,0.268342,nan,nan,123.321,603.1,->flash_kda bwd n/a (inference-only)
+bfloat16,triton,triton,4096,96,128,128,1.586047,1.807504,6.057825,8.230322,64.991,317.8,
+bfloat16,flashkda,flash_kda,4096,96,128,128,0.773797,0.831979,nan,nan,133.212,651.5,->flash_kda bwd n/a (inference-only)
+bfloat16,triton,triton,8192,96,128,128,3.138517,3.269344,12.068718,16.346721,65.687,321.2,
+bfloat16,flashkda,flash_kda,8192,96,128,128,1.528531,1.584098,nan,nan,134.874,659.6,->flash_kda bwd n/a (inference-only)
+bfloat16,triton,triton,16384,96,128,128,6.276164,6.403995,24.230108,32.732806,65.696,321.3,
+bfloat16,flashkda,flash_kda,16384,96,128,128,3.033626,3.083642,nan,nan,135.915,664.7,->flash_kda bwd n/a (inference-only)
+bfloat16,triton,triton,32768,96,128,128,12.598033,12.714101,48.346774,65.410913,65.457,320.1,
+bfloat16,flashkda,flash_kda,32768,96,128,128,6.043604,6.090835,nan,nan,136.447,667.3,->flash_kda bwd n/a (inference-only)
+bfloat16,triton,triton,65536,96,128,128,25.248483,25.345550,nan,nan,65.321,319.5,
+bfloat16,flashkda,flash_kda,65536,96,128,128,12.094580,12.142504,nan,nan,136.364,666.9,->flash_kda bwd n/a (inference-only)

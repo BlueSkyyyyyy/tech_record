@@ -1,5 +1,9 @@
 # TE 算子性能测试（rmsnorm / rmsnorm_bwd / fused_attn_bwd）
 
+> **另见**：[`results_kda_kimi_k3.md`](results_kda_kimi_k3.md) — Kimi K3 的 **KDA** 层
+> （FLA `chunk_kda` Triton vs FlashKDA）性能实测，脚本 `bench_kda_kimi_k3.py`。
+> TE 无 KDA 算子，故 KDA 单独测；本文件仍是 TE 算子的口径。
+
 测试 `transformer_engine`（TE）三个算子的性能，用于与 H100 roofline 对比：
 
 - `rmsnorm_fwd`（即 `te.rmsnorm`）

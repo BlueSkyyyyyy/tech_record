@@ -1,0 +1,25 @@
+fla 0.5.2 | torch 2.12.0a0+0291f960b6.nv26.04.48445190 | NVIDIA H100 80GB HBM3
+========================================================================================================================
+Kimi K3 KDA: B=1 H=96 K=128 V=128   (fwd / bwd / fwd+bwd measured separately, CUPTI device)
+========================================================================================================================
+    dtype      req      eff       T |   fwd dev  fwd wall   TF/s |   bwd dev |   f+b dev | note
+-----------------------------------------------------------------------------------------------
+<site-packages>/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+  float16   triton   triton    1024 |     0.440     0.843   58.6 |     1.556 |     2.158 | 
+  float16 tilelang tilelang    1024 |     0.440     0.870   58.6 |     1.330 |     1.932 | 
+  float16   triton   triton    4096 |     1.594     1.823   64.7 |     6.063 |     8.238 | 
+  float16 tilelang tilelang    4096 |     1.594     1.834   64.7 |     5.057 |     7.235 | 
+  float16   triton   triton    8192 |     3.149     3.312   65.5 |    12.068 |    16.357 | 
+  float16 tilelang tilelang    8192 |     3.148     3.281   65.5 |    10.019 |    14.302 | 
+  float32   triton   triton    1024 |     0.728     1.077   35.4 |     2.875 |     3.805 | 
+2026-10-14 05:47:41  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:129): TileLang begins to compile kernel `kernel` with `out_idx=None`
+  float32 tilelang tilelang    1024 |     0.728     1.094   35.4 |       nan |       nan | bwdFAIL:#if defined(_MSC_VER
+  float32   triton   triton    4096 |     2.695     2.832   38.2 |    11.273 |    14.706 | 
+2026-10-14 05:48:08  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:129): TileLang begins to compile kernel `kernel` with `out_idx=None`
+  float32 tilelang tilelang    4096 |     2.695     2.836   38.2 |       nan |       nan | bwdFAIL:#if defined(_MSC_VER
+  float32   triton   triton    8192 |     5.343     5.488   38.6 |    22.582 |    29.369 | 
+2026-10-14 05:48:34  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:129): TileLang begins to compile kernel `kernel` with `out_idx=None`
+  float32 tilelang tilelang    8192 |     5.343     5.494   38.6 |       nan |       nan | bwdFAIL:#if defined(_MSC_VER
+
+CSV written: kda_dtypes.csv

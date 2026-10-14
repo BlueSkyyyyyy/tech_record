@@ -1,0 +1,39 @@
+fla 0.5.2 | torch 2.12.0a0+0291f960b6.nv26.04.48445190 | NVIDIA H100 80GB HBM3
+================================================================================================
+KDA backend x dtype support matrix (effective backend = what FLA dispatch picks)
+shape: B=1 T=2048 H=96 K=V=128  flags: safe_gate + in-kernel gate/l2norm/beta/beta
+================================================================================================
+     dtype |  requested |  fwd effective |  bwd effective
+--------------------------------------------------------------
+  bfloat16 |     triton |      triton/ok |      triton/ok
+  bfloat16 |   tilelang |    tilelang/ok |    tilelang/ok
+  bfloat16 |   flashkda |   flash_kda/ok |      triton/ok
+   float16 |     triton |      triton/ok |      triton/ok
+   float16 |   tilelang |    tilelang/ok |    tilelang/ok
+   float16 |   flashkda |      triton/ok |      triton/ok
+   float32 |     triton |      triton/ok |      triton/ok
+2026-10-14 03:29:27  [TileLang:tilelang.jit.kernel:INFO] (kernel.py:129): TileLang begins to compile kernel `kernel` with `out_idx=None`
+   float32 |   tilelang |    tilelang/ok | tilelang/FAIL:RuntimeError:#if defined(_MSC_VER) && !de
+   float32 |   flashkda |      triton/ok |      triton/ok
+float8_e4m3fn |     triton | triton/FAIL:CompilationError:at 11:10:
+def fused_beta_sig | triton/FAIL:CompilationError:at 11:10:
+def fused_beta_sig
+float8_e4m3fn |   tilelang | tilelang/FAIL:CompilationError:at 11:10:
+def fused_beta_sig | tilelang/FAIL:CompilationError:at 11:10:
+def fused_beta_sig
+float8_e4m3fn |   flashkda | triton/FAIL:CompilationError:at 11:10:
+def fused_beta_sig | triton/FAIL:CompilationError:at 11:10:
+def fused_beta_sig
+float8_e5m2 |     triton | triton/FAIL:CompilationError:at 11:10:
+def fused_beta_sig | triton/FAIL:CompilationError:at 11:10:
+def fused_beta_sig
+float8_e5m2 |   tilelang | tilelang/FAIL:CompilationError:at 11:10:
+def fused_beta_sig | tilelang/FAIL:CompilationError:at 11:10:
+def fused_beta_sig
+float8_e5m2 |   flashkda | triton/FAIL:CompilationError:at 11:10:
+def fused_beta_sig | triton/FAIL:CompilationError:at 11:10:
+def fused_beta_sig
+--------------------------------------------------------------
+cell = <effective backend>/<runtime status>; runtime: ok | FAIL:<msg>
+rule: a requested backend that rejects is silently replaced by Triton;
+      FlashKDA = bf16 + inference only; TileLang fp32 bwd fails to compile.
