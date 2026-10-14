@@ -5283,6 +5283,35 @@
       （`gemm.hpp:373-427` 无跨 rank 语义），跨 rank 噪声只在共享/稠密分支与优化器同步上。架构无关、H100 真机。
       → `docs/185-dp-allreduce-bits.md`。配套博客 `content/posts/mega-moe-185-dp-allreduce-bits`（索引页新增第 185 篇）。
 
+### P176 增量（opt-in，补齐第 174/175 篇累积序结论在**目标卡 wgrad 路径**上的迁移）
+
+- [x] **P176-1** **MN-major K-grouped wgrad：SM100 FP8 `k_grouped_tn` 生产路径精读（+ H100 可跑对照）**
+      （主 kernel SM100 专属、**仅分析**；H100 用 **BF16 MN-major 同构 kernel** 真机对照）。
+      第 12 篇讲了 SM90 `k_grouped_nt`（K-major）、第 19 篇讲了 SM90 BF16 kernel、第 174/175 篇量了
+      累积序对逐位的影响，但**目标卡（SM100）生产 wgrad 走的是 MN-major 的 `k_grouped_fp8_gemm_tn_contiguous`**
+      ——本机跑不了（`csrc/apis/gemm.hpp:369` `DG_HOST_UNREACHABLE`），第 12 篇只给它一行「仅分析」。
+      本篇补齐并回答「第 174/175 的逐位可复现性结论能否迁移到 tn」。
+      → `docs/186-k-grouped-tn-mn-major.md`（真实行号核对）：宿主契约 `gemm.hpp:320-371`（tn：`recipe=(1,1,gran_k)`
+      `:331`、`gran_k∈{32,128}`/`k_alignment%128` `:335-338`、MN-major `[sum_k,M]/[sum_k,N]`+输出 `[G,m,n]`
+      `:340-343`、PSUM 语义 `:345-348`、仅 arch10 `:361-369`）v.s. `:373-427`（nt：`recipe=(1,1,128)` `:384`、
+      禁 PSUM `:388`、`c` 必填 `:403`、SM90 派发 `:421-423`）v.s. `:676-722`（BF16 tn：arch9 `:708-714`
+      强制 c/禁 PSUM、arch10 `:715-718`）；jit `sm100_fp8_fp4_gemm_1d1d.hpp:325-403`（GemmType 二选一
+      `:342-344`、TMA A/B MN `:360-369`、CD 3D `:370-375`）；kernel `sm100_fp8_fp4_gemm_1d1d.cuh`
+      （`BLOCK_K=128`/`UMMA_K=32` `:81/:72`、K-grouped 断言 `:100-104`、**K 外循环+UMMA K 内循环、仅首条
+      UMMA 清零** `accumulate=(umma_k_idx>0 or k_block_idx>0)` `:359-441`、MN-major TMA `:283-291`、
+      空组跳过 `:526`、CD 组号走 3D TMA `:523`）；scheduler `scheduler/gemm.cuh`（`get_next_k_group` `:71-82`、
+      `get_global_idx` K 偏移 `:157-168`、**每组同一套 (m,n) 块、逐组推进** `:102/:226-246`）。
+      **H100(sm90) 真机对照**（`k_grouped_bf16_gemm_tn_contiguous`→`sm90_bf16_k_grouped_gemm`
+      `sm90_bf16_gemm.hpp:264-330`，物理布局与 tn 逐位同构；`harness/exp_kgrouped_tn_mn_major.{py,sh,out.txt}`）：
+      **A1** 逐组 `relerr≈2.05e-7~5.53e-7`；**A2 全组一次 launch vs 逐组单独 launch 逐位相等（4/4）**；
+      **A3 组排列置换后输出按同置换逐位相等**；**A4** SM90 用 PSUM 被 `gemm.hpp:711` 拒（PSUM 为 SM100-only）；
+      **A5** 20 次 0 bit 变动；**A6** 吞吐 40–77 TFLOPS（远低于第 12 篇 FP8 nt 同形状 425，故 BF16 版只作
+      **正确性/结构对照**、非性能代理）；**B** kernel vs fp64 `3.98e-7`、torch fp32 vs fp64 `1.05e-7`、
+      二者 **bit 不同 92.2%**、`max|差|=1.14e-4`（复现第 174 篇「可复现性 ≠ 数值精度」）。**结论**：tn 与 nt
+      结构同构（每组独立累加器、组内 K 单调）⇒ 第 174/175 篇的累积序结论**迁移成立**；唯一不可从源码判定
+      的是 UMMA v.s. WGMMA 的 K=32 内归约序。配套博客 `content/posts/mega-moe-186-k-grouped-tn-mn-major`
+      （索引页新增第 186 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -5320,8 +5349,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P175 各增量完成（P15-1…P41-1、P42-1…P175-1）。**
-  本轮 P175-1：新建 `docs/185-dp-allreduce-bits.md` + `harness/exp_dp_allreduce_bits.{py,sh,out.txt}`
+- 当前进度：**P0~P14 全部完成；P15~P176 各增量完成（P15-1…P41-1、P42-1…P176-1）。**
+  本轮 P176-1：新建 `docs/186-k-grouped-tn-mn-major.md` +
+  `harness/exp_kgrouped_tn_mn_major.{py,sh,out.txt}`——反向系列（第 12 篇 wgrad / 第 174 篇累积结合序 /
+  第 175 篇跨 rank）用的都是 **SM90 能跑的 FP8 `k_grouped_nt`**（K-major）；但 Mega MoE 的 wgrad 在
+  **目标卡（SM100）**上走的是 **MN-major 的 `k_grouped_fp8_gemm_tn_contiguous`**（`A/B:[sum_k,M]`），
+  本机跑不了（`gemm.hpp:369` `DG_HOST_UNREACHABLE`），第 12 篇只给它一行「仅分析」。本篇补齐并回答
+  「第 174/175 的逐位可复现性结论能否迁移到 tn」。**源码事实**：① 布局/架构矩阵（FP8 nt=SM90 K-major、
+  FP8 tn=**仅 SM100** MN-major、BF16 tn=**SM90+SM100** MN-major、FP4 nt=SM100）都满足 `D[e]=A_e^T B_e`、
+  输出 `[G,m,n]`（`gemm.hpp:320-371/373-427/676-722`）；tn 支持 PSUM/自定义 epilogue/直接输出，nt 在
+  SM90 强制累积且禁 PSUM；② SM100 tn kernel（`sm100_fp8_fp4_gemm_1d1d.cuh`）`BLOCK_K=128/UMMA_K=32`、
+  **每条输出 tile 一条独立 fp32 累加链**（K 块外循环、UMMA K 内循环、仅首条 UMMA 清零，`:359-441`）；
+  ③ scheduler 每组拥有同一套 (m,n) 块、逐组推进、组起点由 `current_k_start` 给出（`scheduler/gemm.cuh:71-82/
+  102/157-168/226-246`）⇒ **组间不共享累加器、不共享 K 区间**。**H100(sm90) 真机对照**（BF16 MN-major
+  同构 kernel `sm90_bf16_gemm.hpp:264-330`，物理布局与 tn 逐位同构）：**A2 全组一次 launch vs 逐组单独
+  launch 逐位相等（4/4）**、**A3 组排列置换逐位相等**、A4 PSUM 被 `gemm.hpp:711` 拒（SM100-only）、
+  A5 20 次 0 bit 变动、A1 relerr≈2e-7~5.5e-7、A6 吞吐 40–77 TFLOPS（只作正确性对照）、B kernel 与
+  torch fp32 **bit 不同 92.2%**。**结论**：tn 与 nt 结构同构 ⇒ 第 174/175 篇累积序结论**迁移成立**；
+  主 kernel SM100 专属、仅分析。索引页新增第 186 篇。
+  上一轮 P175-1：新建 `docs/185-dp-allreduce-bits.md` + `harness/exp_dp_allreduce_bits.{py,sh,out.txt}`
   ——第 184 篇（`docs/184`）量到 MoE 反向梯度累积的「切分 × 结合序」，末句写下「DP 的 ring-reduce
   与 tree-reduce 在 fp32 下不同 bit」，但那是**纯 torch 手动相加**的模拟；第 170 篇（`docs/180`）
   留口子「推到真实多卡」。本篇用**真实 NCCL** 补齐跨 rank 那一格。**H100 真机**（4×H100、1M fp32
@@ -7318,17 +7364,26 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P175 已完成（最新 **P175-1 把第 184 篇 §8 留的「跨 rank all-reduce 序」从纯 torch 模拟
-  推到真实多卡 NCCL**：`docs/185`。**H100 真机**（4×H100、1M fp32、NCCL 2.29.7，NVLS 不可用故默认退到
-  Ring）：① 固定配置 run-to-run **逐位确定**（20 次 0 差）；② **w=2 全同、w=4 才分化**（Ring vs Tree
-  差 **35.6%** bit、relerr 2.967e-08；vs fp64 ~33%）；③ **换算法** Ring↔Tree 改 35.6% bit；④ **换集合
-  操作** ZeRO 的 `reduce_scatter+all_gather` vs `all_reduce` 在 w=4 差 31.9%；⑤ 真实 NCCL 不命中顺序链/
-  旋转/pairwise-tree 任一种（分 chunk 的 reduce-scatter+all-gather）；⑥ `NCCL_DETERMINISTIC=1` 无效果；
-  ⑦ 幅度 ≲3.7e-8（比 FP8 量化误差小 ~1e6 倍）。DeepEP combine 固定 top-k 序 bf16 累加、EPLB 硬件
-  `red.add` 不保证——跨 rank 归约不止 NCCL。纯 NCCL、架构无关。索引页新增第 185 篇）。
-  可继续（均为增量、非承诺）：① 把结合序结论推到 **SM100 `k_grouped_tn`（MN-major，仅分析）**做同一
-  推演；② 把第 170 篇的 dispatch 行序与本篇的累积序**放进同一次端到端训练步**计时（需 DeepEP 运行期，
-  见「阻塞」）；③ 把 NCCL 结论接到**真实 MoE 训练步**的稠密/shared 分支（需 DeepEP 运行期）。
+- **下一步**：P0~P176 已完成（最新 **P176-1 补上第 174/175 篇累积序结论在「目标卡 wgrad 路径」上的迁移**：
+  `docs/186`。第 12 篇讲的 SM90 FP8 `k_grouped_nt` 是 K-major、本机可跑，但目标卡生产 wgrad 走
+  **MN-major 的 `k_grouped_fp8_gemm_tn_contiguous`**（仅 SM100，`gemm.hpp:369` 拒 sm90）。本篇补上：
+  ① 布局/架构矩阵、tn v.s. nt 契约（tn 支持 PSUM/直接输出，nt 在 SM90 强制累积禁 PSUM）；② SM100 tn kernel
+  每条输出 tile 一条**独立、单调的 fp32 累加链**（K 块外循环、UMMA K 内循环、仅首条 UMMA 清零）；③ scheduler
+  每组同一套 (m,n) 块、逐组推进 ⇒ **组间不共享累加器/K 区间**。**H100(sm90) 真机对照**（BF16 MN-major
+  同构 kernel，物理布局与 tn 逐位同构）：**全组一次 launch vs 逐组单独 launch 逐位相等（4/4）**、**组排列
+  置换逐位相等**、PSUM 被 `gemm.hpp:711` 拒（SM100-only）、20 次 0 bit 变动、吞吐 40–77 TFLOPS（只作正确性
+  对照）、kernel 与 torch fp32 **bit 不同 92.2%**。**结论**：tn 与 nt 结构同构 ⇒ 第 174/175 的结论**迁移
+  成立**；唯一不可从源码判定的是 UMMA v.s. WGMMA 的 K=32 内归约序。主 kernel SM100 专属、仅分析。
+  索引页新增第 186 篇）。
+  可继续（均为增量、非承诺）：① 把本轮的 BF16 MN-major 对照接到 **FP8 `k_grouped_tn` 的 SF 打包链路**
+  （第 16 篇）做端到端「布局 → SF → kernel」串联核对；② 把第 170 篇的 dispatch 行序与本篇的累积序
+  **放进同一次端到端训练步**计时（需 DeepEP 运行期，见「阻塞」）；③ 把 NCCL 结论接到**真实 MoE 训练步**
+  的稠密/shared 分支（需 DeepEP 运行期）。
+  上一轮 P175-1 把第 184 篇 §8 留的「跨 rank all-reduce 序」从纯 torch 模拟推到真实多卡 NCCL
+  （`docs/185`；**H100 真机** 4×H100/NCCL 2.29.7：① 固定配置 run-to-run **逐位确定**；② **w=2 全同、
+  w=4 才分化** Ring vs Tree 差 **35.6%** bit、relerr 2.967e-08；③ 换算法改 35.6% bit；④ `rs+ag` vs
+  `all_reduce` 差 31.9%；⑤ 真实 NCCL 不命中顺序链/旋转/pairwise-tree；⑥ `NCCL_DETERMINISTIC=1` 无效果；
+  ⑦ 幅度 ≲3.7e-8。DeepEP combine 固定 top-k 序 bf16 累加、EPLB 硬件 `red.add` 不保证。索引页新增第 185 篇）。
   上一轮 P174-1 把第 170 篇 §8 留下的「多 microbatch 梯度累积结合序」补上（`docs/184`）：
   生产训练 gradient accumulation 把 token 切成若干 microbatch 分别算、再按某顺序
   相加——都不改数学、都改 fp32 舍入路径。**H100(sm90) 真机**（真实 SM90 FP8 kernel）：① wgrad 一次大

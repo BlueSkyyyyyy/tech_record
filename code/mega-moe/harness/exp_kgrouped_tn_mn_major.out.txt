@@ -1,0 +1,39 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+deep_gemm 2.8.1, arch_major=9, device=NVIDIA H100 80GB HBM3, cap=(9, 0)
+物理布局：A/B = [sum_k, M] / [sum_k, N]（MN-major，MN 连续）；输出 D = [G, m, n]
+============================================================================================
+shape: G=4 m=512 n=1024 logical_ks=[512, 384, 640, 256] host_ks(padded)=[512, 384, 640, 256] sum_k=1792
+--------------------------------------------------------------------------------------------
+A1  逐组 D[e]=A_e^T B_e（BF16 输入 / fp32 累加 vs fp64 参考）
+      group 0: logical_k= 512  relerr=4.319e-07
+      group 1: logical_k= 384  relerr=3.157e-07
+      group 2: logical_k= 640  relerr=5.528e-07
+      group 3: logical_k= 256  relerr=2.051e-07
+--------------------------------------------------------------------------------------------
+A2  组独立累加器：全组一次 launch vs 每组单独 launch —— 逐位相等？
+      group 0: bitwise-equal=True
+      group 1: bitwise-equal=True
+      group 2: bitwise-equal=True
+      group 3: bitwise-equal=True
+      => 全部逐位相等 = True
+--------------------------------------------------------------------------------------------
+A3  组排列无关：置换物理组顺序 + ks，输出按同一置换逐位相等？
+      perm=[2, 0, 3, 1]  => 逐位相等 = True
+--------------------------------------------------------------------------------------------
+A4  契约：SM90 BF16 tn 用 PSUM 布局 -> 应被拒（PSUM 为 SM100-only）
+      rejected as expected -> RuntimeError: Assertion error (csrc/apis/gemm.hpp:711): not use_psum_layout and ks_cpu.has_value() and not ks_cpu.value().empty()
+--------------------------------------------------------------------------------------------
+A5  同配置 run-to-run 逐位确定（20 次）
+      20 次里与首次逐位不等的次数 = 0
+--------------------------------------------------------------------------------------------
+A6  吞吐（真实 SM90 BF16 MN-major grouped kernel；对照 P4-2 FP8 nt 同形状 425 TFLOPS）
+      G=8 m=4096 n=7168 k/group=512  t=5955 us  40 TFLOPS  读 15 GB/s（仅 A/B 输入，bf16）
+      G=8 m=4096 n=7168 k/group=1024  t=6230 us  77 TFLOPS  读 30 GB/s（仅 A/B 输入，bf16）
+      G=8 m=7168 n=7168 k/group=512  t=11663 us  36 TFLOPS  读 10 GB/s（仅 A/B 输入，bf16）
+============================================================================================
+B  累积序解离：kernel(真机 fp32 累加) vs fp64 vs torch fp32 bmm
+      relerr(kernel, fp64)       = 3.976e-07
+      relerr(torch_fp32, fp64)   = 1.049e-07
+      bit-diff fraction(kernel, torch_fp32) = 0.9224
+      max|kernel - fp64|         = 1.137e-04
+      max|kernel - torch_fp32|   = 1.144e-04
