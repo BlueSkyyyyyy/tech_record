@@ -5257,6 +5257,32 @@
        只在共享/稠密分支与优化器同步上。主 kernel SM100 专属、仅分析。→ `docs/184-moe-grad-accum-assoc.md`
        （真实行号核对）。配套博客 `content/posts/mega-moe-184-moe-grad-accum-assoc`（索引页新增第 184 篇）。
 
+### P175 增量（opt-in，补齐第 184 篇 §8 留下的「跨 rank 真实归约」）
+
+- [x] **P175-1** **数据并行 all-reduce 的逐位一致性：真实 NCCL 下 ring/树/world-size 都改 bit**
+      （纯 `torch.distributed(NCCL)`，**架构无关、H100 真机**；对照第 184 篇 `docs/184` 的「手动结合序」
+      与第 170 篇 `docs/180` 的口子；DeepEP `impls/ep/reduce_grads.cuh:82`、
+      `impls/ep/combine_utils.cuh:133-151`、`common/ptx.cuh:593-601`；DeepGEMM `csrc/apis/gemm.hpp:373-427`）。
+      第 184 篇量到「DP 的 ring-reduce 与 tree-reduce 在 fp32 下不同 bit」，但那是**纯 torch 手动相加**的
+      模拟；本篇在 H100 上用**真实 NCCL** 做 DP 梯度 all-reduce，把「哪一层决定 bit」钉到配置。
+      **H100 真机**（4×H100、1M fp32 梯度桶、PyTorch 2.12、NCCL 2.29.7；本机 NVSwitch fabric manager
+      未启用 → 默认 NVLS multicast 报 `invalid argument`，故 `NCCL_NVLS_ENABLE=0`、默认算法退到 Ring；
+      `harness/exp_dp_allreduce_bits.{py,sh,out.txt}`）：① **固定配置 run-to-run 逐位确定**——同输入同算法
+      20 次 `all_reduce` 最大逐位差 **0**（所有 world/算法/协议），不确定来自**改配置**而非「每次都抖」；
+      ② **world size**——w=2 时默认/Ring/Tree **全同**（2 个数只有一种加法序、单次 fp32 加正确舍入、
+      vs fp64 逐位 0 差），**w=4 才分化**：Ring vs Tree 差 **373181/1048576（35.6%）**、relerr **2.967e-08**，
+      vs fp64 差 ~33%；③ **算法**——`NCCL_ALGO` Ring↔Tree 改 35.6% bit；④ **集合操作种类**——ZeRO 的
+      `reduce_scatter+all_gather` 与 `all_reduce` 在 w=4 差 **334136/1048576（31.9%）**（w=2 仍 0）；
+      ⑤ **不能简单建模**——真实 NCCL 不命中顺序链/逐-rank 旋转/pairwise-tree 任一种（Ring 差
+      32%/32%/35%，Tree 最接近旋转链仍差 23.5%），因 all-reduce 是**分 chunk 的 reduce-scatter+all-gather**；
+      ⑥ **开关无效**——`NCCL_DETERMINISTIC=1` 逐位 0 差（同第 170 篇 `use_deterministic_algorithms`）；
+      ⑦ **幅度无害**——抖动 ≲ **3.7e-8**，比 FP8 量化误差（3.6e-2）小 ~1e6 倍。**源代码事实**：DeepEP
+      combine 按 top-k 槽位**固定顺序** bf16 累加、EPLB 冗余专家梯度用硬件 `tma_store_reduce_add_f32`
+      （顺序不保证）——跨 rank 归约不止 NCCL 一种。**结论**：复现性清单钉 **(world size, NCCL_ALGO/协议,
+      all_reduce vs rs+ag, grad_accum_steps, microbatch 顺序)**；Mega MoE 的 wgrad 留在专家本地 rank
+      （`gemm.hpp:373-427` 无跨 rank 语义），跨 rank 噪声只在共享/稠密分支与优化器同步上。架构无关、H100 真机。
+      → `docs/185-dp-allreduce-bits.md`。配套博客 `content/posts/mega-moe-185-dp-allreduce-bits`（索引页新增第 185 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -5294,8 +5320,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P174 各增量完成（P15-1…P41-1、P42-1…P174-1）。**
-  本轮 P174-1：新建 `docs/184-moe-grad-accum-assoc.md` + `harness/exp_moe_grad_accum_assoc.{py,sh,out.txt}`
+- 当前进度：**P0~P14 全部完成；P15~P175 各增量完成（P15-1…P41-1、P42-1…P175-1）。**
+  本轮 P175-1：新建 `docs/185-dp-allreduce-bits.md` + `harness/exp_dp_allreduce_bits.{py,sh,out.txt}`
+  ——第 184 篇（`docs/184`）量到 MoE 反向梯度累积的「切分 × 结合序」，末句写下「DP 的 ring-reduce
+  与 tree-reduce 在 fp32 下不同 bit」，但那是**纯 torch 手动相加**的模拟；第 170 篇（`docs/180`）
+  留口子「推到真实多卡」。本篇用**真实 NCCL** 补齐跨 rank 那一格。**H100 真机**（4×H100、1M fp32
+  梯度桶、PyTorch 2.12、NCCL 2.29.7；本机 NVSwitch fabric manager 未启用 → NVLS multicast 建不起来、
+  `NCCL_NVLS_ENABLE=0`、默认算法退到 Ring）：① **固定配置 run-to-run 逐位确定**（同输入同算法 20 次
+  `all_reduce` 最大逐位差 **0**，所有 world/算法/协议）；② **world size**：w=2 默认/Ring/Tree **全同**
+  （2 个数只有一种加法序、单次 fp32 加正确舍入、vs fp64 逐位 0 差），**w=4 才分化**（Ring vs Tree
+  差 **35.6%**、relerr **2.967e-08**，vs fp64 差 ~33%）；③ **算法**：Ring↔Tree 改 35.6% bit；
+  ④ **集合操作种类**：ZeRO 的 `reduce_scatter+all_gather` vs `all_reduce` 在 w=4 差 **31.9%**（w=2 仍 0）；
+  ⑤ **不能简单建模**：真实 NCCL 不命中顺序链/旋转/pairwise-tree 任一种（Ring 差 32%/32%/35%，Tree 最接近
+  旋转链仍差 23.5%），因 all-reduce 是**分 chunk 的 reduce-scatter+all-gather**；⑥ **开关无效**：
+  `NCCL_DETERMINISTIC=1` 逐位 0 差；⑦ **幅度 ≲ 3.7e-8**，比 FP8 量化误差 3.6e-2 小 ~1e6 倍。**源代码
+  事实**：DeepEP combine 按 top-k 槽位固定顺序 bf16 累加（`combine_utils.cuh:133-151`）、EPLB 冗余专家
+  梯度用硬件 `tma_store_reduce_add_f32`（`reduce_grads.cuh:82`，顺序不保证）。**结论**：复现性清单钉
+  **(world size, NCCL_ALGO/协议, all_reduce vs rs+ag, grad_accum_steps, microbatch 顺序)**；Mega MoE
+  的 wgrad 留在专家本地 rank，跨 rank 噪声只在共享/稠密分支与优化器同步上。纯 NCCL、架构无关、H100 真机。
+  索引页新增第 185 篇。
+  上一轮 P174-1：新建 `docs/184-moe-grad-accum-assoc.md` + `harness/exp_moe_grad_accum_assoc.{py,sh,out.txt}`
   ——第 170 篇（`docs/180`）把反向算子链的可复现性量到「kernel 逐位确定、端到端不是」，并在 §8 留下
   口子「量一量多 microbatch 梯度累积的**结合序**」。本篇补上：生产训练里 gradient accumulation
   把 token **切成若干 microbatch** 分别算、再**按某个顺序相加**——都不改数学、都改 fp32 舍入路径。
@@ -7274,19 +7318,26 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P174 已完成（最新 **P174-1 把第 170 篇 §8 留下的「多 microbatch 梯度累积结合序」
-  补上**：`docs/184`。生产训练 gradient accumulation 把 token 切成若干 microbatch 分别算、再按某顺序
+- **下一步**：P0~P175 已完成（最新 **P175-1 把第 184 篇 §8 留的「跨 rank all-reduce 序」从纯 torch 模拟
+  推到真实多卡 NCCL**：`docs/185`。**H100 真机**（4×H100、1M fp32、NCCL 2.29.7，NVLS 不可用故默认退到
+  Ring）：① 固定配置 run-to-run **逐位确定**（20 次 0 差）；② **w=2 全同、w=4 才分化**（Ring vs Tree
+  差 **35.6%** bit、relerr 2.967e-08；vs fp64 ~33%）；③ **换算法** Ring↔Tree 改 35.6% bit；④ **换集合
+  操作** ZeRO 的 `reduce_scatter+all_gather` vs `all_reduce` 在 w=4 差 31.9%；⑤ 真实 NCCL 不命中顺序链/
+  旋转/pairwise-tree 任一种（分 chunk 的 reduce-scatter+all-gather）；⑥ `NCCL_DETERMINISTIC=1` 无效果；
+  ⑦ 幅度 ≲3.7e-8（比 FP8 量化误差小 ~1e6 倍）。DeepEP combine 固定 top-k 序 bf16 累加、EPLB 硬件
+  `red.add` 不保证——跨 rank 归约不止 NCCL。纯 NCCL、架构无关。索引页新增第 185 篇）。
+  可继续（均为增量、非承诺）：① 把结合序结论推到 **SM100 `k_grouped_tn`（MN-major，仅分析）**做同一
+  推演；② 把第 170 篇的 dispatch 行序与本篇的累积序**放进同一次端到端训练步**计时（需 DeepEP 运行期，
+  见「阻塞」）；③ 把 NCCL 结论接到**真实 MoE 训练步**的稠密/shared 分支（需 DeepEP 运行期）。
+  上一轮 P174-1 把第 170 篇 §8 留下的「多 microbatch 梯度累积结合序」补上（`docs/184`）：
+  生产训练 gradient accumulation 把 token 切成若干 microbatch 分别算、再按某顺序
   相加——都不改数学、都改 fp32 舍入路径。**H100(sm90) 真机**（真实 SM90 FP8 kernel）：① wgrad 一次大
   GEMM vs 切 3 个 microbatch 求和 **43.5% bit 变**、relerr 仅 **3.5e-8**；② 结合序（forward/reverse/
   pairwise-tree/by-magnitude）彼此差 200 万~280 万 element、relerr 4.8e-8~6.6e-8 ⇒ **DP ring-reduce
   与 tree-reduce 不同 bit**；③ dgrad 每 token 行独立、**逐位 0 差**；④ kernel 原地累积(`c=d`) 与
   fresh+torch 求和 **逐位 0 差**；⑤ 幅度 ≲7e-8（比 FP8 量化误差 3.6e-2 小 ~1e6 倍）。**结论**：复现性
   清单要钉 `(grad_accum_steps, microbatch 顺序, DP reduce 算法)`，`use_deterministic_algorithms` 对
-  grouped 反向累积序无落点；可复现性 ≠ 数值精度。主 kernel SM100 专属、仅分析。索引页新增第 184 篇）。
-  可继续（均为增量、非承诺）：① 把「跨 rank all-reduce 序」从 §4 的模拟推进到**真实多卡 NCCL**
-  （需 ≥2 个 rank 环境；本机 8 卡共享可做纯 torch 的 `all_reduce` 位一致性对照，DeepEP 端到端仍待
-  NCCL≥2.32.3，见「阻塞」）；② 把结合序结论推到 **SM100 `k_grouped_tn`（MN-major，仅分析）**做同一
-  推演；③ 把第 170 篇的 dispatch 行序与本篇的累积序**放进同一次端到端训练步**计时（需 DeepEP 运行期）。
+  grouped 反向累积序无落点；可复现性 ≠ 数值精度。主 kernel SM100 专属、仅分析。索引页新增第 184 篇。
   上一轮 P173-1 把第 182 篇的「单 kernel 异步张量核」结论落成可核对的资源账：shadow 由 dgrad L2（计算
   受限 1244 TFLOPS）与 wgrad L2（访存受限 449 TFLOPS、SM 占用 ~12%）两段拼成、重算也吃张量核。
   **H100(sm90a) 真机**单 kernel 两 warpgroup（COMP=真实 WGMMA proxy 重算、TENS=第二组 WGMMA proxy
