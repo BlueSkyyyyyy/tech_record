@@ -2018,6 +2018,25 @@
         复用 `docs/07` §114 本机实测（与 P7-111 同一轮新增实验）。见 `docs/08-summary.md`。
         （**补登**：此条与 P7-111 同轮完成、当时只写入「当前进度」而未在 P8 清单落项，本轮补录以免
         进度段（`P8-3…P8-16`）、`docs/08` 文头（`P8-1…P8-16`）与清单三处口径不一致。）
+- [x] **P8-17** 关闭 §114.5（P7-111）逐字留下的**唯一 replay 边界**（「未把 ncu 的 `--replay-mode`
+        切到 application 复测」），并顺手补上 §114 只讲写侧、未点名的**读侧对照**。**`probe_l2_write_evict.cu`/
+        `.py` 一行未改**（只复用）；新增 `harness/probe_l2_write_evict_appreplay_ncu.sh`
+        （`harness/probe_l2_write_evict_appreplay_ncu.out.txt`，同一文件内 `KR_*`=`kernel` 与
+        `AR_*`=`application` 对照）+ `harness/check_l2_write_evict_appreplay.py`
+        （`harness/check_l2_write_evict_appreplay.out.txt`）+ `docs/07` §115 + `docs/08` §115 bullet。
+        **Part R（replay 稳健性）**：六行配置（A1–A4 输出 8 MiB、B1/B2 输出 64 MiB）的 `S_L1`
+        与「L2 收到写扇区」两模式**逐位相同**（270592 / 2105600），而**顺序效应两模式都复现**——
+        store-only **0.000×/0.000×**、read-then-store **0.315×/0.368×**、store-then-read
+        **1.327×/1.363×**、interleaved **1.314×/1.322×**（模式间最大相对差 ~17%，只在 0.3× 那个
+        小逐出项、绝对值 <0.5 MB；1.3× 上只差 ~2.7%）；输出 > L2（64 MiB）两模式都 ~0.68×（差 <1.5%）
+        ⟹ **§114 的「脏行逐出份额」机制不是 kernel-replay 假象**。**Part C（读侧对照）**：
+        `dram__bytes_read` **恰 = 读工作集（1.0001–1.0002×，仅 ncu 两位小数取整）**，与读/写顺序、
+        replay 模式、读量（32/64/128/256 MiB）**全无关**——读数据只读、无「写回时机的逐出份额」歧义，
+        故**读侧可放心用 `dram__bytes_read` 当工作集、写侧不能**（把 §75.4 读侧三口径与 §99–§114 写侧
+        禁用令的**不对称**点明）。**结论**：§114 判据（写量比只用 `S_L1`/解析输出）与 §99–§111 逐条
+        结论不变，且现对 ncu replay 模式免疫；**不改变** §45 的 `cf` 默认部署。**边界**：复用 §114 的
+        理想化微基准（只给机制归属）；只 `kernel`/`application` 两档 replay、未扫
+        `cudaLimitPersistingL2`/set-aside、未做 bf16 操作数版。
 
 ## 每轮增量流程（autopilot）
 
@@ -2280,10 +2299,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-111 补测 + P8-3…P8-16**；子专题
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-111 补测 + P8-3…P8-17**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
   M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - 文档一致性收口（本轮）：**补登 P8-16 清单项 + 关闭 `docs/01` §6 的历史遗留 `待验证`**（无人为
+  - P8-17（本轮）：**关闭 §114.5（P7-111）逐字留下的唯一 replay 边界 + 补读侧对照**。同一写侧微基准
+    （`probe_l2_write_evict.*` 一行未改）在两 replay 模式一次跑完（`probe_l2_write_evict_appreplay_ncu.sh`
+    + `check_l2_write_evict_appreplay.py`，`docs/07` §115 + `docs/08` §115 bullet）：六行配置的 `S_L1`
+    与「L2 写扇区」`kernel`/`application` **逐位相同**（270592 / 2105600），顺序效应**两模式都复现**
+    （store-only **0.000×/0.000×**、read-then-store **0.315×/0.368×**、store-then-read **1.327×/1.363×**，
+    模式间最大差 ~17% 只在 0.3× 小逐出项）⟹ §114 机制**不是 kernel-replay 假象**；**读侧对照**
+    `dram__bytes_read` **恰 = 读工作集（1.000×）**、与顺序/replay/读量全无关。默认部署仍 §45 的 `cf`。
+    **下一步（可选）**：专题维持维护态——主系列 `P7`/写读两微基准均无剩余 `待验证`；
+    megatron-port 仅剩「把原生 fused pre-GDR 接到 `kda.py:399` guard」（需改 Megatron 树、历轮刻意不改）。
+  - 文档一致性收口（上轮）：**补登 P8-16 清单项 + 关闭 `docs/01` §6 的历史遗留 `待验证`**（无人为
     新增实验）。**(1)** P8-16（`docs/08` §114 bullet，与 P7-111 同轮完成）此前只写进「当前进度」、
     未在 P8 清单落项，致进度段（`P8-3…P8-16`）/`docs/08` 文头（`P8-1…P8-16`）/清单（止于 P8-15）三处
     口径不一致——本轮把 P8-16 按既有格式补录进 P8 清单（`ROADMAP.md`），内容全部复用 `docs/07` §114

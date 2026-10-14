@@ -12208,3 +12208,74 @@ store 扇区**逐位不变**，而 `dram__bytes_write` 每次实例都可不同�
   结论成立的前提（生产核亦为默认写回）。
 - 只测 `sm_90a`、fp32、H100 L2 ~50 MB；未扫 `cudaLimitPersistingL2`/L2 set-aside、未做 bf16 操作数版，
   也未把 ncu 的 `--replay-mode` 切到 application 复测（§111 已证本核该口径两类 replay 一致）。
+
+## 115. 关闭 §114.5 的 replay 复测边界 + 读侧对照：§114 的写侧逐出机制**不是 kernel-replay 假象**，而读侧 `dram__bytes_read` 恰是工作集本身（P8-17）
+
+§114.5（P7-111）在把写侧机制钉死后留了一条诚实边界：**「未把 ncu 的 `--replay-mode` 切到 application
+复测」**（它当时引 §111/P7-108 在**另一个**探针上的一致性，但没在本写侧微基准上实测）。同时 §114 只
+讲了写侧；读侧在同一批数据里其实有条对称的「干净」结论未被点名。本轮把两件事一起做掉——**同一个写侧
+微基准、同配置、两种 replay 模式一次跑完**，并显式记录读侧。
+
+证据：`harness/probe_l2_write_evict_appreplay_ncu.sh`（`harness/probe_l2_write_evict_appreplay_ncu.out.txt`，
+`KR_*` = `--replay-mode kernel`、`AR_*` = `--replay-mode application`，同一文件内对照）+
+`harness/check_l2_write_evict_appreplay.py`（`harness/check_l2_write_evict_appreplay.out.txt`，解析）。
+`probe_l2_write_evict.cu`/`.py` 一行未改（只复用）。
+
+### 115.1 store 项跨 replay 模式**逐位相同**，逐出项随顺序摆动**两种 replay 都复现**
+
+| cfg（输出 8 MiB，除 B 为 64 MiB） | `S_L1` KR/AR | L2_wr KR/AR | `dram__bytes_write` KR/AR | `wr/out` KR/AR |
+|---|---|---|---|---|
+| store-only | 270592/270592 | 270592/270592 | 0.00 / 0.00 MB | 0.000× / 0.000× |
+| read-then-store (128 MiB) | 270592/270592 | 270592/270592 | 2.64 / 3.09 MB | 0.315× / 0.368× |
+| store-then-read (128 MiB) | 270592/270592 | 270592/270592 | 11.13 / 11.43 MB | 1.327× / 1.363× |
+| interleaved (128 MiB) | 270592/270592 | 270592/270592 | 11.02 / 11.09 MB | 1.314× / 1.322× |
+| B1 store-only (64 MiB) | 2105600/2105600 | 2105600/2105600 | 45.37 / 45.53 MB | 0.676× / 0.678× |
+| B2 read-then-store (64 MiB) | 2105600/2105600 | 2105600/2105600 | 45.07 / 45.71 MB | 0.672× / 0.681× |
+
+三条结论：
+1. **store 指令流跨 replay 模式逐位相同**：六行的 `S_L1`（270,592 / 2,105,600）与「L2 收到的写扇区」
+   在 `kernel` 与 `application` 两种 replay 下**全部逐位相等**——store 项是**指令流计数**、与 replay
+   机制无关（同 §114.3/§114.4）。
+2. **§114 的核心机制（写后是否有 L2 流量把脏行逐出）两种 replay 都复现**：只写在两模式下都**恰为 0**；
+   read-then-store 落到 ~0.31–0.37×、store-then-read 抬到 ~1.33–1.36×、interleaved ~1.32×——
+   **顺序把同一批 8 MiB 输出从 0 摆到 1.36× 输出**，模式间最大相对差 ~17%（只在 0.3× 那个小逐出项上，
+   绝对值 0.45 MB ≪ 输出）、在 1.3× 上只差 ~2.7%。输出 > L2（64 MiB）时两模式都 ~0.68×、差 <1.5%。
+   即 §114.5 那条边界**关闭**：§114 的「脏行逐出份额」机制**不是 kernel replay 的假象**，`application`
+   replay（缓存 flush 时机不同）下同号、同量级、store 项仍逐位。
+3. **§114.3 的「抖动只在逐出项」在 application replay 下同样成立**——同一配置的模式间 `dram__bytes_write`
+   差值（2.64→3.09、11.13→11.43）全落在逐出项、`S_L1` 纹丝不动，与 §114 用 `ncu -c 3`（kernel replay）
+   观测到的跨实例抖动同源。
+
+### 115.2 读侧对照：`dram__bytes_read` **恰是读工作集本身**，与顺序/replay/读量都无关
+
+| cfg | 读工作集 | `dram__bytes_read` | ÷工作集 |
+|---|---|---|---|
+| read-then-store / store-then-read / interleaved（128 MiB） | 128 MiB | 134.23 MB | **1.0001×** |
+| read-then-store，读 32 / 64 / 256 MiB | 32/64/256 MiB | 33.56 / 67.12 / 268.45 MB | **1.0002/1.0002/1.0001×** |
+
+读侧与写侧**完全相反**：无论读在写前还是写后、无论 `kernel` 还是 `application` replay、无论读多少，
+`dram__bytes_read` **恒 = 读工作集（×1.000）**。机制上二者不对称——**读数据是只读的**，每个字节被 L2
+命中就命中、未命中就从 DRAM 取一次，没有「窗口关闭时还剩多少脏行」这种**写回时机**歧义；而写数据一旦
+在窗内没被逐出就**不计入** `dram__bytes_write`。这正好把 §114 的「写侧散点」反衬清楚：**读侧可以放心
+用 `dram__bytes_read` 当工作集大小，写侧不能**（同 §75.4 的读侧三口径、§99–§114 的写侧禁用令）。§75.4
+对读侧的三口径拆分（L2 总字节含重触 / DRAM 字节 / srcunit 读扇区）与本条正交：这里说的是**DRAM 字节**
+这一路在写侧不可靠、在读侧可靠。
+
+### 115.3 结论与设计输入
+
+- **§114.5 的唯一 replay 边界关闭**：§114 的写侧逐出机制在 `--replay-mode kernel` 与 `application`
+  下**同号同量级**、store 项跨模式逐位——§114.4 的判据（写量比只用 `S_L1`/解析输出、弃
+  `dram__bytes_write`）与 §99–§111 逐条结论**不变**，且现在对 ncu 的 replay 模式**免疫**。
+- **读侧新增一条对称结论**：`dram__bytes_read` = 读工作集（1.000×），与写侧散点形成对照，**可直接用于
+  判「某配置的 DRAM 读是否等于理想工作集」**（例如 §113.2 的 `dram` 8.39 MB = 数据量、§51 的读放大只
+  体现在 `srcunit` 而非 `dram` 读）。
+- **不改变** §45 的 `cf` 默认部署；只影响 ncu 读法（与 §114.4 的口径一致）。
+
+### 115.4 边界（诚实）
+
+- 复用 §114 的同一理想化微基准（连续/规则地址、纯 `float4`、单缓冲、无 mma 依赖），故只给**机制归属**。
+- `application` replay 在 ncu 内会整体重跑 app（缓存 flush 时机与 kernel replay 不同），本表正是利用这
+  一点；但读/写流在单次 launch 内的**相对顺序**两模式都保留，这是结论成立的前提。
+- `--replay-mode` 只有 `kernel`/`application` 两档（本 arch/ncu 版本）；**未**扫
+  `cudaLimitPersistingL2`/L2 set-aside、未做 bf16 操作数版。`dram__bytes_read` 的 1.0001–1.0002× 是
+  ncu 字节打印取整（MB 两位小数）量级、非真实过读。

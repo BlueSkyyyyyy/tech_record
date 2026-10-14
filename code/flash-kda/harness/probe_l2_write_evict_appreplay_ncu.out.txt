@@ -1,0 +1,349 @@
+== build ==
+  built
+
+=== Part A: output 8 MiB (< L2~50 MiB) -- read/write ordering sweep ===
+--- kernel replay (baseline; reproduces §114.2 A1/A2/A3/A4) ---
+
+################################################################################
+# TAG KR_A1_sO8r0_mode0  mode=0 outMB=8 readMB=0  (replay=kernel, ncu -c 1)
+################################################################################
+mode=0(store-only) outMB=8.0 readMB=0.0 grid=264 block=256 nout=2097152 nread=0
+  out.sum=5.2429e+06  wall=72.1 us
+[4180847] python3.12@127.0.0.1
+  void writeKernel<0>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Kbyte         5.63
+    dram__bytes_write.sum                                  byte            0
+    gpu__time_duration.sum                                   us         4.64
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       405656
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG KR_A2_sO8r128_mode1  mode=1 outMB=8 readMB=128  (replay=kernel, ncu -c 1)
+################################################################################
+mode=1(read-then-store) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=84.4 us
+[4180950] python3.12@127.0.0.1
+  void writeKernel<1>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte       134.23
+    dram__bytes_write.sum                                 Mbyte         2.64
+    gpu__time_duration.sum                                   us        49.22
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       406747
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG KR_A3_sO8r128_mode2  mode=2 outMB=8 readMB=128  (replay=kernel, ncu -c 1)
+################################################################################
+mode=2(store-then-read) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=76.7 us
+[4181053] python3.12@127.0.0.1
+  void writeKernel<2>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte       134.23
+    dram__bytes_write.sum                                 Mbyte        11.13
+    gpu__time_duration.sum                                   us        52.13
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       406549
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG KR_A4_sO8r128_mode3  mode=3 outMB=8 readMB=128  (replay=kernel, ncu -c 1)
+################################################################################
+mode=3(interleaved store/read) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=93.8 us
+[4181156] python3.12@127.0.0.1
+  void writeKernel<3>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte       134.23
+    dram__bytes_write.sum                                 Mbyte        11.02
+    gpu__time_duration.sum                                   us        71.01
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       407319
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
+--- application replay (the §114.5 boundary) ---
+
+################################################################################
+# TAG AR_A1_sO8r0_mode0  mode=0 outMB=8 readMB=0  (replay=application, ncu -c 1)
+################################################################################
+mode=0(store-only) outMB=8.0 readMB=0.0 grid=264 block=256 nout=2097152 nread=0
+  out.sum=5.2429e+06  wall=80.3 us
+mode=0(store-only) outMB=8.0 readMB=0.0 grid=264 block=256 nout=2097152 nread=0
+  out.sum=5.2429e+06  wall=95.5 us
+mode=0(store-only) outMB=8.0 readMB=0.0 grid=264 block=256 nout=2097152 nread=0
+  out.sum=5.2429e+06  wall=81.4 us
+[4181259] python3.12@127.0.0.1
+  void writeKernel<0>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Kbyte         5.63
+    dram__bytes_write.sum                                 Kbyte         3.07
+    gpu__time_duration.sum                                   us         4.96
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       405737
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG AR_A2_sO8r128_mode1  mode=1 outMB=8 readMB=128  (replay=application, ncu -c 1)
+################################################################################
+mode=1(read-then-store) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=83.9 us
+mode=1(read-then-store) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=87.0 us
+mode=1(read-then-store) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=83.3 us
+[4181512] python3.12@127.0.0.1
+  void writeKernel<1>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte       134.23
+    dram__bytes_write.sum                                 Mbyte         3.09
+    gpu__time_duration.sum                                   us        49.34
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       406384
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG AR_A3_sO8r128_mode2  mode=2 outMB=8 readMB=128  (replay=application, ncu -c 1)
+################################################################################
+mode=2(store-then-read) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=98.1 us
+mode=2(store-then-read) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=96.2 us
+mode=2(store-then-read) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=83.7 us
+[4181765] python3.12@127.0.0.1
+  void writeKernel<2>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte       134.23
+    dram__bytes_write.sum                                 Mbyte        11.43
+    gpu__time_duration.sum                                   us        52.61
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       406290
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG AR_A4_sO8r128_mode3  mode=3 outMB=8 readMB=128  (replay=application, ncu -c 1)
+################################################################################
+mode=3(interleaved store/read) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=97.1 us
+mode=3(interleaved store/read) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=104.5 us
+mode=3(interleaved store/read) outMB=8.0 readMB=128.0 grid=264 block=256 nout=2097152 nread=33554432
+  out.sum=5.2429e+06  wall=93.8 us
+[4182018] python3.12@127.0.0.1
+  void writeKernel<3>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte       134.22
+    dram__bytes_write.sum                                 Mbyte        11.09
+    gpu__time_duration.sum                                   us        71.10
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       406398
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
+
+=== Part B: output > L2 (64 MiB) store-only vs read-then-store, both replays ===
+
+################################################################################
+# TAG KR_B1_sO64r0_mode0  mode=0 outMB=64 readMB=0  (replay=kernel, ncu -c 1)
+################################################################################
+mode=0(store-only) outMB=64.0 readMB=0.0 grid=264 block=256 nout=16777216 nread=0
+  out.sum=4.1943e+07  wall=100.3 us
+[4182271] python3.12@127.0.0.1
+  void writeKernel<0>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Kbyte         8.96
+    dram__bytes_write.sum                                 Mbyte        45.37
+    gpu__time_duration.sum                                   us        21.34
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                   133184
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector      2105600
+    lts__t_sectors_op_write.sum                          sector      3158861
+    lts__t_sectors_srcunit_tex_op_write.sum              sector      2105600
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG KR_B2_sO64r128_mode1  mode=1 outMB=64 readMB=128  (replay=kernel, ncu -c 1)
+################################################################################
+mode=1(read-then-store) outMB=64.0 readMB=128.0 grid=264 block=256 nout=16777216 nread=33554432
+  out.sum=4.1943e+07  wall=94.2 us
+[4182374] python3.12@127.0.0.1
+  void writeKernel<1>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte       134.23
+    dram__bytes_write.sum                                 Mbyte        45.07
+    gpu__time_duration.sum                                   us        64.99
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                   133184
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector      2105600
+    lts__t_sectors_op_write.sum                          sector      3159546
+    lts__t_sectors_srcunit_tex_op_write.sum              sector      2105600
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG AR_B1_sO64r0_mode0  mode=0 outMB=64 readMB=0  (replay=application, ncu -c 1)
+################################################################################
+mode=0(store-only) outMB=64.0 readMB=0.0 grid=264 block=256 nout=16777216 nread=0
+  out.sum=4.1943e+07  wall=83.2 us
+mode=0(store-only) outMB=64.0 readMB=0.0 grid=264 block=256 nout=16777216 nread=0
+  out.sum=4.1943e+07  wall=83.9 us
+mode=0(store-only) outMB=64.0 readMB=0.0 grid=264 block=256 nout=16777216 nread=0
+  out.sum=4.1943e+07  wall=104.2 us
+[4182477] python3.12@127.0.0.1
+  void writeKernel<0>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Kbyte         8.96
+    dram__bytes_write.sum                                 Mbyte        45.53
+    gpu__time_duration.sum                                   us        21.86
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                   133184
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector      2105600
+    lts__t_sectors_op_write.sum                          sector      3158429
+    lts__t_sectors_srcunit_tex_op_write.sum              sector      2105600
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG AR_B2_sO64r128_mode1  mode=1 outMB=64 readMB=128  (replay=application, ncu -c 1)
+################################################################################
+mode=1(read-then-store) outMB=64.0 readMB=128.0 grid=264 block=256 nout=16777216 nread=33554432
+  out.sum=4.1943e+07  wall=97.4 us
+mode=1(read-then-store) outMB=64.0 readMB=128.0 grid=264 block=256 nout=16777216 nread=33554432
+  out.sum=4.1943e+07  wall=96.9 us
+mode=1(read-then-store) outMB=64.0 readMB=128.0 grid=264 block=256 nout=16777216 nread=33554432
+  out.sum=4.1943e+07  wall=96.0 us
+[4182730] python3.12@127.0.0.1
+  void writeKernel<1>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte       134.23
+    dram__bytes_write.sum                                 Mbyte        45.71
+    gpu__time_duration.sum                                   us        65.34
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                   133184
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector      2105600
+    lts__t_sectors_op_write.sum                          sector      3159821
+    lts__t_sectors_srcunit_tex_op_write.sum              sector      2105600
+    ----------------------------------------------- ----------- ------------
+
+
+=== Part C: read-footprint sweep at fixed ordering (read-then-store, out 8 MiB) ===
+
+################################################################################
+# TAG KR_C1_sO8r32_mode1  mode=1 outMB=8 readMB=32  (replay=kernel, ncu -c 1)
+################################################################################
+mode=1(read-then-store) outMB=8.0 readMB=32.0 grid=264 block=256 nout=2097152 nread=8388608
+  out.sum=5.2429e+06  wall=70.4 us
+[4182983] python3.12@127.0.0.1
+  void writeKernel<1>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte        33.56
+    dram__bytes_write.sum                                 Mbyte         2.60
+    gpu__time_duration.sum                                   us        16.48
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       405689
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG KR_C2_sO8r64_mode1  mode=1 outMB=8 readMB=64  (replay=kernel, ncu -c 1)
+################################################################################
+mode=1(read-then-store) outMB=8.0 readMB=64.0 grid=264 block=256 nout=2097152 nread=16777216
+  out.sum=5.2429e+06  wall=72.3 us
+[4183086] python3.12@127.0.0.1
+  void writeKernel<1>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte        67.12
+    dram__bytes_write.sum                                 Mbyte         2.46
+    gpu__time_duration.sum                                   us        27.23
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       406328
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
+
+################################################################################
+# TAG KR_C3_sO8r256_mode1  mode=1 outMB=8 readMB=256  (replay=kernel, ncu -c 1)
+################################################################################
+mode=1(read-then-store) outMB=8.0 readMB=256.0 grid=264 block=256 nout=2097152 nread=67108864
+  out.sum=5.2429e+06  wall=106.5 us
+[4183189] python3.12@127.0.0.1
+  void writeKernel<1>(const float *, float *, long, long, float *) (264, 1, 1)x(256, 1, 1), Context 1, Stream 7, Device 0, CC 9.0
+    Section: Command line profiler metrics
+    ----------------------------------------------- ----------- ------------
+    Metric Name                                     Metric Unit Metric Value
+    ----------------------------------------------- ----------- ------------
+    dram__bytes_read.sum                                  Mbyte       268.45
+    dram__bytes_write.sum                                 Mbyte         2.73
+    gpu__time_duration.sum                                   us        91.68
+    l1tex__t_requests_pipe_lsu_mem_global_op_st.sum                    18496
+    l1tex__t_sectors_pipe_lsu_mem_global_op_st.sum       sector       270592
+    lts__t_sectors_op_write.sum                          sector       407254
+    lts__t_sectors_srcunit_tex_op_write.sum              sector       270592
+    ----------------------------------------------- ----------- ------------
+
