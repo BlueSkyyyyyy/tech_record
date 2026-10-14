@@ -1,0 +1,50 @@
+====================================================================================================
+====================================================================================================
+=== dtype=bfloat16 layout=packed arm=headwise world=2 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=packed cu=[0, 256] B=2: out shape=(256, 1, 128) |o|max=0.4785
+  [stage2] world=2 arm=headwise  lay=packed out_local=(128, 1, 128)  o max_abs=3.906e-03 rel=9.852e-03 | hs.grad max_abs=1.172e-02 rel=6.881e-03 | param.grad max_abs=5.625e-01 rel=4.018e-03 (in_proj.weight)
+=== dtype=bfloat16 layout=packed arm=headwise world=4 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=packed cu=[0, 256] B=2: out shape=(256, 1, 128) |o|max=0.4688
+  [stage2] world=4 arm=headwise  lay=packed out_local=(64, 1, 128)  o max_abs=2.197e-03 rel=5.357e-03 | hs.grad max_abs=9.766e-03 rel=6.545e-03 | param.grad max_abs=1.000e+00 rel=7.042e-03 (in_proj.weight)
+=== dtype=bfloat16 layout=packed arm=chunkwise world=2 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=packed cu=[0, 256] B=2: out shape=(256, 1, 128) |o|max=0.4688
+  [stage2] world=2 arm=chunkwise lay=packed out_local=(128, 1, 128)  o max_abs=2.930e-03 rel=6.637e-03 | hs.grad max_abs=9.766e-03 rel=6.545e-03 | param.grad max_abs=1.000e+00 rel=7.042e-03 (in_proj.weight)
+=== dtype=bfloat16 layout=packed arm=chunkwise world=4 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=packed cu=[0, 256] B=2: out shape=(256, 1, 128) |o|max=0.4688
+  [stage2] world=4 arm=chunkwise lay=packed out_local=(64, 1, 128)  o max_abs=2.930e-03 rel=7.143e-03 | hs.grad max_abs=7.812e-03 rel=5.236e-03 | param.grad max_abs=1.000e+00 rel=7.042e-03 (in_proj.weight)
+=== dtype=bfloat16 layout=sbhd arm=headwise world=2 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=sbhd cu=[0, 256] B=2: out shape=(256, 2, 128) |o|max=0.5039
+  [stage2] world=2 arm=headwise  lay=sbhd   out_local=(128, 2, 128)  o max_abs=2.930e-03 rel=6.276e-03 | hs.grad max_abs=1.562e-02 rel=7.576e-03 | param.grad max_abs=1.000e+00 rel=5.102e-03 (in_proj.weight)
+=== dtype=bfloat16 layout=sbhd arm=headwise world=4 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=sbhd cu=[0, 256] B=2: out shape=(256, 2, 128) |o|max=0.5039
+  [stage2] world=4 arm=headwise  lay=sbhd   out_local=(64, 2, 128)  o max_abs=2.930e-03 rel=6.276e-03 | hs.grad max_abs=1.562e-02 rel=7.576e-03 | param.grad max_abs=1.500e+00 rel=7.653e-03 (in_proj.weight)
+=== dtype=float32 layout=packed arm=headwise world=2 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=packed cu=[0, 256] B=2: out shape=(256, 1, 128) |o|max=0.4887
+  [stage2] world=2 arm=headwise  lay=packed out_local=(128, 1, 128)  o max_abs=5.587e-04 rel=1.143e-03 | hs.grad max_abs=1.906e-03 rel=1.229e-03 | param.grad max_abs=2.295e-01 rel=1.619e-03 (in_proj.weight)
+=== dtype=float32 layout=packed arm=headwise world=4 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=packed cu=[0, 256] B=2: out shape=(256, 1, 128) |o|max=0.4887
+  [stage2] world=4 arm=headwise  lay=packed out_local=(64, 1, 128)  o max_abs=5.587e-04 rel=1.386e-03 | hs.grad max_abs=1.906e-03 rel=1.229e-03 | param.grad max_abs=2.295e-01 rel=1.619e-03 (in_proj.weight)
+=== dtype=float32 layout=packed arm=chunkwise world=2 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=packed cu=[0, 256] B=2: out shape=(256, 1, 128) |o|max=0.4887
+  [stage2] world=2 arm=chunkwise lay=packed out_local=(128, 1, 128)  o max_abs=5.587e-04 rel=1.143e-03 | hs.grad max_abs=1.906e-03 rel=1.229e-03 | param.grad max_abs=2.295e-01 rel=1.619e-03 (in_proj.weight)
+=== dtype=float32 layout=packed arm=chunkwise world=4 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=packed cu=[0, 256] B=2: out shape=(256, 1, 128) |o|max=0.4887
+  [stage2] world=4 arm=chunkwise lay=packed out_local=(64, 1, 128)  o max_abs=5.510e-04 rel=1.367e-03 | hs.grad max_abs=1.806e-03 rel=1.165e-03 | param.grad max_abs=1.967e-01 rel=1.388e-03 (in_proj.weight)
+=== dtype=float32 layout=sbhd arm=headwise world=2 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=sbhd cu=[0, 256] B=2: out shape=(256, 2, 128) |o|max=0.5052
+  [stage2] world=2 arm=headwise  lay=sbhd   out_local=(128, 2, 128)  o max_abs=6.659e-04 rel=1.459e-03 | hs.grad max_abs=2.096e-03 rel=1.010e-03 | param.grad max_abs=2.448e-01 rel=1.246e-03 (in_proj.weight)
+=== dtype=float32 layout=sbhd arm=headwise world=4 cu=[0, 256] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=sbhd cu=[0, 256] B=2: out shape=(256, 2, 128) |o|max=0.5052
+  [stage2] world=4 arm=headwise  lay=sbhd   out_local=(64, 2, 128)  o max_abs=6.659e-04 rel=1.459e-03 | hs.grad max_abs=1.902e-03 rel=9.168e-04 | param.grad max_abs=2.449e-01 rel=1.246e-03 (in_proj.weight)
+ALL DONE
+
+### boundary: packed THD multi-sequence with plain cu_seqlens (no precomputed CP routes)
+====================================================================================================
+====================================================================================================
+=== dtype=bfloat16 layout=packed arm=headwise world=2 cu=[0, 64, 128] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=packed cu=[0, 64, 128] B=2: out shape=(128, 1, 128) |o|max=0.4336
+  [stage2] world=2 arm=headwise  lay=packed out_local=(64, 1, 128)  o max_abs=6.230e-01 rel=1.437e+00 | hs.grad max_abs=1.064e+00 rel=8.790e-01 | param.grad max_abs=4.322e+01 rel=5.724e-01 (in_proj.weight)
+=== dtype=bfloat16 layout=packed arm=chunkwise world=2 cu=[0, 64, 128] B=2 seed=2026 ===
+  [stage1] cp=1 fp64-ref lay=packed cu=[0, 64, 128] B=2: out shape=(128, 1, 128) |o|max=0.4355
+  [stage2] world=2 arm=chunkwise lay=packed out_local=(64, 1, 128)  o max_abs=3.818e-01 rel=9.178e-01 | hs.grad max_abs=1.207e+00 rel=1.044e+00 | param.grad max_abs=6.250e+01 rel=9.615e-01 (in_proj.weight)
+ALL DONE

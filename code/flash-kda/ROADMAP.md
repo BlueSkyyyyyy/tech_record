@@ -2228,7 +2228,17 @@
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
-  M10-1/M10-2/M10-3 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
+  M10-1/M10-2/M10-3 完成 + M11-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
+  - megatron-port M11-1（本轮）：**把真层对拍扩到 cp>1**（M10-* 都停在单卡 cp=1；M8 只在 FLA
+    算子级锚过 CP）。新增 `megatron-port/harness/check_port_e2e_cp.py` + `docs/12-cp-e2e.md`。
+    两段式：Stage 1 建 cp=1 真层、核心换成 fp64 参考芯 dump 全序列黄金；Stage 2 `mp.spawn` 起
+    `world` 个 NCCL rank、同权重重建真层、喂全输入的 zigzag 分片、对黄金同分片比。**实测**
+    （`T=256`、`world=2/4`、fp32/bf16、headwise/chunkwise、packed 单序列/SBHD B=2）：`o`/`hs.grad`/
+    `param.grad` 相对误差 bf16 `4e-3–1e-2`、fp32 `0.9e-3–1.6e-3`，`world=2/4` 同阶。**两条方法学**：
+    CP 对拍损失须 count-invariant（`sum` 而非 `mean`，否则 cp=2 输入梯度整条差 2×）；复制型参数
+    梯度在 CP 下是部分和、对参考比前须在 CP 组 `all_reduce(SUM)`（否则 `in_proj.weight` 相对误差
+    停在 0.55–0.64）。**遗留边界**：packed THD 多序列（plain `cu_seqlens`、无 prebuilt routes）
+    对不上并触发真层 fallback `FutureWarning`（输入构造不符 CP 契约，非算法错；多序列 CP 用 SBHD）。
   - megatron-port M10-3（本轮）：**关闭 M10-2 的「packed 无 padding」边界——带 `cu_seqlens_padded`
     的 packed / THD 真层对拍**。层把 *padded* 边界交给核心与 causal-conv1d
     （`kda.py:275-281/447/580/598-607`、`common.py:482-506`），故 pad token 被当成段内 token。

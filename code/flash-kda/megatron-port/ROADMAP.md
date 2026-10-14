@@ -22,6 +22,7 @@
 | `docs/09-e2e.md` | 真实层端到端前反向对拍（M10-1） | [x] |
 | `docs/10-packed-thd.md` | 真层 packed / THD（varlen）端到端对拍（M10-2） | [x] |
 | `docs/11-padded-thd.md` | 真层 packed 的 padding（`cu_seqlens_q_padded`）语义对拍（M10-3） | [x] |
+| `docs/12-cp-e2e.md` | 真层 context-parallel（cp>1）数值锚定 vs fp64 参考（M11-1） | [x] |
 | `src/kda_ref.py` | 最小可运行参考实现（纯 PyTorch、fp64、自带自测；M7 起支持 GVA + state_v_first） | [x] |
 | `harness/check_port_fla.py` | 参考 vs FLA 正反向数值锚定脚本（GPU） | [x] |
 | `harness/check_port_fla_m7.py` | 参考 vs FLA 门控/布局边界锚定（M7，GPU） | [x] |
@@ -31,6 +32,7 @@
 | `harness/check_port_e2e.py` | 真实 `KimiDeltaAttention` 层端到端前反向对拍（M10-1，GPU） | [x] |
 | `harness/check_port_e2e_packed.py` | 真层 packed / THD（varlen）端到端对拍（M10-2，GPU） | [x] |
 | `harness/check_port_e2e_padded.py` | 真层 packed 的 padding 语义对拍（M10-3，GPU） | [x] |
+| `harness/check_port_e2e_cp.py` | 真层 cp>1（headwise/chunkwise）前反向锚定 vs fp64 参考（M11-1，GPU；真 NCCL） | [x] |
 
 ## 任务清单
 
@@ -184,6 +186,24 @@
       token 的影响仅剩「自身 slot 尾经门控 `g` 的块尾舍入」、低于部署底噪。**边界**：单卡 tp=cp=1、
       `pad_between_seqs` 布局、cp>1 padded CP 未覆盖。
 
+### M11 context-parallel（cp>1）端到端
+- [x] **M11-1** 把 M10 的真层对拍扩到 **cp>1**（M10-1/2/3 的「边界」都写着单卡 cp=1；M8 只在
+      **FLA 算子**级锚过 CP）。新增 `harness/check_port_e2e_cp.py`（真 NCCL，`mp.spawn`）+
+      `docs/12-cp-e2e.md`。两段式：Stage 1 建 cp=1 真层、把核心换成 fp64 参考芯（M10-2 的
+      `make_ref_gdr`）在全序列上跑前反向 dump 黄金；Stage 2 起 `world` 个 NCCL rank、用同权重
+      重建真层、喂同一全输入的 **zigzag 分片**（`get_pos_emb_on_this_cp_rank`，Megatron 单测同款
+      配方），把 rank-local 张量对 Stage 1 张量的同分片比。**实测**（`T=256`、`world=2/4`、fp32/bf16、
+      `headwise`/`chunkwise`、packed 单序列/SBHD B=2）：`o`/`hs.grad`/`param.grad` 相对误差
+      bf16 **4e-3–1e-2**、fp32 **0.9e-3–1.6e-3**，与 cp=1 的 M10-1/2 bf16 整模块锚定同量级，
+      `world=2/4` 同阶（跨 rank 状态传递未引入偏差）。**方法学（两条，新增）**：(i) CP 对拍损失必须
+      count-invariant（`sum` 而非 `mean`，否则 cp=2 输入梯度整条差 2×，实测 `|grad_cp|/|grad_ref|=1.99`）；
+      (ii) 复制型参数的梯度在 CP 下是**部分和**，对全序列参考比前须在 CP 组 `all_reduce(SUM)`
+      （不归约时 `in_proj.weight` 相对误差停在 0.55–0.64，归约后回底噪）。**遗留边界**：packed THD
+      **多序列**（plain `cu_seqlens`、无 prebuilt THD CP routes）对不上（`o rel` O(1)）且触发真层
+      fallback `FutureWarning`（`context_parallel_layout/conversion.py:120`）——属**输入构造不符真层 CP
+      契约**，非 KDA 算错；Megatron 自己的多序列 CP 单测用 **SBHD + padded**（即本篇 validated 的
+      sbhd 行）。`gdn_pre_gated_delta_rule_fusion`（`kda.py:399-402`）、GVA 仍未覆盖。
+
 ## 已知坑
 
 - **强衰减下不要直接算 $k/E$**（会溢出）：减参考点或用逐对 $2^{\Delta g}$（`docs/03` §4.2）。
@@ -213,13 +233,36 @@
 - **Megatron KDA 不支持 GVA**：`_compute_gates` 只产 H-head `raw_g`（`kda.py:180`），FLA 断言
   `g.shape==(B,T,HV,K)`（`chunk.py:411`）；`num_value_heads==num_key_heads` 是硬约束。勿把 M7 的
   GVA 锚定当成 Megatron 已具备能力。
+- **CP 对拍的损失必须 count-invariant**（M11-1，`docs/12` §2）：真层 CP 下每个 rank 只持有
+  `T/cp` 个 token，`out.float().square().mean()` 会按**本地 token 数**缩放损失，使 cp=2 的输入
+  梯度整条差 **2×**（实测 `|grad_cp|max=3.36e-05` vs `|grad_ref|max=1.69e-05`）。对拍一律用
+  `out.float().sum()`；或对参考乘 `cp`。指纹＝`o` 完全对（permutation-invariant 的平方和损失）、
+  但 `hs.grad` 相对误差恰为 ~1.0 且 `|grad_cp|/|grad_ref|≈cp`。
+- **CP 下复制型参数的梯度是部分和**（M11-1，`docs/12` §2）：每个 CP rank 只算自己 token 分片的
+  参数梯度，全序列梯度＝跨 CP 组 `all_reduce(SUM)`（数据并行同款记账）。直接拿 rank0 的
+  `p.grad` 对 cp=1 参考比，`in_proj.weight` 相对误差停在 **0.55–0.64**；`all_reduce` 后回底噪。
+  指纹＝**误差恰约 1/cp 量级、且所有复制型参数一致偏小**。
+- **packed THD 多序列 CP 要 prebuilt THD CP routes**（M11-1，`docs/12` §4）：`PackedSeqParams`
+  只给 `cu_seqlens`（`qkv_format="thd"`）+ 逐 token zigzag 分片时，多序列 CP 对不上全序列 golden
+  （`o rel` O(1)）并打印 `context_parallel_layout/conversion.py:120` 的 fallback `FutureWarning`
+  （"should not be used on the steady-state forward path"）。这是**输入构造不符真层 CP 契约**，不是
+  KDA 算错；多序列 CP 用 **SBHD（`[T,B,H]`、沿序列维分片）**（Megatron 自己单测的形态）即可。
 
 ## 当前进度 / 下一步
 
-- 当前进度：M0–M8 完成 + M9-1 完成 + M10-1 完成 + M10-2 完成 + **M10-3 完成**（docs 00–11 +
+- 当前进度：M0–M8 完成 + M9-1 完成 + M10-1/M10-2/M10-3 完成 + **M11-1 完成**（docs 00–12 +
   参考实现 + FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 + CP 反向/varlen×CP
   梯度] + Megatron 调用契约对齐 + **真实层端到端前反向对拍 [SBHD + packed/THD + 带 padding 的
-  packed/THD]**）。
+  packed/THD + cp>1 headwise/chunkwise]**）。
+- 本轮（M11-1）：`harness/check_port_e2e_cp.py` + `docs/12-cp-e2e.md`。把 M10 的真层对拍扩到
+  **cp>1**：两段式（cp=1 fp64 参考芯 dump 全序列黄金；`mp.spawn` 起 `world` 个 NCCL rank 重建真层、
+  喂全输入的 zigzag 分片、对黄金的同分片比）。**实测**（`T=256`、`world=2/4`、fp32/bf16、
+  headwise/chunkwise、packed 单序列/SBHD B=2）：`o`/`hs.grad`/`param.grad` 相对误差 bf16
+  `4e-3–1e-2`、fp32 `0.9e-3–1.6e-3`，`world=2/4` 同阶。**两条方法学**：CP 对拍损失须 count-invariant
+  （`sum` 而非 `mean`，否则 cp=2 输入梯度差 2×）；复制型参数梯度在 CP 下是部分和、对参考比前须
+  `all_reduce(SUM)`（否则相对误差停在 0.55–0.64）。**遗留边界**：packed THD **多序列**（plain
+  `cu_seqlens`、无 prebuilt routes）对不上、触发真层 fallback `FutureWarning`（输入构造不符 CP
+  契约，非算法错；多序列 CP 用 SBHD）。
 - 本轮（M10-3）：`harness/check_port_e2e_padded.py` + `docs/11-padded-thd.md`。关闭 M10-2 的
   「packed 无 padding」边界：给 THD 批次带 `cu_seqlens_padded`（真实 `[0,50,110]/[0,50,100,220]`
   → padded `[0,64,128]/[0,64,128,256]`），pad 落在每个 padded slot 尾部、被层当作段内 token
@@ -230,9 +273,9 @@
   **Part F** padded↔unpadded 真实 token `≤1.08e-4`(fp32)/`1.95e-3`(bf16)。**结论**：带 padding 的
   packed 路径数值健全、跨序列隔离精确，pad 对真实 token 的影响仅剩自身 slot 尾的块尾舍入、低于
   部署底噪。**边界**：单卡 tp=cp=1、`pad_between_seqs` 布局、cp>1 的 packed CP（zigzag）未覆盖。
-- 下一步（可选）：retire 到维护态（M0–M10 全完成）；若继续，把 M10-1/M10-2/M10-3 扩到 **cp>1 的
-  headwise/chunkwise CP packed**（多 rank + zigzag，需真 NCCL）真层对拍，或补
-  `gdn_pre_gated_delta_rule_fusion` 的 KDA 专属 streamed 融合前处理（`kda.py:399-402` 的缺口）。
+- 下一步（可选）：retire 到维护态（M0–M11 全完成）；若继续，打通 **packed THD 多序列 CP**（按真层
+  契约预建 THD CP route，或改 padded 布局，`docs/12` §4），或补 `gdn_pre_gated_delta_rule_fusion`
+  的 KDA 专属 streamed 融合前处理（`kda.py:399-402` 的缺口）。
 
 ## 阻塞
 

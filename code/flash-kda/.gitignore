@@ -8,6 +8,7 @@
 # 对拍脚本的临时张量目录
 _m8btmp/
 _cptmp/
+_cptmp_m11/
 
 # autopilot 运行时文件
 autopilot.log
