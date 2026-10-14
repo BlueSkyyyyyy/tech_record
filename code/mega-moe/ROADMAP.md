@@ -5364,6 +5364,24 @@
       「为什么敢用 topk=8」逐项账。主 kernel SM100 专属、仅分析。配套博客
       `content/posts/mega-moe-188-topk-cost-scan`（索引页新增第 188 篇）。
 
+### P179 增量（opt-in，收口第 188 篇「下一步」②：把 block_m 启发式的 tile 收益在 H100 上量出来）
+
+- [x] **P179-1** **Mega MoE 的 `BLOCK_M` 到底买到什么**（block_m 启发式的真实 tile 代价；第 188 篇「下一步」
+      ② 点名「只量了 heuristic 输出、没量 tile 本身的时延差」）。用 H100 真实 SM90 FP8
+      `m_grouped_fp8_fp4_gemm_nt_masked` 当代理（`expected_m` 强制 `block_m∈{64,128}`），把 mega 主 kernel
+      沿每专家 token 数 M 切 `BLOCK_M` 的代价形态量出来。**源码事实**：kernel 侧块数是精确计数
+      `num_total_m_blocks = Σ_e ceil(m_e/BLOCK_M)`（`scheduler/mega_moe.cuh:270-285/301`，每 M block 一个
+      `Linear1` 任务 `:380-386`、重载该专家权重 tile），启发式 `heuristics/mega_moe.hpp:88-127`
+      （`:94` expected、`:97` 「每块 ≈128 行」、`:105` 候选循环）+ 候选集 `layout/mega_moe.cuh:13-16`。
+      **H100(sm90) 真机 + 真绑定**（`harness/exp_block_m_tile.{py,sh,out.txt}`）：
+      ① 复刻 vs 真实 `get_block_m_for_mega_moe` 9 组 **mismatch=0**；② **块内行几乎免费**——`bm=128` 时
+      M=1→128 时延 93.9→92.9 μs **不变**（一个块=流一遍 29.4 MB 权重）；③ **每个额外块一次重载税**——
+      L1 **+9.6 μs**（≈L2 重载 3.1 TB/s）、`bm=64` +8.2/+7.8、L2 +5.4；④ **block_m 收益** M=256：
+      bm64(4 块) 192.8 vs bm128(2 块) 103.8 μs = **1.86×**；⑤ **多专家税** 固定 512 行 G=1→32：
+      201.9→1118.4 μs = **5.54×**（149→27 TFLOPS），坐实 `:99`。代理 kernel vs 反量化参考 relerr
+      **1.473e-3**。`:97` 的「128」是 SM100 标定常数、H100 只能给模型形态（见局限）。主 kernel SM100
+      专属、仅分析。配套博客 `content/posts/mega-moe-189-block-m-tile`（索引页新增第 189 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -5401,8 +5419,16 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P178 各增量完成（P15-1…P41-1、P42-1…P178-1）。**
-  本轮 P178-1：新建 `docs/188-topk-cost-scan.md` + `harness/exp_topk_cost.{py,sh,out.txt}`——把 **top-k 当
+- 当前进度：**P0~P14 全部完成；P15~P179 各增量完成（P15-1…P41-1、P42-1…P179-1）。**
+  本轮 P179-1：新建 `docs/189-mega-moe-block-m-tile.md` + `harness/exp_block_m_tile.{py,sh,out.txt}`——
+  收口第 188 篇「下一步」②（只量了启发式输出、没量 tile 时延差）。用 H100 真实 SM90 FP8
+  `m_grouped_fp8_fp4_gemm_nt_masked` 代理（`expected_m` 强制 `block_m∈{64,128}`）量 mega 主 kernel
+  `BLOCK_M` 的代价形态。**源码事实**：块数是精确计数 `Σ_e ceil(m_e/BLOCK_M)`
+  （`scheduler/mega_moe.cuh:270-285/301`），每 M block 一个 `Linear1` 任务重载专家权重 tile。
+  **H100 真机**：块内行几乎免费（`bm=128` M=1→128 时延 93.9→92.9 μs 不变）、每额外块 +9.6 μs（L1）/
+  +5.4 μs（L2）、block_m 收益 M=256 时 **1.86×**、多专家税 G=1→32 **5.54×**；复刻 vs 真绑定
+  mismatch=0；代理 kernel relerr 1.473e-3。主 kernel SM100 专属、仅分析。索引页新增第 189 篇。
+  上一轮 P178-1：新建 `docs/188-topk-cost-scan.md` + `harness/exp_topk_cost.{py,sh,out.txt}`——把 **top-k 当
   自变量扫过**（前面从没做过）：top-k 进入算子的四条路径（容量 `mega_moe.hpp:48-50`、池容量
   `layout/mega_moe.cuh:21-28`、每 token 缓冲 `:396-397/447-449`、**BLOCK_M 启发式用「每专家期望 token
   `T·R·k/E`」当输入** `heuristics/mega_moe.hpp:94-110`、kernel dispatch/combine SM100 仅分析）。
@@ -7439,17 +7465,18 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P178 已完成（最新 **P178-1 把 top-k 当自变量扫过：前向/反向成本与 grouped GEMM 效率**：
-  `docs/188`。前面从没把 top-k 扫过——直觉上 topk「越贵越线性」，但 topk 还悄悄改了 kernel 的 `block_m`
-  与 grouped GEMM 效率。**H100 真机 + 真绑定**：`block_m` 随 topk 非单调阶梯（64→128→192→240→**192**）、
-  对称缓冲先近线性后饱和（Python 重写 vs C++ 绑定 0 不符）；真实 SM90 FP8 grouped GEMM 扫 topk——**E=64 时
-  wgrad 时间只随 topk 涨 1.09×（K 翻 4×）**、**E=8 时 dgrad 近线性 5.92×**，⇒ topk 的 GEMM 边际强烈依赖
-  每专家 K；通信字节严格 ∝ topk（唯一不可对冲项）。结论：topk 代价在通信 + dgrad、wgrad/tile 反而变好，
-  给「为什么敢用 topk=8」逐项账。主 kernel SM100 专属、仅分析。索引页新增第 188 篇）。
-  可继续（均为增量、非承诺）：① 把 top-k 扫描接到**目标卡 fp8_fp4_mega_moe 端到端**（需 SM100 环境，量
-  真实 dispatch/combine 重叠下的 topk 净成本）；② 把 block_m 启发式的**真实 tile 收益**在 H100 上用一个
-  简化的 `M×N×K` GEMM 代理量出来（本文只量了 heuristic 输出、没量 tile 本身的时延差）；③ 把第 170 篇的
-  dispatch 行序与第 174 篇的累积序**放进同一次端到端训练步**计时（需 DeepEP 运行期，见「阻塞」）。
+- **下一步**：P0~P179 已完成（最新 **P179-1 把「BLOCK_M 到底买到什么」量出来**：`docs/189`。收口第 188 篇
+   「下一步」②——之前只量了启发式输出、没量 tile 时延差。用 H100 真实 SM90 FP8 `m_grouped_..._masked`
+   代理（`expected_m` 强制 `block_m∈{64,128}`）：**块内行几乎免费**（`bm=128` M=1→128 时延 93.9→92.9 μs
+   不变）、**每额外块一次重载税**（L1 +9.6 μs / L2 +5.4 μs）、**block_m 收益 M=256 时 1.86×**、
+   **多专家税 G=1→32 = 5.54×**；复刻 vs 真绑定 mismatch=0。主 kernel SM100 专属、仅分析。索引页新增第
+   189 篇）。
+   上一轮 P178-1：`docs/188`——把 top-k 当自变量扫过（`block_m` 随 topk 非单调阶梯、真实 SM90 FP8
+   grouped GEMM 扫 topk 时 E=64 wgrad 1.09× / E=8 dgrad 5.92×、通信字节严格 ∝ topk）。
+   可继续（均为增量、非承诺）：① 把 top-k / block_m 扫描接到**目标卡 fp8_fp4_mega_moe 端到端**（需 SM100
+   环境，量真实 dispatch/combine 重叠下的净成本）；② 把代理从 SM90 两点 `{64,128}` 扩到**目标卡的
+   全候选 `{8,...,240}`**（需 SM100 或复刻 UMMA/TMEM 骨架）；③ 把第 170 篇的
+   dispatch 行序与第 174 篇的累积序**放进同一次端到端训练步**计时（需 DeepEP 运行期，见「阻塞」）。
   上一轮 P176-1：`docs/186`——第 12 篇讲的 SM90 FP8 `k_grouped_nt` 是 K-major、本机可跑，但目标卡生产
   wgrad 走 **MN-major 的 `k_grouped_fp8_gemm_tn_contiguous`**（仅 SM100，`gemm.hpp:369` 拒 sm90）。补上
   布局/架构矩阵与 tn v.s. nt 契约、SM100 tn kernel 每条输出 tile 一条**独立、单调的 fp32 累加链**（K 块外
