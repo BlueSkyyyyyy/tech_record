@@ -1,0 +1,72 @@
+================================================================================================
+megatron-port M8-2: CP backward anchor (gathered CP grads vs non-CP) vs FLA chunk_kda
+torch=2.12.0a0+0291f960b6.nv26.04.48445190 device=NVIDIA H100 80GB HBM3 visible=5
+================================================================================================
+
+================================================================================================
+[Part 0] reference-internal identity (fp64 CPU): chunked backward == token backward
+================================================================================================
+      C=32 T= 33 pad= 31  | q 0.0e+00 k 0.0e+00 v 0.0e+00 g 5.1e-16 beta 0.0e+00
+      C=32 T=130 pad= 30  | q 0.0e+00 k 0.0e+00 v 0.0e+00 g 2.1e-16 beta 0.0e+00
+      C=32 T=250 pad=  6  | q 0.0e+00 k 0.0e+00 v 0.0e+00 g 2.1e-19 beta 0.0e+00
+      C=64 T= 33 pad= 31  | q 0.0e+00 k 0.0e+00 v 0.0e+00 g 2.0e-16 beta 0.0e+00
+      C=64 T=130 pad= 62  | q 0.0e+00 k 0.0e+00 v 0.0e+00 g 2.8e-16 beta 0.0e+00
+      C=64 T=250 pad=  6  | q 0.0e+00 k 0.0e+00 v 0.0e+00 g 5.0e-18 beta 0.0e+00
+
+================================================================================================
+[Part A] CP backward, single sequence, equal split: gathered grads vs non-CP
+================================================================================================
+    [eq] lens=[256] world=1 C=64 part=256 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [eq] lens=[256] world=2 C=64 part=128 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [eq] lens=[192] world=3 C=64 part=64 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [eq] lens=[256] world=4 C=64 part=64 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [eq] lens=[256] world=2 C=32 part=128 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [eq] lens=[256] world=4 C=32 part=64 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+
+================================================================================================
+[Part B] varlen x CP: several sequences flattened, token-partitioned across ranks
+================================================================================================
+    [varlen] lens=[128, 128] world=2 C=64 part=128 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [varlen] lens=[64, 64, 64, 64] world=4 C=64 part=64 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [varlen] lens=[128, 128] world=2 C=32 part=128 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [varlen] lens=[128, 64, 64] world=4 C=32 part=64 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [varlen] lens=[192, 64] world=2 C=64 part=128 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+
+================================================================================================
+[Part C] the two CP hard constraints for the backward (expect them to break)
+================================================================================================
+    [part%C!=0] lens=[250] world=2 C=64 part=125 aligned=False  <-- UNALIGNED (expected to break)
+        o 1.01e-03  | dq 1.2e-03 dk 1.9e-03 dv 2.3e-03 dg 6.4e-04 dbeta 1.3e-03   (worst=dv 2.3e-03)
+    [total%world!=0] lens=[130] world=4 C=32 part=32 aligned=False  <-- UNALIGNED (expected to break)
+        o 0.00e+00  | dq 0.0e+00 dk 3.6e-02 dv 4.5e-02 dg 1.2e-02 dbeta 7.4e-03   (worst=dv 4.5e-02)
+
+================================================================================================
+[Part D] CP backward with the fused in-kernel gate (logits entry)
+================================================================================================
+    [fused] lens=[256] world=2 C=64 part=128 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [fused varlen] lens=[128, 128] world=2 C=64 part=128 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+
+================================================================================================
+[Part E] GVA (H_V > H) x CP backward: v/g/beta have 2x heads of q/k
+================================================================================================
+    [GVA x2] lens=[256] world=2 C=64 part=128 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+    [GVA x2 varlen] lens=[128, 128] world=4 C=64 part=64 aligned=True
+        o 0.00e+00  | dq 0.0e+00 dk 0.0e+00 dv 0.0e+00 dg 0.0e+00 dbeta 0.0e+00   (worst=o 0.0e+00)
+
+================================================================================================
+Done. CP==non-CP up to bf16 kernel noise; aligned partitions should be bit-exact.
+================================================================================================

@@ -5,6 +5,10 @@
 *.ptx
 *.ncu-rep
 
+# 对拍脚本的临时张量目录
+_m8btmp/
+_cptmp/
+
 # autopilot 运行时文件
 autopilot.log
 autopilot.lock

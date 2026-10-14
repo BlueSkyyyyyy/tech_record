@@ -17,10 +17,12 @@
 | `docs/04-numeric-anchor.md` | 把参考实现锚定到 FLA `chunk_kda`（M6） | [x] |
 | `docs/05-anchor-boundaries.md` | 锚定扩到门控/布局边界（M7：safe_gate/lower_bound、allow_neg_eigval、GVA、state_v_first） | [x] |
 | `docs/06-chunk-varlen.md` | 锚定扩到 chunk_size/pad/varlen/CP（M8-1） | [x] |
+| `docs/07-cp-backward.md` | 锚定扩到 CP 反向 + varlen×CP 梯度（M8-2） | [x] |
 | `src/kda_ref.py` | 最小可运行参考实现（纯 PyTorch、fp64、自带自测；M7 起支持 GVA + state_v_first） | [x] |
 | `harness/check_port_fla.py` | 参考 vs FLA 正反向数值锚定脚本（GPU） | [x] |
 | `harness/check_port_fla_m7.py` | 参考 vs FLA 门控/布局边界锚定（M7，GPU） | [x] |
 | `harness/check_port_fla_m8.py` | 参考 vs FLA `chunk_size`/pad/varlen/CP 锚定（M8-1，GPU；CP 用真实 NCCL rank） | [x] |
+| `harness/check_port_fla_m8b.py` | 参考 vs FLA CP 反向 / varlen×CP 梯度锚定（M8-2，GPU；真实 NCCL rank） | [x] |
 
 ## 任务清单
 
@@ -83,8 +85,20 @@
       与不分片**逐位相同（`max_abs=0`）**；`part%chunk≠0` 差 2.2e-3、`total%world≠0` 丢尾，
       给出 CP 两条硬约束（`total%world==0` 且 `part%chunk_size==0`）。**边界**：CP 只锚前向
       （反向见 M8-2）。
-- [ ] **M8-2** CP **反向**（`dhu` 的 CP 前处理 + 跨 rank `dht` 收发）与 `varlen × CP` 组合的
-      梯度锚定（M8-1 Part C 只锚了前向）。
+- [x] **M8-2** CP **反向**（`dhu` 的 CP 前处理 + 跨 rank `dht` 收发）与 `varlen × CP` 组合的
+      梯度锚定（M8-1 Part C 只锚了前向）。新增 `harness/check_port_fla_m8b.py`
+      （`check_port_fla_m8b.out.txt`）+ `docs/07-cp-backward.md`。**Part 0**（fp64 CPU）：参考的
+      分块反向 == 逐 token 反向到机器精度（`≤5.1e-16`，含非整除 `T=33/130/250`、`C∈{32,64}`）。
+      **Part A**（单序列等分）：`world∈{1,2,3,4}`、`C∈{32,64}`（`world≥3` 走多级 rank 链的
+      `all_gather`+`merge`）六项梯度**逐位相同（`max_abs=0`）**。**Part B**（varlen×CP，5 组，
+      含一条序列跨 rank / 每序列各占一 rank / rank 界落在序列内部）六项**逐位 0**。
+      **Part C**：两条 CP 硬约束对反向同样成立——`part%chunk!=0` 六项梯度 1e-3~2.3e-3；
+      `total%world!=0` 尾块无人认领时 `dk/dv/dg/dbeta` 高达 4.5e-2（**且 `o/dq` 仍逐位 0**，
+      即反向把分片错回灌到保留 token 的梯度，比前向更隐蔽）。**Part D/E**：核内融合门控
+      （logits 入口）与 GVA（$H_V=2H$）× CP 均**逐位 0**——CP 与两者正交。单机 NCCL 需
+      `NCCL_NVLS_ENABLE=0`。**关键事实**：CP 反向不能走 `dht` 入口（`chunk.py:362-364` +
+      `cp/chunk_delta_h.py:849` 双重断言），跨 rank 状态伴随由 `dhm`（本 rank 贡献）+`all_gather`
+      +`merge(FORWARD=False)` 重建。
 
 ### M9 Megatron 接口对齐
 - [ ] **M9-1** 按 `docs/02` §7 检查表逐项对齐 Megatron `kda.py` 的调用契约
@@ -113,17 +127,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：M0–M7 完成 + **M8-1 完成**（docs 00–06 + 参考实现 + FLA 数值锚定
-  [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向]）。
-- 本轮（M8-1）：`harness/check_port_fla_m8.py` + `docs/06-chunk-varlen.md`。**更正前提**：
-  KDA 的 `chunk_size` 只有 **32/64**（16 抛 `ValueError`，`chunk.py:390-392`）。Part 0（fp64 CPU）
-  证明块尾零填充与 varlen 逐序列循环都只是重排、与逐 token 递推 `≤6.3e-14`；Part A
-  `C∈{32,64}×T∈{16,33,64,130,250,256}`、Part B varlen（含 GVA、核内融合门控、per-seq
-  初/终态）前反向全落 **bf16 底噪 ≤7.9e-3**；Part C 真实 NCCL 多 rank CP——**对齐分片时与
-  不分片逐位相同（`max_abs=0`）**，并测出 CP 的两条硬约束（`total%world==0` 且
-  `part%chunk_size==0`，否则差 2.2e-3 / 丢尾）。单机 NCCL 需 `NCCL_NVLS_ENABLE=0`。
-- 下一步：**M8-2**（CP 反向 + varlen×CP 梯度锚定）、M9（Megatron `kda.py` 调用契约对齐）、
-  M10（端到端对拍）。
+- 当前进度：M0–M7 完成 + **M8-1 / M8-2 完成**（docs 00–07 + 参考实现 + FLA 数值锚定
+  [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 + CP 反向/varlen×CP 梯度]）。
+- 本轮（M8-2）：`harness/check_port_fla_m8b.py` + `docs/07-cp-backward.md`。补上 M8-1 只做前向的
+  CP 缺口。**Part 0**（fp64 CPU）证明参考的分块反向 == 逐 token 反向（`≤5.1e-16`）；**Part A**
+  单序列等分 `world∈{1,2,3,4}×C∈{32,64}`、**Part B** varlen×CP 5 组、**Part D** 融合门控、
+  **Part E** GVA×CP——**对齐分片时六项梯度全部 `max_abs=0`（逐位相同）**；**Part C** 确认两条 CP
+  硬约束（`total%world==0` 且 `part%chunk_size==0`）对反向同样成立，且 `total%world!=0` 时
+  `dk/dv/dg/dbeta` 高达 4.5e-2 而 `o/dq` 仍逐位 0（反向比前向更隐蔽）。关键：CP 反向走
+  `chunk_gated_delta_rule_bwd_dhu_pre_process`（`dhm`+`all_gather`+`merge(FORWARD=False)`），
+  不走 `dht` 入口（被双重断言禁止）。
+- 下一步：M9-1（Megatron `kda.py` 调用契约对齐：SBHD 转置、`dht` 初值、`A_log/dt_bias` fp32、
+  `gdn_pre_gated_delta_rule_fusion` 缺口）、M10-1（Megatron 路径端到端前反向对拍）。
 
 ## 阻塞
 

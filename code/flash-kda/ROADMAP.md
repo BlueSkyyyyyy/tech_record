@@ -2227,9 +2227,21 @@
 ## 当前进度 / 下一步
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
-  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M7 完成 + M8-1 完成**（见
+  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成**（见
   `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M8-1（本轮）：**把数值锚定扩到 `chunk_size`/pad/varlen/CP 前向**——
+  - megatron-port M8-2（本轮）：**补上 M8-1 只做前向的 CP 缺口——CP 反向 + `varlen×CP` 梯度锚定**。
+    `harness/check_port_fla_m8b.py`（`check_port_fla_m8b.out.txt`）+ `docs/07-cp-backward.md`。
+    **Part 0**（fp64 CPU）参考分块反向 == 逐 token 反向 `≤5.1e-16`；**Part A**（单序列等分，
+    `world∈{1,2,3,4}×C∈{32,64}`，`world≥3` 走多级 `all_gather`+`merge`）、**Part B**（varlen×CP
+    5 组，含跨 rank 序列 / 每序列各占一 rank / rank 界落在序列内）、**Part D**（核内融合门控）、
+    **Part E**（GVA $H_V$=2$H$）——**对齐分片时六项梯度全部 `max_abs=0`（逐位相同）**；**Part C**
+    两条 CP 硬约束（`total%world==0` 且 `part%chunk_size==0`）对反向同样成立，且 `total%world!=0`
+    时 `dk/dv/dg/dbeta` 高达 4.5e-2 而 `o/dq` 仍逐位 0（反向把分片错回灌到保留 token 的梯度，
+    比前向更隐蔽）。**关键契约**：CP 反向走 `chunk_gated_delta_rule_bwd_dhu_pre_process`
+    （本 rank 算 `dhm=[he|m]` → `all_gather` → `merge(FORWARD=False)` 写 `dht[-1]`），**不走 `dht`
+    入口**（`chunk.py:362-364` + `cp/chunk_delta_h.py:849` 双重断言）。**下一步**：M9-1（Megatron
+    `kda.py` 调用契约对齐）、M10-1（端到端前反向对拍）。
+  - megatron-port M8-1：**把数值锚定扩到 `chunk_size`/pad/varlen/CP 前向**——
     `harness/check_port_fla_m8.py`（`check_port_fla_m8.out.txt`）+ `docs/06-chunk-varlen.md`。
     **更正前提**：KDA 的 `chunk_size` 只有 **32/64**（16 抛 `ValueError`，`chunk.py:390-392`）。
     Part A `C∈{32,64}×T∈{16,33,64,130,250,256}`、Part B varlen（含 GVA/核内融合门控/per-seq 初终态）
