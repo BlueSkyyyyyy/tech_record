@@ -21,6 +21,7 @@
 | `docs/08-megatron-contract.md` | Megatron `kda.py` 调用契约逐项对齐（M9-1） | [x] |
 | `docs/09-e2e.md` | 真实层端到端前反向对拍（M10-1） | [x] |
 | `docs/10-packed-thd.md` | 真层 packed / THD（varlen）端到端对拍（M10-2） | [x] |
+| `docs/11-padded-thd.md` | 真层 packed 的 padding（`cu_seqlens_q_padded`）语义对拍（M10-3） | [x] |
 | `src/kda_ref.py` | 最小可运行参考实现（纯 PyTorch、fp64、自带自测；M7 起支持 GVA + state_v_first） | [x] |
 | `harness/check_port_fla.py` | 参考 vs FLA 正反向数值锚定脚本（GPU） | [x] |
 | `harness/check_port_fla_m7.py` | 参考 vs FLA 门控/布局边界锚定（M7，GPU） | [x] |
@@ -29,6 +30,7 @@
 | `harness/check_port_contract.py` | Megatron `kda.py` 调用契约对齐（M9-1，GPU；加载 FLA `chunk_kda` + 参考） | [x] |
 | `harness/check_port_e2e.py` | 真实 `KimiDeltaAttention` 层端到端前反向对拍（M10-1，GPU） | [x] |
 | `harness/check_port_e2e_packed.py` | 真层 packed / THD（varlen）端到端对拍（M10-2，GPU） | [x] |
+| `harness/check_port_e2e_padded.py` | 真层 packed 的 padding 语义对拍（M10-3，GPU） | [x] |
 
 ## 任务清单
 
@@ -164,6 +166,23 @@
       param.grad ≤2.4e-7。**结论**：packed 的 `cu_seqlens` 记账（切段/隔离/conv1d 跨段）在核心
       与整模块两个粒度都无隐藏偏差；M9-1 shim 契约在 packed 真层再确认。**边界**：单卡 tp=cp=1、
       packed 无 padding（`cu_seqlens_padded` 未用）、cp>1 的 packed CP（zigzag）未覆盖。
+- [x] **M10-3** 关闭 M10-2（`docs/10` §7）明确留下的边界——**带 padding 的 packed / THD**
+      （`cu_seqlens_q_padded` 走 `_resolve_cu_seqlens` 的 padding 分支，`common.py:482-506`；层把
+      *padded* 边界交给核心与 causal-conv1d，`kda.py:275-281/447/580/598-607`）。新增
+      `harness/check_port_e2e_padded.py`（`check_port_e2e_padded.out.txt`）+ `docs/11-padded-thd.md`。
+      两组用例（真实 `[0,50,110]/[0,50,100,220]` → padded `[0,64,128]/[0,64,128,256]`）。**Part A**
+      带 padding 真层 fwd/bwd 全有限。**Part B** 核心锚定（FLA vs 按 padded 边界逐段处理的 fp64
+      参考）：fp32 `o rel=2.558e-03`、梯度 rel 2.7–3.6e-3；bf16 `o rel=3.876e-03`、梯度 rel
+      2.6–7.2e-3（=tf32/bf16 底噪）。**Part C（归因）** 逐操作数翻转 pad：只有门控 **`g`** 会动真实
+      token 输出（fp32 1.29e-5@t=49、bf16 1.53e-5@t=48），`q/k/v/beta` **逐位 0**——pad 的 `g` 参与
+      块内累计衰减的稳定化参考量（chunk 尾舍入）。**Part D（关键安全属性）** 逐序列改自身 pad 尾：
+      **跨序列隔离精确 `max_abs=0`**（fp32/bf16、2 用例 ×3 seed），自身 slot 尾影响最后几个真实
+      token `9.1e-5`（fp32）/`1.95e-3`（bf16）。**Part E** 整模块 padded（FLA 芯 vs fp64 参考芯）
+      fp32 `out=5.07e-4/hs.grad=2.27e-8/param.grad=1.64e-6`、bf16 `out=2.93e-3/…/5.72e-6`（同
+      M10-1/M10-2）。**Part F** 带 padding 的真实 token vs 无 padding 布局 `out≤1.08e-4`(fp32)/
+      `1.95e-3`(bf16)。**结论**：带 padding 的 packed 路径数值健全、**跨序列隔离精确**，pad 对真实
+      token 的影响仅剩「自身 slot 尾经门控 `g` 的块尾舍入」、低于部署底噪。**边界**：单卡 tp=cp=1、
+      `pad_between_seqs` 布局、cp>1 padded CP 未覆盖。
 
 ## 已知坑
 
@@ -197,22 +216,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：M0–M8 完成 + M9-1 完成 + M10-1 完成 + **M10-2 完成**（docs 00–10 + 参考实现 +
-  FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 + CP 反向/varlen×CP 梯度] +
-  Megatron 调用契约对齐 + **真实层端到端前反向对拍 [SBHD + packed/THD]**）。
-- 本轮（M10-2）：`harness/check_port_e2e_packed.py` + `docs/10-packed-thd.md`。把 M10-1 的
-  真层对拍扩到 **packed / THD（varlen）**（`cu_seqlens` 切分、`batch=1`、参考芯改逐序列循环）。
-  **Part A** 三组 pack（含非 64 整除段长）× fp32/bf16 fwd/bwd 全有限。**Part B** 截获真层
-  当次喂 `chunk_kda` 的操作数（`cu_seqlens=[0,64,128]`），FLA vs 逐序列 fp64 参考：fp32
-  `o rel=1.993e-03`、六项梯度 rel 3.2–3.6e-3；bf16 `o rel=3.676e-03`、rel 4.3–9.4e-3（落底噪，
-  且证明 packed 段间无状态泄漏）。**Part C** 整模块 packed：fp32 `out≤5.23e-4 / hs.grad≤2.45e-8 /
-  param.grad≤1.95e-6`；bf16 `out≤2.93e-3 / hs.grad≤1.34e-7 / param.grad≤5.25e-6`。**Part D**
-  packed == unpacked：bf16 输出与 `hs.grad` 逐位相同、fp32 仅归约序微差。**结论**：packed 的
-  `cu_seqlens` 记账在核心/整模块两粒度都无隐藏偏差。**边界**：单卡 tp=cp=1、packed 无 padding、
-  cp>1 的 packed CP（zigzag）未覆盖。
-- 下一步（可选）：retire 到维护态（M0–M10 全完成）；若继续，把 M10-2 扩到 **cp>1 的
-  headwise/chunkwise CP packed**（多 rank + zigzag，需真 NCCL）真层对拍、测 **带 padding** 的
-  pack（`cu_seqlens_q_padded`/`_validate_packed_cu_seqlens`），或补
+- 当前进度：M0–M8 完成 + M9-1 完成 + M10-1 完成 + M10-2 完成 + **M10-3 完成**（docs 00–11 +
+  参考实现 + FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 + CP 反向/varlen×CP
+  梯度] + Megatron 调用契约对齐 + **真实层端到端前反向对拍 [SBHD + packed/THD + 带 padding 的
+  packed/THD]**）。
+- 本轮（M10-3）：`harness/check_port_e2e_padded.py` + `docs/11-padded-thd.md`。关闭 M10-2 的
+  「packed 无 padding」边界：给 THD 批次带 `cu_seqlens_padded`（真实 `[0,50,110]/[0,50,100,220]`
+  → padded `[0,64,128]/[0,64,128,256]`），pad 落在每个 padded slot 尾部、被层当作段内 token
+  交给核心与 conv1d。**Part A** 全有限。**Part B** 核心锚定 fp32 `o rel=2.56e-3`/bf16 `3.88e-3`
+  （梯度 rel ≤7.2e-3）。**Part C** 归因：只有门控 `g` 的 pad 会动真实 token（~1.3e-5），
+  `q/k/v/beta` 逐位 0。**Part D（关键）** 跨序列隔离精确 `max_abs=0`，自身 slot 尾影响
+  `9.1e-5`(fp32)/`1.95e-3`(bf16)。**Part E** 整模块 padded：fp32 `out=5.07e-4`、bf16 `2.93e-3`。
+  **Part F** padded↔unpadded 真实 token `≤1.08e-4`(fp32)/`1.95e-3`(bf16)。**结论**：带 padding 的
+  packed 路径数值健全、跨序列隔离精确，pad 对真实 token 的影响仅剩自身 slot 尾的块尾舍入、低于
+  部署底噪。**边界**：单卡 tp=cp=1、`pad_between_seqs` 布局、cp>1 的 packed CP（zigzag）未覆盖。
+- 下一步（可选）：retire 到维护态（M0–M10 全完成）；若继续，把 M10-1/M10-2/M10-3 扩到 **cp>1 的
+  headwise/chunkwise CP packed**（多 rank + zigzag，需真 NCCL）真层对拍，或补
   `gdn_pre_gated_delta_rule_fusion` 的 KDA 专属 streamed 融合前处理（`kda.py:399-402` 的缺口）。
 
 ## 阻塞

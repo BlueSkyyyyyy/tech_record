@@ -1,0 +1,78 @@
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2387: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at '_common.py:45'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/ops/_common.py", line 45, in maybe_autocast_dtype
+    if torch_version() >= (2, 4, 3):
+
+  torch._dynamo.utils.warn_once(msg)
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2262: UserWarning: Dynamo does not know how to trace the builtin `transformer_engine_torch.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1.rmsnorm_fwd.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+Megatron-LM: ~/proj/Megatron-LM
+=== dtype=float32 cases=[([0, 50, 110], [0, 64, 128]), ([0, 50, 100, 220], [0, 64, 128, 256])] ===
+  -- Part A: padded pack fwd/bwd smoke (float32)
+     a=[0, 50, 110] p=[0, 64, 128]  T_pad= 128  shape/dtype=True  hs.grad finite=True  bad=0
+     a=[0, 50, 100, 220] p=[0, 64, 128, 256]  T_pad= 256  shape/dtype=True  hs.grad finite=True  bad=0
+  -- Part B: padded core-operator anchor (FLA vs fp64 ref, padded slicing)
+     core cu_seqlens (resolved) = [0, 64, 128]  (padded; actual differs)
+     fwd o: max_abs=1.325e-04  rel=2.558e-03
+     grad q     max_abs=2.832e-09  rel=3.275e-03
+     grad k     max_abs=5.328e-09  rel=3.088e-03
+     grad v     max_abs=3.335e-09  rel=3.302e-03
+     grad g     max_abs=5.729e-11  rel=3.599e-03
+     grad beta  max_abs=7.738e-09  rel=2.666e-03
+     core worst grad max_abs=7.738e-09
+  -- Part C: fill-sensitivity attribution on captured core operands
+     flip fill of q    : real-token max=0.000e+00 (at t=0)  n_nonzero=0/110
+     flip fill of k    : real-token max=0.000e+00 (at t=0)  n_nonzero=0/110
+     flip fill of v    : real-token max=0.000e+00 (at t=0)  n_nonzero=0/110
+     flip fill of g    : real-token max=1.293e-05 (at t=49)  n_nonzero=2/110
+     flip fill of beta : real-token max=0.000e+00 (at t=0)  n_nonzero=0/110
+  -- Part D: module padding isolation (per-segment fill flip, float32)
+     worst over 2 cases x 3 seeds, real-token positions:
+       own-slot fill flip      : out max_abs=9.119e-05
+       other-slot fill flip    : out max_abs=0.000e+00  (cross-segment isolation)
+  -- Part E: full-module padded (FLA-core vs ref-core, identical weights)
+     a=[0, 50, 110] p=[0, 64, 128] T_pad= 128  out=5.066e-04 hs.grad=2.269e-08 param.grad=1.641e-06
+     a=[0, 50, 100, 220] p=[0, 64, 128, 256] T_pad= 256  out=4.873e-04 hs.grad=1.288e-08 param.grad=1.520e-06
+     worst: out=5.066e-04 hs.grad=2.269e-08 param.grad=1.641e-06
+  -- Part F: padded vs unpadded real-token equivalence (FLA core, float32)
+     worst over 2 cases x 3 seeds (real pos): out=1.084e-04  hs.grad=5.876e-06
+=== dtype=bfloat16 cases=[([0, 50, 110], [0, 64, 128]), ([0, 50, 100, 220], [0, 64, 128, 256])] ===
+  -- Part A: padded pack fwd/bwd smoke (bfloat16)
+     a=[0, 50, 110] p=[0, 64, 128]  T_pad= 128  shape/dtype=True  hs.grad finite=True  bad=0
+     a=[0, 50, 100, 220] p=[0, 64, 128, 256]  T_pad= 256  shape/dtype=True  hs.grad finite=True  bad=0
+  -- Part B: padded core-operator anchor (FLA vs fp64 ref, padded slicing)
+     core cu_seqlens (resolved) = [0, 64, 128]  (padded; actual differs)
+     fwd o: max_abs=2.441e-04  rel=3.876e-03
+     grad q     max_abs=3.725e-09  rel=4.545e-03
+     grad k     max_abs=7.451e-09  rel=6.250e-03
+     grad v     max_abs=7.451e-09  rel=7.194e-03
+     grad g     max_abs=5.821e-11  rel=5.495e-03
+     grad beta  max_abs=7.658e-09  rel=2.574e-03
+     core worst grad max_abs=7.658e-09
+  -- Part C: fill-sensitivity attribution on captured core operands
+     flip fill of q    : real-token max=0.000e+00 (at t=0)  n_nonzero=0/110
+     flip fill of k    : real-token max=0.000e+00 (at t=0)  n_nonzero=0/110
+     flip fill of v    : real-token max=0.000e+00 (at t=0)  n_nonzero=0/110
+     flip fill of g    : real-token max=1.526e-05 (at t=48)  n_nonzero=2/110
+     flip fill of beta : real-token max=0.000e+00 (at t=0)  n_nonzero=0/110
+  -- Part D: module padding isolation (per-segment fill flip, bfloat16)
+     worst over 2 cases x 3 seeds, real-token positions:
+       own-slot fill flip      : out max_abs=1.953e-03
+       other-slot fill flip    : out max_abs=0.000e+00  (cross-segment isolation)
+  -- Part E: full-module padded (FLA-core vs ref-core, identical weights)
+     a=[0, 50, 110] p=[0, 64, 128] T_pad= 128  out=2.930e-03 hs.grad=1.192e-07 param.grad=5.722e-06
+     a=[0, 50, 100, 220] p=[0, 64, 128, 256] T_pad= 256  out=2.441e-03 hs.grad=5.960e-08 param.grad=3.815e-06
+     worst: out=2.930e-03 hs.grad=1.192e-07 param.grad=5.722e-06
+  -- Part F: padded vs unpadded real-token equivalence (FLA core, bfloat16)
+     worst over 2 cases x 3 seeds (real pos): out=1.953e-03  hs.grad=6.013e-06
+ALL DONE
+[rank0]:[W1014 02:57:13.668103109 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())

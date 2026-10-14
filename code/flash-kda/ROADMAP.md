@@ -2227,9 +2227,23 @@
 ## 当前进度 / 下一步
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
-  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 + M10-1/M10-2 完成**
-  （见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M10-2（本轮）：**把 M10-1 的真层对拍扩到 packed / THD（varlen）路径**——
+  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
+  M10-1/M10-2/M10-3 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
+  - megatron-port M10-3（本轮）：**关闭 M10-2 的「packed 无 padding」边界——带 `cu_seqlens_padded`
+    的 packed / THD 真层对拍**。层把 *padded* 边界交给核心与 causal-conv1d
+    （`kda.py:275-281/447/580/598-607`、`common.py:482-506`），故 pad token 被当成段内 token。
+    `harness/check_port_e2e_padded.py`（`check_port_e2e_padded.out.txt`）+ `docs/11-padded-thd.md`。
+    两组用例（真实 `[0,50,110]/[0,50,100,220]` → padded `[0,64,128]/[0,64,128,256]`）。**Part A**
+    带 padding fwd/bwd 全有限。**Part B** 核心锚定（FLA vs 按 padded 边界逐段处理的 fp64 参考）
+    fp32 `o rel=2.56e-3`、bf16 `3.88e-3`（梯度 rel ≤7.2e-3）。**Part C（归因）** 逐操作数翻转 pad：
+    只有门控 **`g`** 会动真实 token（~1.3e-5），`q/k/v/beta` **逐位 0**（pad 的 `g` 参与块内累计
+    衰减的稳定化参考量、chunk 尾舍入）。**Part D（关键安全属性）** 逐序列改自身 pad 尾：**跨序列
+    隔离精确 `max_abs=0`**（fp32/bf16、2 用例 ×3 seed），自身 slot 尾影响最后几个真实 token
+    `9.1e-5`(fp32)/`1.95e-3`(bf16)。**Part E** 整模块 padded：fp32 `out=5.07e-4`、bf16 `2.93e-3`。
+    **Part F** padded↔unpadded 真实 token `≤1.08e-4`(fp32)/`1.95e-3`(bf16)。**结论**：带 padding 的
+    packed 路径数值健全、跨序列隔离精确，pad 对真实 token 的影响仅剩自身 slot 尾的块尾舍入、低于
+    部署底噪。**边界**：单卡 tp=cp=1、`pad_between_seqs` 布局、cp>1 的 packed CP 未覆盖。
+  - megatron-port M10-2（上轮）：**把 M10-1 的真层对拍扩到 packed / THD（varlen）路径**——
     多序列沿 token 维拍平、`cu_seqlens` 切分、`batch==1`（`kda.py:272-289`），参考芯改成
     **packed-aware**（按相邻 `cu_seqlens` 逐序列循环调 `kda_chunked_fwd`，与 FLA varlen 语义
     一致）。`harness/check_port_e2e_packed.py`（`check_port_e2e_packed.out.txt`）+
