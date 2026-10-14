@@ -1833,6 +1833,27 @@
         `DAMMA` 降 DA 段 regs（`(128,256)`/`(256,*)` 把 reg 侧 1→2）但 **achieved warps 一律由 smem 台阶钉死**。
         **口径坑**：`ncu` 的**字节**指标也逐 launch 自选单位（`V=256` 的 `dram__bytes_read` 打印成 `Gbyte`），
         解析须按打印单位换算（延续 §103.6）。默认部署仍 §45 的 `cf`。见 `docs/07` §110。
+- [x] **P7-108** 关闭 §110.6（P7-107）逐字留下的「`(64,256)` bank-conflict 二级交互机制待验证」
+        （§110 唯一遗留项）。**`b2_mma_probe.cu` 一行未改**（只组合既有宏）；新增
+        `harness/probe_b2_stack_resid.sh`（`harness/probe_b2_stack_resid.out.txt`）+ 单 tag 任意
+        `(B,T,H)` 驱动 `harness/ncu_b2_stack_resid_driver.py` + 解析
+        `harness/check_bwd_b2_stack_resid.py`（`harness/check_bwd_b2_stack_resid.out.txt`）+ 同尺寸不同
+        分解复核 `harness/probe_b2_stack_resid_knee.sh`（`..._knee.out.txt`）+ `docs/07` §111。
+        **逐层量化（底座 `bmt`、`K=64 V=256`）**：(A) 静态共享载入指令多重集
+        （`LDS`/`LDS.64`/`LDS.128`/`LDS.U16`：136/12/26/316 → 合并后 190/18/8/60）**逐位可加**——排除了
+        「换指令/换向量化宽度」；(C) 动态共享载入指令数（`37 781 504`）与**理想 wavefronts**
+        （`wavefronts−bank_conflicts`＝`39 452 672`）**均逐位可加**——残差 **100% 落在 bank-conflict replay 项**。
+        (B) **不是占用率**（`occ_smem` 恒 2、`warps%` 12.5→24.7）：`grid=128 < 132 SM`（1 CTA/SM）残差
+        **精确 +0**，随 grid（工作量）增大到 grid 8192 的 **−652 294（−2.43%）**，且**只随 grid 尺寸、
+        不随 `(B,T,H)` 分解**（grid 2048 三分解残差 −6.3~−9.0e4 同阶、逐 build 计数近乎相同）。残差在
+        grid 512/1024 为小 **正**（+0.2%）、grid ≥2048 转 **负**并增大。(D) **最细可定位层＝冲突类型**：
+        `DAMMA` 砍 data-bank 19.47 M 却把 **arbitration 冲突抬高 +0.71 M**（`INTRA` 亦 +0.28 M），叠加后
+        arbitration **亚可加 −17%**（预测 3.044 M / 观测 2.695 M）——即该二级项是**多波 grid + 每 SM 2 CTA
+        争用 L1TEX 共享载入通道**时的**客户端仲裁记账**效应（单波记不到→归零）。跨 `--replay-mode
+        kernel/application` 复现（grid 4096：−2.8e5/−2.5e5），非 replay 假象。**结论**：算术/字节中性、
+        ≤2.5%、与部署取舍无关；§108–§110 结论不变，默认部署仍 §45 的 `cf`。**边界**：本 arch 无 `op_ld`
+        的 SASS 级 bank-conflict 计（只有 `ldsm/ldgsts/stsm` 的 sass 版），故无法再细分到具体 `LDS` 指令；
+        精确定位到 SASS 级微架构成因留作未解项（不影响结论）。见 `docs/07` §111。
 
 
 ### P8 小结 / 一页纸
@@ -2177,8 +2198,21 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-107 补测 + P8-3…P8-12**。
-  - P7-107 + P8-12（本轮）：**关闭 §109.5（P7-106）明确留下的最后一条边界——把 `bf16mma_tma` 多旋钮叠加的
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-108 补测 + P8-3…P8-13**。
+  - P7-108 + P8-13（本轮）：**关闭 §110.6（P7-107）逐字留下的「`(64,256)` bank-conflict 二级交互机制待
+    验证」——§110 唯一遗留项**。新增 `harness/probe_b2_stack_resid.sh`
+    （`probe_b2_stack_resid.out.txt`）+ `harness/ncu_b2_stack_resid_driver.py` + 解析
+    `harness/check_bwd_b2_stack_resid.py`（`..._resid.out.txt`）+ `harness/probe_b2_stack_resid_knee.sh`
+    （`..._knee.out.txt`）+ `docs/07` §111 + `docs/08` §111 bullet；`b2_mma_probe.cu` 一行未改。**逐层量化**：
+    静态共享载入指令多重集 `LDS/LDS.64/LDS.128/LDS.U16`（136/12/26/316→190/18/8/60）**逐位可加**、
+    动态共享载入指令数（`37 781 504`）与理想 wavefronts（`39 452 672`）**逐位可加** ⇒ 残差 100% 落在
+    bank-conflict replay 项；**不是占用率**（`occ_smem` 恒 2）——`grid=128`（1 CTA/SM）残差**精确 0**，
+    随 grid 增大到 **−2.43%（grid 8192）**，只随 grid 尺寸、不随 `(B,T,H)` 分解；**冲突类型拆分**显示
+    `DAMMA` 把 data-bank 冲突换成 arbitration（+0.71 M），叠加后 arbitration **亚可加 −17%**——即该二级项是
+    **多波 + 每 SM 2 CTA 争用 L1TEX 时**的**仲裁记账**效应。跨 kernel/application replay 复现。**结论**：
+    算术/字节中性、≤2.5%、不改变 §108–§110 的任何取舍；默认部署仍 §45 的 `cf`。**下一步（可选）**：专题维持
+    维护态——`op_ld` 的 SASS 级 bank-conflict 计在本 arch 缺失，残差精确到指令级的微架构成因留作未解项。
+  - P7-107 + P8-12（上轮）：**关闭 §109.5（P7-106）明确留下的最后一条边界——把 `bf16mma_tma` 多旋钮叠加的
     `ncu` 从 2 点扩到全 `{64,128,256}²` 网格**（含此前从未剖析的 `(64,128)` 与 `K=256`）。扩
     `harness/probe_b2_stack_ncu.sh` 到 9 点（`K=256` 因 `INTRA` 越界只扫 `DAMMA` 单轴，实测 `rc=-3`）+ 新增
     `harness/check_bwd_b2_stack_grid.py`（`check_bwd_b2_stack_grid.out.txt`）+ 复核 `(64,256)` 残差的

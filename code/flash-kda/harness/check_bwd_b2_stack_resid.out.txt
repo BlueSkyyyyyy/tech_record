@@ -1,0 +1,36 @@
+parsed: sass=4 grid=24 agg=4 sub=4  from harness/probe_b2_stack_resid.out.txt
+
+[A] static SASS shared-load opcode histogram (additivity test)
+    tag           total      LDS   LDS.64  LDS.128  LDS.U16
+    bmt             490      136       12       26      316
+    bmt_da          216      136       12        8       60
+    bmt_intra       550      190       18       26      316
+    bmt_da_intra    276      190       18        8       60
+    additive LDS          pred=190 obs=190  OK
+    additive LDS.64       pred=18 obs=18  OK
+    additive LDS.128      pred=8 obs=8  OK
+    additive LDS.U16      pred=60 obs=60  OK
+    additive __total__    pred=276 obs=276  OK
+    => instruction multiset additive: True
+
+[C] aggregate layer additivity at grid=8192
+    dynamic shared-ld instr count              bmt=    52264960 obs=    37781504 pred=    37781504 resid=+0 (+0.000%)
+    total shared-load wavefronts               bmt=    81547292 obs=    54624059 pred=    55280648 resid=-656589 (-0.805%)
+    bank conflicts                             bmt=    26824732 obs=    15171387 pred=    15827976 resid=-656589 (-2.448%)
+    ideal wavefronts (wf - bconf)              bmt=    54722560 obs=    39452672 pred=    39452672 resid=+0
+    => ideal wavefronts additive & residual confined to the conflict term
+
+[B] bank-conflict residual vs grid (K=64 V=256)
+      grid          bmt       bmt_da    bmt_intra bmt_da_intra         pred      resid  resid%
+       128       402304        95104       529280       222080       222080         +0  0.000%
+       512      1632951       406138      2143167       920356       916354      +4002  0.245%
+      1024      3289819       832741      4316013      1864090      1858935      +5155  0.157%
+      2048      6640051      1770323      8717615      3770918      3847887     -76969 -1.159%
+      4096     13355582      3668931     17540048      7581825      7853397    -271572 -2.033%
+      8192     26804214      7389444     35248453     15181389     15833683    -652294 -2.434%
+    warps%% / occ_smem(bmt): g128:12.5%/2  g512:23.2%/2  g1024:23.8%/2  g2048:24.2%/2  g4096:24.5%/2  g8192:24.7%/2
+
+[D] conflict-type split at grid=8192
+    mem_shared_op_ld conflicts                 bmt=    26796284 obs=    15187550 pred=    15735599 resid=-548049 (-2.045%)
+    type_arbitration conflicts                 bmt=     2054265 obs=     2695039 pred=     3044255 resid=-349216 (-17.000%)
+    mem_shared (all) conflicts                 bmt=    27854580 obs=    16443222 pred=    16958348 resid=-515126 (-1.849%)
