@@ -5489,6 +5489,35 @@
       把通信与计算放进同一块 SM 不同 warp 的选择。DeepEP dispatch/combine 设备端（NCCL GIN）**仅分析**。
       配套博客 `content/posts/mega-moe-193-comm-sm-opportunity-cost`（索引页新增第 193 篇）。
 
+### P184 增量（opt-in，补齐 Mega MoE dispatch 一直只被定性带过的「round-robin min-peeling」认领协议）
+
+- [x] **P184-1** **Mega MoE dispatch 的 round-robin min-peeling 认领协议：无锁唯一认领 + 它到底在交错什么**
+      （`deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh:439-534`（`:439` `kNumRanksPerLane`、
+      `:448` `kNumGlobalWarps`、`:449` grid-stride token 循环、`:471-478` 读 per-rank 到达数（`:474` TODO not
+      coalesced）、`:480-528` min-peeling、`:501`/`:502` `__reduce_add/min_sync`、`:506-518` 轮内 round-robin
+      （`__ballot_sync`+`__fns`）、`:522-527` 下一轮、`:531-534` 源 topk 索引；`heuristics/mega_moe.hpp:220`
+      `num_dispatch_threads=128`）。第 11 篇（P3-4）拆 dispatch pull 主循环时一句话带过这个映射；第 120 篇
+      拆的是另一层（GEMM 调度器分域+工作窃取）；第 180 篇把端到端不可复现归给 DeepEP **训练侧** dispatch 的
+      `atomicAdd` 槽位分配。**但 min-peeling 本身从没被单独验证过**。**关键事实**：它是**纯整数 + warp
+      intrinsics**，不碰 UMMA/TMA/tcgen05/NVLink ⇒ 虽在 SM100 主 kernel 里却**与架构无关**，可在 H100(sm90a)
+      **真机直接编译运行**。**语义**：逐轮 `length=min(remaining)`、`num_round_tokens=length*|active|`、轮内
+      按活跃 rank **升序 round-robin**，等价于**一次性枚举整条 token 顺序**（零计数自动跳过、每轮削掉最穷那
+      层——「min-peeling」）。**H100 真机**（`src/mega_moe_dispatch_claim.cu` 逐行复刻 `:439-528` + 独立 host
+      oracle；`harness/exp_mega_moe_dispatch_claim.py` 逐轮建置换的**独立** Python 复刻）：① **无锁唯一认领
+      成立**——枚举出的 `(rank,t)` 恰是 `{(r,t):0≤t<counts[r]}` 的一次排列（`dup=oob=uncovered=0`）、经验
+      rank 频率精确等于 `counts`；覆盖 `R∈{4,8,16,32,64,72}`（含 `kNumRanksPerLane=2/3`）、零计数、极端偏斜，
+      **200 组 C++ sweep + 500 组 Python sweep 全过**（`PASS=629/FAIL=0`、`PASS=508/FAIL=0`）；② **它到底在
+      交错什么**——**并发窗口**（528 warp 同迭代处理的连续 528 个 token，即对称缓冲上同时被 pull 的一批）：
+      min-peeling 每窗口覆盖 **4.5 个源 rank、单 rank 窗口仅 1/32**，而朴素「按 counts 连续切段」是
+      **1.2 个、单 rank 窗口 27/32（最长连跑 497）** ⇒ 朴素实现会让**同一瞬间的 528 个 pull 全打到一个源
+      rank**、其余 7 条 NVLink 空转；min-peeling 的 round-robin 正是「让 8 条源链路并行饱和」的保证（与第
+      191/192 篇「每 rank NVLink 出口 ~8–16 SM 封顶」互为表里）；**「每 warp 视角」5.5 vs 6.5 会误导**——
+      grid-stride（`:449`）已把 token 打散，只有并发窗口才反映物理；③ **确定性对照**——给定各 rank 到达数，
+      该映射**唯一且与执行时序无关**（逐步逐位一致）⇒ 前向 dispatch 源顺序是**结构性确定**的，第 180 篇的
+      复现性风险在**训练侧 batched dispatch 的 atomicAdd**，不在这个融合前向里。主 kernel 远端 pull/combine
+      段（UMMA/TMA/NVLink）SM100 专属、仅分析。配套博客 `content/posts/mega-moe-194-dispatch-min-peeling`
+      （索引页新增第 194 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -5526,8 +5555,20 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P183 各增量完成（P15-1…P41-1、P42-1…P183-1）。**
-  本轮 P183-1：新建 `docs/193-comm-sm-opportunity-cost.md` +
+- 当前进度：**P0~P14 全部完成；P15~P184 各增量完成（P15-1…P41-1、P42-1…P184-1）。**
+  本轮 P184-1：新建 `docs/194-mega-moe-dispatch-min-peeling.md` +
+  `src/mega_moe_dispatch_claim.cu` + `harness/exp_mega_moe_dispatch_claim.{sh,py,out.txt}`——
+  把 dispatch 段一直只被定性带过的 **round-robin min-peeling** 认领协议（`impls/sm100_fp8_fp4_mega_moe.cuh:439-528`）
+  单独验证。**关键事实**：纯整数 + warp intrinsics，不碰 UMMA/TMA/NVLink ⇒ 与架构无关，H100(sm90a)
+  **真机可跑**。**结果**：① **无锁唯一认领成立**（枚举 `(rank,t)` 恰为 `{(r,t)}` 的一次排列、
+  频率精确，`R∈{4,8,16,32,64,72}` 含零/偏斜、`kNumRanksPerLane=2/3`，200 C++ + 500 Python sweep 全过，
+  `PASS=629/0` 与 `508/0`）；② **交错的是「并发窗口」**——528 warp 同迭代的连续 528 个 token 在
+  min-peeling 下覆盖 **4.5 个源 rank（单 rank 窗口 1/32）**，而朴素连续切段是 **1.2 个（单 rank 窗口
+  27/32、最长连跑 497）** ⇒ 朴素实现会让同一瞬间的 pull 全打到一个源 rank、7 条 NVLink 空转
+  （与第 191/192 篇「每 rank 出口 ~8–16 SM 封顶」互为表里）；③ 该映射**结构性确定**，第 180 篇的
+  复现性风险在训练侧 `atomicAdd` dispatch、不在此融合前向。主 kernel pull/combine 段 SM100 专属、仅分析。
+  索引页新增第 194 篇。
+  上一轮 P183-1：新建 `docs/193-comm-sm-opportunity-cost.md` +
   `harness/exp_comm_sm_opportunity_cost.{sh,py,out.txt}`——把「给通信让 SM」两侧的账合起来，
   给 DeepEP 模型 `prefer_overlap=False` 的 `max(·,64)` 定价。**源码事实**：`direct EP8` 四个候选里
   **起决定作用的是 combine 的 NVLink 写回腿**（`ep.py:528`，分子分母都在 `nvlink_gbs` 上）⇒ 模型的
@@ -7613,7 +7654,19 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P183 已完成（最新 **P183-1 把「给通信让 SM 的机会成本」合账定价**：`docs/193`。
+- **下一步**：P0~P184 已完成（最新 **P184-1 把 dispatch 的 round-robin min-peeling 认领协议单独验证**：`docs/194`。
+    第 11 篇只定性带过这个映射、第 180 篇把复现性归给训练侧 `atomicAdd`，但 min-peeling 本身没被验证过。
+    **H100(sm90a) 真机**（纯整数+warp intrinsics、与架构无关，`src/mega_moe_dispatch_claim.cu` 逐行复刻
+    `:439-528` + 独立 Python 复刻）——① **无锁唯一认领成立**（枚举 `(rank,t)` 恰为 `{(r,t)}` 的一次排列，
+    `R∈{4,8,16,32,64,72}` 含零/偏斜、200+500 sweep 全过）；② **交错的是并发窗口**——528 warp 同迭代的
+    连续 528 个 token 在 min-peeling 下覆盖 **4.5 个源 rank（单 rank 窗口 1/32）**，朴素连续切段仅 **1.2 个
+    （单 rank 窗口 27/32）** ⇒ 前者让 8 条源 NVLink 并行饱和（与第 191/192 篇互补）；③ 该映射**结构性确定**。
+    主 kernel pull/combine 段 SM100 专属、仅分析。索引页新增第 194 篇。
+    可继续（均为增量、非承诺）：① 把 min-peeling 的并发窗口结论接到**真机 8 卡 NVLink pull**（需 DeepEP
+    对称窗口/运行期，见「阻塞」）；② 把「每 warp vs 并发窗口」两种口径的差异扩到 combine 的
+    `combine_ready_grid_idx` 水位线（`:1395-1441`）+ 多 rank 全图；③ 或选 DeepGEMM/DeepEP `csrc/utils/`
+    剩余小角落 / 前向其它纯整数索引层做定点复核。
+    上一轮 P183-1：`docs/193`——把「给通信让 SM 的机会成本」合账定价。
     第 190 篇量了计算侧汇率、第 191/192 篇量了通信侧膝点，本篇合账给 DeepEP 模型
     `prefer_overlap=False` 的 `max(·,64)` 定价：**H100(sm90) 真机**——① 模型 `direct EP8` 四个候选里
     起决定的是 combine 的 NVLink 写回腿（`ep.py:528`，分子分母都在 `nvlink_gbs` 上）⇒ SM 数
