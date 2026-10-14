@@ -27,6 +27,7 @@
 | `docs/14-pre-gated-fusion.md` | `gdn_pre_gated_delta_rule_fusion` 的 KDA 缺口：结构差异 + KDA 专属 fused pre-GDR 契约与锚定（M12-1） | [x] |
 | `docs/15-fused-pregdr-kernel.md` | KDA 专属 fused pre-GDR 的 Triton 核族实现 + 数值锚定/整层 drop-in/计时（M13-1） | [x] |
 | `docs/16-fused-pregdr-bwd-kernel.md` | KDA 专属 fused pre-GDR 的**原生 Triton 反向**（三反向 kernel + autograd 重接，修掉 M13-1 漏比 conv 参数的测试漏洞；M13-2） | [x] |
+| `docs/17-fused-pregdr-bwd-perf.md` | fused pre-GDR 原生反向的**逐 kernel 剖析 + 融合**（定位 torch glue、producer 直写 `da`、dev 缺口关闭 + conv_bias 端到端；M13-3） | [x] |
 | `src/kda_ref.py` | 最小可运行参考实现（纯 PyTorch、fp64、自带自测；M7 起支持 GVA + state_v_first） | [x] |
 | `src/kda_pregdr_fused.py` | KDA 专属 fused pre-GDR 的 Triton 核族（conv+SiLU / L2-norm / beta sigmoid）+ autograd 包装 + 自测（M13-1） | [x] |
 | `src/kda_pregdr_bwd.py` | KDA 专属 fused pre-GDR 的**原生 Triton 反向**（SiLU→conv dX/dW/dbias / L2-norm / sigmoid）+ autograd 重接（conv 参数作为 Function 输入）+ 自测（M13-2） | [x] |
@@ -42,7 +43,8 @@
 | `harness/check_port_e2e_cp_thd.py` | packed THD 多序列 CP 锚定（逐序列 zigzag 分片 + `--shard global` 受控对拍；M11-2，GPU；真 NCCL） | [x] |
 | `harness/check_port_pre_gated_fusion.py` | `gdn_pre_gated_delta_rule_fusion` KDA 缺口的复现 + KDA 专属 fused pre-GDR 参考锚定 / drop-in（M12-1，GPU） | [x] |
 | `harness/check_port_pregdr_kernel.py` | KDA 专属 fused pre-GDR **Triton 核族**的数值锚定（vs eager/纯 torch 参考）+ 整层 drop-in + wall/dev 计时（M13-1，GPU） | [x] |
-| `harness/check_port_pregdr_bwd_kernel.py` | KDA 专属 fused pre-GDR **原生反向**的孤立/端到端数值锚定 + 整层 drop-in（含 conv 参数）+ wall/dev 计时（M13-2，GPU） | [x] |
+| `harness/check_port_pregdr_bwd_kernel.py` | KDA 专属 fused pre-GDR **原生反向**的孤立/端到端数值锚定 + 整层 drop-in（含 conv 参数）+ 融合前后逐项（Part F）+ `conv_bias=True` 端到端（Part E）+ wall/dev 计时（M13-2/M13-3，GPU） | [x] |
+| `harness/profile_port_pregdr_bwd.py` | fused pre-GDR 原生反向的**逐 kernel 设备时间剖析**（融合前/后对照；M13-3，GPU） | [x] |
 
 ## 任务清单
 
@@ -296,6 +298,25 @@
        `wall` 原生稳定赢 **1.35–1.74×**（eager host 税恒定 ~1.5ms），纯设备 `dev` 小 shape 略慢
        （0.69–0.98×，原型 4-kernel 反向 + 存 `pre` 多跑一遍 conv 的代价）。**边界**：`BT=64`/fp32-internal、
        `conv_bias` 支持但本层 `False`（`dbias` 未实测非零）、反向多 kernel 未融合、仍未接 `kda.py:399` guard。
+- [x] **M13-3** 兑现 M13-2 的「下一步（把反向 conv/l2norm 融合）」，但**先剖析再动手**：新增
+       `harness/profile_port_pregdr_bwd.py`（`profile_port_pregdr_bwd.out.txt`，逐 kernel
+       `self_device_time`）定位 dev 回归，据此融合，再重测。**未改 Megatron-LM 一行**。**诊断（关键）**：
+       M13-2 反向的 dev 时间 **≈45% 不在 Triton kernel、在 torch glue**——`torch.cat(dq,dk)` +
+       `dconv`/`da` 两次 slice-copy + `dqkvfg_t` 三次 slice-copy（`elementwise×5`）+ 两次 zero-fill +
+       `fd()` 的 bf16→fp32 cast（`bfloat16_copy×2`）。**融合**：`src/kda_pregdr_bwd.py` 新增
+       `_kda_l2norm_silu_qk_bwd_kernel:168`（行内选 `dq`/`dk`，一个 kernel 同时做 L2-norm 反向 ∘ SiLU'）
+       与 `_kda_silu_v_bwd_kernel:203`，**直接写 `da`**（无 cat/dqk_in/dconv）；`_kda_conv_bwd_kernel:79`
+       加 `OST/OB/OOFF` 输出步长、**直写 `dqkvfg_t[..., :C]`**；`fd()` 基本退场（kernel load 时 cast）。
+       **坑**：去 `fd` 后整层 Part D 首次 `illegal memory access`——autograd 对 `sum(o)` 递的是
+       **broadcast（stride 全 0）梯度**（`harness/_dbg_repro.py` 打印 `stride (0,0,0,0)`），线性索引
+       越界；修法 `dq,dk,dv = dq.contiguous(),...`（dense 时 no-op，`:293`）。**实测**：隔离反向设备时间
+       **0.64–0.85×**（fp32 `T1024B8` 92.6→66.9µs、bf16 106.2→78.0µs）；整链 Part D dev 缺口基本关闭
+       ——fp32 **0.87/0.93/1.02/1.14×**（M13-2 为 0.80/0.87/0.91/0.98）、bf16 **0.81/0.86/0.91/0.96×**
+       （M13-2 为 0.69/0.76/0.76/0.79），大 shape 翻正；`wall` 仍 1.4–1.8×。**数值**：新增 **Part F**
+       （融合前后同中间量逐项）fp32 ≤1e-6、bf16 3.9e-3（出口 ulp）；新增 **Part E**（`conv_bias=True`
+       非零端到端 stub）`dbias` fp32 2.4–3.8e-6、`bias.grad` 两侧同值——关闭 `docs/16` 的 `dbias=nan` 边界；
+       Part A/B/C 与 M13-2 同阶。见 `docs/17-fused-pregdr-bwd-perf.md`。**边界**：`BT=64`/fp32-internal、
+       反向仍 4 kernel、**未做 ncu**（性能口径为 CUPTI self-dev + 自有 wall/dev）、仍未接 `kda.py:399`。
 
 ## 已知坑
 
@@ -344,6 +365,16 @@
   **输入**（`kda_pre_gdr_fused_native`），梯度即流回真实 `Parameter`。判据：`Function.backward` 的返回
   元组长度/顺序须与全部输入一一对应；对拍脚本要**打印 `compared/skipped` 计数**（本轮 7/0），
   不要只报 max 误差。
+- **autograd 会对「用不上的上游」递 broadcast（stride 全 0）梯度**（M13-3，`docs/17` §3）：
+  `sum(o.float().sum())` 对输出求导时，某输出的梯度可能是**零 stride 的广播视图**（`harness/_dbg_repro.py`
+  打印 `grad shape (2,64,4,32) stride (0,0,0,0) contig False`），不是 dense 张量。凡 kernel **按连续方式
+  线性索引上游梯度**（如 fused pre-GDR 反向的 `dq/dk/dv`），入口必须 `.contiguous()` 兜底——dense 时零成本、
+  广播时才真正 copy。M13-2 用 `fd(...).contiguous()` 顺手实体化故从未暴露；M13-3 去掉 `fd` 后整层对拍
+  首次 `illegal memory access`（而 dense 的剖析脚本一路正常），正是此坑。
+- **「dev 回归」先把每个 kernel 的设备时间拆开再归因**（M13-3，`docs/17` §1）：M13-2 的反向 `dev` 小
+  shape 输给 eager，直觉会怪「多 kernel」；逐 kernel `self_device_time` 显示 **≈45% 是 torch glue**
+  （`cat` + 多次 slice-copy + `fd()` 的 cast/zero-fill），Triton kernel 反而只占一半。判据：优化前先用
+  profiler 把设备时间按 kernel 名分组——「原生 = 更快」只在 glue 也被消掉时才成立。
 - **packed THD 多序列 CP 要 prebuilt THD CP routes**（M11-1，`docs/12` §4）：`PackedSeqParams`
   只给 `cu_seqlens`（`qkv_format="thd"`）+ 逐 token zigzag 分片时，多序列 CP 对不上全序列 golden
   （`o rel` O(1)）并打印 `context_parallel_layout/conversion.py:120` 的 fallback `FutureWarning`
@@ -353,12 +384,23 @@
 ## 当前进度 / 下一步
 
 - 当前进度：M0–M8 完成 + M9-1 完成 + M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 +
-  M12-1 完成 + M13-1 完成 + **M13-2 完成**
-  （docs 00–16 + 参考实现 + FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 +
+  M12-1 完成 + M13-1 完成 + M13-2 完成 + **M13-3 完成**
+  （docs 00–17 + 参考实现 + FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 +
   CP 反向/varlen×CP 梯度] + Megatron 调用契约对齐 + **真实层端到端前反向对拍 [SBHD +
   packed/THD + 带 padding 的 packed/THD + cp>1 headwise/chunkwise + **packed THD 多序列 CP**]** +
   `gdn_pre_gated_delta_rule_fusion` 的 KDA 缺口分析 + 专属 fused pre-GDR 契约锚定/drop-in +
-  **KDA 专属 fused pre-GDR 的 Triton 核族实现** + **原生 Triton 反向 + conv 参数梯度修复**）。
+  **KDA 专属 fused pre-GDR 的 Triton 核族实现** + **原生 Triton 反向 + conv 参数梯度修复** +
+  **反向融合 + 逐 kernel 剖析**）。
+- 本轮（M13-3）：`harness/profile_port_pregdr_bwd.py` + `src/kda_pregdr_bwd.py` 融合 + 扩展的
+  `harness/check_port_pregdr_bwd_kernel.py` + `docs/17-fused-pregdr-bwd-perf.md`。**先剖析再优化**：
+  M13-2 反向的 dev 回归**≈45% 在 torch glue**（`cat` + 多次 slice-copy + `fd()` cast/zero-fill），
+  据此让 producer **直接写 `da`**（`_kda_l2norm_silu_qk_bwd_kernel` 一个 kernel 同做 L2-norm 反向 ∘
+  SiLU'、`_kda_silu_v_bwd_kernel`）并让 conv 反向直写 `dqkvfg_t[..., :C]`。**实测**：隔离反向设备时间
+  **0.64–0.85×**、整链 dev 缺口基本关闭（fp32 **0.87–1.14×**、bf16 **0.81–0.96×**，大 shape 翻正）、
+  `wall` 仍 1.4–1.8×；**数值**新增 Part F（融合前后 fp32 ≤1e-6）+ Part E（`conv_bias=True` 非零端到端，
+  关闭 `docs/16` 的 `dbias=nan` 边界）；**坑**：autograd 递 broadcast（stride 0）梯度需 `.contiguous()` 兜底。
+  **未改 Megatron-LM 一行**。**下一步（可选）**：retire 维护态（M0–M13 全完成），或（皆需改 Megatron 树、
+  历轮均未做）把原生 fused pre-GDR 接到 `kda.py:399` 的 `gdn_pre_gated_delta_rule_fusion` guard。
 - 本轮（M13-2）：`src/kda_pregdr_bwd.py` + `harness/check_port_pregdr_bwd_kernel.py` +
   `docs/16-fused-pregdr-bwd-kernel.md`。让 KDA 专属 fused pre-GDR 有**原生 Triton 反向**
   （SiLU→conv dX/dW/dbias / L2-norm / sigmoid），并把 `conv1d.weight`/`conv1d.bias` 作为 autograd
@@ -416,9 +458,11 @@
   + 专属 fused pre-GDR 契约锚定/drop-in，见 `docs/14`）；「按 `docs/14` §5 契约把 KDA 专属 fused
   pre-GDR 实现成 Triton 核族」**已由 M13-1 完成**（三 kernel 核族 + 数值锚定 + 整层 drop-in +
   wall/dev 计时，见 `docs/15`）；「原生 Triton 反向」**已由 M13-2 完成**（三反向 kernel + autograd
-  重接 + conv 参数梯度修复，见 `docs/16`）。若继续，仅剩「把原生 fused pre-GDR（前向+反向）接到
-  `kda.py:399` 的 `gdn_pre_gated_delta_rule_fusion` guard」——这需要修改 Megatron-LM 树
-  （历轮都刻意不改），属实现工程、非分析缺口。
+  重接 + conv 参数梯度修复，见 `docs/16`）；「把反向 conv/l2norm 融合」**已由 M13-3 完成**（先逐
+  kernel 剖析定位 glue、再融合 producer 直写 `da` + conv 直写输出，dev 缺口关闭 + Part E/F，见
+  `docs/17`）。若继续，仅剩「把原生 fused pre-GDR（前向+反向）接到 `kda.py:399` 的
+  `gdn_pre_gated_delta_rule_fusion` guard」——这需要修改 Megatron-LM 树（历轮都刻意不改），
+  属实现工程、非分析缺口。
 
 ## 阻塞
 

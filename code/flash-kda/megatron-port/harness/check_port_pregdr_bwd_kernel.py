@@ -22,6 +22,15 @@
 #           parameter grads -- explicitly including the ``conv1d`` params M13-1 skipped;
 #   Part D  timing: isolated eager pre-GDR vs the native fused family (forward+backward).
 #
+# M13-3 adds the fused producers (``_kda_l2norm_silu_qk_bwd_kernel`` / ``_kda_silu_v_bwd_kernel``
+# write ``da`` in place, dropping the cat/dqk_in/dconv/da materialisations + ``fd()`` casts)
+# and two more parts:
+#   Part E  ``conv_bias=True`` end-to-end on a stub module with a **non-zero** bias (the real
+#           Megatron KDA layer builds conv1d with ``bias=None``, so ``dbias`` is never
+#           exercised there -- see M13-2's ``dbias=nan``);
+#   Part F  fused vs unfused backward on the **same** saved intermediates (proves the fusion
+#           is numerically transparent).
+#
 # Container import workarounds are the same as M10-M13 (nvrx version patch +
 # ``EP_SUPPRESS_NCCL_CHECK=1``).
 #
@@ -278,9 +287,79 @@ def part_d(kda, bwd, dtype, cases):
               % (T, B, te_wall, tf_wall, te_wall / tf_wall, te_dev, tf_dev, te_dev / tf_dev))
 
 
+# ---------------------------------------------------------------------------------------
+# Part E: conv_bias=True end-to-end (stub module, non-zero bias) -- the real layer has
+# bias=None, so this is the only place dbias is driven non-zero through autograd.
+# ---------------------------------------------------------------------------------------
+def part_e(bwd, dtype, cases):
+    print("  -- Part E: conv_bias=True end-to-end vs torch.autograd (stub, non-zero bias) (%s)"
+          % str(dtype).split(".")[-1])
+    Fm = bwd.fused
+    Hk = Hv = 4
+    KD = VD = 32
+    W = 4
+    qk, vd = Hk * KD, Hv * VD
+    C = 2 * qk + vd
+    dev = "cuda"
+    for (T, B) in cases:
+        stub = Fm._Stub(qk, vd, Hk, Hv, KD, VD, W, dtype).to(dev)
+        torch.nn.init.normal_(stub.conv1d.weight, std=0.3)
+        torch.nn.init.normal_(stub.conv1d.bias, std=0.2)
+        qkvfg = torch.randn(T, B, C + qk + vd, device=dev, dtype=dtype)
+        beta = torch.randn(T, B, Hk, device=dev, dtype=dtype)
+        q = qkvfg.detach().clone().requires_grad_(True)
+        be = beta.detach().clone().requires_grad_(True)
+        out = bwd.kda_pre_gdr_fused_native(stub, q, be, B, T)
+        g = _mk_grads(out[:6], seed=T * 17 + B)
+        (sum((o.float() * gg).sum() for o, gg in zip(out[:6], g))).backward()
+
+        qr = qkvfg.detach().clone().requires_grad_(True)
+        br = beta.detach().clone().requires_grad_(True)
+        wr = stub.conv1d.weight.detach().clone().requires_grad_(True)
+        bir = stub.conv1d.bias.detach().clone().requires_grad_(True)
+        ref = Fm._ref_torch(qr, br, wr, bir, Hk, Hv, KD, VD, W)
+        (sum((o.float() * gg).sum() for o, gg in zip(ref, g))).backward()
+
+        dq = (q.grad.float() - qr.grad.float()).abs().max().item()
+        db = (be.grad.float() - br.grad.float()).abs().max().item()
+        dw = (stub.conv1d.weight.grad.float() - wr.grad.float()).abs().max().item()
+        dbi = (stub.conv1d.bias.grad.float() - bir.grad.float()).abs().max().item()
+        print("     T=%-5d B=%d  dqkvfg=%.3e dbeta=%.3e dweight=%.3e dbias=%.3e  "
+              "(bias.grad native=%.3e ref=%.3e)"
+              % (T, B, dq, db, dw, dbi,
+                 stub.conv1d.bias.grad.float().abs().max().item(),
+                 bir.grad.float().abs().max().item()))
+
+
+# ---------------------------------------------------------------------------------------
+# Part F: fused vs unfused backward on identical saved intermediates / grads.
+# ---------------------------------------------------------------------------------------
+def part_f(kda, bwd, dtype, cases):
+    print("  -- Part F: fused vs unfused backward (same intermediates/grads) (%s)"
+          % str(dtype).split(".")[-1])
+    m13 = _import_m13()
+    dims = bwd._dims(kda)
+    C = 2 * dims[0] + dims[1]
+    for (T, B) in cases:
+        cap = m13._capture(kda, dtype, T, B, seed=T * 19 + B)
+        qkvfg, beta = cap["qkvfg"], cap["beta_in"]
+        w = kda.conv1d.weight.detach()
+        b = kda.conv1d.bias
+        outs, saves = bwd._forward_raw_save(qkvfg, beta, w, b, dims)
+        up = _mk_grads(outs, seed=T * 23 + B)
+        f = bwd._backward_raw(qkvfg, beta, w, saves, up, dims, fused=True)
+        u = bwd._backward_raw(qkvfg, beta, w, saves, up, dims, fused=False)
+        names = ("dqkvfg", "dbeta", "dweight", "dbias")
+        line = []
+        for nm, a, c in zip(names, f, u):
+            line.append("%s=%.3e" % (nm, (a.float() - c.float()).abs().max().item()))
+        print("     T=%-5d B=%d  %s" % (T, B, "  ".join(line)))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dtypes", default="float32,bfloat16")
+    ap.add_argument("--skip-c", action="store_true")
     args = ap.parse_args()
     dtypes = [getattr(torch, t.strip()) for t in args.dtypes.split(",")]
 
@@ -301,7 +380,9 @@ def main():
         part_a(kda, bwd, dtype, cases_a)
         part_b(kda, bwd, dtype, cases_b)
         part_c(bwd, dtype)
+        part_f(kda, bwd, dtype, cases_b)
         part_d(kda, bwd, dtype, cases_t)
+        part_e(bwd, dtype, cases_b)
 
     m13.ps.destroy_model_parallel()
     print("ALL DONE")

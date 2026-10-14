@@ -77,7 +77,7 @@ def _kda_silu_bwd_kernel(dy, pre, dx, N, BLOCK: tl.constexpr):
 # --------------------------------------------------------------------------------------
 @triton.jit
 def _kda_conv_bwd_kernel(da, x, wgt, dx, dw, dbias,
-                         T,
+                         T, OST, OB, OOFF,
                          D: tl.constexpr, W: tl.constexpr,
                          BT: tl.constexpr, BD: tl.constexpr):
     i_d, i_t, i_b = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -103,7 +103,7 @@ def _kda_conv_bwd_kernel(da, x, wgt, dx, dw, dbias,
                         mask=((o_ts < T))[:, None] & m_d[None, :], other=0.0).to(tl.float32)
         b_wc = tl.sum(b_w * (o_w == (W - 1 - s))[None, :], 1)           # [BD]
         acc_dx += b_das * b_wc[None, :]
-    tl.store(dx + i_b * (T * D) + o_t[:, None] * D + o_d[None, :],
+    tl.store(dx + i_b * OB + o_t[:, None] * OST + OOFF + o_d[None, :],
              acc_dx, mask=m_xy)                                         # dx is fp32
 
     # dW / dbias via atomics
@@ -146,6 +146,76 @@ def _kda_sigmoid_bwd_kernel(y, dy, dx, N, BLOCK: tl.constexpr):
     b_y = tl.load(y + off, mask=m, other=0.0).to(tl.float32)
     b_dy = tl.load(dy + off, mask=m, other=0.0).to(tl.float32)
     tl.store(dx + off, b_dy * b_y * (1.0 - b_y), mask=m)
+
+
+# --------------------------------------------------------------------------------------
+# 5. M13-3 fused producers: write ``da`` (grad wrt pre-SiLU conv output) directly.
+#
+# The M13-2 host path materialised four fp32 [B,T,C] intermediates on the way to ``da``:
+#   * ``dqk_norm = cat([dq, dk])`` (a torch CatArrayBatchedCopy),
+#   * ``dqk_in`` (L2-norm backward output),
+#   * ``dconv`` (assembled from ``dqk_in`` and ``dv`` via two slice-copies),
+#   * ``da``   (SiLU backward output).
+# Plus ``fd() = .detach().float().contiguous()`` casts of every incoming gradient.  A
+# per-kernel profile (``harness/profile_port_pregdr_bwd.py``) shows those torch elementwise
+# kernels are ~half the backward's device time.  These two kernels produce ``da`` in place,
+# reading the raw (bf16/fp32) gradients and casting on load:
+#
+#   * qk channels: L2-norm backward of ``cat([dq,dk])`` composed with ``silu'(pre)``;
+#   * v  channels: ``dv * silu'(pre)``.
+# --------------------------------------------------------------------------------------
+@triton.jit
+def _kda_l2norm_silu_qk_bwd_kernel(dq, dk, x, pre, da, eps, ROWS,
+                                   Hk: tl.constexpr, KD: tl.constexpr,
+                                   C: tl.constexpr, BT: tl.constexpr, BD: tl.constexpr):
+    i = tl.program_id(0)
+    o_r = i * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BD)
+    m_r = o_r < ROWS
+    m = m_r[:, None] & (o_d < KD)[None, :]
+    rmod = o_r % (2 * Hk)
+    is_q = rmod < Hk
+    is_k = rmod >= Hk
+    tok = o_r // (2 * Hk)
+    hh = rmod
+
+    px = o_r[:, None] * KD + o_d[None, :]                       # x = query_key [rows, KD]
+    b_x = tl.load(x + px, mask=m, other=0.0).to(tl.float32)
+
+    hq = tok * Hk + hh                                          # valid when is_q
+    hk = tok * Hk + (hh - Hk)                                   # valid when !is_q
+    pdq = hq[:, None] * KD + o_d[None, :]
+    pdk = hk[:, None] * KD + o_d[None, :]
+    b_dy = tl.load(dq + pdq, mask=m & is_q[:, None], other=0.0).to(tl.float32) \
+        + tl.load(dk + pdk, mask=m & is_k[:, None], other=0.0).to(tl.float32)
+
+    rstd = 1.0 / tl.sqrt(tl.sum(b_x * b_x, 1) + eps)
+    dot = tl.sum(b_dy * b_x, 1)
+    dxk = rstd[:, None] * b_dy - (rstd * rstd * rstd)[:, None] * b_x * dot[:, None]
+
+    pp = tok[:, None] * C + hh[:, None] * KD + o_d[None, :]     # pre/da qk region
+    b_pre = tl.load(pre + pp, mask=m, other=0.0).to(tl.float32)
+    sig = 1.0 / (1.0 + tl.exp(-b_pre))
+    tl.store(da + pp, dxk * (sig * (1.0 + b_pre * (1.0 - sig))), mask=m)
+
+
+@triton.jit
+def _kda_silu_v_bwd_kernel(dv, pre, da, ROWS,
+                           Hv: tl.constexpr, VD: tl.constexpr, C: tl.constexpr,
+                           VOFF: tl.constexpr, BT: tl.constexpr, BD: tl.constexpr):
+    i = tl.program_id(0)
+    o_r = i * BT + tl.arange(0, BT)
+    o_d = tl.arange(0, BD)
+    m_r = o_r < ROWS
+    m = m_r[:, None] & (o_d < VD)[None, :]
+    tok = o_r // Hv
+    hh = o_r % Hv
+    pdv = o_r[:, None] * VD + o_d[None, :]
+    b_dy = tl.load(dv + pdv, mask=m, other=0.0).to(tl.float32)
+    pp = tok[:, None] * C + VOFF + hh[:, None] * VD + o_d[None, :]
+    b_pre = tl.load(pre + pp, mask=m, other=0.0).to(tl.float32)
+    sig = 1.0 / (1.0 + tl.exp(-b_pre))
+    tl.store(da + pp, b_dy * (sig * (1.0 + b_pre * (1.0 - sig))), mask=m)
 
 
 # --------------------------------------------------------------------------------------
@@ -201,7 +271,7 @@ def _forward_raw_save(qkvfg, beta, conv_w, conv_b, dims):
 # --------------------------------------------------------------------------------------
 # Backward host
 # --------------------------------------------------------------------------------------
-def _backward_raw(qkvfg, beta, conv_w, saves, grads, dims):
+def _backward_raw(qkvfg, beta, conv_w, saves, grads, dims, fused=True):
     qk, vd, Hk, Hv, KD, VD, W, has_bias, activation = dims
     dev = qkvfg.device
     B, T, C = saves["B"], saves["T"], saves["C"]
@@ -215,47 +285,75 @@ def _backward_raw(qkvfg, beta, conv_w, saves, grads, dims):
     dq, dk, dv = z(dq), z(dk), z(dv)
     dgate, dbeta_sig, draw_g = z(dgate), z(dbeta_sig), z(draw_g)
 
-    def fd(t):
-        return t.detach().float().contiguous()
+    Ctot = C + qk + vd
+    if fused:
+        # The producers index ``dq/dk/dv`` linearly (contiguous).  Autograd may hand a
+        # *broadcast* gradient (e.g. ``sum(o)`` -> stride-0 expanded view); M13-2 hid that
+        # behind ``fd(...).contiguous()``.  Materialise only when needed (no-op when dense).
+        dq, dk, dv = dq.contiguous(), dk.contiguous(), dv.contiguous()
+        # --- fused producers: write ``da`` (grad wrt pre-SiLU conv output) in place.
+        # qk channels: L2-norm bwd composed with SiLU' (no cat / dqk_in / dconv).
+        da = torch.empty(B, T, C, device=dev, dtype=torch.float32)
+        rows_qk = B * T * 2 * Hk
+        _kda_l2norm_silu_qk_bwd_kernel[(triton.cdiv(rows_qk, 64),)](
+            dq, dk, query_key, pre, da, 1e-6, rows_qk,
+            Hk=Hk, KD=KD, C=C, BT=64, BD=_next_pow2(KD))
+        # v channels: SiLU'.
+        rows_v = B * T * Hv
+        _kda_silu_v_bwd_kernel[(triton.cdiv(rows_v, 64),)](
+            dv, pre, da, rows_v, Hv=Hv, VD=VD, C=C, VOFF=2 * qk, BT=64,
+            BD=_next_pow2(VD))
+        # --- conv backward writes dx straight into dqkvfg_t[..., :C] (no ``dx`` copy) ---
+        dqkvfg_t = torch.empty(B, T, Ctot, device=dev, dtype=torch.float32)
+        dweight = torch.zeros(C, W, device=dev, dtype=torch.float32)
+        dbias = torch.zeros(C, device=dev, dtype=torch.float32)
+        BD = min(128, _next_pow2(C))
+        BT = 64
+        grid = (triton.cdiv(C, BD), triton.cdiv(T, BT), B)
+        _kda_conv_bwd_kernel[grid](da, x, conv_w, dqkvfg_t, dweight, dbias,
+                                   T, Ctot, T * Ctot, 0, D=C, W=W, BT=BT, BD=BD)
+    else:
+        def fd(t):
+            return t.detach().float().contiguous()
 
-    # --- L2-norm backward: cat(dq,dk) over the [Hk,Hk] split -> grad wrt query_key ---
-    dqk_norm = torch.cat([fd(dq), fd(dk)], dim=2).contiguous()   # [B,T,2Hk,KD] fp32
-    dqk_in = torch.empty_like(dqk_norm)
-    rows = B * T * 2 * Hk
-    _kda_l2norm_bwd_kernel[(triton.cdiv(rows, 64),)](
-        query_key, dqk_norm, dqk_in, 1e-6, rows, D=KD, BD=_next_pow2(KD), BT=64)
+        # --- L2-norm backward: cat(dq,dk) over the [Hk,Hk] split -> grad wrt query_key ---
+        dqk_norm = torch.cat([fd(dq), fd(dk)], dim=2).contiguous()   # [B,T,2Hk,KD] fp32
+        dqk_in = torch.empty_like(dqk_norm)
+        rows = B * T * 2 * Hk
+        _kda_l2norm_bwd_kernel[(triton.cdiv(rows, 64),)](
+            query_key, dqk_norm, dqk_in, 1e-6, rows, D=KD, BD=_next_pow2(KD), BT=64)
 
-    # --- assemble grad wrt the post-SiLU conv output (all C channels) ---
-    dconv = torch.empty(B, T, C, device=dev, dtype=torch.float32)
-    dconv[..., :2 * qk] = dqk_in.reshape(B, T, 2 * qk)
-    dconv[..., 2 * qk:] = fd(dv).reshape(B, T, vd)
+        # --- assemble grad wrt the post-SiLU conv output (all C channels) ---
+        dconv = torch.empty(B, T, C, device=dev, dtype=torch.float32)
+        dconv[..., :2 * qk] = dqk_in.reshape(B, T, 2 * qk)
+        dconv[..., 2 * qk:] = fd(dv).reshape(B, T, vd)
 
-    # --- SiLU backward -> da (fp32) ---
-    da = torch.empty_like(dconv)
-    Nc = B * T * C
-    _kda_silu_bwd_kernel[(triton.cdiv(Nc, 1024),)](dconv, pre, da, Nc, BLOCK=1024)
+        # --- SiLU backward -> da (fp32) ---
+        da = torch.empty_like(dconv)
+        Nc = B * T * C
+        _kda_silu_bwd_kernel[(triton.cdiv(Nc, 1024),)](dconv, pre, da, Nc, BLOCK=1024)
 
-    # --- conv backward -> dx / dweight / dbias ---
-    dx = torch.empty(B, T, C, device=dev, dtype=torch.float32)
-    dweight = torch.zeros(C, W, device=dev, dtype=torch.float32)
-    dbias = torch.zeros(C, device=dev, dtype=torch.float32)
-    BD = min(128, _next_pow2(C))
-    BT = 64
-    grid = (triton.cdiv(C, BD), triton.cdiv(T, BT), B)
-    _kda_conv_bwd_kernel[grid](da, x, fd(conv_w), dx, dweight, dbias,
-                               T, D=C, W=W, BT=BT, BD=BD)
+        # --- conv backward -> dx / dweight / dbias ---
+        dx = torch.empty(B, T, C, device=dev, dtype=torch.float32)
+        dweight = torch.zeros(C, W, device=dev, dtype=torch.float32)
+        dbias = torch.zeros(C, device=dev, dtype=torch.float32)
+        BD = min(128, _next_pow2(C))
+        BT = 64
+        grid = (triton.cdiv(C, BD), triton.cdiv(T, BT), B)
+        _kda_conv_bwd_kernel[grid](da, x, fd(conv_w), dx, dweight, dbias,
+                                   T, C, T * C, 0, D=C, W=W, BT=BT, BD=BD)
+        dqkvfg_t = torch.empty(B, T, Ctot, device=dev, dtype=torch.float32)
+        dqkvfg_t[..., :C] = dx
 
-    # --- sigmoid backward ---
+    # --- sigmoid backward (casts its input on load) ---
     dbeta = torch.empty_like(beta_sig)
     Nb = B * T * Hk
     _kda_sigmoid_bwd_kernel[(triton.cdiv(Nb, 1024),)](
-        beta_sig.reshape(-1), fd(dbeta_sig).reshape(-1), dbeta.reshape(-1), Nb, BLOCK=1024)
+        beta_sig.reshape(-1), dbeta_sig.reshape(-1), dbeta.reshape(-1), Nb, BLOCK=1024)
 
-    # --- assemble dqkvfg [T,B,Cin] ---
-    dqkvfg_t = torch.empty(B, T, C + qk + vd, device=dev, dtype=torch.float32)
-    dqkvfg_t[..., :C] = dx
-    dqkvfg_t[..., C:C + qk] = fd(draw_g).reshape(B, T, qk)
-    dqkvfg_t[..., C + qk:] = fd(dgate).reshape(B, T, vd)
+    # --- assemble dqkvfg [T,B,Cin]: raw_g / gate pass-through copies (cast on copy_) ---
+    dqkvfg_t[..., C:C + qk].copy_(draw_g.reshape(B, T, qk))
+    dqkvfg_t[..., C + qk:].copy_(dgate.reshape(B, T, vd))
     dqkvfg = dqkvfg_t.transpose(0, 1).to(qkvfg.dtype)
 
     dbeta_out = dbeta.transpose(0, 1).to(beta.dtype)
