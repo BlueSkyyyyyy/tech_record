@@ -2226,8 +2226,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**。
-  - P7-109 + P8-14（本轮）：**兑现 §94.5/§95.3/§96.3/§97.3 四次点名却从未执行的「`intra` staging 降
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
+  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M6 完成**（见
+  `code/flash-kda/megatron-port/ROADMAP.md`）。
+  - megatron-port M6（本轮）：**把子专题自己的参考实现 `megatron-port/src/kda_ref.py` 从「只自洽」
+    锚定到 FLA `chunk_kda` 正反向**。新增 `megatron-port/harness/check_port_fla.py`
+    （`check_port_fla.out.txt`，H100）+ `megatron-port/docs/04-numeric-anchor.md` +
+    `megatron-port/ROADMAP.md`。**Part A（显式操作数，关 `use_gate_in_kernel` 等）/ Part B（核内融合
+    门控，喂原始 logits）各 4 组**，含 `K=64≠V=96` 与非整除 `T=250`：前反向全部落 **bf16 底噪**
+    （`o/S` ≤6.4e-3、`dq/dk/dv/dg/dbeta/dh0` ≤4.4e-3），Part B 与 Part A 同量级 ⟹ 核内门控相对
+    显式 $g$ **无额外可测误差**；`dA_log` 相对量到 **2.95e-2** 但绝对仅 **5.7e-4**（逐 head 标量求和
+    近抵消，看绝对不看相对）。**结论**：参考可作为移植主对拍的 golden。**下一步**：M7
+    （`safe_gate`/`allow_neg_eigval`/GVA/`state_v_first` 锚定边界）、M8（chunk sweep/varlen/CP）。
+  - P7-109 + P8-14（上轮）：**兑现 §94.5/§95.3/§96.3/§97.3 四次点名却从未执行的「`intra` staging 降
     bf16 = K=256 折叠容量杠杆」——测后为三负并更正 §97**。给 `b2_mma_probe.cu` 加 `-DB2M_INTRA_BF16`
     （`=1` `q/k/g` 全 bf16、`=2` 只 `q/k` 降位 `g` 保 fp32；staging `:658-662`、写 `:1681`、读
     `:1715-1720/1738/1752-1753/1765`，**tf32 mma 一字未动**）。新增 `harness/check_bwd_b2_intra_bf16.py`

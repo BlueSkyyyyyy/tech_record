@@ -1,0 +1,24 @@
+==============================================================================
+KDA reference self-test (fp64, CPU)
+==============================================================================
+
+[Part A] token recurrence vs chunked forward (o and final state)
+  OK  B=1 T=16 H=2 K=16 V=16 C=64  rel|do|=3.86e-16  rel|dS|=2.02e-16
+  OK  B=2 T=33 H=3 K=24 V=20 C=16  rel|do|=9.96e-16  rel|dS|=2.50e-16
+  OK  B=1 T=64 H=2 K=32 V=32 C=64  rel|do|=3.98e-15  rel|dS|=1.12e-14
+  OK  B=2 T=130 H=4 K=32 V=48 C=32  rel|do|=2.56e-15  rel|dS|=5.45e-15
+
+[Part B] gradients: autograd(chunked) vs autograd(token)
+  OK     dq: rel|diff|=1.16e-15
+  OK     dk: rel|diff|=2.14e-15
+  OK     dv: rel|diff|=1.59e-15
+  OK     dg: rel|diff|=7.20e-15
+  OK  dbeta: rel|diff|=1.71e-15
+  OK    dh0: rel|diff|=3.37e-16
+
+[Part C] gate: naive closed form vs autograd through softplus
+  OK  rel dg=4.71e-08   rel dA=4.63e-08  (fp32 gate math)
+
+==============================================================================
+ALL PASS
+==============================================================================
