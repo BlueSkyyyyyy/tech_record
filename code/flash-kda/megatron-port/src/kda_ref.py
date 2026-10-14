@@ -144,13 +144,14 @@ def _invert_lower_i_plus(A: torch.Tensor) -> torch.Tensor:
 def kda_chunked_fwd(
     q: torch.Tensor,          # [B, T, H, K]
     k: torch.Tensor,          # [B, T, H, K]
-    v: torch.Tensor,          # [B, T, H, V]
-    g: torch.Tensor,          # [B, T, H, K] activated log-decay (<=0)
-    beta: torch.Tensor,       # [B, T, H]
+    v: torch.Tensor,          # [B, T, HV, V]  (HV == H, or a GVA multiple of H)
+    g: torch.Tensor,          # [B, T, HV, K] activated log-decay (<=0)
+    beta: torch.Tensor,       # [B, T, HV]     post-sigmoid
     scale: float | None = None,
-    initial_state: torch.Tensor | None = None,  # [B, H, K, V]
+    initial_state: torch.Tensor | None = None,  # [B, HV, K, V] or [B, HV, V, K] if state_v_first
     output_final_state: bool = False,
     chunk_size: int = 64,
+    state_v_first: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """Chunkwise form; the algebra the FLA forward kernels implement.
 
@@ -171,13 +172,29 @@ def kda_chunked_fwd(
 
     Note ``w``/``u``/``qg``/``kg`` are the exact tensors FLA saves for backward
     (``chunk_fwd.py:71-84``) and ``v_new`` is what the state kernel writes.
+
+    **GVA** (grouped value attention): FLA allows ``HV > H`` (``HV % H == 0``); the
+    value head ``hv`` shares the q/k head ``hv // (HV // H)`` (``chunk_intra.py:79``).
+    We reproduce that exactly with ``repeat_interleave`` on q/k, whose autograd is the
+    matching group-sum, so ``dq``/``dk`` come out over the original ``H`` heads.
+
+    **state_v_first**: FLA's ``initial_state``/``final_state`` use the V-first layout
+    ``[..., V, K]`` when set (instead of the default ``[..., K, V]``); the recurrence is
+    on the transpose either way.
     """
     B, T, H, K = q.shape
+    HV = v.shape[2]
     V = v.shape[-1]
     if scale is None:
         scale = K ** -0.5
     dtype = q.dtype
     q, k, v, g, beta = (x.double() for x in (q, k, v, g, beta))
+    if HV != H:
+        assert HV % H == 0, f"GVA requires HV % H == 0, got HV={HV}, H={H}"
+        grp = HV // H
+        q = q.repeat_interleave(grp, dim=2)
+        k = k.repeat_interleave(grp, dim=2)
+    H = HV  # from here H counts the *value/state* heads
 
     pad = (-T) % chunk_size
     if pad:
@@ -231,7 +248,10 @@ def kda_chunked_fwd(
 
     S = torch.zeros(B, H, K, V, dtype=torch.float64, device=q.device)
     if initial_state is not None:
-        S = S + initial_state.double()
+        s0 = initial_state.double()
+        if state_v_first:
+            s0 = s0.transpose(-1, -2)
+        S = S + s0
 
     o = torch.empty(B, NT, chunk_size, H, V, dtype=torch.float64, device=q.device)
     for c in range(NT):
@@ -244,7 +264,8 @@ def kda_chunked_fwd(
              + torch.einsum("bihk,bihv->bhkv", k_rest[:, c], v_new))
 
     o = o.reshape(B, NT * chunk_size, H, V)[:, :T]
-    return o.to(dtype), (S.to(dtype) if output_final_state else None)
+    fstate = S.transpose(-1, -2) if state_v_first else S
+    return o.to(dtype), (fstate.to(dtype) if output_final_state else None)
 
 
 # --------------------------------------------------------------------------------------

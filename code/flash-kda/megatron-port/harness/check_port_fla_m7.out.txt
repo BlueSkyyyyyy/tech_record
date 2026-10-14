@@ -1,0 +1,154 @@
+==========================================================================================
+megatron-port M7: anchor src/kda_ref.py against FLA chunk_kda gate/layout boundaries
+torch=2.12.0a0+0291f960b6.nv26.04.48445190 device=NVIDIA H100 80GB HBM3
+==========================================================================================
+
+==========================================================================================
+[Part 0] reference-internal identities (fp64 CPU)
+==========================================================================================
+  GVA  chunked vs token-recurrence(expanded): rel|do|=7.39e-15 rel|dS|=2.22e-14
+  svf  o unchanged: |do|max=0.00e+00   S_svf == S^T: |d|max=0.00e+00
+       shapes: o=(2, 96, 4, 20) S=(2, 4, 20, 16)
+
+==========================================================================================
+[Part A] GVA (grouped value attention, HV>H) -- explicit operands
+  FLA: value head hv shares q/k head hv//(HV//H); ref expands q/k via repeat_interleave
+==========================================================================================
+  [GVA x2] B=2 T=256 H=2 HV=4 K=128 V=128 chunk=64
+    |o|max=0.084  |s|max=0.511
+    fwd  o: max_abs=3.034e-04 max_rel=3.605e-03    S: max_abs=2.144e-03 max_rel=4.205e-03
+    bwd           dq: max_abs=3.836e-04 max_rel=2.917e-03
+    bwd           dk: max_abs=8.958e-04 max_rel=2.634e-03
+    bwd           dv: max_abs=9.843e-05 max_rel=3.180e-03
+    bwd           dg: max_abs=2.951e-05 max_rel=2.481e-03
+    bwd        dbeta: max_abs=4.959e-04 max_rel=2.107e-03
+    bwd          dh0: max_abs=5.859e-06 max_rel=1.943e-03
+  [GVA x4 non-div T] B=1 T=250 H=2 HV=8 K=64 V=96 chunk=64
+    |o|max=0.133  |s|max=0.792
+    fwd  o: max_abs=8.743e-04 max_rel=6.540e-03    S: max_abs=3.445e-03 max_rel=4.369e-03
+    bwd           dq: max_abs=4.490e-04 max_rel=1.921e-03
+    bwd           dk: max_abs=1.020e-03 max_rel=2.902e-03
+    bwd           dv: max_abs=9.639e-05 max_rel=3.213e-03
+    bwd           dg: max_abs=7.972e-05 max_rel=2.711e-03
+    bwd        dbeta: max_abs=3.623e-04 max_rel=1.555e-03
+    bwd          dh0: max_abs=1.060e-05 max_rel=1.680e-03
+  [GVA x2 big] B=1 T=512 H=4 HV=8 K=128 V=128 chunk=64
+    |o|max=0.103  |s|max=0.500
+    fwd  o: max_abs=4.131e-04 max_rel=4.023e-03    S: max_abs=1.807e-03 max_rel=3.602e-03
+    bwd           dq: max_abs=4.233e-04 max_rel=3.445e-03
+    bwd           dk: max_abs=1.132e-03 max_rel=3.770e-03
+    bwd           dv: max_abs=6.701e-05 max_rel=3.385e-03
+    bwd           dg: max_abs=5.492e-05 max_rel=3.260e-03
+    bwd        dbeta: max_abs=9.291e-04 max_rel=3.203e-03
+    bwd          dh0: max_abs=1.058e-05 max_rel=2.216e-03
+
+==========================================================================================
+[Part B] state_v_first -- explicit operands (initial_state/final_state in V-first [V,K])
+==========================================================================================
+  [svf] B=2 T=256 H=2 HV=2 K=128 V=128 chunk=64
+    |o|max=0.066  |s|max=0.415
+    fwd  o: max_abs=3.090e-04 max_rel=4.673e-03    S: max_abs=1.029e-03 max_rel=2.481e-03
+    bwd           dq: max_abs=1.791e-04 max_rel=2.283e-03
+    bwd           dk: max_abs=7.541e-04 max_rel=3.635e-03
+    bwd           dv: max_abs=9.154e-05 max_rel=4.991e-03
+    bwd           dg: max_abs=2.566e-05 max_rel=5.650e-03
+    bwd        dbeta: max_abs=9.831e-04 max_rel=2.918e-03
+    bwd          dh0: max_abs=5.604e-06 max_rel=2.504e-03
+  [svf+GVA x2 non-div T] B=1 T=250 H=2 HV=4 K=64 V=96 chunk=64
+    |o|max=0.102  |s|max=0.772
+    fwd  o: max_abs=8.037e-04 max_rel=7.952e-03    S: max_abs=2.999e-03 max_rel=3.872e-03
+    bwd           dq: max_abs=4.361e-04 max_rel=2.479e-03
+    bwd           dk: max_abs=8.208e-04 max_rel=3.274e-03
+    bwd           dv: max_abs=8.474e-05 max_rel=3.819e-03
+    bwd           dg: max_abs=2.988e-05 max_rel=2.296e-03
+    bwd        dbeta: max_abs=8.151e-04 max_rel=4.774e-03
+    bwd          dh0: max_abs=5.653e-06 max_rel=1.431e-03
+
+==========================================================================================
+[Part C] safe_gate + lower_bound=-5 -- fused gate (TensorCore bounded-decay branch)
+==========================================================================================
+  [safe lb=-5] B=2 T=256 H=2 HV=2 K=128 V=128 chunk=64 lb=-5.0
+    |o|max=0.060  |s|max=0.548
+    fwd  o: max_abs=3.689e-04 max_rel=6.129e-03    S: max_abs=1.391e-03 max_rel=2.537e-03
+    bwd           dq: max_abs=4.481e-04 max_rel=5.191e-03
+    bwd           dk: max_abs=6.976e-04 max_rel=4.039e-03
+    bwd           dv: max_abs=8.458e-05 max_rel=4.876e-03
+    bwd     dg_logit: max_abs=4.317e-05 max_rel=1.833e-03
+    bwd  dbeta_logit: max_abs=4.964e-05 max_rel=1.660e-03
+    bwd          dh0: max_abs=4.290e-06 max_rel=2.707e-03
+    bwd       dA_log: max_abs=5.648e-04 max_rel=2.707e-02
+    bwd     ddt_bias: max_abs=7.990e-04 max_rel=2.877e-02
+  [safe lb=-5] B=1 T=250 H=2 HV=2 K=64 V=96 chunk=64 lb=-5.0
+    |o|max=0.104  |s|max=0.645
+    fwd  o: max_abs=4.761e-04 max_rel=4.578e-03    S: max_abs=2.144e-03 max_rel=3.316e-03
+    bwd           dq: max_abs=3.133e-04 max_rel=1.760e-03
+    bwd           dk: max_abs=7.264e-04 max_rel=2.772e-03
+    bwd           dv: max_abs=7.568e-05 max_rel=3.639e-03
+    bwd     dg_logit: max_abs=1.137e-04 max_rel=3.625e-03
+    bwd  dbeta_logit: max_abs=9.129e-05 max_rel=4.485e-03
+    bwd          dh0: max_abs=8.727e-06 max_rel=2.083e-03
+    bwd       dA_log: max_abs=7.486e-04 max_rel=1.651e-02
+    bwd     ddt_bias: max_abs=1.170e-03 max_rel=3.646e-02
+  [safe lb=-5] B=1 T=128 H=4 HV=4 K=128 V=128 chunk=64 lb=-5.0
+    |o|max=0.062  |s|max=0.654
+    fwd  o: max_abs=2.926e-04 max_rel=4.717e-03    S: max_abs=1.796e-03 max_rel=2.739e-03
+    bwd           dq: max_abs=4.202e-04 max_rel=3.201e-03
+    bwd           dk: max_abs=9.906e-04 max_rel=4.418e-03
+    bwd           dv: max_abs=6.080e-05 max_rel=2.752e-03
+    bwd     dg_logit: max_abs=7.007e-05 max_rel=1.710e-03
+    bwd  dbeta_logit: max_abs=7.129e-05 max_rel=1.961e-03
+    bwd          dh0: max_abs=6.049e-06 max_rel=2.437e-03
+    bwd       dA_log: max_abs=3.951e-04 max_rel=1.161e-02
+    bwd     ddt_bias: max_abs=8.985e-04 max_rel=1.917e-02
+  [safe+GVA x2] B=2 T=256 H=2 HV=4 K=128 V=128 chunk=64 lb=-5.0
+    |o|max=0.067  |s|max=0.497
+    fwd  o: max_abs=4.860e-04 max_rel=7.161e-03    S: max_abs=1.384e-03 max_rel=2.781e-03
+    bwd           dq: max_abs=5.764e-04 max_rel=3.007e-03
+    bwd           dk: max_abs=9.292e-04 max_rel=3.005e-03
+    bwd           dv: max_abs=8.257e-05 max_rel=4.142e-03
+    bwd     dg_logit: max_abs=7.677e-05 max_rel=2.605e-03
+    bwd  dbeta_logit: max_abs=1.036e-04 max_rel=2.082e-03
+    bwd          dh0: max_abs=8.321e-06 max_rel=2.738e-03
+    bwd       dA_log: max_abs=2.415e-04 max_rel=2.160e-03
+    bwd     ddt_bias: max_abs=9.903e-04 max_rel=2.488e-02
+
+==========================================================================================
+[Part D] allow_neg_eigval -- beta = 2*sigmoid(beta_logit) in (0,2), fused gate
+==========================================================================================
+  [neg_eigval] B=2 T=256 H=2 HV=2 K=128 V=128 chunk=64
+    |o|max=0.138  |s|max=1.085
+    fwd  o: max_abs=6.897e-04 max_rel=4.984e-03    S: max_abs=3.574e-03 max_rel=3.298e-03
+    bwd           dq: max_abs=4.623e-04 max_rel=3.226e-03
+    bwd           dk: max_abs=1.385e-03 max_rel=2.933e-03
+    bwd           dv: max_abs=2.246e-04 max_rel=6.042e-03
+    bwd     dg_logit: max_abs=7.517e-05 max_rel=4.834e-03
+    bwd  dbeta_logit: max_abs=1.723e-04 max_rel=3.711e-03
+    bwd          dh0: max_abs=6.458e-06 max_rel=2.041e-03
+    bwd       dA_log: max_abs=4.159e-04 max_rel=3.711e-03
+    bwd     ddt_bias: max_abs=1.122e-04 max_rel=4.242e-03
+  [neg_eigval non-div T] B=1 T=250 H=2 HV=2 K=64 V=96 chunk=64
+    |o|max=0.225  |s|max=1.033
+    fwd  o: max_abs=1.275e-03 max_rel=5.676e-03    S: max_abs=3.734e-03 max_rel=3.608e-03
+    bwd           dq: max_abs=8.156e-04 max_rel=3.507e-03
+    bwd           dk: max_abs=2.354e-03 max_rel=4.686e-03
+    bwd           dv: max_abs=1.537e-04 max_rel=3.421e-03
+    bwd     dg_logit: max_abs=6.881e-05 max_rel=4.490e-03
+    bwd  dbeta_logit: max_abs=1.288e-04 max_rel=1.667e-03
+    bwd          dh0: max_abs=1.112e-05 max_rel=2.662e-03
+    bwd       dA_log: max_abs=3.101e-04 max_rel=3.114e-03
+    bwd     ddt_bias: max_abs=1.026e-04 max_rel=4.328e-03
+  [neg_eigval+GVA x2] B=1 T=250 H=2 HV=4 K=64 V=96 chunk=64
+    |o|max=0.182  |s|max=1.618
+    fwd  o: max_abs=8.768e-04 max_rel=4.823e-03    S: max_abs=6.831e-03 max_rel=4.205e-03
+    bwd           dq: max_abs=1.005e-03 max_rel=3.824e-03
+    bwd           dk: max_abs=1.822e-03 max_rel=3.655e-03
+    bwd           dv: max_abs=1.925e-04 max_rel=4.102e-03
+    bwd     dg_logit: max_abs=6.793e-05 max_rel=3.084e-03
+    bwd  dbeta_logit: max_abs=1.923e-04 max_rel=2.036e-03
+    bwd          dh0: max_abs=1.725e-05 max_rel=2.718e-03
+    bwd       dA_log: max_abs=1.005e-03 max_rel=2.862e-03
+    bwd     ddt_bias: max_abs=1.762e-04 max_rel=5.214e-03
+
+==========================================================================================
+Done. Residual = FLA bf16-kernel error (reference is fp64). M6 default path unchanged.
+==========================================================================================

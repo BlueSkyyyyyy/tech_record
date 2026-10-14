@@ -2227,17 +2227,32 @@
 ## 当前进度 / 下一步
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
-  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M6 完成**（见
+  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M7 完成**（见
   `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M6（本轮）：**把子专题自己的参考实现 `megatron-port/src/kda_ref.py` 从「只自洽」
+  - megatron-port M7（本轮）：**把 M6 的数值锚定从「默认门 + `HV=H`」扩到四个边界**——
+    `safe_gate=True`/`lower_bound`（TensorCore 有界门分支）、`allow_neg_eigval`（$\beta=2\sigma$）、
+    **GVA**（$H_V>H$）、`state_v_first`（V-first 状态）。新增
+    `megatron-port/harness/check_port_fla_m7.py`（`check_port_fla_m7.out.txt`，H100）+
+    `docs/05-anchor-boundaries.md`，并给 `src/kda_ref.py::kda_chunked_fwd` 补 **GVA**
+    （`repeat_interleave` 组映射，autograd 即组求和，与 `chunk_intra.py:79` 的 `i_h=i_hv//(HV//H)`
+    一致）与 **state_v_first**（双端转置状态）。**Part 0（fp64 CPU）**：GVA 分块 vs 展开后逐 token
+    递推 `rel|do|=7.4e-15 / rel|dS|=2.2e-14`、svf 的 `o` 逐位不变且 `S_svf≡S^T`。**Part A（GVA，
+    3 组）/ B（svf，2 组）/ C（safe `lb=-5`，4 组）/ D（neg_eigval，3 组）** 含非整除 `T=250`、
+    `HV=2H/4H`、`K=64≠V=96`：前反向全部落 **bf16 底噪 ≤~8e-3**（A `o 6.5e-3/dk 3.8e-3`、B `o 8.0e-3/
+    dg 5.7e-3`、C `o 7.2e-3/dq 5.2e-3`、D `dv 6.0e-3/dk 4.7e-3`），`dA_log`/`ddt_bias` 相对量到
+    **3.6e-2** 但绝对仅 **≤1.2e-3**（逐 head 标量近抵消，判据同 M6）。**无回归**：M6 的
+    `check_port_fla.py` 重跑与旧 `check_port_fla.out.txt` **diff 为空**。**结论**：参考实现四个边界
+    全部锚定，可作为移植主对拍 golden；移植要点（GVA 组求和、svf 双端、safe_gate 分支+公式、
+    neg_eigval 只改 $\beta$ 入口）已写进 `docs/05` §7。**下一步**：M8（chunk sweep/varlen/CP）、
+    M9（Megatron `kda.py` 契约对齐）、M10（端到端对拍）。
+  - megatron-port M6（上轮）：**把子专题自己的参考实现 `megatron-port/src/kda_ref.py` 从「只自洽」
     锚定到 FLA `chunk_kda` 正反向**。新增 `megatron-port/harness/check_port_fla.py`
     （`check_port_fla.out.txt`，H100）+ `megatron-port/docs/04-numeric-anchor.md` +
     `megatron-port/ROADMAP.md`。**Part A（显式操作数，关 `use_gate_in_kernel` 等）/ Part B（核内融合
     门控，喂原始 logits）各 4 组**，含 `K=64≠V=96` 与非整除 `T=250`：前反向全部落 **bf16 底噪**
     （`o/S` ≤6.4e-3、`dq/dk/dv/dg/dbeta/dh0` ≤4.4e-3），Part B 与 Part A 同量级 ⟹ 核内门控相对
     显式 $g$ **无额外可测误差**；`dA_log` 相对量到 **2.95e-2** 但绝对仅 **5.7e-4**（逐 head 标量求和
-    近抵消，看绝对不看相对）。**结论**：参考可作为移植主对拍的 golden。**下一步**：M7
-    （`safe_gate`/`allow_neg_eigval`/GVA/`state_v_first` 锚定边界）、M8（chunk sweep/varlen/CP）。
+    近抵消，看绝对不看相对）。**结论**：参考可作为移植主对拍的 golden。
   - P7-109 + P8-14（上轮）：**兑现 §94.5/§95.3/§96.3/§97.3 四次点名却从未执行的「`intra` staging 降
     bf16 = K=256 折叠容量杠杆」——测后为三负并更正 §97**。给 `b2_mma_probe.cu` 加 `-DB2M_INTRA_BF16`
     （`=1` `q/k/g` 全 bf16、`=2` 只 `q/k` 降位 `g` 保 fp32；staging `:658-662`、写 `:1681`、读

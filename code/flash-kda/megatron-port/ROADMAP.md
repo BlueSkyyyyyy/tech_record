@@ -15,8 +15,10 @@
 | `docs/02-backward.md` | FLA KDA 反向算子整理（dAv→dhu→wy_dqkg→intra→门控 + 移植检查表） | [x] |
 | `docs/03-optimization.md` | 优化手段（分块/融合/重算/精度/布局/系统层 + 目标卡取舍） | [x] |
 | `docs/04-numeric-anchor.md` | 把参考实现锚定到 FLA `chunk_kda`（M6） | [x] |
-| `src/kda_ref.py` | 最小可运行参考实现（纯 PyTorch、fp64、自带自测） | [x] |
+| `docs/05-anchor-boundaries.md` | 锚定扩到门控/布局边界（M7：safe_gate/lower_bound、allow_neg_eigval、GVA、state_v_first） | [x] |
+| `src/kda_ref.py` | 最小可运行参考实现（纯 PyTorch、fp64、自带自测；M7 起支持 GVA + state_v_first） | [x] |
 | `harness/check_port_fla.py` | 参考 vs FLA 正反向数值锚定脚本（GPU） | [x] |
+| `harness/check_port_fla_m7.py` | 参考 vs FLA 门控/布局边界锚定（M7，GPU） | [x] |
 
 ## 任务清单
 
@@ -55,8 +57,16 @@
       梯度 ≤~4.4e-3，`dA_log` 相对量到 2.95e-2 但绝对 5.7e-4）；`harness/check_port_fla.out.txt`。
 
 ### M7 锚定边界（门控变体）
-- [ ] **M7-1** 把锚定扩到 `safe_gate=True`/`lower_bound`（TensorCore 门控分支）、
+- [x] **M7-1** 把锚定扩到 `safe_gate=True`/`lower_bound`（TensorCore 门控分支）、
       `allow_neg_eigval`、GVA（$H_V>H$）、`state_v_first`——M6 只测了默认门与 `HV=H`。
+      新增 `harness/check_port_fla_m7.py`（`check_port_fla_m7.out.txt`）+ `docs/05-anchor-boundaries.md`，
+      并给 `src/kda_ref.py` 的 `kda_chunked_fwd` 补 **GVA**（`repeat_interleave` 组映射，
+      autograd 即组求和）与 **state_v_first**（双端转置状态）。**Part 0**（fp64 CPU）：GVA 分块
+      vs 展开后逐 token 递推 `rel|do|=7.4e-15 / rel|dS|=2.2e-14`、svf 的 `o` 逐位不变且
+      `S_svf≡S^T`。**Part A（GVA）**/ **Part B（svf）**/ **Part C（safe lb=-5）**/ **Part D
+      （neg_eigval）** 共 12 组（含非整除 `T=250`、`HV=2H/4H`、`K≠V`）：前反向全部落
+      **bf16 底噪 ≤~8e-3**，`dA_log/ddt_bias` 相对量到 3.6e-2 但绝对 ≤1.2e-3（逐 head 标量
+      近抵消）。**M6 默认路径重跑与旧输出 diff 为空**（无回归）。
 
 ### M8 锚定边界（chunk/varlen/CP）
 - [ ] **M8-1** `chunk_size∈{16,32,64}` × `T` 的 pad 语义 sweep；varlen（`cu_seqlens`）；
@@ -80,12 +90,14 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：M0–M6 完成（docs 00–04 + 参考实现 + FLA 数值锚定）。
-- 本轮（M6）：`harness/check_port_fla.py` + `docs/04-numeric-anchor.md`。把只「自洽」过的
-  参考实现锚定到 FLA `chunk_kda` 正反向：Part A（显式 `q/k/v/g/beta`）与 Part B（核内融合
-  门控），各 4 组含 `K64≠V96`、非整除 `T=250`；前反向全部位落 bf16 底噪；`dA_log` 相对量
-  到 2.95e-2（绝对 5.7e-4，逐 head 标量近抵消所致）。参考可进移植主对拍回路。
-- 下一步：M7（`safe_gate`/`allow_neg_eigval`/GVA/`state_v_first` 锚定）、M8（chunk sweep/varlen/CP）。
+- 当前进度：M0–M7 完成（docs 00–05 + 参考实现 + FLA 数值锚定 [默认 + 门控/布局边界]）。
+- 本轮（M7）：`harness/check_port_fla_m7.py` + `docs/05-anchor-boundaries.md`。把 M6 的锚定
+  扩到四个边界——`safe_gate`/`lower_bound`、`allow_neg_eigval`、GVA（$H_V>H$）、`state_v_first`；
+  并给参考实现补 GVA（`repeat_interleave`）与 state_v_first（双端转置）。Part 0（fp64 CPU）
+  GVA 与展开递推自洽 `7.4e-15`、svf 精确；A–D 共 12 组前反向全落 bf16 底噪 ≤~8e-3
+  （`dA_log/ddt_bias` 相对 3.6e-2 但绝对 ≤1.2e-3）；M6 输出重跑逐位不变。
+- 下一步：M8（`chunk_size∈{16,32,64}`×`T` 的 pad 语义 sweep、varlen `cu_seqlens`、CP 路径）、
+  M9（Megatron `kda.py` 调用契约对齐）、M10（端到端对拍）。
 
 ## 阻塞
 
