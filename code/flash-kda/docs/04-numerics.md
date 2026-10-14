@@ -379,7 +379,69 @@ both (fp32)            o max_abs=0.000e+00  S max_abs=0.000e+00
   （`IsVarlen=false`）同源、未单独列（其算术与 varlen 仅差 tile→序列定位，P4-4/本节已分别覆盖两端）。
   本节只验数值，不测 fp32 状态的性能/带宽。
 
-## 9. 小结与下一步
+## 9. 第三个参照：FlashKDA 自带的 **kernel-逐位** torch 参考（P4-6）
+
+前面所有前向数值锚定都只用两方：**fp64 逐 token golden**（`src/kda_ref.py`）与 **FLA Triton**
+（`chunk_kda`）。两者都是 *独立于 FlashKDA kernel* 的实现；而 FlashKDA 仓库里还自带一个
+**故意逐位复刻 kernel** 的纯 torch 参考 `tests/torch_ref.py`——它严格镜像 kernel 的每一步低层选择：
+
+- L2 归一化的 warp-shuffle 树 + FMA（`l2_normalize_kernel_match`，`torch_ref.py:62–74`）；
+- 门控 sigmoid 用 `tanh.approx.f32`（`sigmoid_ext`，`torch_ref.py:7–34`）；
+- 衰减 `exp2` 带 FTZ（`fp32_ex2_ftz`，`torch_ref.py:51–57`）；
+- `(I+L)^{-1}` 用 8×8 fp32 前代 + 16×16 bf16-HMMA 合并（`inv_fwd_subst_16`，`torch_ref.py:81–122`）。
+
+FlashKDA 自己的 `tests/test_fwd.py:260–261` 断言 `torch.equal(out_kernel, out_ref)`——即这个参考是
+**精确**的、不是 bf16 级的近似。本节首次把它当成专题的**第三个 oracle** 用起来
+（`harness/check_fwd_torchref.py`，原始输出 `harness/check_fwd_torchref.out.txt`），回答三件事。
+
+### 9.1 Part A：kernel 与它自带的参考**逐位相同**（本轮独立复现该事实）
+
+五组 case（含 $B{=}2,T{=}130$ 非整除 16、$g{=}0$、$g{=}N(0,4)$）：`o` 与 $S^\top$ 都 `torch.equal==True`、
+`max_abs=0.000e+00`。这把我们后续结论的分母钉死——**该参考读到的就是 kernel 的代数**，任何与它的差异
+都可归给「bf16 量化 / 累加序」，而不是「参考近似不准」。
+
+### 9.2 Part B：我们的分块代数 vs 该 kernel-忠实参考——落 bf16 底噪
+
+把 `src/kda_ref.py::kda_chunked_fwd`（P1-2 的分块公式）喂上与 kernel-忠实参考**完全相同**的
+激活后操作数（同一份 `l2_normalize_kernel_match` 的 bf16 `q,k`、同一份 `tanh.approx` 的 `g/β`），
+再比 `o`/$S^\top$（`max_rel` 分母取参照幅值）：
+
+| case | `o` max_rel（我方 fp32） | $S^\top$ max_rel（我方 fp32） | `o` max_rel（我方 fp64） | $S^\top$ max_rel（我方 fp64） |
+|---|---|---|---|---|
+| B1T256H4 | 1.033e-02 | 7.799e-03 | 1.070e-02 | 7.973e-03 |
+| B2T130H2（非整除） | 7.890e-03 | 8.352e-03 | 8.694e-03 | 8.254e-03 |
+| B1T64H1 | 4.570e-03 | 1.076e-02 | 4.266e-03 | 1.059e-02 |
+| g=0 | 7.413e-03 | 7.316e-03 | 7.380e-03 | 7.277e-03 |
+| g=N(0,4) | 5.725e-03 | 5.578e-03 | 5.977e-03 | 5.680e-03 |
+
+两点关键：
+
+- 全部落在 §4/§5/§6 的 **bf16 底噪带**（$4\times10^{-3}\sim1.1\times10^{-2}$）内——一个**完全独立**于
+  token-recurrent golden 的分块实现，与 kernel 的代数只差 bf16 量级。
+- **我方 fp32 与 fp64 两列几乎重合**，说明残差**不来自我们的累加**，而来自参考自己的逐操作数
+  bf16 量化（`torch_ref.py` 把 `kd/qd/ki/kr` 及 `INV` 都降到 bf16 再算）。这正是 §5 归因「误差由
+  bf16 数据表示决定、非算法缺陷」的又一次独立印证。
+
+### 9.3 Part C：alg0 的精确等式——我方 fp64 分块 == 参考 chunk 循环的 fp64 转录（逐位）
+
+为把「公式本身对不对」与「bf16 量化」彻底分开，把 `torch_ref.py:200–244` 的分块循环**在 fp64 里
+重抄一遍**（去掉所有 bf16 cast、用精确 `torch.sigmoid`），并与 `kda_chunked_fwd` 跑在**同一份 fp64
+操作数**上：五组 case 的 `o`/$S^\top$ 全部 **`max_abs=0.000e+00`（逐位相同）**。两个独立转写的分块
+代数在机器精度上重合，确认 P1-2 的 `L/Mqk/INV/U/S_new` 五条式子无一抄错。
+
+同时给出「精确解 vs bf16 参考」的总误差（=bf16 量化 + 激活近似的合计）：`o` max_rel 为
+1.10e-02 / 8.74e-03 / 4.39e-03 / 6.91e-03 / 6.29e-03，与 Part B 同带——再次说明端到端误差由 bf16
+输入/状态/操作数量化主导，算法顺序只占零头。
+
+### 9.4 结论
+
+- FlashKDA 自带参考是**逐位的**（Part A 独立复现），可作为「kernel 代数」的严格 oracle。
+- 我们的分块公式（P1-2）与该 oracle 在**同操作数**下只差 bf16 底噪（Part B），而它自身的 fp64 转写
+  与对方 chunk 循环**逐位相同**（Part C）——分块公式获得迄今最强的一次独立确认。
+- 这也给 `docs/03` §18.5 的 caveat（「纯 PyTorch 消融，未逐位复现 kernel 累加序」）补上了对照物：
+  需要「kernel 累加序」时可直接用这份 bit-exact 参考，而不必再自建。
+
+## 10. 小结与下一步
 
 - FlashKDA 前向 kernel 在全部测试 shape / seed / 门控区间下，与 fp64 golden 的 `o` 峰值相对误差
   为 $4\times10^{-3}\sim7.6\times10^{-3}$、终态为 $5\times10^{-3}\sim1.4\times10^{-2}$，符合 bf16 精度预期。
@@ -392,13 +454,9 @@ both (fp32)            o max_abs=0.000e+00  S max_abs=0.000e+00
 - 脚本/证据：`harness/check_fwd_numerics.py`、`harness/check_fwd_numerics.out.txt`；
   三方对比 `harness/check_three_way.py`、`harness/check_three_way.out.txt`；
   受控消融 `harness/check_state_bf16.py`（P3-3）；varlen 锚定 `harness/check_varlen_forward.py`、
-  `harness/check_varlen_forward.out.txt`（P4-4）。
-- 三方对比（golden / FlashKDA / FLA）显示三者同处 bf16 底噪；`flash↔fla` 的 `o` 误差因共模抵消
-  更小（$3.65\times10^{-3}$），佐证误差主项是 bf16 输入舍入。
-- 钉死了一个易踩的布局约定：FlashKDA 状态是 $S^\top$（$[N,H,V,K]$）。
-- 脚本/证据：`harness/check_fwd_numerics.py`、`harness/check_fwd_numerics.out.txt`；
-  三方对比 `harness/check_three_way.py`、`harness/check_three_way.out.txt`；
-  受控消融 `harness/check_state_bf16.py`（P3-3）。
+  `harness/check_varlen_forward.out.txt`（P4-4）；`StateFP32` 壳 `harness/check_varlen_forward_fp32state.py`（P4-5）；
+  第三 oracle（FlashKDA 自带 kernel-逐位 torch 参考）`harness/check_fwd_torchref.py`、
+  `harness/check_fwd_torchref.out.txt`（P4-6）。
 
 **下一步（P5）**：进入反向。用 FLA `chunk_kda` 的 `torch.autograd` 拿参考梯度，先在
 `src/kda_bwd_ref.py` 里实现逐 token 反向（adjoint）并与 autograd 对拍（P5-1/P5-2），再做分块化推导。

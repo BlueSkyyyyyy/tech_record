@@ -90,7 +90,22 @@
       （$|h0-\text{round}_{bf16}(h0)|{=}1.31{\times}10^{-2}$）喂 fp32 壳与「`h0.to(bf16)` 喂 bf16 壳」
       **逐位相同** ⟹ 多出的尾数在载入时被内部 round 掉。**Part D**：fp32 四状态组合（无/仅入/仅出/双端）
       都相对逐序列 fp32 batched 逐位相同。**结论**：`StateFP32` 是**接口 dtype 旋钮、非精度旋钮**；要真正
-      fp32 状态须改 kernel 的 `state_acc`。边界：`D=128`/bf16 操作数/varlen（`B==1`）；只验数值不测性能。
+       fp32 状态须改 kernel 的 `state_acc`。边界：`D=128`/bf16 操作数/varlen（`B==1`）；只验数值不测性能。
+
+- [x] **P4-6** 引入**第三个前向 oracle**——FlashKDA 仓库自带的 **kernel-逐位** torch 参考
+      `tests/torch_ref.py`（故意复刻 kernel：warp-shuffle 树 L2 范数 + FMA、`tanh.approx` sigmoid、
+      FTZ `exp2`、8×8 前代 + 16×16 bf16-HMMA 求逆；其 `tests/test_fwd.py:260` 断言 `torch.equal`）。
+      此前专题前向只用「fp64 golden」与「FLA」两方，均独立于 kernel。新增
+      `harness/check_fwd_torchref.py`（`harness/check_fwd_torchref.out.txt`）+ `docs/04` §9。**Part A**：
+      五组 case（含 $B{=}2,T{=}130$ 非整除、$g{=}0$、$g{=}N(0,4)$）kernel 与其参考 `o`/`S^T`
+      **`torch.equal`（`max_abs=0`）**，独立复现该事实。**Part B**：把 `src/kda_ref.py::kda_chunked_fwd`
+      喂**同一份激活后操作数**（同 `l2_normalize_kernel_match` 的 bf16 `q,k`、同 `tanh.approx` 的 `g/β`），
+      vs 该参考 `o`/`S^T` `max_rel` **4.3e-3~1.1e-2（bf16 底噪带）**，且我方 fp32 与 fp64 两列几乎重合
+      ⟹ 残差来自参考自身的逐操作数 bf16 量化、非我们的累加。**Part C**：把 `torch_ref.py:200-244` 的
+      chunk 循环在 **fp64** 重抄一遍、与 `kda_chunked_fwd` 跑**同一 fp64 操作数**，`o`/`S^T` **逐位相同
+      （`max_abs=0`，五组）** ⟹ P1-2 分块公式获迄今最强独立确认；「精确解 vs bf16 参考」总误差 `o max_rel`
+      4.4e-3~1.1e-2 与 Part B 同带。**副产物**：`docs/03` §18.5 的 caveat「未逐位复现 kernel 累加序」有了
+      现成对照物（引用 `docs/04` §9）。不改变任何部署结论。
 
 ### P5 反向的推导与实现（`docs/05-kda-bwd.md`）
 
@@ -2381,10 +2396,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P4-5 + P6-3…P6-9 / P7-3…P7-113 补测 + P8-3…P8-19**；子专题
+- 当前进度：**P0–P8 全部完成 + P4-5/P4-6 + P6-3…P6-9 / P7-3…P7-113 补测 + P8-3…P8-19**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
   M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成 + **M14-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - P4-5（本轮）：**关闭 P4-4 §7.6 的 `StateFP32=true` varlen 模板待验证**，并顺带证伪一个常见误解——
+  - P4-6（本轮）：**引入第三个前向 oracle——FlashKDA 自带的 kernel-逐位 torch 参考 `tests/torch_ref.py`**。
+    此前前向数值只用「fp64 逐 token golden」与「FLA」两方（均独立于 kernel）；该参考**故意逐位复刻
+    kernel**（warp-shuffle 树 L2 范数 + FMA、`tanh.approx` sigmoid、FTZ `exp2`、8×8 前代 + 16×16 bf16-HMMA
+    求逆，`torch_ref.py:62-74/7-34/51-57/81-122`），其自身测试断言 `torch.equal(out_kernel,out_ref)`
+    （`tests/test_fwd.py:260`）。新增 `harness/check_fwd_torchref.py`（`harness/check_fwd_torchref.out.txt`）
+    + `docs/04` §9 + `docs/08` bullet + `docs/03` §18.5 补句。**Part A**：五组 case（含 $B{=}2,T{=}130$
+    非整除 16、$g{=}0$、$g{=}N(0,4)$）kernel 与其参考 `o`/`S^T` **`torch.equal`（`max_abs=0`）**，独立复现。
+    **Part B**：把 `src/kda_ref.py::kda_chunked_fwd` 喂**同一份激活后操作数**（同 `l2_normalize_kernel_match`
+    的 bf16 `q,k`、同 `tanh.approx` 的 `g/β`），vs 该参考 `o`/`S^T` `max_rel` **4.3e-3~1.1e-2（=bf16 底噪带）**，
+    且我方 fp32 与 fp64 两列几乎重合 ⟹ 残差来自参考自身的逐操作数 bf16 量化、非我们的累加。**Part C**：把
+    `torch_ref.py:200-244` 的 chunk 循环在 **fp64** 重抄一遍、与 `kda_chunked_fwd` 跑**同一 fp64 操作数**，
+    `o`/`S^T` **逐位相同（`max_abs=0`，五组）** ⟹ P1-2 分块公式获迄今最强独立确认；「精确解 vs bf16 参考」
+    总误差 `o max_rel` 4.4e-3~1.1e-2 与 Part B 同带。**副产物**：`docs/03` §18.5「未逐位复现 kernel 累加序」
+    有了现成对照物。不改变任何部署结论。**下一步（可选）**：专题维持维护态——主系列 `P7`/`docs/05`/P4-4/P4-5/P4-6
+    均无剩余 `待验证`；megatron-port 仅剩「把 shim 落成真实 Megatron 树分支」（需改 Megatron 树、历轮刻意不改）。
+  - P4-5（上轮）：**关闭 P4-4 §7.6 的 `StateFP32=true` varlen 模板待验证**，并顺带证伪一个常见误解——
     「fp32 状态更精确」。新增 `harness/check_varlen_forward_fp32state.py`
     （`harness/check_varlen_forward_fp32state.out.txt`）+ `docs/04` §8。**结构事实**：递推状态
     `state_acc` 是 **`BF16`** smem 数组（`fwd_kernel2.cuh:82`），整段递推都在 bf16 上做；`StateFP32`

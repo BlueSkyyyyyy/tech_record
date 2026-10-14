@@ -704,7 +704,10 @@ max_rel≈6.3e-3、输出≈4.0e-3，FlashKDA 内核分别为 9.0e-3 / 5.4e-3—
 - **支持 §3**：在 KDA 实际的有衰减 regime，bf16 状态存储对**输出**的边际影响 ≤ ~1e-4（max_abs），
   远小于 bf16 操作数误差本身；fp32 FMA 更新使该代价可忽略。
 - **待验证/边界**：以上是纯 PyTorch 消融，未逐位复现 kernel 的 smem/MMA 累加顺序；g→0 的
-  病态长序列误差会升到 ~0.5–1%，属已知 trade-off，而 KDA 的 gate 设计避开了该区。
+  病态长序列误差会升到 ~0.5–1%，属已知 trade-off，而 KDA 的 gate 设计避开了该区。**（补：P4-6 已把
+  FlashKDA 自带的 `tests/torch_ref.py` 作为 kernel-逐位 oracle 引入 `docs/04` §9——需要「kernel 累加序」
+  的对照物时可直接用它，其 `o`/`S^T` 与 kernel `torch.equal`。本轮消融的 bf16 状态项与端到端结果一致性
+  未受影响。）**
 - 未验证「Neumann 级数 vs 前代求逆」等其它精度项——那是 P2-2(d) 的主题，此处不重复。
 
 ## 19. 状态落盘的 bf16 / fp32 两条路径

@@ -766,3 +766,16 @@ cuSOLVER $P$ 在 CPU/GPU **逐位相同**（`max_rel=0`）、tf32 打开时求�
 $P$ 只 $\le10^{-8}$」）与 `harness/check_bwd_chunked.py` 文档串。**设计输入**：本容器里任何「torch fp32 参考
 vs 金标」对拍**前一律显式关 tf32**（`allow_tf32=False` 或 `fp32_precision='ieee'`），否则带 $\sim10^{-4}$ 底噪。
 对部署无后果（默认仍 §45 的 `cf`）。
+
+- **（`docs/04` §9，P4-6）把 FlashKDA 自带的 *kernel-逐位* torch 参考作为第三个 oracle**：此前前向数值
+  只用「fp64 逐 token golden」与「FLA」两方，均独立于 kernel；FlashKDA 仓库自带 `tests/torch_ref.py`
+  **故意逐位复刻 kernel**（warp-shuffle 树 L2 范数 + FMA、`tanh.approx` sigmoid、FTZ `exp2`、8×8 前代 +
+  16×16 bf16-HMMA 求逆），其自身测试断言 `torch.equal(out_kernel, out_ref)`。新增
+  `harness/check_fwd_torchref.py`（`.out.txt`）。**Part A**：五组 case（含 $B{=}2,T{=}130$ 非整除、
+  $g{=}0$、$g{=}N(0,4)$）kernel 与其参考 `o`/`S^T` **`torch.equal`（`max_abs=0`）**，独立复现该事实。
+  **Part B**：把 `src/kda_ref.py` 的分块公式喂**同一份激活后操作数**，vs 该参考 `o`/`S^T` `max_rel`
+  4.3e-3~1.1e-2（=bf16 底噪带），且我方 fp32 与 fp64 两列几乎重合 ⟹ 残差来自参考自身的逐操作数 bf16
+  量化、非我们的累加。**Part C**：把参考 chunk 循环在 fp64 重抄一遍、与 `kda_chunked_fwd` 跑同一 fp64
+  操作数，`o`/`S^T` **逐位相同（`max_abs=0`）** ⟹ P1-2 分块公式获迄今最强独立确认；「精确解 vs bf16 参考」
+  总误差 `o max_rel` 4.4e-3~1.1e-2 与 Part B 同带。**副产物**：`docs/03` §18.5 的「未逐位复现 kernel 累加序」
+  有了现成对照物（引用 `docs/04` §9）。不改变任何部署结论。
