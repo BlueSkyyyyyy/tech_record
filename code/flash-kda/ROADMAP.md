@@ -2228,8 +2228,18 @@
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
-  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M13-2（本轮）：**给 KDA 专属 fused pre-GDR 写原生 Triton 反向，并修掉 M13-1 一个
+  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
+  - megatron-port M13-3（本轮）：**兑现 M13-2 的「下一步（融合反向 conv/l2norm）」，但先逐 kernel 剖析
+    再动手**。新增 `harness/profile_port_pregdr_bwd.py`（逐 kernel `self_device_time`）定位 M13-2 反向的
+    `dev` 回归——**≈45% 不在 Triton kernel、在 torch glue**（`cat(dq,dk)` + `dconv`/`da` 两次 slice-copy +
+    `dqkvfg_t` 三次 slice-copy + 两次 zero-fill + `fd()` 的 bf16→fp32 cast）。据此在 `src/kda_pregdr_bwd.py`
+    加 `_kda_l2norm_silu_qk_bwd_kernel`（行内选 `dq/dk`，一个 kernel 同做 L2-norm 反向 ∘ SiLU'）与
+    `_kda_silu_v_bwd_kernel`，**直接写 `da`**；conv 反向加 `OST/OB/OOFF` 直写 `dqkvfg_t[..., :C]`。
+    **实测**：隔离反向设备时间 **0.64–0.85×**、整链 `dev` 缺口基本关闭（fp32 **0.87–1.14×**、bf16
+    **0.81–0.96×**，大 shape 翻正）、`wall` 仍 1.4–1.8×。**Part F**（融合前后同中间量）fp32 ≤1e-6；
+    **Part E**（`conv_bias=True` 非零端到端）关闭 `docs/16` 的 `dbias=nan` 边界。**坑**：autograd 递
+    broadcast（stride 0）梯度，线性索引上游梯度的 kernel 需 `.contiguous()` 兜底。见 `docs/17`。
+  - megatron-port M13-2（上轮）：**给 KDA 专属 fused pre-GDR 写原生 Triton 反向，并修掉 M13-1 一个
     此前未发现的测试漏洞**。新增 `megatron-port/src/kda_pregdr_bwd.py`（SiLU→conv dX/dW/dbias /
     L2-norm / sigmoid 三个反向 kernel + 组装 + autograd 重接）+ `harness/check_port_pregdr_bwd_kernel.py`
     （`check_port_pregdr_bwd_kernel.out.txt`）+ `docs/16-fused-pregdr-bwd-kernel.md`。**未改 Megatron-LM
