@@ -83,10 +83,11 @@ def forward_precision_note(device):
     """Explain the fp32 gradient gap: the blocked reference's inverse solve.
 
     Compare ``kda_chunked_fwd`` vs ``kda_token_recurrent`` (same inputs) in fp32 and
-    fp64.  The blocked forward contains ``(I+L)^-1`` via ``torch.linalg.solve``; on GPU
-    cuSOLVER-fp32 this is much less accurate than on CPU LAPACK, so the fp32 forward
-    (and hence any gradient through it) degrades -- a property of the *oracle*, not of
-    the hand-derived backward.
+    fp64.  NOTE (corrected by P7-113 / docs/07 §117): the fp32 GPU gap (~3e-4) is
+    **not** the cuSOLVER ``(I+L)^-1`` -- it is the NGC container default
+    ``torch.backends.cuda.matmul.allow_tf32 = True`` making every fp32 matmul in the
+    blocked forward run in tf32.  cuSOLVER P is bit-identical CPU vs GPU; with
+    ``allow_tf32=False`` the gap drops to ~1e-7 (see harness/check_fwd_gpu_cpu.py).
     """
     print("\n  forward chunked-vs-token precision (oracle conditioning, seed=0 T=16 D=16):")
     for dt in (torch.float32, torch.float64):

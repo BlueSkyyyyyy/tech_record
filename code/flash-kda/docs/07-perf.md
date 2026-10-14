@@ -12379,3 +12379,89 @@ store 扇区**逐位不变**，而 `dram__bytes_write` 每次实例都可不同�
 - Part B 用 fp64 脚手架隔离 $P$；真实 fp32 链里 $P$ 的量级结论沿用（$P$ 误差 $\le10^{-4}$ 远低于
   fp32 累加底噪）。
 - 「GPU>CPU 求解差」的确切成因（§116.2 要点 3）未定位，标 `待验证`。
+
+## 117. 关闭 §116.2 要点 3 / `docs/05` §7.4 的最后一条 `待验证`——fp32 分块前向「GPU 比 CPU 差 $\sim3\times10^{-4}$」的成因是**本容器默认 tf32 matmul**，不是 cuSOLVER（P7-113）
+
+§116.2 要点 3 把 §7.4 观察到的「同一份输入下 `kda_chunked_fwd` 在 GPU 上与逐 token 前向差
+$\sim3\times10^{-4}$、CPU 上仅 $\sim2\times10^{-7}$」逐字标为 `待验证`，并猜「更可能来自 chunked forward 里
+**其它** fp32 `matmul` 的累加序（或当时的 torch 版本/默认 tf32）」。本轮用一个自包含 harness
+（`harness/check_fwd_gpu_cpu.py`，`harness/check_fwd_gpu_cpu.out.txt`）把这条**钉死**：**就是默认 tf32
+matmul**。**未改 `src/` 的算术。**
+
+### 117.1 关键事实：本容器的 torch 默认 `allow_tf32=True`
+
+在 `kernel_lab`（NGC `nv26.04`）里：
+
+```
+torch.backends.cuda.matmul.allow_tf32 = True      # 容器默认
+torch.backends.cuda.matmul.fp32_precision = "tf32"
+env TORCH_ALLOW_TF32_CUBLAS_OVERRIDE = 1
+```
+
+即 NGC 镜像用环境变量把 PyTorch **标准的 fp32 matmul 默认（`allow_tf32=False`）覆盖成 tf32**。
+于是分块前向里每一处 fp32 `@`（`kd@ki^T`、`qd@S`、`P@uprime`、`kr^T@U`）在 GPU 上都以 tf32
+（10-bit 尾数，相对舍入 $\sim2^{-11}\approx4.9\times10^{-4}$）执行；CPU 上则走真正的 fp32。这正是
+$\sim3\times10^{-4}$ 的量级来源，与 `torch.linalg.solve` 无关。
+
+### 117.2 Part A：把「设备 × dtype 精度」扫开
+
+`o = kda_chunked_fwd(...)` vs `kda_token_recurrent(...)` 的 `max_rel`：
+
+| T | D | fp64 CPU | fp32 CPU | fp32 GPU **ieee** | fp32 GPU **tf32** | fp64 GPU |
+|---|---|---|---|---|---|---|
+| 16 | 16 | 1.92e-16 | 7.72e-08 | 1.03e-07 | **2.55e-04** | 9.59e-17 |
+| 64 | 64 | 3.26e-16 | 3.50e-07 | 1.17e-07 | **2.08e-04** | 3.26e-16 |
+| 256 | 128 | 1.08e-15 | 4.24e-07 | 2.12e-07 | **3.00e-04** | 1.97e-16 |
+| 512 | 128 | 6.49e-16 | 4.48e-07 | 1.99e-07 | **3.07e-04** | 2.78e-16 |
+
+- GPU 上**只有 tf32 那一列**是 $\sim3\times10^{-4}$；切成 `ieee` 后 GPU 立刻回到 $\sim1\text{–}2\times10^{-7}$
+  （与 CPU 同量级，甚至更小）。fp64 两侧都到机器精度。
+- 即 §7.4 的 GPU/CPU 差**完全是 tf32 开关的产物**，与「GPU 的求解器不如 CPU LAPACK」无关。
+
+### 117.3 Part B：排除求逆（cuSOLVER）——三行判定
+
+在真实 KDA 块 $L=\text{tril}(k^{\text{dec}}{k^{\text{inv}}}^\top,-1)\beta$ 上（$T{=}64,D{=}64$，$\mathrm{cond}(I{+}L)=1.18$）：
+
+```
+B1  cuSOLVER P      cpu vs gpu  max_rel = 0.00e+00      # 逐位相同
+B2  tf32=ON  + fp32 solve        o max_rel = 2.08e-04
+B2  tf32=ON  + fp64 solve(补丁)  o max_rel = 2.08e-04   # 一字不变 -> 求逆被免罪
+B3  tf32=OFF + fp32 solve        o max_rel = 1.17e-07
+```
+
+- **B1**：cuSOLVER 在 CPU/GPU 上给出的 $P$ **逐位完全相同**（`max_rel=0.00e+00`）——与 §116.2 的
+  「cuSOLVER 不理会 `allow_tf32`」一致。
+- **B2**：把 `_chunk_inv` 临时换成 **fp64 求解再落 fp32**（`_chunk_inv` 补丁），tf32 打开时的
+  $2.08\times10^{-4}$ **一字不变**——证明误差不来自 $P$ 的精度，而来自 tf32 的矩阵乘。
+- **B3**：关掉 tf32、求逆仍走 fp32 cuSOLVER，立刻回到 $1.17\times10^{-7}$。
+
+三者合起来：**成因唯一落在 tf32 matmul**。这也修掉了 `docs/05` §7.4 与
+`harness/check_bwd_chunked.py::forward_precision_note` 文档串里「GPU cuSOLVER-fp32 比 CPU LAPACK 差得多」
+的错误归因。
+
+### 117.4 Part C：连带修正 P5-4 的 fp32 梯度表
+
+`kda_chunked_backward` vs `kda_token_backward` 六项梯度的 worst `max_rel`（3 组 case）：
+
+| 口径 | worst max_rel |
+|---|---|
+| CPU fp32 ieee | 1.24e-06 |
+| GPU fp32 **tf32** | **5.97e-04** |
+| GPU fp32 ieee | 1.03e-06 |
+| GPU fp64 | 6.31e-16 |
+
+- `docs/05` §7.4 表里的「fp32 (GPU) $\sim5\times10^{-4}\text{–}1\times10^{-3}$」是**容器默认 tf32 污染**的
+  `harness/check_bwd_chunked.out.txt` 在 GPU 上测得的；`ieee` 下该差降到 $\sim10^{-6}$。
+- **对推导本身无影响**：fp64 仍 $\sim10^{-16}$（分块公式与逐 token 严格等价的证据），fp32 的真实精度
+  是 $\sim10^{-6}$（`ieee`）而非 $\sim10^{-3}$；§7.4 的结论「差异来自 $P$ 的 fp32 精度而非反向公式」
+  **应更正为**「fp32 的 $\sim10^{-3}$ 主要来自容器默认 tf32 matmul，$P$ 的 fp32/cuSOLVER 只 $\le10^{-8}$」。
+
+### 117.5 设计输入 / 方法学
+
+- **对拍前一律显式设 `torch.backends.cuda.matmul.allow_tf32=False`（或 `fp32_precision='ieee'`）**，
+  否则本容器里任何「torch fp32 参考 vs 金标」都会带 $\sim10^{-4}$ 的 tf32 底噪。这与 `已知坑`
+  里既有的 P7-44 条（`b2_mma_probe` 对拍）同源，但本次把它定性为**参考实现自身**的污染（不只是
+  被测核），并给出量级 $2\text{–}3\times10^{-4}$ 与 tf32 尾数 $\varepsilon_{tf32}\!\approx\!4.9\times10^{-4}$ 的对应。
+- **求逆路径免罪**：cuSOLVER（§116）与 kernel 8×8 前代（`docs/02` §11.4）都不受此影响；§7.4/§116
+  的两条 `待验证` 至此**全部关闭**。
+- **对部署无后果**：默认部署仍 §45 的 `cf`；本节只修正一个**参考实现/测试口径**的归因。

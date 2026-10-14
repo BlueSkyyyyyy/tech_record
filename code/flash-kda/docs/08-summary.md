@@ -1,6 +1,6 @@
 # KDA 前向 / 反向算子实现解析：一页纸汇总
 
-> 本文是「Kimi Delta Attention（KDA）前向 / 反向算子实现解析」的收尾篇（路线图 **P8-1…P8-18**）。
+> 本文是「Kimi Delta Attention（KDA）前向 / 反向算子实现解析」的收尾篇（路线图 **P8-1…P8-19**）。
 > 把前七篇（数学 `01`、K1 `02`、K2 `03`、数值 `04`、反向推导 `05`、反向 kernel `06`、
 > 性能 `07`）压成一张可独立阅读的速查表：**公式 → 结构 → 误差 → 性能 → 反向要点**。
 > 所有数字都来自本机实测，出处见各篇与 `code/flash-kda/harness/*.out.txt`。
@@ -745,3 +745,14 @@ staging）。计时 `fold/(bf16+b3)`：`K=64` 0.88–0.92（净赢）、`K=128` 
 `INTRA` 按 `K` 切换）；唯一例外是 `(64,256)` 的 ~2% bank-conflict 二级项（可复现、不影响取舍）。**§111 把该例外也钉死**：
 它是**多波 grid + 每 SM 2 CTA 争用 L1TEX 共享载入通道**时的 **arbitration 冲突记账**效应（指令数/理想 wavefronts/
 占用率/字节均逐位可加，残差只在 replay 项），算术、字节中性，≤2.5%，与取舍无关。
+
+**§117（P7-113）关闭 `docs/05` §7.4 / §116.2 要点 3 的最后一条 `待验证`**——fp32 分块前向「GPU 比 CPU
+差 $\sim3\times10^{-4}$」的成因**不是** cuSOLVER，而是**本 NGC 容器默认 `torch.backends.cuda.matmul.allow_tf32=True`**
+（env `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1`）；分块前向的 fp32 `@` 在 GPU 上全走 tf32
+（$\varepsilon_{tf32}\!\approx\!4.9\times10^{-4}$）。`harness/check_fwd_gpu_cpu.py`（`.out.txt`）三行判死：
+cuSOLVER $P$ 在 CPU/GPU **逐位相同**（`max_rel=0`）、tf32 打开时求逆换 fp64 **一字不变**（$2.08\times10^{-4}$）、
+关 tf32 后前向差 $2\text{–}3\times10^{-4}\!\to\!1\text{–}2\times10^{-7}$、fp32 梯度差 $5.97\times10^{-4}\!\to\!1.03\times10^{-6}$
+（fp64 仍 $6.31\times10^{-16}$）。**修正 §7.4 归因**（「差异来自 $P$ 的 fp32 精度」$\to$「来自容器默认 tf32 matmul，
+$P$ 只 $\le10^{-8}$」）与 `harness/check_bwd_chunked.py` 文档串。**设计输入**：本容器里任何「torch fp32 参考
+vs 金标」对拍**前一律显式关 tf32**（`allow_tf32=False` 或 `fp32_precision='ieee'`），否则带 $\sim10^{-4}$ 底噪。
+对部署无后果（默认仍 §45 的 `cf`）。

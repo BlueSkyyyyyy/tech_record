@@ -435,11 +435,14 @@ chunked backward 能 block-parallel 的原因，也解释了 `03`/`05` §6 观�
 - **fp64 下 13 组 case 全部到机器精度**（`max_rel` $\sim10^{-15}$，含 $D=128,T=512$ 的真实规模）。
   因为分块公式与逐 token 递推在实数域严格等价（`01` §6），其 adjoint 也必然等价；这确认
   「把逐 token adjoint 折叠成分块形式」没有丢项、没有符号错误。
-- fp32 的 $\sim10^{-3}$ 不是推导误差，而是**参考实现里块内求逆走的是 fp32 `torch.linalg.solve`**：
+- fp32 的 $\sim10^{-3}$ 不是推导误差。~~而是**参考实现里块内求逆走的是 fp32 `torch.linalg.solve`**：
   同样输入下 `kda_chunked_fwd` 在 **GPU 上** 与逐 token 前向就差 $\sim3\times10^{-4}$（CPU 上仅
-  $\sim2\times10^{-7}$，见 `harness/check_bwd_chunked.out.txt` 附注），梯度再放大到 $\sim10^{-3}$。
-  同一 case 里「本实现 vs autograd(chunked)」只有 $\sim5\times10^{-4}$（两者都吃同一个 fp32 $P$），
-  证明差异来自 $P$ 的 fp32 精度而非反向公式。~~**待验证**：真正的 kernel 用 8×8 前代 + HMMA 合并
+  $\sim2\times10^{-7}$，见 `harness/check_bwd_chunked.out.txt` 附注），梯度再放大到 $\sim10^{-3}$。~~
+  **——经 `07` §117 / P7-113 更正**：那 $\sim3\times10^{-4}$ 与本表 fp32 行的 $\sim10^{-3}$ **不是**求逆
+  （本容器 NGC torch 默认 `allow_tf32=True`，分块前向的 fp32 matmul 全走 tf32）；关 tf32 后
+  `kda_chunked_fwd` vs 逐 token 只剩 $\sim10^{-7}$、`kda_chunked_backward` vs 逐 token 只剩 $\sim10^{-6}$
+  （`harness/check_fwd_gpu_cpu.py`/`.out.txt`）。cuSOLVER fp32 的 $P$ 在 CPU/GPU **逐位相同**（$\sim10^{-8}$）。
+  同一 case 里「本实现 vs autograd(chunked)」只有 $\sim5\times10^{-4}$（两者都吃同一个 fp32 $P$）。~~**待验证**：真正的 kernel 用 8×8 前代 + HMMA 合并
   （`02` §8）在 bf16 下是否比 cuSOLVER fp32 更稳，留到 P6。~~——**已解决**（`07` §116 / P7-112）：
   在真实 KDA 块矩阵上，cuSOLVER fp32 的 $P$ 就到 $\sim10^{-8}$（且 GPU==CPU），kernel 路径
   （8×8 前代 + bf16 HMMA 合并）$\sim10^{-4}\!\sim\!10^{-3}$——**不比 cuSOLVER 更准**，但**稳定**

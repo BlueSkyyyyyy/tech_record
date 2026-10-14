@@ -1,0 +1,26 @@
+device: cuda=True  torch=2.12.0a0+0291f960b6.nv26.04.48445190
+==============================================================================
+Part A  forward  kda_chunked_fwd  vs  kda_token_recurrent   (max_rel of o)
+==============================================================================
+  torch.backends.cuda.matmul.allow_tf32 (container default) = True
+     T    D |   fp64 cpu   fp32 cpu | fp32 gpu ieee fp32 gpu tf32 |   fp64 gpu
+    16   16 |   1.92e-16   7.72e-08 |      1.03e-07      2.55e-04 |   9.59e-17
+    64   64 |   3.26e-16   3.50e-07 |      1.17e-07      2.08e-04 |   3.26e-16
+   256  128 |   1.08e-15   4.24e-07 |      2.12e-07      3.00e-04 |   1.97e-16
+   512  128 |   6.49e-16   4.48e-07 |      1.99e-07      3.07e-04 |   2.78e-16
+==============================================================================
+Part B  isolate the solve  (T=64 D=64, real KDA block, fp32)
+==============================================================================
+  B1 cuSOLVER P, cpu vs gpu max_rel = 0.00e+00   cond(I+L) = 1.1848
+  B2 tf32=ON  + fp32 solve  : o max_rel = 2.08e-04
+  B2 tf32=ON  + fp64 solve  : o max_rel = 2.08e-04   (unchanged -> solve exonerated)
+  B3 tf32=OFF + fp32 solve  : o max_rel = 1.17e-07
+==============================================================================
+Part C  knock-on: chunked-bwd vs token-bwd  (worst max_rel over 6 grads, 3 cases)
+==============================================================================
+  cpu fp32 ieee : 1.24e-06
+  gpu fp32 tf32 : 5.97e-04
+  gpu fp32 ieee : 1.03e-06
+  gpu fp64      : 6.31e-16
+
+DONE
