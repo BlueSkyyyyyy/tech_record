@@ -5433,6 +5433,34 @@
       DeepEP dispatch/combine 设备端（NCCL GIN，`docs/86`/「阻塞」）**仅分析**；本篇量的是 host 常量
       与原始 CUDA 带宽。配套博客 `content/posts/mega-moe-191-sm-bandwidth-budget`（索引页新增第 191 篇）。
 
+### P182 增量（opt-in，把「一条 NVLink 膝点」在多对多下检验：乘以 peer 数吗？）
+
+- [x] **P182-1** **通信腿在「多对多（all-to-all）」下的每 SM 带宽预算**
+      （`~/github/DeepEP`：`deep_ep/utils/envs.py:194-204`（`get_sm_read_gbs`=180 / `get_sm_write_gbs`=45）
+      / `:208-234`（`get_nvlink_gbs` = `nvidia-smi nvlink -s` 求和 ×0.9）；
+      `deep_ep/buffers/ep.py:431-541`（`get_theoretical_num_sms`：`:508` `nvlink_traffic`、
+      `:522-529` 四候选、`:530-532` clamp、`:643` 消费点）；配套第 191 篇 `docs/191`、第 190 篇 `docs/190`）。
+      第 191 篇只量了**一条 NVLink P2P**（rank0 ↔ rank1）在 ~8 个 SM 处饱和于 ~372 GB/s。但真实 EP 里
+      一个 rank 要和**其余 7 个 rank 同时**通信——于是「一条链路 ~8 SM」在多对多下该乘以 peer 数
+      （7 条链 ⇒ 56 SM），还是仍封顶在一个 rank 的「总」NVLink 出口？DeepEP 的 SM 模型用**每 rank 总**
+      NVLink 带宽当分子、每 SM 带宽常量当分母反推 SM 数，隐含「每 SM 带宽恒定」。本篇把这个假设放到
+      **真机 all-to-all** 下检验。**H100(sm90) 真机**（`src/nvlink_alltoall_budget.cu` 纯 CUDA + 7 张
+      空闲卡 UVA peer 全互联 + P63-1 的 `ast` 抽取跑**未修改的真实** `get_theoretical_num_sms`，
+      `ep.py` sha256 `a8f72c39…`/`envs.py` sha256 `23843e16…`）：① **每 rank 的 NVLink 聚合带宽是常数**
+      ——6 peer 与 1 peer 同 SM 数下**逐点相同**（峰值 **375.7 vs 371.6 GB/s**，比值 **1.011×**）；固定
+      grid=64 把 peer 从 1 扫到 6，稳在 **372–428 GB/s**（比值 1.19×）；**多 peer 只增加「分布」、不增加
+      「总量」**；② **膝点不随 peer 放大**——单 peer 16 SM、多 peer（block-per-peer）12 SM、striped
+      （每块轮询全部 peer）**8 SM** 饱和于 ~375，仍落 **8–16 SM**，不是 7×8=56；③ **全部 7 rank 同时
+      all-to-all**（真满负荷）：每 rank **~325 GB/s**（单租户的 0.87×）、节点聚合 **2280 GB/s**，
+      `nvlink_gbs=430.3` 比满负荷乐观 **1.32×**；④ **模型对照**：`direct EP8` 的 **16 SM 恰落在真机
+      膝点（8–16）内**，而 `prefer_overlap=False` 的 `max(·,64)`（`ep.py:531`）把 EP8 顶到 **64=
+      膝点的 4×**——模型封顶是 `device_sms//2`（`:532`）、**不建模链路膝点**。`PASS=11 / FAIL=0`。
+      **结论**：「给通信让 SM」的预算是**每 rank 链路出口**的量级（约 8–16），既不随 peer 数放大、
+      也不该被顶到 4× 膝点；与 Mega MoE 主 kernel 不做 SM 分区、把通信与计算放进同一块 SM 不同 warp
+      的选择一致。DeepEP dispatch/combine 设备端（NCCL GIN）**仅分析**；本篇量的是它脚下的 host 常量
+      与原始 NVLink 带宽（`harness/exp_nvlink_alltoall_budget.{sh,py,out.txt}`）。配套博客
+      `content/posts/mega-moe-192-nvlink-alltoall-budget`（索引页新增第 192 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -5470,8 +5498,17 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P181 各增量完成（P15-1…P41-1、P42-1…P181-1）。**
-  本轮 P181-1：新建 `docs/191-sm-bandwidth-budget.md` + `src/sm_bandwidth_budget.cu` +
+- 当前进度：**P0~P14 全部完成；P15~P182 各增量完成（P15-1…P41-1、P42-1…P182-1）。**
+  本轮 P182-1：新建 `docs/192-nvlink-alltoall-budget.md` + `src/nvlink_alltoall_budget.cu` +
+  `harness/exp_nvlink_alltoall_budget.{sh,py,out.txt}`——补「给通信让 SM」这条设计轴里第 191 篇
+  留下的**多对多**缺口：一条 NVLink 的膝点要乘以 peer 数吗？**H100(sm90) 真机**（纯 CUDA + 7 张
+  空闲卡 UVA peer 全互联 + P63-1 的 `ast` 抽取跑真实 `get_theoretical_num_sms`）：① **每 rank 的
+  NVLink 聚合带宽是常数**——6 peer 与 1 peer 同 SM 数下逐点相同（峰值 375.7 vs 371.6，1.011×）、
+  固定 grid=64 扫 peer 1→6 稳在 372–428；② 膝点不随 peer 放大——单 peer 16 / 多 peer 12 / striped
+  8 SM 饱和于 ~375，仍 8–16 SM、不是 7×8；③ 全 7 rank 同时 all-to-all：每 rank ~325（单租户 0.87×）、
+  节点聚合 2280 GB/s、`nvlink_gbs=430.3` 乐观 1.32×；④ `direct EP8`=16 落在膝点内、`prefer_overlap=False`
+  的 64=膝点 4×。`PASS=11/FAIL=0`。DeepEP 设备端仅分析。索引页新增第 192 篇。
+  上一轮 P181-1：新建 `docs/191-sm-bandwidth-budget.md` + `src/sm_bandwidth_budget.cu` +
   `harness/exp_sm_bandwidth_budget.{sh,py,out.txt}`——补「给通信让 SM」这条设计轴的**另一半**：
   **每 SM 带宽预算**。DeepEP 用硬编码 `get_sm_read_gbs()=180`/`get_sm_write_gbs()=45`
   （`deep_ep/utils/envs.py:194-204`，带 TODO）反推 dispatch/combine 开几个 SM
@@ -7537,15 +7574,18 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P181 已完成（最新 **P181-1 把「通信腿的每 SM 带宽预算」量出来**：`docs/191`。
-    给「按 SM 分区藏通信」补上**对偶**——第 190 篇量计算侧分母（让一个 SM 付多少），本篇量通信侧
-    （几个 SM 打满链路）：DeepEP 硬编码 `sm_read_gbs=180`/`sm_write_gbs=45`（`envs.py:194-204`，带 TODO）
-    反推 dispatch/combine SM 数（`ep.py:431-541`）。**H100(sm90) 真机**（纯 CUDA + P63-1 的 `ast` 抽取跑
-    真实方法体）：单 SM 读 **145**（模型偏乐观 19.5%）/ 写 **63**（偏保守 40.8%）、读:写 4:1→2.29:1；
-    每 SM 线性区只到 **8 SM**、HBM 读聚合峰值 **3208 GB/s**（需 ~22 SM）、**一条 NVLink P2P `N=8` 饱和
-    于 ~372 GB/s**（通信腿 ~8 SM 封顶、超过白给）；实测常量代回真实模型 `direct EP8` 16→12、
-    `prefer_overlap=False` 的 `max(·,64)` 顶到 64=膝点 8×（模型只封顶 `device//2`、不建模链路膝点）。
-    `PASS=6/FAIL=0`。DeepEP 设备端（NCCL GIN）仅分析。索引页新增第 191 篇）。
+- **下一步**：P0~P182 已完成（最新 **P182-1 把「一条 NVLink 膝点要乘以 peer 数吗」量出来**：`docs/192`。
+    第 191 篇只量了一条 P2P，本篇补多对多：**一个 rank 的 NVLink 聚合带宽是常数，与 peer 数无关**
+    （6 peer 与 1 peer 同 SM 数下逐点相同、峰值 375.7 vs 371.6 = 1.011×；固定 grid=64 扫 peer 1→6 稳在
+    372–428 GB/s）；**膝点也不随 peer 放大**（单 peer 16 / 多 peer 12 / striped 8 SM 饱和于 ~375，
+    仍 8–16 SM、不是 7×8=56）；**全 7 rank 同时 all-to-all**：每 rank ~325（单租户 0.87×）、节点聚合
+    2280 GB/s、`nvlink_gbs=430.3` 乐观 1.32×；`direct EP8`=16 落在膝点内、`prefer_overlap=False` 的
+    64=膝点 4×（模型封顶 `device//2`、不建模链路膝点）。`PASS=11/FAIL=0`。DeepEP 设备端仅分析。
+    索引页新增第 192 篇）。
+    上一轮 P181-1：`docs/191`——**通信腿的每 SM 带宽预算**（DeepEP 硬编码 `sm_read_gbs=180`/
+    `sm_write_gbs=45`；**H100(sm90) 真机**：单 SM 读 **145**/写 **63**、读:写 4:1→2.29:1；每 SM 线性区
+    只到 **8 SM**、HBM 读聚合峰值 **3208 GB/s**、一条 NVLink P2P `N=8` 饱和于 ~372；实测常量代回真实
+    模型 `direct EP8` 16→12、`prefer_overlap=False` 顶到 64=膝点 8×。`PASS=6/FAIL=0`。索引页新增第 191 篇）。
     上一轮 P180-1：`docs/190`——**单条 grouped GEMM 的 SM 预算曲线**（给「按 SM 分区藏通信」补分母——
     H100 真实 SM90 FP8 grouped kernel + `set_num_sms` 扫
     `{132..4}`：三条腿都有**平台**（`132→84` 砍 36% SM：L1 −37% / L2 −30% / **wgrad 只 −4.4%**）、
@@ -7559,9 +7599,10 @@
     可继续（均为增量、非承诺）：① 把本篇的 SM 曲线接到**目标卡 fp8_fp4_mega_moe 端到端**（需 SM100 环境，
     但主 kernel `heuristics/mega_moe.hpp:69` 钉死全 SM、只能量单 kernel 内 warp 预算而非 SM 数）；② 把
      top-k / block_m 扫描接到目标卡端到端（需 SM100）；③ 把第 170 篇的 dispatch 行序与第 174 篇的累积序
-     **放进同一次端到端训练步**计时（需 DeepEP 运行期，见「阻塞」）；④ 把第 191 篇的 NVLink P2P 膝点
-     （`N=8` 饱和 ~372 GB/s）换成 **8 卡 all-to-all 聚合**的「每 SM 带宽」曲线（需 DeepEP 运行期 / NCCL
-     ≥2.31，见「阻塞」），或纯 CUDA 8 卡多对多实测。
+     **放进同一次端到端训练步**计时（需 DeepEP 运行期，见「阻塞」）；④ ~~把第 191 篇的 NVLink P2P 膝点
+     换成 8 卡 all-to-all 聚合的「每 SM 带宽」曲线~~（**已由 P182-1 完成**：纯 CUDA 7 卡多对多实测，
+     每 rank 聚合带宽是常数、膝点不随 peer 放大）；可继续：把该曲线接到**真实 DeepEP dispatch/combine
+     运行期**（需 NCCL ≥2.31，见「阻塞」），或把 `nvlink_gbs=430.3` 按满负荷实测 **325.7** 重跑模型看 SM 数移动。
   上一轮 P176-1：`docs/186`——第 12 篇讲的 SM90 FP8 `k_grouped_nt` 是 K-major、本机可跑，但目标卡生产
   wgrad 走 **MN-major 的 `k_grouped_fp8_gemm_tn_contiguous`**（仅 SM100，`gemm.hpp:369` 拒 sm90）。补上
   布局/架构矩阵与 tn v.s. nt 契约、SM100 tn kernel 每条输出 tile 一条**独立、单调的 fp32 累加链**（K 块外
