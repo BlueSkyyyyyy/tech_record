@@ -280,12 +280,106 @@ both (bf16)      o vs per-seq batched max_abs=0.000e+00  S max_abs=0.000e+00
 - **`B==1` 硬约束**（`flash_kda.cpp:150`）：`cu_seqlens` 给的是拼接后的序列边界，故 varlen 只支持一条
   拼接轴；多 batch 的多序列要走 batched 或逐条 varlen。
 - 只测 **`D=128`、bf16 操作数、bf16 状态**；`StateFP32=true` 的 varlen 模板（`flash_kda.cpp:203-207`）
-  未单独测——但 Part A/E 已证状态组合的**调度**层无差，fp32 状态只改落盘精度，风险很低（**待验证**：
-  若追严格，补 `final_state`/`initial_state` 传 fp32 的一组）。
+  已由 **§8（P4-5）** 单独锚定。
 - 本节只验**数值**，不测 varlen 的**性能**（`tile_prefix` 二分 vs 整除的 host/device 成本）；性能专属
   证据见 `docs/07`。
 
-## 8. 小结与下一步
+## 8. varlen 前向的 `StateFP32` 模板：它只是一个 fp32 I/O 外壳（P4-5）
+
+§7 只锚了 **bf16** 状态，并明确把 `StateFP32=true` 的 varlen 模板留作**待验证**。本节用
+`harness/check_varlen_forward_fp32state.py`（原始输出 `harness/check_varlen_forward_fp32state.out.txt`）
+把它钉死，并顺带回答一个容易想反的问题：**`StateFP32` 会不会带来更精确的状态？答案是不会。**
+
+### 8.1 结构事实：状态递推始终在 bf16 里跑，fp32 只是 I/O 壳
+
+读 K2 kernel 可以直接判定这一点，无须实验（结构描述亦见 `docs/03` §3/§19）：
+
+- `state_acc` 是一块 **`BF16`** 的 smem 数组（`fwd_kernel2.cuh:82`：
+  `cute::ArrayEngine<BF16, cosize_v<StateSmemLayout>> state_acc`），整段递推
+  `s_acc ← s_acc·g_total + k_rest^T U`（`docs/03`）都在它上面做，**没有 fp32 状态副本**。
+- `StateFP32=true` 只在两端改行为：
+  - **载入**：TMA 把 fp32 `initial_state` 搬进 staging 缓冲 `state_fp32_buf`，然后
+    `smem_cvt_fp32_to_bf16` 逐元素 `BF16(fp32_view(r,c))` 落进 `state_acc`
+    （`fwd_kernel2.cuh:300-303`；转换在 `utils.cuh:378-407`）——即**立即 round 到 bf16**。
+  - **落盘**：先 `smem_cvt_bf16_to_fp32` 把 bf16 `state_acc` 升回 fp32 staging
+    （`fwd_kernel2.cuh:811-814`；`utils.cuh:409-437` 的 `bf16_to_f32` 是**精确**升位），再 TMA 写 fp32。
+
+所以 `StateFP32` 与 `bf16` 两条模板的**内部算术逐字相同**，只有输入/输出的 dtype 不同；bf16→fp32 升位
+无损、fp32→bf16 降位是 round-to-nearest。一句话：`StateFP32` 让调用方**不必手动 `h0.to(bf16)`**，
+而状态精度仍受 bf16 支配。
+
+### 8.2 Part A：壳等价——与 bf16 模板**逐位相同**（`max_abs=0`）
+
+七组 `lens`（含 $L{=}1<$CHUNK、非整除 $T{=}257/199$、$g{=}0$、$g{=}4$）用**同一个 bf16 可表示的
+`h0`** 分别跑 fp32-state 与 bf16-state 两个 varlen launch，再逐序列与 `B=1` 的 fp32-state batched 比：
+
+| case | `o`(f32 壳 vs bf16 壳) | `S`(fp32 vs upcast bf16) | packed vs `B=1` |
+|---|---|---|---|
+| 全部七组 | **0.000e+00** | **0.000e+00** | `o`/`S` **0.000e+00** |
+
+- 两壳的 `o` **逐位相同**、fp32 落盘恰是 bf16 状态终值的**精确升位**（差 0）——与 §8.1 的结构
+  预测完全一致。
+- fp32-state 的 varlen 依旧与「逐序列 `B=1`」**逐位相同**——即 P4-4 Part A 的「varlen 调度是
+  batched 的无损重排」在 `StateFP32` 模板上同样成立，再次排除 tile→序列二分错/状态泄漏/尾块记账错。
+
+### 8.3 Part B：与 fp64 golden 比——fp32 壳与 bf16 壳误差**逐值相同**（无精度增益）
+
+用**真正随机的 fp32 `h0`** 跑两个壳，逐序列与 fp64 token-recurrent golden 比 `max_rel`：
+
+| case | fp32-state `o` / `S^T` | bf16-state `o` / `S^T` |
+|---|---|---|
+| `lens=[30,16,5,50]` | 6.06e-03 / 1.02e-02 | 6.06e-03 / 1.02e-02 |
+| `lens=[1,16,17,64,3]` | 7.98e-03 / 8.54e-03 | 7.98e-03 / 8.54e-03 |
+| `lens=[64,64,64]` | 6.32e-03 / 9.34e-03 | 6.32e-03 / 9.34e-03 |
+| `lens=[250,7]` | 5.59e-03 / 8.53e-03 | 5.59e-03 / 8.53e-03 |
+| `lens=[33,47,19,100]` | 7.17e-03 / 1.18e-02 | 7.17e-03 / 1.18e-02 |
+| `g=0` | 5.81e-03 / 5.61e-03 | 5.81e-03 / 5.61e-03 |
+| `g=N(0,4)` | 6.38e-03 / 1.25e-02 | 6.38e-03 / 1.25e-02 |
+
+两列的误差在打印精度内**完全相同**，且落在 §4/§7 的 bf16 底噪带内。这不是巧合：由 §8.1，两个壳的
+内部轨迹逐位一致，误差自然一致——**`StateFP32` 不改变任何数值精度**。
+
+### 8.4 Part C：真 fp32 `h0` 的余下尾数被内部 round 掉
+
+取一组**真实 fp32**（非 bf16 可表示）的 `h0`：`|h0_fp32 − round_bf16(h0_fp32)| = 1.31e-02`。把这份
+真 fp32 `h0` 喂 fp32-state 壳，与「先把 `h0` round 成 bf16、再喂 bf16 壳」比：
+
+```
+o(fp32-state, genuine h0)  vs  o(bf16 shell, bf16(h0)) = 0.000e+00
+S(fp32-state, genuine h0)  vs  S(bf16 shell, bf16(h0)) = 0.000e+00
+```
+
+**逐位相同**。即 fp32 壳对真 fp32 `h0` 做的，恰好等价于调用方自己先 `.to(bf16)`——多出来的尾数在
+载入时就被 `BF16(...)` 丢掉（§8.1 的 `fwd_kernel2.cuh:300-303`）。
+
+### 8.5 Part D：fp32 状态组合扫描
+
+`flash_kda.cpp:192-207` 对「无状态 / 仅入 / 仅出 / 双端」各派发一版 `StateFP32` 模板，四组都相对
+「逐序列 fp32-state batched」**逐位相同**：
+
+```
+no state               o max_abs=0.000e+00  (no S out)
+state-in only (fp32)   o max_abs=0.000e+00  (no S out)
+state-out only (fp32)  o max_abs=0.000e+00  S max_abs=0.000e+00
+both (fp32)            o max_abs=0.000e+00  S max_abs=0.000e+00
+```
+
+（`out-only`+fp32 这一档即使 `initial_state_ptr=nullptr` 也正常——`fwd_launch.cu:119-143` 为
+`StateFP32` 无条件构造 fp32 状态 TMA 图，但 `HasStateIn=false` 时它从不被发射。）
+
+### 8.6 结论与设计输入
+
+- §7.6 的「`StateFP32` 的 varlen 模板未单独测」**关闭**：七个 `lens` × 四种状态组合，fp32-state
+  packed 与逐序列 batched **逐位相同**、与 fp64 golden 落 bf16 底噪。
+- **设计输入**：`StateFP32` **不是精度旋钮**，只是把状态接口从 bf16 换成 fp32——内部递推恒为 bf16。
+  想把状态精度提到 fp32，须改 kernel（`state_acc` 换 fp32 累加），传 fp32 `initial_state`/`final_state`
+  是不够的。反过来，如果上游已持有 fp32 状态、又不介意内部 bf16，用 `StateFP32` 可省掉调用方的一次
+  `.to(bf16)` cast。
+- **边界（诚实）**：只测 `D=128`、bf16 操作数、varlen（`B==1`）；batched 的 `StateFP32` 模板
+  （`IsVarlen=false`）同源、未单独列（其算术与 varlen 仅差 tile→序列定位，P4-4/本节已分别覆盖两端）。
+  本节只验数值，不测 fp32 状态的性能/带宽。
+
+## 9. 小结与下一步
 
 - FlashKDA 前向 kernel 在全部测试 shape / seed / 门控区间下，与 fp64 golden 的 `o` 峰值相对误差
   为 $4\times10^{-3}\sim7.6\times10^{-3}$、终态为 $5\times10^{-3}\sim1.4\times10^{-2}$，符合 bf16 精度预期。

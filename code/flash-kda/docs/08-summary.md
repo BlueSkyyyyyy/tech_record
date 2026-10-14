@@ -81,6 +81,7 @@ $\sim10^{-9}\!\sim\!10^{-7}$，只是计算顺序的舍入。**KDA vs GLA/DeltaN
 | 三方：`flash↔fla` 的 $o$ | max_rel **3.65e-3** < 各自 vs golden（6.22e-3） | **共模抵消**（共享同一份 bf16 输入量化） |
 | **varlen/packed vs 逐序列 batched**（P4-4） | `o`/`S` **max_abs = 0** | 7 组 `lens`（含 $L{=}1<$CHUNK、非整除 $T$）× 4 状态组合，逐位相同 |
 | **varlen/packed vs fp64 golden**（P4-4） | $o$ **5.6e-3 ~ 8.0e-3** / $S^T$ **5.6e-3 ~ 1.25e-2** | 与 batched 同带 ⟹ packing 无额外误差 |
+| **`StateFP32` fp32 状态壳 vs bf16 壳**（P4-5） | `o`/`S` **max_abs = 0**；vs golden 误差**逐值相同** | `StateFP32` 是 I/O dtype 壳、**非精度旋钮**（内部恒 bf16） |
 | 反向六项 vs autograd（fp64） | **max_abs = 0** | 显式 adjoint 与链式法则逐位相等 |
 | 反向 chunked vs 逐 token（fp64） | max_rel **~1e-15**（含 $D=128,T=512$） | 13 组 case 全机器精度 |
 | FLA `chunk_kda` 反向（bf16） | 六项 max_rel **3e-3 ~ 8.2e-3** | 与前向误差同阶，无算法级偏差 |
@@ -90,6 +91,10 @@ $\sim10^{-9}\!\sim\!10^{-7}$，只是计算顺序的舍入。**KDA vs GLA/DeltaN
 - **varlen/packed（P4-4）**：`cu_seqlens` 路径与 batched 只差「tile→(序列,块) 映射」（batched 整除、
   varlen 用 `tile_prefix` 二分），逐 tile 算术相同——实测 packed 与逐序列单独跑**逐位相同**，
   且每序列 `initial_state` 按序列索引生效（非共享）。即 varlen 调度是 batched 的**无损重排**。
+- **`StateFP32` 只是 fp32 状态的 I/O 外壳（P4-5）**：K2 递推状态 `state_acc` 恒为 `BF16`
+  （`fwd_kernel2.cuh:82`）；`StateFP32=true` 只在载入时把 fp32 `initial_state` round 成 bf16、
+  落盘时把 bf16 精确升回 fp32。故七组 `lens` × 四状态组合下 fp32 壳与 bf16 壳 `o`/`S` **逐位相同**、
+  与 fp64 golden 的误差**逐值相同**；真 fp32 `h0` 的余下尾数在载入即丢。**想要真 fp32 状态须改 kernel。**
 
 ## 5. 性能（H100 80GB HBM3，bf16，$D=128$）
 

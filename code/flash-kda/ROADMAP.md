@@ -78,6 +78,19 @@
       其余 0.18–0.24）⟹ 每序列 `initial_state` 按序列索引生效（非共享）。**Part E**：四种
       `HasStateIn/Out` 组合都相对逐序列 batched 逐位相同。边界：`B==1` 硬约束、`D=128`/bf16、`StateFP32`
       的 varlen 模板未单独测（待验证）。默认部署不受影响。
+- [x] **P4-5** 关闭 P4-4 §7.6 留下的 `StateFP32=true` varlen 模板待验证，并回答「fp32 状态是否更精确」：
+      新增 `harness/check_varlen_forward_fp32state.py`（`harness/check_varlen_forward_fp32state.out.txt`）
+      + `docs/04` §8。**结构事实**：递推状态 `state_acc` 是 **`BF16`** smem 数组（`fwd_kernel2.cuh:82`），
+      `StateFP32` 只是 I/O 壳——载入 fp32 `initial_state` 后立即 `BF16(...)` round 进 `state_acc`
+      （`:300-303`、`utils.cuh:378-407`），落盘时精确升位回 fp32（`:811-814`、`utils.cuh:409-437`）。
+      **Part A**：七组 `lens`（含 $L{=}1<$CHUNK、$T{=}257/199$ 非整除、$g{=}0/4$）× bf16 可表示 `h0`，
+      fp32-state 与 bf16-state 两壳 `o`/`S` **逐位相同（`max_abs=0`）**、packed 与逐序列 `B=1` 逐位相同。
+      **Part B**：真 fp32 `h0` 下两壳 vs fp64 golden 的 `o`/`S^T` max_rel **逐值相同**（6.06e-03/1.02e-02 …
+      5.59e-03/8.53e-03，=bf16 底噪）——`StateFP32` 无精度增益。**Part C**：真 fp32 `h0`
+      （$|h0-\text{round}_{bf16}(h0)|{=}1.31{\times}10^{-2}$）喂 fp32 壳与「`h0.to(bf16)` 喂 bf16 壳」
+      **逐位相同** ⟹ 多出的尾数在载入时被内部 round 掉。**Part D**：fp32 四状态组合（无/仅入/仅出/双端）
+      都相对逐序列 fp32 batched 逐位相同。**结论**：`StateFP32` 是**接口 dtype 旋钮、非精度旋钮**；要真正
+      fp32 状态须改 kernel 的 `state_acc`。边界：`D=128`/bf16 操作数/varlen（`B==1`）；只验数值不测性能。
 
 ### P5 反向的推导与实现（`docs/05-kda-bwd.md`）
 
@@ -2156,6 +2169,12 @@
   求逆免罪）。即这 $\sim10^{-4}$ 底噪**不只是被测核的、也是 torch 参考的**；任何「torch fp32 vs 金标」
   对拍前一律显式 `allow_tf32=False`（或 `fp32_precision='ieee'`），否则会把 tf32 底噪当成算法/求逆误差
   （`docs/05` §7.4 曾据此误归因到 cuSOLVER）。
+- **FlashKDA 的 `StateFP32` 是 I/O dtype 壳、不是精度旋钮**（P4-5，`docs/04` §8）：K2 的递推状态
+  `state_acc` 是 **`BF16`** smem 数组（`fwd_kernel2.cuh:82`），`StateFP32=true` 只是把入参 `initial_state`/
+  出参 `final_state` 声明成 fp32——载入时 fp32→bf16 round（`:300-303`、`utils.cuh:378-407`）、落盘时
+  bf16→fp32 精确升位（`:811-814`、`utils.cuh:409-437`）。故传 fp32 状态**不提高**任何精度：真 fp32 `h0`
+  的结果与「先 `.to(bf16)` 再走 bf16 壳」逐位相同（$|h0-\text{round}_{bf16}(h0)|$ 那部分尾数在载入即丢）。
+  要真正 fp32 状态须改 kernel 的 `state_acc`（换 fp32 累加），而非换接口 dtype。
 
 - **Triton 里「关掉一个 `tl.dot` 但保字节」不能用秩-1 归约替身**（P7-45）：`tl.sum(X,1)[:,None]*tl.sum(Y,0)`
   要读同样操作数，但 Triton 为这些跨 lane 归约做**布局转换**（MMA layout ⇄ blocked），实测 `no_post`
@@ -2362,10 +2381,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-113 补测 + P8-3…P8-19**；子专题
+- 当前进度：**P0–P8 全部完成 + P4-5 + P6-3…P6-9 / P7-3…P7-113 补测 + P8-3…P8-19**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
   M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成 + **M14-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - P4-4（本轮）：**补上 FlashKDA 前向 varlen/packed 路径的数值锚定**（此前 varlen 只做过字节账
+  - P4-5（本轮）：**关闭 P4-4 §7.6 的 `StateFP32=true` varlen 模板待验证**，并顺带证伪一个常见误解——
+    「fp32 状态更精确」。新增 `harness/check_varlen_forward_fp32state.py`
+    （`harness/check_varlen_forward_fp32state.out.txt`）+ `docs/04` §8。**结构事实**：递推状态
+    `state_acc` 是 **`BF16`** smem 数组（`fwd_kernel2.cuh:82`），整段递推都在 bf16 上做；`StateFP32`
+    只在两端改行为——fp32 `initial_state` TMA 到 staging 后**立即 `BF16(...)` round** 进 `state_acc`
+    （`:300-303`、`utils.cuh:378-407`），终态从 bf16 **精确升位**回 fp32 再 TMA 落盘（`:811-814`、
+    `utils.cuh:409-437`）。**Part A**：七组 `lens`（含 $L{=}1<$CHUNK、$T{=}257/199$ 非整除、$g{=}0/4$）
+    × bf16 可表示 `h0`，fp32 壳与 bf16 壳 `o`/`S` **逐位相同（`max_abs=0`）**、packed 与逐序列 `B=1`
+    逐位相同。**Part B**：真 fp32 `h0` 下两壳 vs fp64 golden `o`/`S^T` max_rel **逐值相同**
+    （6.06e-03/1.02e-02 … 5.59e-03/8.53e-03，=bf16 底噪）——无精度增益。**Part C**：真 fp32 `h0`
+    （$|h0-\text{round}_{bf16}(h0)|{=}1.31{\times}10^{-2}$）喂 fp32 壳 ≡ 「`h0.to(bf16)` 喂 bf16 壳」
+    **逐位相同** ⟹ 多出尾数在载入时被 round 掉。**Part D**：fp32 四状态组合（无/仅入/仅出/双端）
+    都相对逐序列 fp32 batched 逐位相同。**设计输入**：`StateFP32` 是**接口 dtype 旋钮、非精度旋钮**，
+    要真正 fp32 状态须改 kernel 的 `state_acc`。见 `docs/04` §8。默认部署不受影响。**下一步（可选）**：
+    专题维持维护态——主系列 `P7`/`docs/05`/P4-4/P4-5 均无剩余 `待验证`；megatron-port 仅剩「把
+    shim 落成真实 Megatron 树分支」（需改 Megatron 树、历轮刻意不改）。
+  - P4-4（上轮）：**补上 FlashKDA 前向 varlen/packed 路径的数值锚定**（此前 varlen 只做过字节账
     `check_workspace_layout.py` Part C，**从未验数值**）。新增 `harness/check_varlen_forward.py`
     （`harness/check_varlen_forward.out.txt`）+ `docs/04` §7。**动机**：batched（P4-2/P4-3）与 varlen
     两条 host 路径只差「tile→(序列,块) 映射」（batched 整除 `flash_kda.cpp:180`；varlen 用预生成
