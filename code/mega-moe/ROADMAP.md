@@ -5090,9 +5090,49 @@
       是瓶颈轴、`H_i`（头数）可砍（`32→8` 参数 −25%、recall −0.6 点）；**逐头权重 `w` 几乎无用**
       （差异 ≤0.6 点，复现第 175/176 篇）；⑤ **下游很快饱和**（`Hi=8` 与 `Hi=32` 下游 `relL2` 都
       `6.50e-2`，复现第 168/172 篇）。主 kernel UMMA/MXFP4 档 SM100 专属、仅分析。
-      → `docs/179-indexer-mqa-capacity.md`（真实行号核对），实验
-      `harness/exp_indexer_mqa_capacity.{py,sh,out.txt}`。配套博客
-      `content/posts/mega-moe-179-indexer-mqa-capacity`（索引页新增第 179 篇）。
+       → `docs/179-indexer-mqa-capacity.md`（真实行号核对），实验
+       `harness/exp_indexer_mqa_capacity.{py,sh,out.txt}`。配套博客
+       `content/posts/mega-moe-179-indexer-mqa-capacity`（索引页新增第 179 篇）。
+
+### P170 增量（opt-in，补齐反向算子链一直缺席的「可复现性边界」）
+
+- [x] **P170-1** **MoE 反向算子链的可复现性边界：kernel 逐位确定、端到端不是——`use_deterministic_algorithms` 够不够**
+      （`csrc/apis/config.hpp:33-35`、`csrc/jit_kernels/heuristics/runtime.hpp:14-26`、
+      `csrc/apis/gemm.hpp:519-522/528-531`、`csrc/apis/einsum.hpp:81/115`、
+      `csrc/jit_kernels/heuristics/mega_gate.hpp:110-126`、`csrc/apis/mega_mhc.hpp:15-16`、
+      `deep_gemm/include/deep_gemm/scheduler/gemm.cuh:64-79/91-104`、
+      `deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh:189/220/346`、
+      `deep_gemm/include/deep_gemm/impls/sm90_bmk_bnk_mn.cuh:167/171`、
+      `deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh:1473-1499`；
+      DeepEP `deep_ep/include/deep_ep/impls/ep/dispatch.cuh:341`、`deep_ep/buffers/ep.py:113-199`）。
+      第 12/13 篇拆了 wgrad/dgrad 的**实现**、第 48 篇拆了 `use_deterministic_algorithms` 的
+      **三个落点**、第 62 篇拆了 DeepEP 的 `deterministic_sort`，但「**哪些算子逐位确定、真正的
+      不确定源在哪、想把一次 MoE 训练步做到逐位可复现要动哪一层**」从没被放到一张图里量过。
+      本篇补上，把反向算子链拆成三层量。**H100(sm90) 真机**（`k_grouped`(wgrad) 形状 G=8、
+      `host_ks=[1024,768,640,512,896,384,768,512]`,m=512,n=1024；`m_grouped`(dgrad) G=8,n=256,k=512；
+      纯 torch 固定累加序参考）：① **grouped 反向 GEMM 是结构性 bit-确定的**——各 20 次、
+      开关 True/False、`num_sms` 60/80/100/132（vs 132）逐位差**全 0**；根因是
+      `scheduler/gemm.cuh:91-104` 只沿 M/N 切块、**从不切 K**（`num_blocks=num_m_blocks*num_n_blocks`），
+      K 在 CTA 内按固定 K-block 顺序累加（`sm90_fp8_gemm_1d1d.cuh:189/220`）、累积写回是同 CTA 的
+      `SM90_TMA_REDUCE_ADD_2D`（`:346`）；对照 DeepGEMM 唯一跨分片 `atomicAdd` 的自家 kernel 是
+      einsum `bmk_bnk_mn`（`sm90_bmk_bnk_mn.cuh:167/171`，第 17 篇量过 ~5 万处 bit 抖动）；
+      ② **唯一带契约级不确定的 GEMM 路径是稠密 cuBLASLt 回退**——`bench_kineto` 抓到 `det=False`
+      发射 `nvjet`(38.3us)+`reduce`(2.5us，split-K 归约)、`det=True` 走自研 kernel(77.8us)，
+      **自研慢 1.9×**；但该形状 10 次 `det=False` 输出也**逐位相同**（开关防「可能」不防「每次」；
+      cutlass `tile_scheduler_detail.hpp:66` 自己列 `Nondeterministic` 模式为契约证据）；
+      ③ **收缩轴决定谁敏感**：真实 `m_grouped` 组内 token 行置换后按行对齐 → **逐位 0/327680**
+      （dgrad 每行独立、机器级 batch-invariant）；wgrad 收缩轴是 token，置换 token 序在精确算术下
+      不变、但 fp32 累加序变 → **~83% bit 变（217862/262144）、relerr 仅 ~1.554e-07**（参考自身
+      10 次 0 差）；④ **端到端真凶是 dispatch**：DeepEP `dispatch.cuh:341` 的 `atomicAdd` 分配槽位
+      使行序随时序变，5 个随机行序下 wgrad 逐位差 max=218210/262144（relerr ~1.56e-07）、
+      **dgrad/逐 token 量逐位不变=True**；靠 `EPHandle.deterministic_sort`（`ep.py:113-199`，
+      `torch.sort:146`、`scatter_add_:197`、expand 双键 `:195-199`）规范回源索引序才逐位可复现。
+      **结论**：grouped GEMM 无需开关（开关对它无落点）；`use_deterministic_algorithms` 只修稠密
+      回退 + Mega Gate/mHC split-K；MoE 训练可复现的真正杠杆在通信编排；抖动 ~1.5e-7 训练无害，
+      **可复现性与数值精度是两件事**。主 kernel SM100 专属、仅分析。
+      → `docs/180-moe-backward-determinism.md`（真实行号核对），实验
+      `harness/exp_moe_backward_determinism.{py,sh,out.txt}`。配套博客
+      `content/posts/mega-moe-180-moe-backward-determinism`（索引页新增第 180 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -5131,8 +5171,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P169 各增量完成（P15-1…P41-1、P42-1…P169-1）。**
-  本轮 P169-1：新建 `docs/179-indexer-mqa-capacity.md` +
+- 当前进度：**P0~P14 全部完成；P15~P170 各增量完成（P15-1…P41-1、P42-1…P170-1）。**
+  本轮 P170-1：新建 `docs/180-moe-backward-determinism.md` +
+  `harness/exp_moe_backward_determinism.{py,sh,out.txt}`——第 12/13 篇拆了 wgrad/dgrad 实现、
+  第 48 篇拆了 `use_deterministic_algorithms` 的三个落点、第 62 篇拆了 `deterministic_sort`，但
+  「哪些算子逐位确定、真正的不确定源在哪」从没量过。本篇用 H100(sm90) 真实 grouped kernel 把反向
+  算子链拆成三层。**H100(sm90) 真机**：① **grouped 反向 GEMM 是结构性 bit-确定的**——`k_grouped`
+  (wgrad) / `m_grouped`(dgrad) 各 20 次、开关 True/False、`num_sms` 60/80/100/132 逐位差**全 0**
+  （根因 `scheduler/gemm.cuh:91-104` 只沿 M/N 切块、不切 K，K 在 CTA 内固定顺序累加）；② **唯一带
+  契约级不确定的 GEMM 路径是稠密 cuBLASLt 回退**——kineto 抓到 `det=False` 发射 `nvjet`+`reduce`
+  (split-K 归约)、`det=True` 走自研 kernel（慢 1.9×）；但该形状 10 次也逐位相同（防「可能」非「每次」）；
+  ③ **收缩轴决定敏感度**：真实 `m_grouped` 组内 token 行置换 → 输出逐位 **0 差**；wgrad 收缩轴是
+  token，置换 token 序 → **~83% bit 变、relerr ~1.55e-07**；④ **端到端真凶是 dispatch**：DeepEP
+  `dispatch.cuh:341` 原子槽位使行序随时序变，乱序下 wgrad 逐位抖动、dgrad/逐 token 量不变，
+  靠 `deterministic_sort`(`ep.py:113-199`) 规范回序才可复现。**结论**：grouped GEMM 无需开关、
+  `use_deterministic_algorithms` 只修稠密回退 + Mega Gate/mHC split-K、真正杠杆在通信编排；
+  抖动 ~1.5e-7 训练无害（可复现性≠数值精度）。主 kernel SM100 专属、仅分析。
+  索引页新增第 180 篇。
+  上一轮 P169-1：新建 `docs/179-indexer-mqa-capacity.md` +
   `harness/exp_indexer_mqa_capacity.{py,sh,out.txt}`——第 168 篇把 indexer 的 KL 蒸馏真的跑起来、
   量到「撑 top-k recall 要 R≈64–128」，但它训的是**自由 logits** 与**低秩 `I=U Vᵀ`**，
   **都不是生产 indexer 的架构**。生产 indexer 是 **MQA 打分算子**
@@ -7029,7 +7085,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P169 已完成（最新 **P169-1 把 P168 的「容量≈秩」从自由/低秩 logits 推到生产
+- **下一步**：P0~P170 已完成（最新 **P170-1 把 MoE 反向算子链的「可复现性边界」量出来**：
+  grouped 反向 GEMM 是结构性 bit-确定的（20 次 0 差、开关无关、`num_sms` 无关）；唯一契约级不确定的
+  GEMM 路径是稠密 cuBLASLt 回退（det=False 发射 split-K reduce、慢 1.9×）；端到端不可复现的真凶在
+  **dispatch 的行序**——wgrad 收缩轴是 token（乱序下 ~83% bit 变、relerr ~1.5e-7），dgrad 每行独立
+  （逐位不变）；靠 DeepEP `deterministic_sort` 规范回源索引序才可复现。结论：grouped GEMM 无需开关、
+  真正杠杆在通信编排、可复现性≠数值精度。主 kernel SM100 专属、仅分析。详见 `docs/180`，
+  索引页新增第 180 篇）。
+  上一轮 P169-1 把 P168 的「容量≈秩」从自由/低秩 logits 推到生产
   indexer 的真实架构（MQA+ReLU）**：生产算子 `out_ij = Σ_h relu(q_h·kv_j)·w_h` 与低秩模型类的
   **唯一差别是 ReLU**，而 `relu` 逐元素作用在低秩矩阵上**把秩打满**（同参数同初始化下线性版输出秩
   = 内维 P，ReLU 版在 P=8 高达 161），故「需要多少秩」在真实架构下提法不对、真正的资源是内维 `H_i·d_i`。

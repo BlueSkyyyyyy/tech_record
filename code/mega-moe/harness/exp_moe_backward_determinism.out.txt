@@ -1,0 +1,38 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+get_arch_major() = 9
+k_grouped: G=8 m=512 n=1024 host_ks=[1024, 768, 640, 512, 896, 384, 768, 512] sum_k=5504
+m_grouped: G=8 n=256 k=512 m=1664
+=== Part A: 反向 grouped GEMM 本体是结构性 bit-确定的 ===
+  A  k_grouped(wgrad) det=True: 20 次逐位差 = 0
+  A  k_grouped(wgrad) det=False: 20 次逐位差 = 0
+  A  m_grouped(dgrad) det=True: 20 次逐位差 = 0
+  A  m_grouped(dgrad) det=False: 20 次逐位差 = 0
+  A  num_sms= 60: k_grouped 逐位差=0, m_grouped 逐位差=0
+  A  num_sms= 80: k_grouped 逐位差=0, m_grouped 逐位差=0
+  A  num_sms=100: k_grouped 逐位差=0, m_grouped 逐位差=0
+  A  num_sms=132: k_grouped 逐位差=0, m_grouped 逐位差=0
+
+=== Part B: 唯一带契约级不确定的 GEMM 路径是稠密 cuBLASLt 回退 ===
+  B  m=n=512 k=32768 bf16:
+     det=True  (自研 kernel, 命中 "gemm"):     78.5 us
+     det=False (cuBLASLt 回退): nvjet=    38.4 us + reduce=     2.4 us (reduce>0 即 split-K 归约被发射)
+     自研/cuBLASLt 时间比 = 1.924x
+     det=True: 10 次逐位差 = 0
+     det=False: 10 次逐位差 = 0
+
+=== Part C: 收缩轴决定谁对 token 序敏感 ===
+  C2 真实 m_grouped(dgrad)：组内 token 行置换后按行对齐，逐位差=0/425984  ← dgrad 每行独立
+  C1 固定累加序参考自身 10 次逐位差 = 0
+  C1 wgrad token 序样本 0: 逐位差=217862/262144, relerr=1.554e-07  ← 数学不变、bit 变
+  C1 wgrad token 序样本 1: 逐位差=218022/262144, relerr=1.554e-07  ← 数学不变、bit 变
+  C1 wgrad token 序样本 2: 逐位差=217905/262144, relerr=1.554e-07  ← 数学不变、bit 变
+  C1 wgrad token 序样本 3: 逐位差=217904/262144, relerr=1.550e-07  ← 数学不变、bit 变
+  C1 wgrad token 序样本 4: 逐位差=218104/262144, relerr=1.558e-07  ← 数学不变、bit 变
+  C1 5 个 token 序: 逐位差 min=217862 max=218104；relerr 量级 ~1e-7（训练可接受，但逐位不可复现）
+
+=== Part D: MoE 层级 —— dispatch 行序决定 wgrad 能否逐位复现 ===
+  D  dispatch 行序随机（5 样本）：wgrad 逐位差 max=218210/262144, relerr max=1.560e-07
+  D  对照：逐 token 量（dgrad 类，行独立）在乱序下逐位不变 = True
+  结论：kernel 稳定 ≠ 端到端可复现；wgrad 的 token 累加序由 dispatch 决定（DeepEP dispatch.cuh:341 的 atomicAdd 槽位分配）。
+
+DONE
