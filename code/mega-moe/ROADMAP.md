@@ -5382,6 +5382,31 @@
       **1.473e-3**。`:97` 的「128」是 SM100 标定常数、H100 只能给模型形态（见局限）。主 kernel SM100
       专属、仅分析。配套博客 `content/posts/mega-moe-189-block-m-tile`（索引页新增第 189 篇）。
 
+### P180 增量（opt-in，把「给通信让 SM」这条设计轴的分母：单条 grouped GEMM 的 SM 预算曲线量出来）
+
+- [x] **P180-1** **MoE grouped GEMM 的 SM 预算曲线：给通信让出一个 SM，计算腿要付多少**（
+      `deep_gemm/include/deep_gemm/scheduler/gemm.cuh:14-27/34-38/107-141/186`；
+      `csrc/runtime/runtime.hpp:22/78-87`；`csrc/jit_kernels/impls/sm90_fp8_gemm_1d2d.hpp:92/125`、
+      `sm90_fp8_gemm_1d1d.hpp:170/177/212`；`csrc/jit_kernels/heuristics/sm90.hpp:33/47-55/63-65/77-78`；
+      `csrc/jit_kernels/heuristics/mega_moe.hpp:67-70`；
+      `deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh:33-49`）。
+      第 144/165 篇量了「两 stream / micro-batch 流水线」能不能藏通信、第 182/183 篇量了「按 SM 分区并发」
+      与「单 kernel 内计算腿 × 访存腿的资源账」，但**一条 grouped GEMM 自己的 SM 预算曲线从没被单独画过**
+      ——而它恰是「给通信留 k 个 SM、剩下给计算」这条设计轴的分母。**源码事实**：`num_sms` 是**编译期
+      模板参数 `kNumSMs`**（`scheduler/gemm.cuh:20/34/38`），同时决定 persistent grid 宽度
+      （`next_block_idx = (++iter)*kNumSMs + blockIdx.x`，`:186`）、**L2 swizzle 分组宽度
+      `kNum1DBlocksPerGroup∈{8,16}`**（`:14-27`）、**cluster 合法性**（`sm90.hpp:77-78`）；
+      主 kernel 更把 SM 钉死为全设备（`heuristics/mega_moe.hpp:69` 断言 `num_sms==device`）。**H100(sm90)
+      真机**（真实 SM90 FP8 grouped kernel + `deep_gemm.set_num_sms`，扫 `{132,120,…,4}`；
+      `harness/exp_sm_budget_curve.{py,sh,out.txt}`）：① 三条腿都有**平台**——`132→84`（砍 36% SM）
+      前向 L1 **−37%**（357.7→491.9 us）、L2/dgrad **−30%**（191.5→248.5）、**反向 wgrad 只 −4.4%**
+      （534.5→558.3，84 SM 甚至比 96/108 快）；② **边际代价由「计算受限 vs 访存受限」决定**——平台区
+      wgrad **≈0 us/SM**（噪声内为负）、L1 ~1.4–3 us/SM，拐点区（<48 SM）统一涨到 ~10–120 us/SM；
+      ③ 反推 reserve k SM 的计算损失：48 SM → L1 **+134 us** / L2 +57 / wgrad **+24 us**——**访存受限腿
+      的 SM 几乎白送**。结论与 Mega MoE 主 kernel「全 SM + 单 kernel warp specialization、不做 SM 分区」
+      的选择对得上。主 kernel SM100 专属、仅分析。配套博客
+      `content/posts/mega-moe-190-sm-budget-curve`（索引页新增第 190 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -5419,8 +5444,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P179 各增量完成（P15-1…P41-1、P42-1…P179-1）。**
-  本轮 P179-1：新建 `docs/189-mega-moe-block-m-tile.md` + `harness/exp_block_m_tile.{py,sh,out.txt}`——
+- 当前进度：**P0~P14 全部完成；P15~P180 各增量完成（P15-1…P41-1、P42-1…P180-1）。**
+  本轮 P180-1：新建 `docs/190-sm-budget-curve.md` + `harness/exp_sm_budget_curve.{py,sh,out.txt}`——
+  把「给通信让 SM」这条设计轴的分母量出来：**单条 grouped GEMM 的 SM 预算曲线**（第 144/165 篇量了
+  「两 stream / micro-batch 能否藏通信」、第 182/183 篇量了「SM 分区 / 资源账」，但单条 GEMM 自己的
+  曲线从没画过）。**源码事实**：`num_sms` 是编译期模板参数 `kNumSMs`（`scheduler/gemm.cuh:20/34/38`），
+  同时改 persistent grid 宽度（`:186`）、L2 swizzle 分组（`:14-27`）、cluster 合法性（`sm90.hpp:77-78`）；
+  主 kernel 把 SM 钉死为全设备（`heuristics/mega_moe.hpp:69`）。**H100 真机**（真实 SM90 FP8 grouped
+  kernel + `set_num_sms`，扫 `{132..4}`）：三条腿都有**平台**——`132→84`（砍 36% SM）L1 **−37%**、
+  L2 −30%、**wgrad 只 −4.4%**（84 SM 反比 96/108 快）；平台区边际 wgrad **≈0 us/SM**、L1 ~1.4–3，
+  拐点区（<48 SM）~10–120 us/SM；reserve 48 SM 损失 L1 **+134** / L2 +57 / wgrad **+24 us**
+  ——**访存受限腿的 SM 几乎白送**。主 kernel SM100 专属、仅分析。索引页新增第 190 篇。
+  上一轮 P179-1：新建 `docs/189-mega-moe-block-m-tile.md` + `harness/exp_block_m_tile.{py,sh,out.txt}`——
   收口第 188 篇「下一步」②（只量了启发式输出、没量 tile 时延差）。用 H100 真实 SM90 FP8
   `m_grouped_fp8_fp4_gemm_nt_masked` 代理（`expected_m` 强制 `block_m∈{64,128}`）量 mega 主 kernel
   `BLOCK_M` 的代价形态。**源码事实**：块数是精确计数 `Σ_e ceil(m_e/BLOCK_M)`
@@ -7465,18 +7500,20 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P179 已完成（最新 **P179-1 把「BLOCK_M 到底买到什么」量出来**：`docs/189`。收口第 188 篇
-   「下一步」②——之前只量了启发式输出、没量 tile 时延差。用 H100 真实 SM90 FP8 `m_grouped_..._masked`
-   代理（`expected_m` 强制 `block_m∈{64,128}`）：**块内行几乎免费**（`bm=128` M=1→128 时延 93.9→92.9 μs
-   不变）、**每额外块一次重载税**（L1 +9.6 μs / L2 +5.4 μs）、**block_m 收益 M=256 时 1.86×**、
-   **多专家税 G=1→32 = 5.54×**；复刻 vs 真绑定 mismatch=0。主 kernel SM100 专属、仅分析。索引页新增第
-   189 篇）。
-   上一轮 P178-1：`docs/188`——把 top-k 当自变量扫过（`block_m` 随 topk 非单调阶梯、真实 SM90 FP8
-   grouped GEMM 扫 topk 时 E=64 wgrad 1.09× / E=8 dgrad 5.92×、通信字节严格 ∝ topk）。
-   可继续（均为增量、非承诺）：① 把 top-k / block_m 扫描接到**目标卡 fp8_fp4_mega_moe 端到端**（需 SM100
-   环境，量真实 dispatch/combine 重叠下的净成本）；② 把代理从 SM90 两点 `{64,128}` 扩到**目标卡的
-   全候选 `{8,...,240}`**（需 SM100 或复刻 UMMA/TMEM 骨架）；③ 把第 170 篇的
-   dispatch 行序与第 174 篇的累积序**放进同一次端到端训练步**计时（需 DeepEP 运行期，见「阻塞」）。
+- **下一步**：P0~P180 已完成（最新 **P180-1 把「单条 grouped GEMM 的 SM 预算曲线」量出来**：`docs/190`。
+    给「按 SM 分区藏通信」这条设计轴补上分母——H100 真实 SM90 FP8 grouped kernel + `set_num_sms` 扫
+    `{132..4}`：三条腿都有**平台**（`132→84` 砍 36% SM：L1 −37% / L2 −30% / **wgrad 只 −4.4%**）、
+    平台区边际 **wgrad ≈0 / L1 ~1.4–3 us/SM**、拐点区（<48 SM）~10–120 us/SM；reserve 48 SM 损失
+    L1 +134 / L2 +57 / **wgrad +24 us**（访存受限腿白送）。主 kernel SM100 专属、仅分析。索引页新增第
+    190 篇）。
+    上一轮 P179-1：`docs/189`——**BLOCK_M 到底买到什么**（块内行几乎免费、每额外块一次重载税、多专家税
+    5.54×；复刻 vs 真绑定 mismatch=0）。
+    上一轮 P178-1：`docs/188`——把 top-k 当自变量扫过（`block_m` 随 topk 非单调阶梯、真实 SM90 FP8
+    grouped GEMM 扫 topk 时 E=64 wgrad 1.09× / E=8 dgrad 5.92×、通信字节严格 ∝ topk）。
+    可继续（均为增量、非承诺）：① 把本篇的 SM 曲线接到**目标卡 fp8_fp4_mega_moe 端到端**（需 SM100 环境，
+    但主 kernel `heuristics/mega_moe.hpp:69` 钉死全 SM、只能量单 kernel 内 warp 预算而非 SM 数）；② 把
+    top-k / block_m 扫描接到目标卡端到端（需 SM100）；③ 把第 170 篇的 dispatch 行序与第 174 篇的累积序
+    **放进同一次端到端训练步**计时（需 DeepEP 运行期，见「阻塞」）。
   上一轮 P176-1：`docs/186`——第 12 篇讲的 SM90 FP8 `k_grouped_nt` 是 K-major、本机可跑，但目标卡生产
   wgrad 走 **MN-major 的 `k_grouped_fp8_gemm_tn_contiguous`**（仅 SM100，`gemm.hpp:369` 拒 sm90）。补上
   布局/架构矩阵与 tn v.s. nt 契约、SM100 tn kernel 每条输出 tile 一条**独立、单调的 fp32 累加链**（K 块外
