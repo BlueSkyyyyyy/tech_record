@@ -67,6 +67,17 @@
 - [x] **P4-1** 参考实现：`src/kda_ref.py` 逐 token 递推（fp32/fp64）作为 golden（P1-4 交付）。
 - [x] **P4-2** FlashKDA forward vs golden：多 shape（不同 T/H）、多 seed、多门控区间，报 max abs/rel。
 - [x] **P4-3** 与 FLA `chunk_kda` 三方对比；给误差表。
+- [x] **P4-4** varlen/packed 前向（`cu_seqlens`）的数值锚定（此前 varlen 只做过**字节账**
+      `check_workspace_layout.py` Part C，从未验数值）：新增 `harness/check_varlen_forward.py`
+      （`harness/check_varlen_forward.out.txt`）+ `docs/04` §7。**Part A**：七组 `lens`（含 $L{=}1<$CHUNK、
+      $T{=}257/199$ 非整除、$g{=}0$、$g{=}4$）× bf16 状态，packed 与「逐序列 `B=1` batched」按序列切片
+      **逐位相同（`o`/`S` `max_abs=0`）**——把「varlen 调度是 batched 的无损重排」钉死（同时排除
+      tile→序列二分错、序列间状态泄漏、尾块记账错三类）。**Part B**：同七组 vs fp64 token-recurrent
+      golden `o` max_rel 5.6–8.0e-3、`S^T` 5.6e-3–1.25e-2，与 P4-2 batched 同带 ⟹ packing 不引入额外
+      误差。**Part C**：distinct-`h0` vs shared-`h0` 差在 packed 与孤立两口径**逐位相同**（seq0 差 0、
+      其余 0.18–0.24）⟹ 每序列 `initial_state` 按序列索引生效（非共享）。**Part E**：四种
+      `HasStateIn/Out` 组合都相对逐序列 batched 逐位相同。边界：`B==1` 硬约束、`D=128`/bf16、`StateFP32`
+      的 varlen 模板未单独测（待验证）。默认部署不受影响。
 
 ### P5 反向的推导与实现（`docs/05-kda-bwd.md`）
 
@@ -2354,7 +2365,22 @@
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-113 补测 + P8-3…P8-19**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
   M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成 + **M14-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M14-1（本轮）：**兑现 megatron-port 路线图最后一项**——让 `KimiDeltaAttention`
+  - P4-4（本轮）：**补上 FlashKDA 前向 varlen/packed 路径的数值锚定**（此前 varlen 只做过字节账
+    `check_workspace_layout.py` Part C，**从未验数值**）。新增 `harness/check_varlen_forward.py`
+    （`harness/check_varlen_forward.out.txt`）+ `docs/04` §7。**动机**：batched（P4-2/P4-3）与 varlen
+    两条 host 路径只差「tile→(序列,块) 映射」（batched 整除 `flash_kda.cpp:180`；varlen 用预生成
+    `tile_prefix` 二分 `fwd_kernel1.cuh` 的 `IsVarlen=true` 分支），逐 tile 算术相同——故 packed 结果
+    应等于逐序列单独跑。**Part A**：七组 `lens`（含 $L{=}1<$CHUNK、`T=257/199` 非整除、`g=0`、`g=4`）
+    × bf16 状态，packed 与「逐序列 `B=1` batched」按序列切片 **逐位相同（`o`/`S` `max_abs=0`）**，
+    一次排除 tile→序列二分错、序列间状态泄漏、尾块记账错三类。**Part B**：同七组 vs fp64
+    token-recurrent golden `o` max_rel 5.6–8.0e-3、`S^T` 5.6e-3–1.25e-2（与 P4-2 batched 同带）
+    ⟹ packing 不引入额外误差。**Part C**：distinct-`h0` vs shared-`h0` 的差在 packed 与孤立两口径
+    **逐位相同**（seq0 差 0、其余 0.18–0.24；seq1 终态因初态不同移动 5.10e-2）⟹ 每序列
+    `initial_state` 按序列索引生效。**Part E**：四种 `HasStateIn/Out` 组合都相对逐序列 batched 逐位
+    相同。**边界**：`B==1` 硬约束、`D=128`/bf16 操作数与状态、`StateFP32=true` 的 varlen 模板未单独
+    测（待验证）。见 `docs/04` §7。**下一步（可选）**：专题维持维护态；主系列 `P7` 仍无剩余
+    `待验证`，megatron-port 仅剩「把原生 fused pre-GDR 接到 `kda.py:399` 真实树分支」（需改 Megatron 树）。
+  - megatron-port M14-1（上轮）：**兑现 megatron-port 路线图最后一项**——让 `KimiDeltaAttention`
     自己的 `gdn_pre_gated_delta_rule_fusion` 开关真的**分派到** KDA 专属原生 fused pre-GDR（前向 +
     原生反向），而非上游那样在两处 `raise`；**用运行时 shim，未改 Megatron-LM 一行**。新增
     `src/kda_pregdr_fusion_shim.py`（`TransformerConfig.__post_init__` 临时屏蔽字段绕过配置 guard

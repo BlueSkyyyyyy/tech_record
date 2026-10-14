@@ -181,10 +181,124 @@ FlashKDA 与 FLA 各取自己的 bf16 舍入值。状态统一在 $S^\top$（$[V
 > 结论：以 fp64 逐 token 递推为基准，FlashKDA 与独立的 FLA 实现**互相印证**——同一输入下两者之差
 > 不超过各自相对 golden 的误差，且差值主要来自算法路径（分块大小、累加序）而非某一方算错。
 
-## 7. 小结与下一步
+## 7. varlen（packed `cu_seqlens`）前向的数值锚定（P4-4）
+
+前几节（P4-2/P4-3）的数值锚定**只跑过 batched 路径**（$B$ 条等长 $T$ 的序列）。FlashKDA 还有另一条
+host 分派路径：**varlen / packed**——`cu_seqlens` 给出拼接后各序列边界、`B=1`、序列长度不等。此前对
+它唯一的验证是**字节账**（`harness/check_workspace_layout.py` 的 Part C：`tile_prefix` 的 int32 数组
+落在预测偏移、canary 未被越界写），**从没验证过数值**：packing 后每条序列的输出/终态是否真的等于它
+单独跑一遍？本节用 `harness/check_varlen_forward.py`（原始输出 `harness/check_varlen_forward.out.txt`）
+把它钉死。
+
+### 7.1 varlen 路径与 batched 路径的差别只在「tile → (序列, 块) 映射」
+
+- batched：host 已知每序列等长，`total_tiles = N·ceil(T_seq/16)`（精确，`flash_kda.cpp:180`），
+  kernel 直接整除定位（`fwd_kernel1.cuh` 的 `IsVarlen=false` 分支）。
+- varlen：长度不等、host 无法预知每序列几块，于是**预生成 `tile_prefix`**（各序列累计 tile 数的前缀和），
+  kernel 用 $O(\log N)$ 二分把「第几个 tile」映射回「哪条序列的第几块」（`fwd_kernel1.cuh` 的
+  `IsVarlen=true` 分支）。host 只按**上界** `ceil(T_total/16)+N` 分配与 launch（`flash_kda.cpp:178`），
+  多出的 CTA 在 kernel 头部 `return`。
+
+关键点：**两条路径的「逐 tile 算术」完全相同**——varlen 只改「CTA 从哪些 token 取数、写到哪」，不改
+每个 tile 内做的 L2 归一化、cumsum、decay、$L/M_{qk}$ 求逆、GEMM 与状态更新。所以只要 tile→序列的
+映射没错，packed 结果应当与「逐序列单独跑」**逐位相同**。这正是本节最锋利的判据。
+
+### 7.2 Part A：packed vs 逐序列 batched —— **逐位相同（`max_abs=0`）**
+
+对每组 `lens` 构造 packed 输入 `[1,T_total,H,D]` + `cu_seqlens` + 每序列 `initial_state [N,H,D,D]`，
+跑一次 varlen；再对每条序列切片，用 `B=1` 的普通 batched 路径（同一份输入、同一个 `h0`、同 `scale`）
+跑一次。逐序列比输出切片与 `final_state` 行：
+
+| case | `T_total` | `N` | `o` max_abs | `S` max_abs |
+|---|---|---|---|---|
+| `lens=[30,16,5,50]` | 101 | 4 | **0.000e+00** | **0.000e+00** |
+| `lens=[1,16,17,64,3]`（含 $L{=}1<$CHUNK） | 101 | 5 | **0.000e+00** | **0.000e+00** |
+| `lens=[64,64,64]`（均为 16 倍数） | 192 | 3 | **0.000e+00** | **0.000e+00** |
+| `lens=[250,7]`（$T$ 非 16 倍数） | 257 | 2 | **0.000e+00** | **0.000e+00** |
+| `lens=[33,47,19,100]` | 199 | 4 | **0.000e+00** | **0.000e+00** |
+| `g=0`（无衰减） | 101 | 4 | **0.000e+00** | **0.000e+00** |
+| `g=N(0,4)`（强衰减） | 101 | 4 | **0.000e+00** | **0.000e+00** |
+
+七组（含单 token 序列、非整除 $T$、极端门控）全部**逐位相同**。这同时排除了三类易错：
+
+1. **tile→序列映射错**（二分写错）：会让某条序列读到邻居的 token → O(1) 差；
+2. **序列间状态泄漏**（一条序列的 `s_acc` 灌进下一条）：在 packed 里表现为「后一条序列输出/终态偏移」，
+   单跑时不会；
+3. **尾块记账错**（非整除 $T$、$L<$CHUNK）：尾块 mask / `tile_prefix` 边界错误 → 只在特定 `lens` 现形。
+
+七组同时逐位，等价于「varlen 调度是 batched 的**无损重排**」。
+
+### 7.3 Part B：packed vs fp64 golden —— 与 batched 同处 bf16 底噪
+
+同七组 packed（`HasStateIn/Out` 均开、bf16），逐序列与 fp64 token-recurrent golden 比 `max_rel`
+（分母取 golden 峰值）：
+
+| case | `o` max_rel | `S^T` max_rel |
+|---|---|---|
+| `lens=[30,16,5,50]` | 6.06e-03 | 1.02e-02 |
+| `lens=[1,16,17,64,3]` | 7.98e-03 | 8.54e-03 |
+| `lens=[64,64,64]` | 6.32e-03 | 9.34e-03 |
+| `lens=[250,7]` | 5.59e-03 | 8.53e-03 |
+| `lens=[33,47,19,100]` | 7.17e-03 | 1.18e-02 |
+| `g=0` | 5.81e-03 | 5.61e-03 |
+| `g=N(0,4)` | 6.38e-03 | 1.25e-02 |
+
+全部落在 §4 的 batched 带宽内（`o` $4\text{–}7.6\times10^{-3}$、`S` $5\times10^{-3}\text{–}1.4\times10^{-2}$）。
+即 **packing 不引入任何超出 bf16 底噪的额外误差**——与 Part A 的「逐位无损重排」互为印证。
+
+### 7.4 Part C：每序列的 `initial_state` 是按序列索引的（不是共享）
+
+varlen 的 `initial_state`/`final_state` 形状是 `[N,H,D,D]`（`flash_kda.cpp:162-174` 强制）。若 kernel
+误用第一条序列的 $h_0$ 当共享初态，packed 结果仍会「自洽」、只有与「逐序列单独跑」比才露馅。用
+「distinct-$h_0$ vs shared-$h_0$」的差做判据，对每条序列比 **packed 差** 与 **孤立差**：
+
+| 序列（长度） | 孤立 `|o(h0_i)−o(h0_0)|` | packed 同值 | 逐位相同 |
+|---|---|---|---|
+| 0（30） | 0.000e+00 | 0.000e+00 | 是 |
+| 1（16） | 1.782e-01 | 1.782e-01 | 是 |
+| 2（5） | 2.236e-01 | 2.236e-01 | 是 |
+| 3（50） | 2.432e-01 | 2.432e-01 | 是 |
+
+`seq0` 两口径都 $h_0$ 未变故差 0；其余序列 packed 差与孤立差**逐位相同**，说明 packed 里序列 $i$ 真的
+吃的是 $h_0[i]$。终态侧：`seq0` 终态在两种口径下逐位相同（它的初态没变），而 `seq1` 终态因初态不同
+移动了 **5.104e-02**（O($h_0$) 量级）——再次证明初态按序列生效。
+
+### 7.5 Part E：varlen 模板的四种状态组合
+
+`fwd_kda` 对 `HasStateIn/HasStateOut` 各有一版编译好的 varlen 模板（`flash_kda.cpp:209-213` 的
+`DISPATCH_STATE(true)`）。四组合都相对「逐序列 batched」**逐位相同**：
+
+```
+no state         o vs per-seq batched max_abs=0.000e+00  (no S out)
+state-in only    o vs per-seq batched max_abs=0.000e+00  (no S out)
+state-out only   o vs per-seq batched max_abs=0.000e+00  S max_abs=0.000e+00
+both (bf16)      o vs per-seq batched max_abs=0.000e+00  S max_abs=0.000e+00
+```
+
+### 7.6 边界（诚实）
+
+- **`B==1` 硬约束**（`flash_kda.cpp:150`）：`cu_seqlens` 给的是拼接后的序列边界，故 varlen 只支持一条
+  拼接轴；多 batch 的多序列要走 batched 或逐条 varlen。
+- 只测 **`D=128`、bf16 操作数、bf16 状态**；`StateFP32=true` 的 varlen 模板（`flash_kda.cpp:203-207`）
+  未单独测——但 Part A/E 已证状态组合的**调度**层无差，fp32 状态只改落盘精度，风险很低（**待验证**：
+  若追严格，补 `final_state`/`initial_state` 传 fp32 的一组）。
+- 本节只验**数值**，不测 varlen 的**性能**（`tile_prefix` 二分 vs 整除的 host/device 成本）；性能专属
+  证据见 `docs/07`。
+
+## 8. 小结与下一步
 
 - FlashKDA 前向 kernel 在全部测试 shape / seed / 门控区间下，与 fp64 golden 的 `o` 峰值相对误差
   为 $4\times10^{-3}\sim7.6\times10^{-3}$、终态为 $5\times10^{-3}\sim1.4\times10^{-2}$，符合 bf16 精度预期。
+- **varlen/packed 路径（P4-4）**：七组（含 $L{=}1<$CHUNK、非整除 $T$、$g{=}0$/$g{=}4$）× 四种状态
+  组合，packed 与「逐序列 batched」**逐位相同（`max_abs=0`）**、与 fp64 golden 同处 bf16 底噪，
+  且每序列 `initial_state` 按序列索引生效——varlen 调度是 batched 的无损重排。
+- 三方对比（golden / FlashKDA / FLA）显示三者同处 bf16 底噪；`flash↔fla` 的 `o` 误差因共模抵消
+  更小（$3.65\times10^{-3}$），佐证误差主项是 bf16 输入舍入。
+- 钉死了一个易踩的布局约定：FlashKDA 状态是 $S^\top$（$[N,H,V,K]$）。
+- 脚本/证据：`harness/check_fwd_numerics.py`、`harness/check_fwd_numerics.out.txt`；
+  三方对比 `harness/check_three_way.py`、`harness/check_three_way.out.txt`；
+  受控消融 `harness/check_state_bf16.py`（P3-3）；varlen 锚定 `harness/check_varlen_forward.py`、
+  `harness/check_varlen_forward.out.txt`（P4-4）。
 - 三方对比（golden / FlashKDA / FLA）显示三者同处 bf16 底噪；`flash↔fla` 的 `o` 误差因共模抵消
   更小（$3.65\times10^{-3}$），佐证误差主项是 bf16 输入舍入。
 - 钉死了一个易踩的布局约定：FlashKDA 状态是 $S^\top$（$[N,H,V,K]$）。

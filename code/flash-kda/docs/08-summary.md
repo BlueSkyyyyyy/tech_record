@@ -79,12 +79,17 @@ $\sim10^{-9}\!\sim\!10^{-7}$，只是计算顺序的舍入。**KDA vs GLA/DeltaN
 | 前向 $o$（FlashKDA bf16） | max_rel **4.0e-3 ~ 7.6e-3** | 峰值相对误差，随 T 不漂移 |
 | 前向终态 $S$（FlashKDA bf16） | max_rel **5.0e-3 ~ 1.4e-2** | $g=0$ 无衰减时最大 |
 | 三方：`flash↔fla` 的 $o$ | max_rel **3.65e-3** < 各自 vs golden（6.22e-3） | **共模抵消**（共享同一份 bf16 输入量化） |
+| **varlen/packed vs 逐序列 batched**（P4-4） | `o`/`S` **max_abs = 0** | 7 组 `lens`（含 $L{=}1<$CHUNK、非整除 $T$）× 4 状态组合，逐位相同 |
+| **varlen/packed vs fp64 golden**（P4-4） | $o$ **5.6e-3 ~ 8.0e-3** / $S^T$ **5.6e-3 ~ 1.25e-2** | 与 batched 同带 ⟹ packing 无额外误差 |
 | 反向六项 vs autograd（fp64） | **max_abs = 0** | 显式 adjoint 与链式法则逐位相等 |
 | 反向 chunked vs 逐 token（fp64） | max_rel **~1e-15**（含 $D=128,T=512$） | 13 组 case 全机器精度 |
 | FLA `chunk_kda` 反向（bf16） | 六项 max_rel **3e-3 ~ 8.2e-3** | 与前向误差同阶，无算法级偏差 |
 
 - **误差归因**：bf16 输入舍入（~3.9e-3）是主项；bf16 状态存储边际 ~1e-4（有衰减）~2e-3（$g=0$）；
   门控 `ex2.approx`/`tanh.approx` 端到端 ≤2e-5（可忽略）。算法（分块/求逆/`MOVM_T`）无可测额外损失。
+- **varlen/packed（P4-4）**：`cu_seqlens` 路径与 batched 只差「tile→(序列,块) 映射」（batched 整除、
+  varlen 用 `tile_prefix` 二分），逐 tile 算术相同——实测 packed 与逐序列单独跑**逐位相同**，
+  且每序列 `initial_state` 按序列索引生效（非共享）。即 varlen 调度是 batched 的**无损重排**。
 
 ## 5. 性能（H100 80GB HBM3，bf16，$D=128$）
 
