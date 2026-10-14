@@ -12279,3 +12279,103 @@ store 扇区**逐位不变**，而 `dram__bytes_write` 每次实例都可不同�
 - `--replay-mode` 只有 `kernel`/`application` 两档（本 arch/ncu 版本）；**未**扫
   `cudaLimitPersistingL2`/L2 set-aside、未做 bf16 操作数版。`dram__bytes_read` 的 1.0001–1.0002× 是
   ncu 字节打印取整（MB 两位小数）量级、非真实过读。
+
+## 116. 关闭 `docs/05` §7.4 的历史遗留 `待验证`——K1 的「8×8 前代 + bf16 HMMA 合并」求逆路径 vs cuSOLVER fp32（P7-112）
+
+`docs/05` §7.4 在解释「fp64 下逐 token 反向 vs 分块反向到机器精度、fp32 下差 $\sim10^{-3}$」时，
+逐字留了一条 `待验证`：
+
+> **待验证**：真正的 kernel 用 8×8 前代 + HMMA 合并（`02` §8）在 bf16 下是否比 cuSOLVER fp32 更稳，
+> 留到 P6。
+
+`docs/02` §11.4（`check_inv_precision.py`）后来量过该 kernel 路径对 fp64 金标的误差，但用的是**随机** $L$、
+且只停在 $P$ 本身；§7.4 问的是**真实 KDA 块矩阵**上「kernel 路径是否比 cuSOLVER fp32 更稳」以及它对
+**反向梯度**的后果。本轮用一个新 harness（`harness/check_inv_kernel_path.py`，
+`harness/check_inv_kernel_path.out.txt`）把三件事一次做完。**未改任何 `src/`、`.cu`。**
+
+### 116.1 方法
+
+- **真实 $L$**：按 `kda_ref.kda_chunked_fwd` 的构造（也是 FlashKDA K1 的构造）从真实形状输入生成
+  $L=\text{tril}(k^{\text{dec}}{k^{\text{inv}}}^\top,-1)\cdot\beta$——$q/k$ 先 L2 归一化（KDA 契约）、
+  $g=-|\mathcal U|\,s_g$、$\beta=\sigma(z)$，$s_g$ 扫 $\{0,0.5,2,8\}$（$s_g$ 小 → $L$ 元素 O(1) → 病态；
+  $s_g$ 大 → $L\!\to\!0$ → 良态），另加一组**共线 key**（同 chunk 内所有 key 同向）拉高条件数。
+- **四条 $P=(I+L)^{-1}$ 路径**：cuSOLVER **GPU** fp32 / cuSOLVER **CPU** fp32 / kernel 路径
+  （`check_inv_precision.schur_inv(...,quant_merge=True)`：seed $L$ fp32、8×8 前代全 fp32、
+  仅 HMMA 输入 $P/M$ 量化 bf16、结果再落 bf16——复刻 `utils.cuh:213-369`）；金标 = fp64
+  `torch.linalg.solve(I+L, I)`。
+- **梯度隔离（关键口径）**：把整条 `kda_chunked_backward` 跑在 **fp64** 输入上（于是除 $P$ 外全部
+  fp64），只把 `kda_ref._chunk_inv` 换成各 fp32 构造路径再升回 fp64。这样六项梯度之差**只归因于
+  $P$ 的构造**，不被 chunked 反向里其它 fp32 累加序污染。
+
+### 116.2 Part A：真实 $L$ 上 cuSOLVER fp32 与 kernel 路径的 $P$ 误差
+
+各配置跨 32 个 chunk 的 **worst max_abs**（$P$ vs fp64 金标）：
+
+| config | $\mathrm{cond}(I{+}L)$ | cuSOLVER GPU | cuSOLVER CPU | kernel 路径 |
+|---|---|---|---|---|
+| D=128, $s_g$=0.0, $\beta\!\sim\!1$ | 1.39 | $2.63\times10^{-8}$ | $2.63\times10^{-8}$ | $8.62\times10^{-4}$ |
+| D=128, $s_g$=0.5 | 1.20 | $9.61\times10^{-9}$ | $9.61\times10^{-9}$ | $4.83\times10^{-4}$ |
+| D=128, $s_g$=2.0 | 1.10 | $2.83\times10^{-9}$ | $2.83\times10^{-9}$ | $2.43\times10^{-4}$ |
+| D=128, $s_g$=8.0 ($L\!\to\!0$) | 1.05 | $8.16\times10^{-10}$ | $8.16\times10^{-10}$ | $1.21\times10^{-4}$ |
+| D=16, $s_g$=0.0 | 2.43 | $6.40\times10^{-8}$ | $6.40\times10^{-8}$ | $2.42\times10^{-3}$ |
+| D=16, $s_g$=0.3 **共线 key** | 5.78 | $3.80\times10^{-8}$ | $3.80\times10^{-8}$ | $4.07\times10^{-3}$ |
+
+三条：
+
+1. **真实 $L$ 上 cuSOLVER fp32 就很准（$\sim10^{-8}$）**，且 **GPU 与 CPU 逐位同阶**（同一 L 上
+   `torch.linalg.solve` 两侧给出完全相同的结果，见 A2）。即使把 key 做成近共线（cond 5.78）也只到
+   $3.8\times10^{-8}$——没有出现「GPU 比 CPU 差 3 个数量级」的迹象。
+2. **kernel 路径比 cuSOLVER fp32 差 4–5 个数量级**（$\sim10^{-4}\sim10^{-3}$），**不是**靠「更稳」取胜；
+   它的误差是 **bf16 HMMA 输入量化**的地板（$\varepsilon_{\text{bf16}}\!\approx\!7.8\times10^{-3}$，
+   与自身 $|P|$ 同量级），**不是失稳**——跨病态/共线都只随 $|L|$ 平缓变化、从不爆炸，与 `docs/02` §11.4
+   「前代 + Schur 从不构造 $L^k$、对近共线 key 也稳」一致。
+3. **A2（诚实修正 §7.4 的归因）**：把 `allow_tf32` 在 GPU 上切到 True/False，$P$ 误差**都是 $2.63\times10^{-8}$**
+   （cuSOLVER 不理会该开关）。故 §7.4 观察到的「GPU 上 $3\times10^{-4}$、CPU 上 $2\times10^{-7}$」**不能**
+   归给块内求逆——本轮在 $P$ 这一级**未复现**那个 GPU/CPU 差；它更可能来自 chunked forward 里**其它**
+   fp32 `matmul` 的累加序（或当时的 torch 版本/默认 tf32）。**这一处 GPU>CPU 的确切成因本轮未定位，标
+   `待验证`**（不影响本节任何结论）。
+
+### 116.3 Part B：把 $P$ 的构造隔离出来——六项梯度只差 $\le10^{-4}$
+
+整条反向跑 fp64、只换 $P$（$B2\,T64\,D32$、$q/k$ L2 归一化、$|dq|_{\max}\!\sim\!1\text{–}3$），
+六项梯度 vs「fp64 精确 $P$」的 **worst max_abs**：
+
+| $s_g$ | 路径 | dq | dk | dv | dg | dbeta | dh0 |
+|---|---|---|---|---|---|---|---|
+| 0.5 | cuSOLVER fp32 | 9.7e-9 | 8.4e-9 | 1.1e-9 | 1.5e-9 | 6.6e-9 | 3.4e-10 |
+| 0.5 | **kernel 路径** | 3.6e-4 | 2.9e-4 | 4.3e-5 | 1.1e-4 | 2.9e-4 | 9.9e-6 |
+| 2.0 | cuSOLVER fp32 | 3.0e-9 | 2.2e-9 | 7.1e-10 | 2.3e-10 | 1.1e-9 | 2.6e-11 |
+| 2.0 | **kernel 路径** | 6.4e-5 | 6.4e-5 | 1.5e-5 | 6.3e-6 | 3.9e-5 | 2.9e-6 |
+| 8.0 | cuSOLVER fp32 | 5.0e-10 | 6.0e-10 | 2.9e-10 | 4.4e-11 | 7.2e-10 | 1.5e-12 |
+| 8.0 | **kernel 路径** | 4.5e-5 | 4.1e-5 | 1.2e-5 | 3.1e-6 | 3.2e-5 | 1.4e-8 |
+
+- **cuSOLVER fp32 的 $P$ 对梯度几乎免费**（$\le10^{-8}$）——印证 §7.4 的「本实现 vs autograd(chunked)
+  只有 $5\times10^{-4}$」不是求逆的锅。
+- **kernel 路径的 $P$ 给六项梯度带来 $\sim10^{-4}$**（相对 $|dq|\!\sim\!1\text{–}3$ 即 rel $\sim10^{-4}$），
+  比 bf16 **操作数**底噪（`docs/06` §6.6 的 $3\times10^{-2}\!\sim\!5\times10^{-2}$）**低 2–3 个数量级**，
+  也低于 `docs/06` §6.11（P6-9）量到的「$P$ 降 bf16 的归因增量 $\le1.3\times10^{-4}$」同阶。
+
+### 116.4 Part C：脚手架自检（fp64 精确 $P$ == 逐 token autograd）
+
+`g_scale=0.5/8.0` 下，fp64 分块反向（精确 $P$）vs fp64 逐 token `torch.autograd` 六项全到
+**$\le5.6\times10^{-16}$**——证明上面的隔离口径本身干净（Part B 的量都是 $P$ 构造造成的，不是脚手架）。
+
+### 116.5 结论与设计输入
+
+- **§7.4 的 `待验证` 关闭**：kernel 的「8×8 前代 + bf16 HMMA 合并」求逆路径**不比 cuSOLVER fp32 更稳**
+  （$P$ 精度差 4–5 个数量级），但它**稳定**（误差是 bf16 量化地板、非失稳）、且对六项反向梯度的贡献
+  **$\le10^{-4}$**，远低于 bf16 操作数底噪。**故「真 kernel 用 8×8 前代会不会把反向精度拖坏」的答案
+  是「不会」**——它落在 bf16 噪声之下，无须为它增存 fp32 `P`（与 P6-9 的结论一致）。
+- **顺带修正 §7.4 的一处归因**：那条 `待验证` 的上下文把「GPU fp32 比 CPU 差 $\sim3\times10^{-4}$」暗示为
+  求解器问题；本轮实测 $P$ 这一级 **GPU==CPU、与 `allow_tf32` 无关**。该 GPU/CPU 差的成因**本轮未定位、
+  标 `待验证`**，但已可排除「块内求逆」。
+- **部署无后果**：默认部署仍 §45 的 `cf`；这不改变任何 P7-82…P7-111 的结论。
+
+### 116.6 边界（诚实）
+
+- 只在 `[T,D]` 单头、$D\!\in\!\{16,128\}$、`chunk=16`、$q/k$ L2 归一化上量；$P$ 路径用**纯 PyTorch
+  复刻** `utils.cuh:213-369`（bf16 HMMA 记 fp32 矩阵乘、未模拟 HMMA 的累加序/`ftz`），故给的是
+  **该构造的精度量级**而非逐位。
+- Part B 用 fp64 脚手架隔离 $P$；真实 fp32 链里 $P$ 的量级结论沿用（$P$ 误差 $\le10^{-4}$ 远低于
+  fp32 累加底噪）。
+- 「GPU>CPU 求解差」的确切成因（§116.2 要点 3）未定位，标 `待验证`。

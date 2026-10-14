@@ -439,8 +439,13 @@ chunked backward 能 block-parallel 的原因，也解释了 `03`/`05` §6 观�
   同样输入下 `kda_chunked_fwd` 在 **GPU 上** 与逐 token 前向就差 $\sim3\times10^{-4}$（CPU 上仅
   $\sim2\times10^{-7}$，见 `harness/check_bwd_chunked.out.txt` 附注），梯度再放大到 $\sim10^{-3}$。
   同一 case 里「本实现 vs autograd(chunked)」只有 $\sim5\times10^{-4}$（两者都吃同一个 fp32 $P$），
-  证明差异来自 $P$ 的 fp32 精度而非反向公式。**待验证**：真正的 kernel 用 8×8 前代 + HMMA 合并
-  （`02` §8）在 bf16 下是否比 cuSOLVER fp32 更稳，留到 P6。
+  证明差异来自 $P$ 的 fp32 精度而非反向公式。~~**待验证**：真正的 kernel 用 8×8 前代 + HMMA 合并
+  （`02` §8）在 bf16 下是否比 cuSOLVER fp32 更稳，留到 P6。~~——**已解决**（`07` §116 / P7-112）：
+  在真实 KDA 块矩阵上，cuSOLVER fp32 的 $P$ 就到 $\sim10^{-8}$（且 GPU==CPU），kernel 路径
+  （8×8 前代 + bf16 HMMA 合并）$\sim10^{-4}\!\sim\!10^{-3}$——**不比 cuSOLVER 更准**，但**稳定**
+  （bf16 量化地板、非失稳），且隔离到 fp64 反向脚手架后对六项梯度的贡献 **$\le10^{-4}$**（远低于
+  bf16 操作数底噪），故「真 kernel 会不会拖坏反向精度」＝**不会**，无须增存 fp32 $P$（与 `06` §6.11
+  P6-9 一致）。
 - bf16 下 $\sim10^{-2}\sim3\times10^{-1}$，与 `04`/`05` §6 的 bf16 底噪一致。
 
 ### 7.5 两个容易写错的点（踩坑）

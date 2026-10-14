@@ -1907,6 +1907,19 @@
       **只在逐出项**，`S_L1` 逐位稳——§102.4 的「~19 MB」即同一计数残差随核规模的缩放。**结论**：写量比
       判据（`S_L1`/解析输出，弃 `dram__bytes_write`）从「经验」升为「机制」，§99–§111 逐条结论不变、
       与 §45 `cf` 部署无关。见 `docs/07` §114、`docs/08` §114 bullet（P8-16）。
+- [x] **P7-112** 关闭 `docs/05` §7.4 的历史遗留 `待验证`——K1 的「8×8 前代 + bf16 HMMA 合并」求逆路径
+      （`utils.cuh:213-369`）**是否比 cuSOLVER fp32 更稳**。新增 `harness/check_inv_kernel_path.py`
+      （`harness/check_inv_kernel_path.out.txt`）；**未改任何 `src/`、`.cu`**。**Part A（真实 KDA 块矩阵 $L$、
+      $q/k$ L2 归一化、$g$ 尺度扫全、含近共线 key）**：cuSOLVER fp32 的 $P$ 误差 **$\sim10^{-8}$**
+      （$2.6\text{–}8.2\times10^{-9}$）、**GPU 与 CPU 逐位同阶**、`allow_tf32` 开关无影响；kernel 路径
+      **$\sim10^{-4}\!\sim\!10^{-3}$**（$1.2\times10^{-4}\text{–}4.1\times10^{-3}$，随 $|L|$，共线 cond 5.78
+      也只 4.07e-3）——**不比 cuSOLVER 更准**（差 4–5 个数量级），但**稳定**（bf16 量化地板、非失稳）。
+      **Part B（fp64 脚手架隔离 $P$）**：整条 `kda_chunked_backward` 跑 fp64、只换 `_chunk_inv`——cuSOLVER
+      fp32 的 $P$ 对六项梯度只 $\le10^{-8}$；kernel 路径 $\le3.6\times10^{-4}$（rel $\sim10^{-4}$，低于
+      bf16 操作数底噪 2–3 个数量级）。**Part C**：fp64 精确 $P$ 的分块反向 == fp64 逐 token autograd
+      $\le5.6\times10^{-16}$（脚手架干净）。**结论**：kernel 求逆路径**不会**拖坏反向精度、无须增存 fp32 $P$
+      （与 P6-9 一致）；并**修正 §7.4 的归因**——其「GPU fp32 比 CPU 差 ~3e-4」在 $P$ 这一级**未复现**
+      （成因本轮未定位、标 `待验证`，但已排除块内求逆）。默认部署仍 §45 的 `cf`。见 `docs/07` §116。
 
 
 ### P8 小结 / 一页纸
@@ -2037,6 +2050,13 @@
         结论不变，且现对 ncu replay 模式免疫；**不改变** §45 的 `cf` 默认部署。**边界**：复用 §114 的
         理想化微基准（只给机制归属）；只 `kernel`/`application` 两档 replay、未扫
         `cudaLimitPersistingL2`/set-aside、未做 bf16 操作数版。
+- [x] **P8-18** 补全一页纸（`docs/08-summary.md`）——新增 **§116 bullet**（P7-112 关闭 `docs/05` §7.4
+        历史遗留 `待验证`：真实 KDA 块 $L$ 上 cuSOLVER fp32 求逆 $P$ 就 $\sim10^{-8}$（GPU==CPU、
+        `allow_tf32` 无关）、kernel「8×8 前代 + bf16 HMMA 合并」路径 $\sim10^{-4}\!\sim\!10^{-3}$
+        （不比 cuSOLVER 更准但稳定、bf16 量化地板）；fp64 脚手架隔离 $P$ 后 kernel 路径对六项梯度
+        $\le3.6\times10^{-4}$、低于 bf16 操作数底噪 2–3 个数量级 ⟹ 真 kernel 求逆不会拖坏反向精度、
+        无须增存 fp32 $P$；并修正 §7.4 的 GPU>CPU 归因），文档头 `P8-1…P8-17`→`P8-1…P8-18`。数字全部
+        复用 `docs/07` §116 本机实测（同一轮新增实验）。见 `docs/08-summary.md`。
 
 ## 每轮增量流程（autopilot）
 
@@ -2299,10 +2319,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-111 补测 + P8-3…P8-17**；子专题
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-112 补测 + P8-3…P8-18**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
   M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - P8-17（本轮）：**关闭 §114.5（P7-111）逐字留下的唯一 replay 边界 + 补读侧对照**。同一写侧微基准
+  - P7-112 + P8-18（本轮）：**关闭 `docs/05` §7.4 的历史遗留 `待验证`**——K1 的「8×8 前代 + bf16 HMMA
+    合并」求逆路径（`utils.cuh:213-369`）是否比 cuSOLVER fp32 更稳。新增 `harness/check_inv_kernel_path.py`
+    （`harness/check_inv_kernel_path.out.txt`），**未改任何 `src/`、`.cu`**。在**真实 KDA 块矩阵** $L$
+    （$q/k$ L2 归一化、$g$ 尺度扫全、含近共线 key）上：cuSOLVER fp32 的 $P$ 误差 $\sim10^{-8}$
+    （$2.6\text{–}8.2\times10^{-9}$，**GPU==CPU**、`allow_tf32` 无关），kernel 路径 $\sim10^{-4}\!\sim\!10^{-3}$
+    （$1.2\times10^{-4}\text{–}4.1\times10^{-3}$，共线 cond 5.78 也只 4.07e-3）——**不比 cuSOLVER 更准**（差
+    4–5 个数量级），但**稳定**（bf16 量化地板、非失稳）。**fp64 脚手架隔离 $P$**：整条分块反向跑 fp64、
+    只换 `_chunk_inv`——cuSOLVER fp32 的 $P$ 对六项梯度 $\le10^{-8}$、kernel 路径 $\le3.6\times10^{-4}$
+    （rel $\sim10^{-4}$，低于 bf16 操作数底噪 2–3 个数量级）；fp64 精确 $P$ 与逐 token autograd
+    $\le5.6\times10^{-16}$（脚手架干净）。**结论**：真 kernel 求逆**不会**拖坏反向精度、无须增存 fp32 $P$
+    （与 P6-9 一致）；并**修正 §7.4 的 GPU>CPU 归因**（该差在 $P$ 级未复现、成因未定位标 `待验证`，
+    已排除块内求逆）。默认部署仍 §45 的 `cf`。见 `docs/07` §116 + `docs/08` §116 bullet。
+    **下一步（可选）**：专题维持维护态——主系列 `P7` 无剩余 `待验证`（§7.4 已关）；
+    megatron-port 仅剩「把原生 fused pre-GDR 接到 `kda.py:399` guard」（需改 Megatron 树、历轮刻意不改）。
+  - P8-17（上轮）：**关闭 §114.5（P7-111）逐字留下的唯一 replay 边界 + 补读侧对照**。同一写侧微基准
     （`probe_l2_write_evict.*` 一行未改）在两 replay 模式一次跑完（`probe_l2_write_evict_appreplay_ncu.sh`
     + `check_l2_write_evict_appreplay.py`，`docs/07` §115 + `docs/08` §115 bullet）：六行配置的 `S_L1`
     与「L2 写扇区」`kernel`/`application` **逐位相同**（270592 / 2105600），顺序效应**两模式都复现**
