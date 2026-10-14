@@ -381,6 +381,35 @@ DEV void st2(float* p, float a, float b) {
 #ifndef B2M_INTRA_SPAD
 #define B2M_INTRA_SPAD 0
 #endif
+// P7-109: bf16 staging for the folded `intra` raw `q/k/g` tiles -- the counterfactual for the
+// capacity lever docs/07 §97 named ("K=256 的 bf16 降位是容量杠杆") but never ran.  Halves the
+// `3*BT*KD*4` staging footprint *and* the smem-read traffic of the intra mma loop by storing the
+// raw tiles as bf16 and widening on read.  bf16 is a subset of tf32, so the widened values feed
+// the **unchanged** tf32 mma; the only effect is quantizing the *stored* `q/k/g`.  `=1`: bf16
+// `q/k/g`; `=2`: bf16 `q/k`, `g` kept fp32 (g drives `exp2f(+-g)` in the gate; bf16 rounding of
+// `g` in [-5,0] is ~7e-3 relative -> expected too coarse for the gate but measured separately).
+#ifndef B2M_INTRA_BF16
+#define B2M_INTRA_BF16 0
+#endif
+#if B2M_INTRA_BF16 && !B2M_INTRA
+#error "B2M_INTRA_BF16 requires B2M_INTRA"
+#endif
+#if B2M_INTRA_BF16
+using b16 = __nv_bfloat16;
+#define IQK(x) __bfloat162float(x)
+#define TO_QK(x) __float2bfloat16(x)
+#else
+using b16 = float;
+#define IQK(x) (x)
+#define TO_QK(x) (x)
+#endif
+#if B2M_INTRA_BF16 == 1
+#define IG(x) __bfloat162float(x)
+#define TO_G(x) __float2bfloat16(x)
+#else
+#define IG(x) (x)
+#define TO_G(x) (x)
+#endif
 // P7-56: the *fifth non-GEMM segment* of B2 in CUDA -- the per-token write-gate gradient
 //   db[o_A] = sum_v dvb[o_A,v] * v[o_A,v]  +  sum_k dkgb[o_A,k] * kg[o_A,k]
 // (FLA `chunk_bwd.py`, `check_bwd_dqkg_kernel.py:180-210`: `b_db = sum_V(b_dvb*b_v)` then
@@ -626,9 +655,13 @@ struct alignas(128) Shared {
     // the `dAqk` input tile [BT,BT]; `dAkk` is read directly from SAND's `daB` (masked `-X2`),
     // so no `dA` staging/round-trip.  `idbrow` is the `db` cross-warp reduction (merged into
     // the `db` store).
-    float siq[BT][KD + B2M_INTRA_PAD];
-    float sik[BT][KD + B2M_INTRA_PAD];
+    b16 siq[BT][KD + B2M_INTRA_PAD];   // P7-109: bf16 under B2M_INTRA_BF16
+    b16 sik[BT][KD + B2M_INTRA_PAD];
+#if B2M_INTRA_BF16 == 1
+    b16 sig[BT][KD + B2M_INTRA_PAD];
+#else
     float sig[BT][KD + B2M_INTRA_PAD];
+#endif
     float sda[BT][BT + B2M_INTRA_SPAD];
     float idbrow[NW][BT];
 #endif
@@ -1645,7 +1678,8 @@ b2mma_kernel(
             const int64_t off = ((int64_t)(n * T + tt) * H + hh) * KD + col;
             qv = qptr[off]; kv = kraw[off]; gv = graw[off];
         }
-        sh->siq[row][col] = qv; sh->sik[row][col] = kv; sh->sig[row][col] = gv;
+        sh->siq[row][col] = TO_QK(qv); sh->sik[row][col] = TO_QK(kv);
+        sh->sig[row][col] = TO_G(gv);
     }
     for (int idx = threadIdx.x; idx < BT * BT; idx += NW * 32) {
         const int a = idx / BT, j = idx % BT;
@@ -1678,12 +1712,12 @@ b2mma_kernel(
             #pragma unroll
             for (int nt = 0; nt < NBW; ++nt) {
                 const int col = warp * BW + nt * 8 + g;
-                const float kg0 = sh->sik[j0][col] * exp2f(-sh->sig[j0][col]);
-                const float kg1 = sh->sik[j1][col] * exp2f(-sh->sig[j1][col]);
-                const float qg0 = sh->siq[j0][col] * exp2f(sh->sig[j0][col]);
-                const float qg1 = sh->siq[j1][col] * exp2f(sh->sig[j1][col]);
-                const float kd0 = sh->sik[j0][col] * sh->sbeta[j0] * exp2f(sh->sig[j0][col]);
-                const float kd1 = sh->sik[j1][col] * sh->sbeta[j1] * exp2f(sh->sig[j1][col]);
+                const float kg0 = IQK(sh->sik[j0][col]) * exp2f(-IG(sh->sig[j0][col]));
+                const float kg1 = IQK(sh->sik[j1][col]) * exp2f(-IG(sh->sig[j1][col]));
+                const float qg0 = IQK(sh->siq[j0][col]) * exp2f(IG(sh->sig[j0][col]));
+                const float qg1 = IQK(sh->siq[j1][col]) * exp2f(IG(sh->sig[j1][col]));
+                const float kd0 = IQK(sh->sik[j0][col]) * sh->sbeta[j0] * exp2f(IG(sh->sig[j0][col]));
+                const float kd1 = IQK(sh->sik[j1][col]) * sh->sbeta[j1] * exp2f(IG(sh->sig[j1][col]));
                 uint32_t b_kg[2]  = {to_tf32(kg0), to_tf32(kg1)};
                 uint32_t b_qg[2]  = {to_tf32(qg0), to_tf32(qg1)};
                 uint32_t b_kgd[2] = {to_tf32(kd0), to_tf32(kd1)};
@@ -1701,7 +1735,7 @@ b2mma_kernel(
             for (int i = 0; i < 4; ++i) {
                 const int rowrel = (i < 2) ? g : g + 8;
                 const int col = warp * BW + nt * 8 + 2 * t + (i & 1);
-                const float gg = sh->sig[rowrel][col];
+                const float gg = IG(sh->sig[rowrel][col]);
                 idq[nt][i] *= exp2f(gg);                 // dq2 = 2^g ⊙ (Mq@KG)
                 idk[nt][i] *= exp2f(gg);                 // dk2 = 2^g ⊙ (Mk@KG)
                 idt[nt][i] *= exp2f(-gg);                // dkt = 2^-g ⊙ (Sq@QG + Sk@KGd)
@@ -1715,8 +1749,8 @@ b2mma_kernel(
             for (int i = 0; i < 4; ++i) {
                 const int rowrel = (i < 2) ? g : g + 8;
                 const int col = warp * BW + nt * 8 + 2 * t + (i & 1);
-                const float kv = sh->sik[rowrel][col];
-                idg[nt][i] = sh->siq[rowrel][col] * idq[nt][i] + (idk[nt][i] - idt[nt][i]) * kv;
+                const float kv = IQK(sh->sik[rowrel][col]);
+                idg[nt][i] = IQK(sh->siq[rowrel][col]) * idq[nt][i] + (idk[nt][i] - idt[nt][i]) * kv;
                 idk[nt][i] += idt[nt][i];                 // dk2 += dkt
             }
         }
@@ -1728,7 +1762,7 @@ b2mma_kernel(
             for (int i = 0; i < 4; ++i) {
                 const int rowrel = (i < 2) ? g : g + 8;
                 const int col = warp * BW + nt * 8 + 2 * t + (i & 1);
-                const float p = dkpre[nt][i] * sh->sik[rowrel][col];
+                const float p = dkpre[nt][i] * IQK(sh->sik[rowrel][col]);
                 if (i < 2) pr0 += p; else pr1 += p;
             }
         }
