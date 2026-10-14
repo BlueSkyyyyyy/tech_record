@@ -5224,8 +5224,38 @@
        三段真实时长（只让重算藏进 wgrad、dgrad 串行）→ `756.9us`、**`1.43×`**，几乎顶到预算 `1.49×`，
        且把两 kernel 两 stream 的 `1.09×` 拉到 `1.43×`。**边界**：COMP/TENS 单 warpgroup WGMMA proxy
        真实 GEMM（未复刻 UMMA/TMEM/多 stage），`0.333` 为下界估计；主 kernel SM100 专属、仅分析。
-       → `docs/183-recompute-shadow-fused.md`。配套博客
-       `content/posts/mega-moe-183-recompute-shadow-fused`（索引页新增第 183 篇）。
+        → `docs/183-recompute-shadow-fused.md`。配套博客
+        `content/posts/mega-moe-183-recompute-shadow-fused`（索引页新增第 183 篇）。
+
+### P174 增量（opt-in，补齐第 170 篇 §8 留下的「多 microbatch 梯度累积结合序」）
+
+- [x] **P174-1** **MoE 反向梯度累积的「切分 × 结合序」可复现性：wgrad 敏感、dgrad 免疫**
+       （`csrc/apis/gemm.hpp:373-427/403/55-76`、`deep_gemm/include/deep_gemm/scheduler/gemm.cuh:100/71-82/185-245/296-309`、
+       `deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh:267/301-311/318-325/346-348`、
+       `deep_gemm/include/deep_gemm/common/types.cuh:31-37`、`deep_gemm/utils/math.py:52-59`、
+       `tests/generators.py:488-544/551-608/378-419`；对照第 170 篇 `docs/180` §8）。
+       第 170 篇把「反向算子链可复现性边界」量到「kernel 逐位确定、端到端不是」，并在 §8 明确留下口子：
+       「给实验增加『多 microbatch 梯度累加』维度，量梯度累积的结合序」。生产训练里 gradient
+       accumulation 把 token **切成若干 microbatch** 分别算、再**按某个顺序相加**——都不改数学、都改
+       fp32 舍入路径。本篇补上。**机制**：wgrad（`k_grouped_fp8_gemm_nt_contiguous`）**不切 K**
+       （`scheduler/gemm.cuh:100`）、K 轴按 K-block 顺序串行累加进 `final_accum`
+       （`sm90_fp8_gemm_1d1d.cuh:267/301-311/318-325`）、`SM90_TMA_REDUCE_ADD_2D` 写回（`:346-348`）
+       ——「某专家的权重梯度」是一条按 K 排的加法链，切开再相加即改结合律；dgrad（`m_grouped`）
+       不等长轴在 **M（token）**、**每行独立**（`scheduler/gemm.cuh:296-309`）——切分只是行重排。
+       **H100(sm90) 真机**（真实 SM90 FP8 kernel；`harness/exp_moe_grad_accum_assoc.{py,sh,out.txt}`）：
+       ① **切分改 bit**——同一批 token 一次大 GEMM vs 切 3 个 microbatch 求和（`ks=[1024,…,512]`、
+       每 mb 总 token `[2432,1664,1408]`），**43.5% element 逐位不同**、relerr 仅 **3.5e-8**；
+       ② **结合序也改 bit**——固定 8 份偏梯度按 forward/reverse/pairwise-tree/by-magnitude 求和，
+       彼此差 200 万~280 万个 element（relerr 4.8e-8~6.6e-8）⇒ **DP 的 ring-reduce（顺序）与
+       tree-reduce（树形）在 fp32 下给出不同 bit**；③ **dgrad 免疫**——每组 token 行置换（=microbatch
+       切分的行重排）后按行对齐 **逐位 0/327680 差**；④ **训练真实写法可放心互换**——kernel 原地累积
+       （`c=d`）与「各 microbatch 算 fresh、再 torch 求和」**逐位 0 差**（`SM90_TMA_REDUCE_ADD_2D`
+       的 `D=C+Δ` 正是同一条左结合链）；⑤ **幅度** ≲ **7e-8** 相对，比 **FP8 量化误差 3.6e-2 小 ~1e6 倍**
+       ——训练无害，只影响逐位回归/调试。**结论**：复现性清单要显式钉住 `(grad_accum_steps, microbatch
+       顺序, DP reduce 算法)`，`use_deterministic_algorithms` 对 grouped 反向累积序**无落点**；
+       **可复现性 ≠ 数值精度**（同第 170 篇）。Mega MoE 把 wgrad 留在专家本地 rank，跨 rank 归约噪声
+       只在共享/稠密分支与优化器同步上。主 kernel SM100 专属、仅分析。→ `docs/184-moe-grad-accum-assoc.md`
+       （真实行号核对）。配套博客 `content/posts/mega-moe-184-moe-grad-accum-assoc`（索引页新增第 184 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -5264,8 +5294,26 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P173 各增量完成（P15-1…P41-1、P42-1…P173-1）。**
-  本轮 P173-1：新建 `docs/183-recompute-shadow-fused.md` + `src/recompute_shadow_fused.cu` +
+- 当前进度：**P0~P14 全部完成；P15~P174 各增量完成（P15-1…P41-1、P42-1…P174-1）。**
+  本轮 P174-1：新建 `docs/184-moe-grad-accum-assoc.md` + `harness/exp_moe_grad_accum_assoc.{py,sh,out.txt}`
+  ——第 170 篇（`docs/180`）把反向算子链的可复现性量到「kernel 逐位确定、端到端不是」，并在 §8 留下
+  口子「量一量多 microbatch 梯度累积的**结合序**」。本篇补上：生产训练里 gradient accumulation
+  把 token **切成若干 microbatch** 分别算、再**按某个顺序相加**——都不改数学、都改 fp32 舍入路径。
+  **机制**：wgrad（`k_grouped_fp8_gemm_nt_contiguous`）**不切 K**（`scheduler/gemm.cuh:100`）、
+  K 轴按 K-block 顺序串行累加进 `final_accum`（`sm90_fp8_gemm_1d1d.cuh:267/301-311/318-325`）、
+  `SM90_TMA_REDUCE_ADD_2D` 写回（`:346-348`）——「某专家权重梯度」是一条按 K 排的加法链，切开再相加
+  即改结合律；dgrad（`m_grouped`）不等长轴在 M（token）、**每行独立**（`scheduler/gemm.cuh:296-309`）
+  ——切分只是行重排。**H100(sm90) 真机**（真实 SM90 FP8 kernel）：① **切分改 bit**——同一批 token
+  一次大 GEMM vs 切 3 个 microbatch 求和（`ks=[1024,…,512]`、每 mb 总 token `[2432,1664,1408]`），
+  **43.5% element 逐位不同**、relerr 仅 **3.5e-8**；② **结合序也改 bit**——8 份偏梯度按
+  forward/reverse/pairwise-tree/by-magnitude 求和彼此差 200 万~280 万个 element（relerr 4.8e-8~6.6e-8），
+  坐实 **DP 的 ring-reduce 与 tree-reduce 在 fp32 下不同 bit**；③ **dgrad 免疫**——每组 token 行置换
+  （=microbatch 切分的行重排）逐位 **0/327680 差**；④ **训练真实写法可放心互换**——kernel 原地累积
+  （`c=d`）与「各 microbatch 算 fresh 再 torch 求和」**逐位 0 差**；⑤ **幅度** ≲ **7e-8**，比 **FP8
+  量化误差 3.6e-2 小 ~1e6 倍**——训练无害、只影响逐位回归。**结论**：复现性清单要显式钉住
+  `(grad_accum_steps, microbatch 顺序, DP reduce 算法)`，`use_deterministic_algorithms` 对 grouped
+  反向累积序无落点；**可复现性 ≠ 数值精度**。主 kernel SM100 专属、仅分析。索引页新增第 184 篇。
+  上一轮 P173-1：新建 `docs/183-recompute-shadow-fused.md` + `src/recompute_shadow_fused.cu` +
   `harness/exp_recompute_shadow_fused.{sh,out.txt}`——第 182 篇（P172-1）量到「重算藏进 shadow」
   两 kernel 两 stream 兑现不了、结论是「要靠单 kernel 内让异步张量核去吃访存受限腿闲着的张量核」；
   本篇把它落成**可核对的资源账**：shadow 由 dgrad L2（计算受限 1244 TFLOPS）与 wgrad L2（访存受限
@@ -7226,15 +7274,27 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P173 已完成（最新 **P173-1 把第 182 篇的「单 kernel 异步张量核」结论落成可核对的
-  资源账**：shadow 由 dgrad L2（计算受限 1244 TFLOPS）与 wgrad L2（访存受限 449 TFLOPS、SM 占用 ~12%）
-  两段拼成、重算也吃张量核。**H100(sm90a) 真机**单 kernel 两 warpgroup（COMP=真实 WGMMA proxy 重算、
-  TENS=第二组 WGMMA proxy dgrad、MEM=512 MiB RMW proxy wgrad，三腿二分标定到单跑等长 ≈346–349us）：
-  **COMP+MEM 重叠效率 `0.877`**（不同资源：张量核 vs HBM）、**COMP+TENS 仅 `0.333`**（同一块张量核）。
-  把 `0.877` 代回第 182 篇三段真实时长（重算藏进 wgrad、dgrad 串行）→ `756.9us`、**`1.43×`**（顶到预算
-  `1.49×`），把两 kernel 两 stream 的 `1.09×` 拉到 `1.43×`。**结论**：单 kernel 融合的收益来自「访存腿
-  与计算腿分属不同资源池」——不是塞进同一资源池抢。主 kernel SM100 专属、仅分析。详见 `docs/183`，
-  索引页新增第 183 篇）。
+- **下一步**：P0~P174 已完成（最新 **P174-1 把第 170 篇 §8 留下的「多 microbatch 梯度累积结合序」
+  补上**：`docs/184`。生产训练 gradient accumulation 把 token 切成若干 microbatch 分别算、再按某顺序
+  相加——都不改数学、都改 fp32 舍入路径。**H100(sm90) 真机**（真实 SM90 FP8 kernel）：① wgrad 一次大
+  GEMM vs 切 3 个 microbatch 求和 **43.5% bit 变**、relerr 仅 **3.5e-8**；② 结合序（forward/reverse/
+  pairwise-tree/by-magnitude）彼此差 200 万~280 万 element、relerr 4.8e-8~6.6e-8 ⇒ **DP ring-reduce
+  与 tree-reduce 不同 bit**；③ dgrad 每 token 行独立、**逐位 0 差**；④ kernel 原地累积(`c=d`) 与
+  fresh+torch 求和 **逐位 0 差**；⑤ 幅度 ≲7e-8（比 FP8 量化误差 3.6e-2 小 ~1e6 倍）。**结论**：复现性
+  清单要钉 `(grad_accum_steps, microbatch 顺序, DP reduce 算法)`，`use_deterministic_algorithms` 对
+  grouped 反向累积序无落点；可复现性 ≠ 数值精度。主 kernel SM100 专属、仅分析。索引页新增第 184 篇）。
+  可继续（均为增量、非承诺）：① 把「跨 rank all-reduce 序」从 §4 的模拟推进到**真实多卡 NCCL**
+  （需 ≥2 个 rank 环境；本机 8 卡共享可做纯 torch 的 `all_reduce` 位一致性对照，DeepEP 端到端仍待
+  NCCL≥2.32.3，见「阻塞」）；② 把结合序结论推到 **SM100 `k_grouped_tn`（MN-major，仅分析）**做同一
+  推演；③ 把第 170 篇的 dispatch 行序与本篇的累积序**放进同一次端到端训练步**计时（需 DeepEP 运行期）。
+  上一轮 P173-1 把第 182 篇的「单 kernel 异步张量核」结论落成可核对的资源账：shadow 由 dgrad L2（计算
+  受限 1244 TFLOPS）与 wgrad L2（访存受限 449 TFLOPS、SM 占用 ~12%）两段拼成、重算也吃张量核。
+  **H100(sm90a) 真机**单 kernel 两 warpgroup（COMP=真实 WGMMA proxy 重算、TENS=第二组 WGMMA proxy
+  dgrad、MEM=512 MiB RMW proxy wgrad，三腿二分标定到单跑等长 ≈346–349us）：**COMP+MEM 重叠效率
+  `0.877`**（不同资源：张量核 vs HBM）、**COMP+TENS 仅 `0.333`**（同一块张量核）。把 `0.877` 代回
+  第 182 篇三段真实时长（重算藏进 wgrad、dgrad 串行）→ `756.9us`、**`1.43×`**（顶到预算 `1.49×`），
+  把两 kernel 两 stream 的 `1.09×` 拉到 `1.43×`。**结论**：单 kernel 融合的收益来自「访存腿与计算腿
+  分属不同资源池」——不是塞进同一资源池抢。主 kernel SM100 专属、仅分析。详见 `docs/183`）。
   上一轮 P172-1 把第 181 篇的「重算 shadow 预算」在真机并发下兑现：
   `1.49×` 预算为真，但**两个 kernel + 两条 stream 兑现不了**——满 132 SM 双 stream = 串行
   （`overlap_factor=0.985×`，`smem_capacity=232448`/SM 使 block 无法 co-reside）；把 `num_sms`
