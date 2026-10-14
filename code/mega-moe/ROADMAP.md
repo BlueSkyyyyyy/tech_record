@@ -5134,6 +5134,38 @@
       `harness/exp_moe_backward_determinism.{py,sh,out.txt}`。配套博客
       `content/posts/mega-moe-180-moe-backward-determinism`（索引页新增第 180 篇）。
 
+### P171 增量（opt-in，补齐反向 SwiGLU 的输入 `h` 从哪来：存 vs 重算）
+
+- [x] **P171-1** **MoE 反向的激活存储 vs 重算（activation checkpointing）**
+      （`deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_mega_moe.cuh:1108-1134`、
+      `deep_gemm/include/deep_gemm/layout/mega_moe.cuh:360-365/389/391/427-445`、
+      `csrc/apis/gemm.hpp:181`、`csrc/jit_kernels/heuristics/sm90.hpp:14`；
+      对照第 10/13/144/145/156/159/167/170 篇）。第 144 篇（P144-1）拆了反向的 SwiGLU 段、
+      并指出「前提是前向不单独存 gate/up」；第 145/156 篇试图折进 dgrad 的 epilogue；第 159 篇给了
+      完整前反向分段账——但**从没量过**：融合前向确实不存 `h` 时，反向把它**重算**一次的代价、
+      显存收益、数值是否无损。**来源事实**：Mega MoE 的 L1 epilogue 在寄存器/TMEM 里**原地**做
+      SwiGLU 再量化（kernel `:1108-1134`，`h` 从不落 global）；持久 buffer 只有 `l1_token_buffer`
+      (=输入 `x`, fp8)、`l2_token_buffer`(=量化后的 `a`, L2 输入)、`l1_topk_weights_buffer`——**没有 `h`**
+      （layout `:360-365/427-445`）。于是反向拿 `h` 三选一：**STORE-ALL**（存 `h`，`2·m·I·2 B`）、
+      **STORE-G1**（只存 `G1`，`a/silu(G1)` 反推 `G2`）、**RECOMPUTE**（不存，重发一次前向 L1
+      grouped GEMM `h=x@W1ᵀ`；`x`/`W1` 本就在手，额外显存 **0**）。**H100(sm90) 真机**（真实
+      `m_grouped_fp8_gemm_nt_contiguous` forward L1/dgrad、`k_grouped_fp8_gemm_nt_contiguous` wgrad；
+      `harness/exp_moe_activation_recompute.{py,sh,out.txt}`）：① **重算与存储逐位相等**——同一确定
+      kernel（第 170 篇证 grouped GEMM 结构性 bit 确定）喂同一量化输入，`h` `torch.equal=True`
+      （max|d|=0）、由它算的 SwiGLU 反向 `dG` 也 `torch.equal=True`/`rel=0`，**重算数值免费**；
+      STORE-G1 反推 `G2` 则 fp32 存储 `rel=6.824e-2`、**FP8 存储（生产实际）`4.273e-1`**；
+      ② **显存账**（`H=7168,I=2048,E=8,topk=2,Es=1`）STORE-ALL 从 T=2048 的 **50.3 MB** 涨到
+      T=8192 的 **201.3 MB**（≈一张 fp8 `W1` 234.9 MB 的 **21%→86%**）、STORE-G1 一半、
+      RECOMPUTE **0**（`x` 为 wgrad 已存）；③ **时间预算**（空闲 GPU1）重算 = 一次前向 L1 GEMM
+      （路由+共享），可藏进「不依赖 `h` 的反向 GEMM」（dgrad L2 `dA=dY@W2` + wgrad L2 `dW2=aᵀ dY`）：
+      **RECOMPUTE/SHADOW = 0.47×（T=2048，283 vs 599us）/ 0.73×（T=4096，531 vs 729us）**——重算是
+      计算受限 GEMM（1250–1380 TFLOPS），shadow 里 wgrad L2 因收缩维小（`k=512`/组）访存受限
+      （241 TFLOPS）；**但这是预算不是实测重叠**：第 148 篇证侧流 overlap 被 `232448 B/SM`
+      （`sm90.hpp:14`）堵死、第 167 篇证单 kernel 融合需异步张量核。**结论**：RECOMPUTE 支配
+      STORE-ALL（0 显存、逐位无损、预算可藏），STORE-G1 不划算；落地前提与 Mega MoE 融合同源。
+      主 kernel SM100 专属、仅分析。→ `docs/181-moe-activation-recompute.md`（真实行号核对）。配套
+      博客 `content/posts/mega-moe-181-moe-activation-recompute`（索引页新增第 181 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -5171,8 +5203,24 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P170 各增量完成（P15-1…P41-1、P42-1…P170-1）。**
-  本轮 P170-1：新建 `docs/180-moe-backward-determinism.md` +
+- 当前进度：**P0~P14 全部完成；P15~P171 各增量完成（P15-1…P41-1、P42-1…P171-1）。**
+  本轮 P171-1：新建 `docs/181-moe-activation-recompute.md` +
+  `harness/exp_moe_activation_recompute.{py,sh,out.txt}`——第 144 篇拆了反向的 SwiGLU 段、指出
+  「前提是前向不单独存 gate/up」；第 145/156 篇试图折进 dgrad epilogue；第 159 篇给了完整前反向
+  账——但**从没量过**：融合前向确实不存 `h` 时反向**重算**一次的代价/显存/数值。**来源事实**：
+  Mega MoE 的 L1 epilogue 在寄存器/TMEM 里原地 SwiGLU 再量化（`sm100_fp8_fp4_mega_moe.cuh:1108-1134`，
+  `h` 不落 global）；持久 buffer 只有 `l1_token_buffer`(=x)/`l2_token_buffer`(=量化 a)/`l1_topk_weights`
+  ——**没有 `h`**（`layout/mega_moe.cuh:360-365/427-445`）。三选一：STORE-ALL / STORE-G1 / RECOMPUTE。
+  **H100(sm90) 真机**：① **重算与存储逐位相等**（同一确定 kernel，`h` `torch.equal=True` max|d|=0、
+  由它算的 SwiGLU 反向 `dG` 也 rel=0）；STORE-G1 反推 `G2` fp32 `6.824e-2`/FP8 `4.273e-1`；
+  ② **显存**（H=7168,I=2048,E=8,topk=2）STORE-ALL 50.3MB(T=2048)→201.3MB(T=8192)≈W1(fp8) 的
+  21%→86%、RECOMPUTE **0**、STORE-G1 一半；③ **时间预算**（空闲 GPU1）：RECOMPUTE/SHADOW=
+  **0.47×(T=2048, 283vs599us) / 0.73×(T=4096, 531vs729us)**（重算 1250–1380 TFLOPS 计算受限，
+  shadow 里 wgrad L2 访存受限 241 TFLOPS）；**预算可藏但落地要并发**（第 148 篇侧流被 `232448 B/SM`
+  smem 堵死、第 167 篇单 kernel 融合需异步张量核）。**结论**：RECOMPUTE 支配 STORE-ALL（0 显存、
+  逐位无损、预算可藏），STORE-G1 不划算；落地前提与 Mega MoE 融合同源。主 kernel SM100 专属、仅分析。
+  索引页新增第 181 篇。
+  上一轮 P170-1：新建 `docs/180-moe-backward-determinism.md` +
   `harness/exp_moe_backward_determinism.{py,sh,out.txt}`——第 12/13 篇拆了 wgrad/dgrad 实现、
   第 48 篇拆了 `use_deterministic_algorithms` 的三个落点、第 62 篇拆了 `deterministic_sort`，但
   「哪些算子逐位确定、真正的不确定源在哪」从没量过。本篇用 H100(sm90) 真实 grouped kernel 把反向
@@ -7085,14 +7133,23 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P170 已完成（最新 **P170-1 把 MoE 反向算子链的「可复现性边界」量出来**：
+- **下一步**：P0~P171 已完成（最新 **P171-1 把反向 SwiGLU 的输入 `h`「存 vs 重算」量出来**：
+  来源事实是 Mega MoE 前向**不存 `h`**——L1 epilogue 在寄存器/TMEM 里原地 SwiGLU 再量化
+  （`sm100_fp8_fp4_mega_moe.cuh:1108-1134`）、持久 buffer 只有 `x`/量化 `a`/topk 权重
+  （`layout/mega_moe.cuh:360-365/427-445`）。三选一里 **RECOMPUTE 支配 STORE-ALL**：同一确定 kernel
+  重发一次前向 L1 GEMM 得到**逐位相等**的 `h`（`torch.equal=True`、`dG` rel=0），额外显存 **0**
+  （`x`/`W1` 本就在手），时间预算只有 shadow（不依赖 `h` 的 dgrad L2 + wgrad L2）的 **0.47×/0.73×**
+  （T=2048/4096，空闲 GPU1）；STORE-ALL 到 T=8192 要 201.3MB（≈一张 fp8 W1 的 86%）、STORE-G1
+  反推 `G2` 在 FP8 存储下误差 4.273e-1 不划算。落地前提（异步张量核+单 kernel）与 Mega MoE 融合同源。
+  主 kernel SM100 专属、仅分析。详见 `docs/181`，索引页新增第 181 篇）。
+  上一轮 P170-1 把 MoE 反向算子链的「可复现性边界」量出来：
   grouped 反向 GEMM 是结构性 bit-确定的（20 次 0 差、开关无关、`num_sms` 无关）；唯一契约级不确定的
   GEMM 路径是稠密 cuBLASLt 回退（det=False 发射 split-K reduce、慢 1.9×）；端到端不可复现的真凶在
   **dispatch 的行序**——wgrad 收缩轴是 token（乱序下 ~83% bit 变、relerr ~1.5e-7），dgrad 每行独立
   （逐位不变）；靠 DeepEP `deterministic_sort` 规范回源索引序才可复现。结论：grouped GEMM 无需开关、
   真正杠杆在通信编排、可复现性≠数值精度。主 kernel SM100 专属、仅分析。详见 `docs/180`，
-  索引页新增第 180 篇）。
-  上一轮 P169-1 把 P168 的「容量≈秩」从自由/低秩 logits 推到生产
+  索引页新增第 180 篇。
+  再上一轮 P169-1 把 P168 的「容量≈秩」从自由/低秩 logits 推到生产
   indexer 的真实架构（MQA+ReLU）**：生产算子 `out_ij = Σ_h relu(q_h·kv_j)·w_h` 与低秩模型类的
   **唯一差别是 ReLU**，而 `relu` 逐元素作用在低秩矩阵上**把秩打满**（同参数同初始化下线性版输出秩
   = 内维 P，ReLU 版在 P=8 高达 161），故「需要多少秩」在真实架构下提法不对、真正的资源是内维 `H_i·d_i`。
@@ -7141,8 +7198,11 @@
    剩下可做的是用**真实训练权重**的 indexer↔主注意力（非参数化 q/k）复核，或把两级粗筛在
    **SM100 真 kernel** 上端到端确认（本机不可跑）；
   ③ **已由 P157-1 完成**：单进程「Mega-MoE-like 单 kernel」原型（结论：融合需异步张量核）；
-  ④ **已由 P160-1 完成**：`deep_jit/utils/` 剩余 7 个支撑头；继续可选 DeepGEMM/DeepEP `csrc/utils/`
-  或 `deep_jit/utils/` 之外的小角落做定点复核。详见上。
+   ④ **已由 P160-1 完成**：`deep_jit/utils/` 剩余 7 个支撑头；继续可选 DeepGEMM/DeepEP `csrc/utils/`
+   或 `deep_jit/utils/` 之外的小角落做定点复核。
+   ⑤ **已由 P171-1 完成**：反向 SwiGLU 输入的「存 vs 重算」——RECOMPUTE 逐位无损、额外显存 0、
+   时间预算 0.47×/0.73× shadow（详见 `docs/181`）。继续可选：把重算的 shadow 预算**在真机并发下兑现**
+   （多流或单 kernel，受第 148/167 篇的 smem/异步张量核约束），或 DeepEP 端到端（待 NCCL≥2.32.3）。详见上。
   上一轮 P151-1：把多卡 EP MoE 图接上真实 SM90 FP8 grouped kernel
   上一轮 P146-1：把「SwiGLU 反向落地成 SM100 `epilogue_class` operator」推到契约层——数值可行（真实
   `math.cuh` store 分支逐位复现，FP8 0/16777216、SF 0/524288），但契约是「单输出 + 无逐元素索引 + 无状态」，
