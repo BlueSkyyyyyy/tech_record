@@ -248,8 +248,11 @@ $\approx3.1\times10^{-3}\!\sim\!6.0\times10^{-3}$，与 bf16 输入本身的量�
 `state_v_first`）不仅改变**返回**终态的布局，也会把传入的 `initial_state` 当作 V-first 重新解释。
 最初误用该开关后，除 $t=0$（唯一直接吃初态的 token）外一切正常、$t=0$ 误差却高达 $0.1$——误导性地
 像是「随机小误差」。默认 `transpose_state_layout=False` 时终态就是 $[N,H,K,V]$，与本文 $S$ 同布局，
-对拍一致。**待验证**：FlashKDA `fwd` 返回的终态是 $[V,K]$（`torch_ref.py` 里 `state_slice` 存的就是
-$S^\top$），与 FLA 默认布局互为转置——这一点留到 P4-2 对拍时钉死。
+对拍一致。**已在 P4-2 钉死**：FlashKDA 的 `initial_state`/`final_state` 用 $S^\top$ 布局（$[N,H,V,K]$，
+`torch_ref.py` 里 `state_slice` 存的就是 $S^\top$），与 K2 内部 `s_acc`（$[V,K]$）及包装文档串
+（`flash_kda/__init__.py:21`）一致；默认 `transpose_state_layout=False` 时 FLA 终态是 $[N,H,K,V]$、与本文
+$S$ 同布局。两者互为转置——直接把 kernel `final_state` 与 golden $S$ 比 `max_abs=0.511`，转置后再比只剩
+`0.00398`（`harness/probe_state_layout.py`，见 `docs/04` §3）。
 
 ## 7. 下一步
 
