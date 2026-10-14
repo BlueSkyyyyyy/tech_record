@@ -2228,8 +2228,22 @@
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
-  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M12-1（本轮）：**关闭路线图唯一剩余的可选缺口——`gdn_pre_gated_delta_rule_fusion`
+  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
+  - megatron-port M13-1（本轮）：**兑现 `docs/14` §7 的「下一步」——把 KDA 专属 fused pre-GDR 从纯 torch
+    参考兑现成可运行 Triton 核族**。新增 `megatron-port/src/kda_pregdr_fused.py`（`_kda_conv_silu_kernel`
+    /`_kda_l2norm_kernel`/`_kda_beta_sigmoid_kernel` 三 kernel + `_forward_raw` 编排 + autograd 包装）+
+    `harness/check_port_pregdr_kernel.py`（`check_port_pregdr_kernel.out.txt`）+ `docs/15-fused-pregdr-kernel.md`。
+    **未改 Megatron-LM 一行**。**Part A**（vs 真层 eager，5 组含非整除 `T=250`）：fp32 `v/gate/beta/g`
+    逐位 0、`q/k` ≤1.2e-7；bf16 worst **≤1.95e-3（0.5 ulp）**、半数 shape 前向逐位 0。**Part B**（vs 纯
+    torch 原语参考）：fp32 1.8e-7、bf16 3.91e-3（conv 后端舍入，同 M12-1 归因）。**Part C**（整层 drop-in，
+    同权重只换 `pre_gated_delta_rule`）：fp32 `out 1.23e-4/hs.grad 3.04e-4/param.grad rel 2.08e-4`、bf16
+    `out 逐位 0/hs.grad 7.81e-3/param.grad rel 3.55e-3`。**Part D**（孤立计时）：`wall` eager 恒 ~450µs
+    （host launch 税）→ Triton ~190µs（**2.4–2.8×**）；纯设备 `dev` 小 shape 0.61–0.81×、大 shape 反超
+    **1.16–1.20×**。**踩坑**：初版 l2norm「一行一 program」全 shape `dev` 0.60–0.74×，块化 `[BT,BD]` 后
+    大 shape 抬到 1.16–1.20×。**边界**：前向 only（Part C 梯度走参考 backward）、单卡 tp=cp=1/SBHD/GVA=1、
+    未接 `kda.py:399` guard。**下一步（可选）**：原生 Triton 反向并接 `kda.py:399`，或 retire 维护态
+    （M0–M13 全完成）。
+  - megatron-port M12-1（上轮）：**关闭路线图唯一剩余的可选缺口——`gdn_pre_gated_delta_rule_fusion`
     对 KDA 未实现**（`kda.py:399-402` + `transformer_config.py:1936-1938`）。**未改 Megatron-LM 一行**；
     新增 `megatron-port/harness/check_port_pre_gated_fusion.py`（`check_port_pre_gated_fusion.out.txt`）+
     `docs/14-pre-gated-fusion.md`。**Part A** 复现配置期/运行期两道 guard；**Part B** 逐真实行号给出 GDN

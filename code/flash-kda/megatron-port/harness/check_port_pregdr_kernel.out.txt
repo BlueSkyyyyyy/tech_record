@@ -1,0 +1,60 @@
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2387: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at '_common.py:45'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/ops/_common.py", line 45, in maybe_autocast_dtype
+    if torch_version() >= (2, 4, 3):
+
+  torch._dynamo.utils.warn_once(msg)
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2262: UserWarning: Dynamo does not know how to trace the builtin `transformer_engine_torch.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1.rmsnorm_fwd.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+Megatron-LM: ~/proj/Megatron-LM
+=== dtype=float32 ===
+  -- Part A: Triton pre-GDR family vs eager pre_gated_delta_rule (float32)
+     T=64   B=2  q=8.941e-08  k=1.192e-07  v=0.000e+00  gate=0.000e+00  beta=0.000e+00  g=0.000e+00  | worst=1.192e-07
+     T=128  B=2  q=1.192e-07  k=1.192e-07  v=0.000e+00  gate=0.000e+00  beta=0.000e+00  g=0.000e+00  | worst=1.192e-07
+     T=250  B=1  q=5.960e-08  k=5.960e-08  v=0.000e+00  gate=0.000e+00  beta=0.000e+00  g=0.000e+00  | worst=5.960e-08
+     T=256  B=1  q=5.960e-08  k=1.192e-07  v=0.000e+00  gate=0.000e+00  beta=0.000e+00  g=0.000e+00  | worst=1.192e-07
+     T=1024 B=2  q=1.192e-07  k=1.192e-07  v=0.000e+00  gate=0.000e+00  beta=0.000e+00  g=0.000e+00  | worst=1.192e-07
+  -- Part B: vs pure-torch-primitive reference (conv=torch, l2norm=torch) (float32)
+     T=64   B=2  q=1.192e-07  k=1.192e-07  v=5.960e-08  gate=0.000e+00  beta=5.960e-08  g=0.000e+00  | worst=1.192e-07
+     T=250  B=1  q=1.788e-07  k=1.192e-07  v=1.192e-07  gate=0.000e+00  beta=5.960e-08  g=0.000e+00  | worst=1.788e-07
+  -- Part C: full-layer drop-in (eager pre-GDR vs Triton family, same weights)
+     out max_abs=1.230e-04   hs.grad max_abs=3.035e-04   param.grad max_abs=1.462e-02 (max|param.grad|=7.021e+01, rel=2.082e-04)
+  -- Part D: timing, isolated pre-GDR (float32)
+     T=64    B=2  wall: eager=  429.73 triton=  155.34 (2.766x) | dev: eager=   13.45 triton=   18.27 (0.736x)
+     T=256   B=2  wall: eager=  455.19 triton=  191.12 (2.382x) | dev: eager=   15.85 triton=   19.61 (0.808x)
+     T=1024  B=2  wall: eager=  459.07 triton=  190.83 (2.406x) | dev: eager=   25.56 triton=   25.39 (1.007x)
+     T=1024  B=8  wall: eager=  466.21 triton=  193.79 (2.406x) | dev: eager=   71.31 triton=   59.64 (1.196x)
+=== dtype=bfloat16 ===
+  -- Part A: Triton pre-GDR family vs eager pre_gated_delta_rule (bfloat16)
+     T=64   B=2  q=0.000e+00  k=0.000e+00  v=0.000e+00  gate=0.000e+00  beta=0.000e+00  g=0.000e+00  | worst=0.000e+00
+     T=128  B=2  q=2.441e-04  k=0.000e+00  v=0.000e+00  gate=0.000e+00  beta=0.000e+00  g=0.000e+00  | worst=2.441e-04
+     T=250  B=1  q=9.766e-04  k=0.000e+00  v=0.000e+00  gate=0.000e+00  beta=0.000e+00  g=0.000e+00  | worst=9.766e-04
+     T=256  B=1  q=0.000e+00  k=0.000e+00  v=0.000e+00  gate=0.000e+00  beta=0.000e+00  g=0.000e+00  | worst=0.000e+00
+     T=1024 B=2  q=4.883e-04  k=1.953e-03  v=0.000e+00  gate=0.000e+00  beta=0.000e+00  g=0.000e+00  | worst=1.953e-03
+  -- Part B: vs pure-torch-primitive reference (conv=torch, l2norm=torch) (bfloat16)
+     T=64   B=2  q=3.906e-03  k=3.906e-03  v=3.906e-03  gate=0.000e+00  beta=1.192e-07  g=0.000e+00  | worst=3.906e-03
+     T=250  B=1  q=3.906e-03  k=3.906e-03  v=3.906e-03  gate=0.000e+00  beta=1.192e-07  g=0.000e+00  | worst=3.906e-03
+  -- Part C: full-layer drop-in (eager pre-GDR vs Triton family, same weights)
+     out max_abs=0.000e+00   hs.grad max_abs=7.812e-03   param.grad max_abs=2.500e-01 (max|param.grad|=7.050e+01, rel=3.546e-03)
+  -- Part D: timing, isolated pre-GDR (bfloat16)
+     T=64    B=2  wall: eager=  462.06 triton=  194.16 (2.380x) | dev: eager=   13.94 triton=   22.86 (0.610x)
+     T=256   B=2  wall: eager=  459.69 triton=  193.57 (2.375x) | dev: eager=   16.12 triton=   23.72 (0.679x)
+     T=1024  B=2  wall: eager=  458.31 triton=  192.61 (2.379x) | dev: eager=   23.70 triton=   26.59 (0.891x)
+     T=1024  B=8  wall: eager=  460.26 triton=  195.15 (2.359x) | dev: eager=   57.68 triton=   49.91 (1.156x)
+ALL DONE
+[rank0]:[W1014 04:47:20.902276583 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
