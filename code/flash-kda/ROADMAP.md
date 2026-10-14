@@ -2227,9 +2227,16 @@
 ## 当前进度 / 下一步
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
-  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M7 完成**（见
+  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M7 完成 + M8-1 完成**（见
   `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M7（本轮）：**把 M6 的数值锚定从「默认门 + `HV=H`」扩到四个边界**——
+  - megatron-port M8-1（本轮）：**把数值锚定扩到 `chunk_size`/pad/varlen/CP 前向**——
+    `harness/check_port_fla_m8.py`（`check_port_fla_m8.out.txt`）+ `docs/06-chunk-varlen.md`。
+    **更正前提**：KDA 的 `chunk_size` 只有 **32/64**（16 抛 `ValueError`，`chunk.py:390-392`）。
+    Part A `C∈{32,64}×T∈{16,33,64,130,250,256}`、Part B varlen（含 GVA/核内融合门控/per-seq 初终态）
+    前反向全落 **bf16 底噪 ≤7.9e-3**；Part C 真实 NCCL 多 rank CP——**对齐分片与不分片逐位相同
+    （`max_abs=0`）**，并测出 CP 两条硬约束（`total%world==0` 且 `part%chunk_size==0`，否则差 2.2e-3 /
+    丢尾）。单机 NCCL 需 `NCCL_NVLS_ENABLE=0`。**下一步**：M8-2（CP 反向 + varlen×CP）、M9、M10。
+  - megatron-port M7：**把 M6 的数值锚定从「默认门 + `HV=H`」扩到四个边界**——
     `safe_gate=True`/`lower_bound`（TensorCore 有界门分支）、`allow_neg_eigval`（$\beta=2\sigma$）、
     **GVA**（$H_V>H$）、`state_v_first`（V-first 状态）。新增
     `megatron-port/harness/check_port_fla_m7.py`（`check_port_fla_m7.out.txt`，H100）+

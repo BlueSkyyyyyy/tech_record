@@ -1,0 +1,70 @@
+================================================================================================
+megatron-port M8-1: chunk_size / pad / varlen / CP anchor vs FLA chunk_kda
+torch=2.12.0a0+0291f960b6.nv26.04.48445190 device=NVIDIA H100 80GB HBM3
+================================================================================================
+
+================================================================================================
+[Part 0] reference-internal identities (fp64 CPU): pad semantics + varlen
+================================================================================================
+  (a) chunked(zero-pad) vs token recurrence, non-divisible T:
+      C=32 T= 33 pad= 31  rel|do|=1.74e-15 rel|dS|=5.67e-15
+      C=32 T=130 pad= 30  rel|do|=1.09e-14 rel|dS|=7.99e-15
+      C=32 T=250 pad=  6  rel|do|=6.30e-14 rel|dS|=4.32e-14
+      C=64 T= 33 pad= 31  rel|do|=2.59e-15 rel|dS|=2.46e-15
+      C=64 T=130 pad= 62  rel|do|=5.02e-15 rel|dS|=5.11e-15
+      C=64 T=250 pad=  6  rel|do|=1.93e-14 rel|dS|=1.85e-14
+  (b) varlen (per-seq loop) vs token recurrence per sequence:
+      lens=[250, 130, 64] chunk=64  rel|do|=3.38e-14 rel|dS|=3.47e-14
+
+================================================================================================
+[Part A] chunk_size {32,64} x T pad-semantics sweep (explicit gate) vs FLA
+  FLA rejects chunk_size=16 for KDA -> the roadmap {16,32,64} is really {32,64}
+================================================================================================
+    chunk_size=16 -> ValueError: `chunk_size` must be either 32 or 64 for KDA, got 16.
+    [eq] C=32 T= 16 pad= 16  o 5.25e-03  S 2.07e-03  | dq 2.7e-03 dk 2.5e-03 dv 4.7e-03 dg 4.4e-03 dbeta 3.2e-03 dh0 3.2e-03
+    [eq] C=32 T= 33 pad= 31  o 4.28e-03  S 2.00e-03  | dq 3.4e-03 dk 2.8e-03 dv 2.5e-03 dg 3.4e-03 dbeta 5.2e-03 dh0 1.3e-03
+    [eq] C=32 T= 64 pad=  0  o 4.46e-03  S 1.99e-03  | dq 2.8e-03 dk 3.1e-03 dv 3.9e-03 dg 2.5e-03 dbeta 4.7e-03 dh0 1.6e-03
+    [eq] C=32 T=130 pad= 30  o 3.22e-03  S 4.87e-03  | dq 3.0e-03 dk 3.7e-03 dv 4.2e-03 dg 1.8e-03 dbeta 9.5e-04 dh0 2.1e-03
+    [eq] C=32 T=250 pad=  6  o 7.85e-03  S 3.15e-03  | dq 3.2e-03 dk 3.4e-03 dv 3.6e-03 dg 3.5e-03 dbeta 1.4e-03 dh0 1.1e-03
+    [eq] C=32 T=256 pad=  0  o 5.39e-03  S 2.02e-03  | dq 2.9e-03 dk 3.4e-03 dv 4.2e-03 dg 2.3e-03 dbeta 1.7e-03 dh0 1.3e-03
+    [eq] C=64 T= 16 pad= 48  o 5.25e-03  S 2.07e-03  | dq 2.7e-03 dk 2.5e-03 dv 4.7e-03 dg 4.4e-03 dbeta 3.2e-03 dh0 3.2e-03
+    [eq] C=64 T= 33 pad= 31  o 4.28e-03  S 2.00e-03  | dq 3.4e-03 dk 2.8e-03 dv 2.5e-03 dg 1.7e-03 dbeta 5.2e-03 dh0 1.3e-03
+    [eq] C=64 T= 64 pad=  0  o 4.46e-03  S 1.99e-03  | dq 2.8e-03 dk 3.1e-03 dv 3.9e-03 dg 2.5e-03 dbeta 4.7e-03 dh0 1.6e-03
+    [eq] C=64 T=130 pad= 62  o 3.22e-03  S 4.87e-03  | dq 3.0e-03 dk 3.7e-03 dv 4.2e-03 dg 1.8e-03 dbeta 9.5e-04 dh0 2.1e-03
+    [eq] C=64 T=250 pad=  6  o 7.85e-03  S 3.15e-03  | dq 3.2e-03 dk 3.4e-03 dv 3.6e-03 dg 3.5e-03 dbeta 1.4e-03 dh0 1.1e-03
+    [eq] C=64 T=256 pad=  0  o 5.39e-03  S 2.02e-03  | dq 2.9e-03 dk 3.4e-03 dv 4.2e-03 dg 2.3e-03 dbeta 1.7e-03 dh0 1.3e-03
+
+================================================================================================
+[Part B] varlen (cu_seqlens), B=1 flattened; initial/final state per sequence
+================================================================================================
+    [3seq] lens=[250, 130, 64] C=64 explicit  o 3.90e-03  S 3.05e-03  | dq 3.5e-03 dk 2.8e-03 dv 5.5e-03 dg 3.2e-03 dbeta 2.0e-03 dh0 1.3e-03
+    [4seq C32] lens=[128, 64, 96, 64] C=32 explicit  o 3.82e-03  S 1.13e-03  | dq 3.1e-03 dk 3.1e-03 dv 4.0e-03 dg 2.2e-03 dbeta 4.2e-03 dh0 2.4e-03
+    [GVA x2] lens=[64, 250, 250] C=64 explicit  o 3.02e-03  S 3.63e-03  | dq 1.8e-03 dk 3.6e-03 dv 5.0e-03 dg 3.9e-03 dbeta 1.9e-03 dh0 2.9e-03
+    [fused gate] lens=[250, 130, 64] C=64 fused     o 5.08e-03  S 2.76e-03  | dq 3.2e-03 dk 2.6e-03 dv 4.9e-03 dg_logit 2.7e-03 dbeta_logit 5.3e-03 dh0 4.2e-03 dA_log 3.0e-04 ddt_bias 4.4e-03
+
+================================================================================================
+[Part C] context parallel: gathered CP output vs non-CP full sequence (NCCL)
+  CP forbids initial/final state; cu_seqlens overridden by context.
+================================================================================================
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+    lens=[256] world=1 C=64 part=256 aligned=True  got_T=256 ref_T=256  max_abs=0.000e+00 max_rel=0.000e+00
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+    lens=[256] world=2 C=64 part=128 aligned=True  got_T=256 ref_T=256  max_abs=0.000e+00 max_rel=0.000e+00
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+    lens=[256] world=4 C=64 part=64 aligned=True  got_T=256 ref_T=256  max_abs=0.000e+00 max_rel=0.000e+00
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+    lens=[128, 128] world=2 C=64 part=128 aligned=True  got_T=256 ref_T=256  max_abs=0.000e+00 max_rel=0.000e+00
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+    lens=[250] world=2 C=64 part=125 aligned=False  got_T=250 ref_T=250  max_abs=1.221e-04 max_rel=2.165e-03
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+    lens=[130] world=4 C=32 part=32 aligned=False  got_T=128 ref_T=130  max_abs=0.000e+00 max_rel=0.000e+00
+
+================================================================================================
+Done. Residual = FLA bf16-kernel error (reference is fp64).
+================================================================================================
