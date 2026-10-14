@@ -23,6 +23,7 @@
 | `docs/10-packed-thd.md` | 真层 packed / THD（varlen）端到端对拍（M10-2） | [x] |
 | `docs/11-padded-thd.md` | 真层 packed 的 padding（`cu_seqlens_q_padded`）语义对拍（M10-3） | [x] |
 | `docs/12-cp-e2e.md` | 真层 context-parallel（cp>1）数值锚定 vs fp64 参考（M11-1） | [x] |
+| `docs/13-thd-cp.md` | 打通 packed THD *多序列* CP（逐序列 zigzag 分片 + 预建 route；M11-2） | [x] |
 | `src/kda_ref.py` | 最小可运行参考实现（纯 PyTorch、fp64、自带自测；M7 起支持 GVA + state_v_first） | [x] |
 | `harness/check_port_fla.py` | 参考 vs FLA 正反向数值锚定脚本（GPU） | [x] |
 | `harness/check_port_fla_m7.py` | 参考 vs FLA 门控/布局边界锚定（M7，GPU） | [x] |
@@ -33,6 +34,7 @@
 | `harness/check_port_e2e_packed.py` | 真层 packed / THD（varlen）端到端对拍（M10-2，GPU） | [x] |
 | `harness/check_port_e2e_padded.py` | 真层 packed 的 padding 语义对拍（M10-3，GPU） | [x] |
 | `harness/check_port_e2e_cp.py` | 真层 cp>1（headwise/chunkwise）前反向锚定 vs fp64 参考（M11-1，GPU；真 NCCL） | [x] |
+| `harness/check_port_e2e_cp_thd.py` | packed THD 多序列 CP 锚定（逐序列 zigzag 分片 + `--shard global` 受控对拍；M11-2，GPU；真 NCCL） | [x] |
 
 ## 任务清单
 
@@ -202,7 +204,23 @@
       **多序列**（plain `cu_seqlens`、无 prebuilt THD CP routes）对不上（`o rel` O(1)）且触发真层
       fallback `FutureWarning`（`context_parallel_layout/conversion.py:120`）——属**输入构造不符真层 CP
       契约**，非 KDA 算错；Megatron 自己的多序列 CP 单测用 **SBHD + padded**（即本篇 validated 的
-      sbhd 行）。`gdn_pre_gated_delta_rule_fusion`（`kda.py:399-402`）、GVA 仍未覆盖。
+       sbhd 行）。`gdn_pre_gated_delta_rule_fusion`（`kda.py:399-402`）、GVA 仍未覆盖。
+- [x] **M11-2** 关闭 M11-1 明确留下的**最后一条边界——packed THD 多序列 CP**（`docs/13-thd-cp.md`）。
+      新增 `harness/check_port_e2e_cp_thd.py`（`check_port_e2e_cp_thd.out.txt`，空闲卡；`mp.spawn`
+      真 NCCL）。**根因更正**：M11-1 的 O(1) 不是「缺 prebuilt route / 需 padded 布局」——`conversion.py`
+      本就会从 `cu_seqlens` 重建等价 route；真错在**输入分片粒度**。Megatron 的 THD CP zigzag 是
+      **逐序列**切 `2*cp_size` 块（`routes.py:63/_build_thd_layout_segments:79-90`），而 M11-1 用的
+      `get_pos_emb_on_this_cp_rank`（`rope_utils.py:181`）按**整条 token 轴** zigzag——单序列重合、
+      多序列不同（`cu=[0,64,128],cp=2`：整轴给 rank0 `{0..31,96..127}`、逐序列给
+      `{0..15,48..63,64..79,112..127}`）。修法＝**逐序列 zigzag 分片** + 构造 batch 时调公开 API
+      `prebuild_thd_cp_partition_routes`（`routes.py:257`）消除 fallback `FutureWarning`。**实测**：
+      `world=2/4` × `headwise/chunkwise` × fp32/bf16 × 3 组 pack（`[0,64,128]`/`[0,64,160]` 非均匀/
+      `[0,64,128,192,256]`）：bf16 `o/hs.grad/param.grad ~5e-3–8e-3`、fp32 `~1e-3`，与 M11-1 单序列/
+      SBHD 多序列及 M10 的 cp=1 整模块锚定**同量级**；`FutureWarning` 归零。**受控对拍**（同脚本
+      `--shard global`）复现 M11-1 的 O(1)（`o rel 1.10`/`0.92`）→ 一眼分开「算法错」与「输入构造错」。
+      **方法学（新增）**：CP 对拍的**分片粒度**须与被锚定拓扑对齐（THD=逐序列、SBHD=沿序列维）。
+      **边界**：单卡 tp=1 / packed B=1 / `pad_between_seqs` 与 `cu_seqlens_q_padded` 未涉 /
+      `gdn_pre_gated_delta_rule_fusion` 与 GVA 仍未覆盖。
 
 ## 已知坑
 
@@ -250,10 +268,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：M0–M8 完成 + M9-1 完成 + M10-1/M10-2/M10-3 完成 + **M11-1 完成**（docs 00–12 +
-  参考实现 + FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 + CP 反向/varlen×CP
-  梯度] + Megatron 调用契约对齐 + **真实层端到端前反向对拍 [SBHD + packed/THD + 带 padding 的
-  packed/THD + cp>1 headwise/chunkwise]**）。
+- 当前进度：M0–M8 完成 + M9-1 完成 + M10-1/M10-2/M10-3 完成 + M11-1 完成 + **M11-2 完成**
+  （docs 00–13 + 参考实现 + FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 +
+  CP 反向/varlen×CP 梯度] + Megatron 调用契约对齐 + **真实层端到端前反向对拍 [SBHD +
+  packed/THD + 带 padding 的 packed/THD + cp>1 headwise/chunkwise + **packed THD 多序列 CP**]**）。
+- 本轮（M11-2）：`harness/check_port_e2e_cp_thd.py` + `docs/13-thd-cp.md`。关闭 M11-1 留的
+  **packed THD 多序列 CP** 边界，**并更正根因**：O(1) 不是「缺 prebuilt route」而是**输入分片粒度**
+  ——真层 THD CP zigzag 是**逐序列**切块（`routes.py:79-90`），M11-1 用的整轴 zigzag
+  （`rope_utils.py:181`）对多序列不同。修法＝逐序列 zigzag 分片 + `prebuild_thd_cp_partition_routes`
+  消掉 `FutureWarning`。**实测** `world=2/4`×`headwise/chunkwise`×fp32/bf16×3 组 pack（含非均匀
+  序列长）：bf16 `~5e-3–8e-3`、fp32 `~1e-3`（与 M11-1 同量级），`FutureWarning` 归零；
+  `--shard global` 受控对拍复现 M11-1 的 O(1)。**下一步（可选）**：retire 到维护态（M0–M11 全完成）；
+  若继续，补 `gdn_pre_gated_delta_rule_fusion` 的 KDA 专属 streamed 融合前处理（`kda.py:399-402`）。
 - 本轮（M11-1）：`harness/check_port_e2e_cp.py` + `docs/12-cp-e2e.md`。把 M10 的真层对拍扩到
   **cp>1**：两段式（cp=1 fp64 参考芯 dump 全序列黄金；`mp.spawn` 起 `world` 个 NCCL rank 重建真层、
   喂全输入的 zigzag 分片、对黄金的同分片比）。**实测**（`T=256`、`world=2/4`、fp32/bf16、
@@ -273,9 +299,9 @@
   **Part F** padded↔unpadded 真实 token `≤1.08e-4`(fp32)/`1.95e-3`(bf16)。**结论**：带 padding 的
   packed 路径数值健全、跨序列隔离精确，pad 对真实 token 的影响仅剩自身 slot 尾的块尾舍入、低于
   部署底噪。**边界**：单卡 tp=cp=1、`pad_between_seqs` 布局、cp>1 的 packed CP（zigzag）未覆盖。
-- 下一步（可选）：retire 到维护态（M0–M11 全完成）；若继续，打通 **packed THD 多序列 CP**（按真层
-  契约预建 THD CP route，或改 padded 布局，`docs/12` §4），或补 `gdn_pre_gated_delta_rule_fusion`
-  的 KDA 专属 streamed 融合前处理（`kda.py:399-402` 的缺口）。
+- 下一步（可选）：retire 到维护态（M0–M11 全完成）。原列的「打通 packed THD 多序列 CP」**已由
+  M11-2 完成**（根因是逐序列 zigzag 分片而非 prebuilt route，见 `docs/13` §2）；若继续，仅剩补
+  `gdn_pre_gated_delta_rule_fusion` 的 KDA 专属 streamed 融合前处理（`kda.py:399-402` 的缺口）。
 
 ## 阻塞
 

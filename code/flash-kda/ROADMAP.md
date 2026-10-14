@@ -2228,8 +2228,17 @@
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
-  M10-1/M10-2/M10-3 完成 + M11-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M11-1（本轮）：**把真层对拍扩到 cp>1**（M10-* 都停在单卡 cp=1；M8 只在 FLA
+  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
+  - megatron-port M11-2（本轮）：**打通 packed THD 多序列 CP 并更正根因**。新增
+    `megatron-port/harness/check_port_e2e_cp_thd.py`（`check_port_e2e_cp_thd.out.txt`）+
+    `docs/13-thd-cp.md`。M11-1 留的 O(1) 不是「缺 prebuilt route」（`conversion.py` 本就会从
+    `cu_seqlens` 重建等价 route），而是**输入分片粒度**：真层 THD CP zigzag 逐序列切块
+    （`routes.py:79-90`）、M11-1 的整轴 zigzag（`rope_utils.py:181`）对多序列不同。修法＝逐序列
+    zigzag 分片 + `prebuild_thd_cp_partition_routes`（`routes.py:257`）消 `FutureWarning`。
+    `world=2/4`×`headwise/chunkwise`×fp32/bf16×3 组 pack（含非均匀序列长）：bf16
+    `o/hs.grad/param.grad ~5e-3–8e-3`、fp32 `~1e-3`（与 M11-1 同量级），`FutureWarning` 归零；
+    `--shard global` 受控对拍复现 M11-1 的 O(1)（`o rel 1.10`/`0.92`）。
+  - megatron-port M11-1（上轮）：**把真层对拍扩到 cp>1**（M10-* 都停在单卡 cp=1；M8 只在 FLA
     算子级锚过 CP）。新增 `megatron-port/harness/check_port_e2e_cp.py` + `docs/12-cp-e2e.md`。
     两段式：Stage 1 建 cp=1 真层、核心换成 fp64 参考芯 dump 全序列黄金；Stage 2 `mp.spawn` 起
     `world` 个 NCCL rank、同权重重建真层、喂全输入的 zigzag 分片、对黄金同分片比。**实测**

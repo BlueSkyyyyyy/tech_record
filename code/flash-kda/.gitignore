@@ -9,6 +9,7 @@
 _m8btmp/
 _cptmp/
 _cptmp_m11/
+_cptmp_m11b/
 
 # autopilot 运行时文件
 autopilot.log
