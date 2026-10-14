@@ -2228,8 +2228,20 @@
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
-  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M13-1（本轮）：**兑现 `docs/14` §7 的「下一步」——把 KDA 专属 fused pre-GDR 从纯 torch
+  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
+  - megatron-port M13-2（本轮）：**给 KDA 专属 fused pre-GDR 写原生 Triton 反向，并修掉 M13-1 一个
+    此前未发现的测试漏洞**。新增 `megatron-port/src/kda_pregdr_bwd.py`（SiLU→conv dX/dW/dbias /
+    L2-norm / sigmoid 三个反向 kernel + 组装 + autograd 重接）+ `harness/check_port_pregdr_bwd_kernel.py`
+    （`check_port_pregdr_bwd_kernel.out.txt`）+ `docs/16-fused-pregdr-bwd-kernel.md`。**未改 Megatron-LM
+    一行**。**漏洞**：M13-1 的参考反向（`kda_pregdr_fused.py:207-224`）用 detached clone 求 conv 参数
+    梯度却只回传 `q/beta`，而整层对拍（`check_port_pregdr_kernel.py:247`）`continue` 把 conv 参数**静默
+    跳过**；修法＝把 `conv1d.weight`/`conv1d.bias` 作为 Function **输入**。**Part A**（孤立反向 vs 解析
+    参考）：fp32 `dweight/dx 1e-6`；bf16 `dweight`（fp32 返回）仍 1e-6（证代数正确），`dx/dbeta` 的
+    ~1e-2/~2e-3 = 出口 bf16 的 **~0.5 ulp**。**Part B**（端到端 vs autograd）：fp32 全落 1e-6、bf16
+    ~3e-2（前向量化）。**Part C**（整层 drop-in）：**7 参数全比较、0 跳过**、`conv1d.weight.grad` 两侧
+    同值、fp32 rel 1.95e-5 / bf16 3.9e-3。**Part D**：`wall` 原生稳定赢 1.35–1.74×（eager host 税恒定
+    ~1.5ms），纯设备 `dev` 小 shape 略慢（0.69–0.98×，多 kernel 原型代价）。见 `docs/16`。
+  - megatron-port M13-1（上轮）：**兑现 `docs/14` §7 的「下一步」——把 KDA 专属 fused pre-GDR 从纯 torch
     参考兑现成可运行 Triton 核族**。新增 `megatron-port/src/kda_pregdr_fused.py`（`_kda_conv_silu_kernel`
     /`_kda_l2norm_kernel`/`_kda_beta_sigmoid_kernel` 三 kernel + `_forward_raw` 编排 + autograd 包装）+
     `harness/check_port_pregdr_kernel.py`（`check_port_pregdr_kernel.out.txt`）+ `docs/15-fused-pregdr-kernel.md`。

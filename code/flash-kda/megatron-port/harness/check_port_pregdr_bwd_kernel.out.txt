@@ -1,0 +1,64 @@
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2387: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at '_common.py:45'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/ops/_common.py", line 45, in maybe_autocast_dtype
+    if torch_version() >= (2, 4, 3):
+
+  torch._dynamo.utils.warn_once(msg)
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2262: UserWarning: Dynamo does not know how to trace the builtin `transformer_engine_torch.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1.rmsnorm_fwd.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+Megatron-LM: ~/proj/Megatron-LM
+=== dtype=float32 ===
+  -- Part A: isolated backward kernels vs analytic reference (float32)
+     T=64    B=2  dweight=9.537e-07 dbias=nan dx=1.192e-06 dbeta=5.960e-08
+     T=128   B=2  dweight=1.907e-06 dbias=nan dx=1.192e-06 dbeta=1.192e-07
+     T=250   B=1  dweight=1.550e-06 dbias=nan dx=1.192e-06 dbeta=5.960e-08
+     T=256   B=1  dweight=1.907e-06 dbias=nan dx=9.537e-07 dbeta=5.960e-08
+     T=1024  B=2  dweight=5.722e-06 dbias=nan dx=1.431e-06 dbeta=5.960e-08
+  -- Part B: native backward vs torch.autograd (torch-primitive forward) (float32)
+     T=64    B=2  dqkvfg=8.345e-07 dbeta=5.960e-08 dweight=1.907e-06 dbias=nan
+     T=250   B=1  dqkvfg=9.537e-07 dbeta=5.960e-08 dweight=1.431e-06 dbias=nan
+     T=128   B=2  dqkvfg=9.537e-07 dbeta=5.960e-08 dweight=1.907e-06 dbias=nan
+  -- Part C: full-layer drop-in (native fused pre-GDR, same weights) (float32)
+     out max_abs=0.000e+00  hs.grad max_abs=2.842e-05  param.grad max_abs=1.250e-03 (rel=1.950e-05)
+     params compared=7 skipped=0   conv1d.weight.grad (eager=8.637e+00 native=8.637e+00)  conv1d.bias.grad (eager=nan native=nan)
+  -- Part D: timing, isolated pre-GDR fwd+bwd (float32)
+     T=64    B=2  wall: eager= 1462.97 native=  840.46 (1.741x) | dev: eager=   69.20 native=   86.81 (0.797x)
+     T=256   B=2  wall: eager= 1554.50 native= 1124.26 (1.383x) | dev: eager=   99.17 native=  113.92 (0.871x)
+     T=1024  B=2  wall: eager= 1673.92 native= 1080.56 (1.549x) | dev: eager=  117.90 native=  129.90 (0.908x)
+     T=1024  B=8  wall: eager= 1642.14 native= 1216.15 (1.350x) | dev: eager=  254.34 native=  258.40 (0.984x)
+=== dtype=bfloat16 ===
+  -- Part A: isolated backward kernels vs analytic reference (bfloat16)
+     T=64    B=2  dweight=1.192e-06 dbias=nan dx=1.474e-02 dbeta=1.929e-03
+     T=128   B=2  dweight=1.431e-06 dbias=nan dx=1.378e-02 dbeta=1.920e-03
+     T=250   B=1  dweight=1.431e-06 dbias=nan dx=1.527e-02 dbeta=1.910e-03
+     T=256   B=1  dweight=1.669e-06 dbias=nan dx=1.183e-02 dbeta=1.953e-03
+     T=1024  B=2  dweight=4.768e-06 dbias=nan dx=1.549e-02 dbeta=1.951e-03
+  -- Part B: native backward vs torch.autograd (torch-primitive forward) (bfloat16)
+     T=64    B=2  dqkvfg=3.125e-02 dbeta=0.000e+00 dweight=3.125e-02 dbias=nan
+     T=250   B=1  dqkvfg=3.125e-02 dbeta=0.000e+00 dweight=3.876e-02 dbias=nan
+     T=128   B=2  dqkvfg=3.125e-02 dbeta=0.000e+00 dweight=3.516e-02 dbias=nan
+  -- Part C: full-layer drop-in (native fused pre-GDR, same weights) (bfloat16)
+     out max_abs=0.000e+00  hs.grad max_abs=7.812e-03  param.grad max_abs=2.500e-01 (rel=3.906e-03)
+     params compared=7 skipped=0   conv1d.weight.grad (eager=8.625e+00 native=8.625e+00)  conv1d.bias.grad (eager=nan native=nan)
+  -- Part D: timing, isolated pre-GDR fwd+bwd (bfloat16)
+     T=64    B=2  wall: eager= 1711.96 native= 1223.53 (1.399x) | dev: eager=   86.74 native=  125.36 (0.692x)
+     T=256   B=2  wall: eager= 1693.61 native= 1184.90 (1.429x) | dev: eager=  116.40 native=  152.93 (0.761x)
+     T=1024  B=2  wall: eager= 1817.83 native= 1320.05 (1.377x) | dev: eager=  128.04 native=  168.31 (0.761x)
+     T=1024  B=8  wall: eager= 1787.41 native= 1320.73 (1.353x) | dev: eager=  226.91 native=  287.11 (0.790x)
+ALL DONE
+[rank0]:[W1014 05:02:02.630795143 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
