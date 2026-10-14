@@ -2228,8 +2228,23 @@
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
-  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M11-2（本轮）：**打通 packed THD 多序列 CP 并更正根因**。新增
+  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
+  - megatron-port M12-1（本轮）：**关闭路线图唯一剩余的可选缺口——`gdn_pre_gated_delta_rule_fusion`
+    对 KDA 未实现**（`kda.py:399-402` + `transformer_config.py:1936-1938`）。**未改 Megatron-LM 一行**；
+    新增 `megatron-port/harness/check_port_pre_gated_fusion.py`（`check_port_pre_gated_fusion.out.txt`）+
+    `docs/14-pre-gated-fusion.md`。**Part A** 复现配置期/运行期两道 guard；**Part B** 逐真实行号给出 GDN
+    融合入口（`fused_pre_gated_delta_rule.py:2571`）与 KDA pre-GDR 的四处会静默算错的硬差异（投影段
+    `gdn.py:52` vs `kda.py:133`、门控激活位置 `fused…:500-508` vs `kda.py:121` 的 `use_gate_in_kernel`、
+    门控参数形状 `kda.py:141-142` per-channel vs `gdn.py:61-62` per-head、单投影+`causal_conv1d` 契约）；
+    **Part C** 纯 torch 参考 `kda_pre_gdr_fused_ref` 对真实层 eager `pre_gated_delta_rule` 逐张量锚定——
+    同批 FLA 原语时 `v/gate/g` 逐位(=0)、`k` bf16 亦逐位、`q/beta` ≤1 ulp（fp32 `q 8.94e-08`、bf16
+    `q 1.95e-03`），参考 run-to-run 自洽=0，换 torch conv/l2norm 后残差归因到原语；**Part D** 逐位同权重
+    drop-in 整层前反向——fp32 `out 6.48e-05 / hs.grad 2.65e-04 / param.grad rel 1.82e-04`、bf16
+    `out 9.77e-04 / hs.grad 3.91e-03 / param.grad rel 3.31e-03`（与 M10/M11 整模块 bf16 锚定同阶）；
+    **Part E** 布局账（只有 `gate` 的 `.contiguous()` 实打实物化）。**边界**：tp=cp=1、SBHD、GVA 因子=1、
+    未写 Triton 融合核、未计时。**下一步（可选）**：按 `docs/14` §5 契约写 KDA 专属 Triton fused pre-GDR
+    并接到 `kda.py:399` 分支，或 retire 到维护态（M0–M12 全完成）。
+  - megatron-port M11-2（上轮）：**打通 packed THD 多序列 CP 并更正根因**。新增
     `megatron-port/harness/check_port_e2e_cp_thd.py`（`check_port_e2e_cp_thd.out.txt`）+
     `docs/13-thd-cp.md`。M11-1 留的 O(1) 不是「缺 prebuilt route」（`conversion.py` 本就会从
     `cu_seqlens` 重建等价 route），而是**输入分片粒度**：真层 THD CP zigzag 逐序列切块

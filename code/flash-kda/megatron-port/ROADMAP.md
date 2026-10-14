@@ -24,6 +24,7 @@
 | `docs/11-padded-thd.md` | 真层 packed 的 padding（`cu_seqlens_q_padded`）语义对拍（M10-3） | [x] |
 | `docs/12-cp-e2e.md` | 真层 context-parallel（cp>1）数值锚定 vs fp64 参考（M11-1） | [x] |
 | `docs/13-thd-cp.md` | 打通 packed THD *多序列* CP（逐序列 zigzag 分片 + 预建 route；M11-2） | [x] |
+| `docs/14-pre-gated-fusion.md` | `gdn_pre_gated_delta_rule_fusion` 的 KDA 缺口：结构差异 + KDA 专属 fused pre-GDR 契约与锚定（M12-1） | [x] |
 | `src/kda_ref.py` | 最小可运行参考实现（纯 PyTorch、fp64、自带自测；M7 起支持 GVA + state_v_first） | [x] |
 | `harness/check_port_fla.py` | 参考 vs FLA 正反向数值锚定脚本（GPU） | [x] |
 | `harness/check_port_fla_m7.py` | 参考 vs FLA 门控/布局边界锚定（M7，GPU） | [x] |
@@ -35,6 +36,7 @@
 | `harness/check_port_e2e_padded.py` | 真层 packed 的 padding 语义对拍（M10-3，GPU） | [x] |
 | `harness/check_port_e2e_cp.py` | 真层 cp>1（headwise/chunkwise）前反向锚定 vs fp64 参考（M11-1，GPU；真 NCCL） | [x] |
 | `harness/check_port_e2e_cp_thd.py` | packed THD 多序列 CP 锚定（逐序列 zigzag 分片 + `--shard global` 受控对拍；M11-2，GPU；真 NCCL） | [x] |
+| `harness/check_port_pre_gated_fusion.py` | `gdn_pre_gated_delta_rule_fusion` KDA 缺口的复现 + KDA 专属 fused pre-GDR 参考锚定 / drop-in（M12-1，GPU） | [x] |
 
 ## 任务清单
 
@@ -219,8 +221,35 @@
       SBHD 多序列及 M10 的 cp=1 整模块锚定**同量级**；`FutureWarning` 归零。**受控对拍**（同脚本
       `--shard global`）复现 M11-1 的 O(1)（`o rel 1.10`/`0.92`）→ 一眼分开「算法错」与「输入构造错」。
       **方法学（新增）**：CP 对拍的**分片粒度**须与被锚定拓扑对齐（THD=逐序列、SBHD=沿序列维）。
-      **边界**：单卡 tp=1 / packed B=1 / `pad_between_seqs` 与 `cu_seqlens_q_padded` 未涉 /
-      `gdn_pre_gated_delta_rule_fusion` 与 GVA 仍未覆盖。
+       **边界**：单卡 tp=1 / packed B=1 / `pad_between_seqs` 与 `cu_seqlens_q_padded` 未涉 /
+       `gdn_pre_gated_delta_rule_fusion` 与 GVA 仍未覆盖。
+
+### M12 pre-GDR 融合缺口（KDA vs GDN）
+- [x] **M12-1** 关闭 M9-1/M11-2 反复点名、路线图唯一剩余的可选缺口——**`gdn_pre_gated_delta_rule_fusion`
+      对 KDA 未实现**（`kda.py:399-402` / 配置期 `transformer_config.py:1936-1938`）。**未改 Megatron-LM
+      一行**；新增 `harness/check_port_pre_gated_fusion.py`（`check_port_pre_gated_fusion.out.txt`，空闲卡）+
+      `docs/14-pre-gated-fusion.md`。**Part A（复现）**：两道 guard 均实测触发同一句
+      `NotImplementedError`（配置期 + 运行期）。**Part B（结构差异，真实行号）**：GDN 融合入口
+      `fused_streamed_pre_gated_delta_rule`（`fused_pre_gated_delta_rule.py:2571`）与 KDA pre-GDR 有**四处
+      会静默算错的硬差异**——(1) 投影段：GDN `["query","key","value","z","beta","alpha"]`（`gdn.py:52`）
+      vs KDA `["query","key","value","g","gate"]`（`kda.py:133`），KDA 的 `g` 段宽 **`qk_dim`＝per-channel**、
+      `beta` 走**独立 `beta_proj`**（`kda.py:100-110`）；(2) 门控激活位置：GDN 在 pre-GDR 核内算
+      `g=-exp(A_log)*softplus(alpha+dt_bias)`（`fused_pre_gated_delta_rule.py:500-508`），KDA **原样返回
+      `raw_g`** 并置 `use_gate_in_kernel=True`（`kda.py:121`）把激活留给 `chunk_kda`；(3) 门控参数形状：
+      KDA `dt_bias_dim=qk_dim_local_tp`（per-channel）、`a_log_dim=num_k_heads`（`kda.py:141-142`），GDN 两者
+      都 per-value-head（`gdn.py:61-62`）；(4) 融合核输入契约假定单投影 + `causal_conv1d`。**Part C（契约与
+      锚定）**：给出 KDA 专属 fused pre-GDR 的三 scope 契约（conv / qk-l2norm+split / raw_g+beta，且
+      `gate` 以 `qkvfg` strided view 返回），用纯 torch 参考 `kda_pre_gdr_fused_ref` 对真实层 eager
+      `pre_gated_delta_rule` 逐张量锚定——同批 FLA 原语时 **`v/gate/g` 逐位(=0)**、`k` 在 bf16 亦逐位、
+      `q/beta` ≤1 ulp（fp32 `q 8.94e-08`、bf16 `q 1.95e-03`＝亚 ulp），参考 **run-to-run 自洽=0**；换
+      torch conv/l2norm 后残差归因到原语（`v` bf16 7.81e-03、`q/k` bf16 ~3.9e-03）。**Part D（drop-in）**：
+      逐位同权重、只替换 `pre_gated_delta_rule`，整层前反向——fp32 `out 6.48e-05 / hs.grad 2.65e-04 /
+      param.grad rel 1.82e-04`、bf16 `out 9.77e-04 / hs.grad 3.91e-03 / param.grad rel 3.31e-03`（与
+      M10-1/M11-2 整模块 bf16 锚定同阶，证明融合预处理对核心与整层梯度数值透明）。**Part E（布局账）**：
+      六操作数全为新分配（fp32 322 KiB / bf16 161 KiB），其中只有 `gate` 的 eager `.contiguous()` 会实打实
+      物化（bf16 32 KiB）——融合省的是 launch + 中间激活读写，不是「最终操作数拷贝」。**边界**：tp=cp=1、
+      SBHD、GVA 因子=1、未写 Triton 融合核、未计时；容器未装外部 `causal-conv1d`，故 GDN 融合入口本机也
+      不可运行。**下一步（可选）**：按 §5 契约实现 KDA 专属 Triton 融合核并接到 `kda.py:399` 分支，或维持维护态。
 
 ## 已知坑
 
@@ -268,10 +297,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：M0–M8 完成 + M9-1 完成 + M10-1/M10-2/M10-3 完成 + M11-1 完成 + **M11-2 完成**
-  （docs 00–13 + 参考实现 + FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 +
+- 当前进度：M0–M8 完成 + M9-1 完成 + M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 +
+  **M12-1 完成**
+  （docs 00–14 + 参考实现 + FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 +
   CP 反向/varlen×CP 梯度] + Megatron 调用契约对齐 + **真实层端到端前反向对拍 [SBHD +
-  packed/THD + 带 padding 的 packed/THD + cp>1 headwise/chunkwise + **packed THD 多序列 CP**]**）。
+  packed/THD + 带 padding 的 packed/THD + cp>1 headwise/chunkwise + **packed THD 多序列 CP**]** +
+  **`gdn_pre_gated_delta_rule_fusion` 的 KDA 缺口分析 + 专属 fused pre-GDR 契约锚定/drop-in**）。
+- 本轮（M12-1）：`harness/check_port_pre_gated_fusion.py` + `docs/14-pre-gated-fusion.md`。关闭
+  路线图唯一剩余的可选缺口——`gdn_pre_gated_delta_rule_fusion` 对 KDA 未实现（`kda.py:399-402`
+  + `transformer_config.py:1936-1938`）。**未改 Megatron-LM 一行**。**Part A** 复现两道 guard；
+  **Part B** 逐行号给出 GDN 融合入口（`fused_pre_gated_delta_rule.py:2571`）与 KDA pre-GDR 四处
+  会静默算错的硬差异（投影段 `gdn.py:52` vs `kda.py:133`、门控激活位置 `fused...:500-508` vs
+  `kda.py:121` 的 `use_gate_in_kernel`、门控参数形状 `kda.py:141-142` per-channel vs `gdn.py:61-62`
+  per-head、单投影 + `causal_conv1d` 契约）；**Part C** 用纯 torch 参考 `kda_pre_gdr_fused_ref`
+  对真实层 eager `pre_gated_delta_rule` 锚定：同批 FLA 原语时 `v/gate/g` 逐位、`k` bf16 逐位、
+  `q/beta` ≤1 ulp（fp32 `q 8.94e-08`、bf16 `q 1.95e-03`），参考自洽=0；**Part D** 逐位同权重
+  drop-in 整层前反向——fp32 `out 6.48e-05 / param.grad rel 1.82e-04`、bf16 `out 9.77e-04 /
+  param.grad rel 3.31e-03`（与 M10/M11 整模块 bf16 锚定同阶）；**Part E** 布局账（只有 `gate`
+  的 `.contiguous()` 实打实物化）。**下一步（可选）**：按 `docs/14` §5 契约写 KDA 专属 Triton
+  融合核并接到 `kda.py:399` 分支，或 retire 到维护态（M0–M12 全完成）。
 - 本轮（M11-2）：`harness/check_port_e2e_cp_thd.py` + `docs/13-thd-cp.md`。关闭 M11-1 留的
   **packed THD 多序列 CP** 边界，**并更正根因**：O(1) 不是「缺 prebuilt route」而是**输入分片粒度**
   ——真层 THD CP zigzag 是**逐序列**切块（`routes.py:79-90`），M11-1 用的整轴 zigzag
@@ -299,9 +343,10 @@
   **Part F** padded↔unpadded 真实 token `≤1.08e-4`(fp32)/`1.95e-3`(bf16)。**结论**：带 padding 的
   packed 路径数值健全、跨序列隔离精确，pad 对真实 token 的影响仅剩自身 slot 尾的块尾舍入、低于
   部署底噪。**边界**：单卡 tp=cp=1、`pad_between_seqs` 布局、cp>1 的 packed CP（zigzag）未覆盖。
-- 下一步（可选）：retire 到维护态（M0–M11 全完成）。原列的「打通 packed THD 多序列 CP」**已由
-  M11-2 完成**（根因是逐序列 zigzag 分片而非 prebuilt route，见 `docs/13` §2）；若继续，仅剩补
-  `gdn_pre_gated_delta_rule_fusion` 的 KDA 专属 streamed 融合前处理（`kda.py:399-402` 的缺口）。
+- 下一步（可选）：retire 到维护态（M0–M12 全完成）。原列的「打通 packed THD 多序列 CP」**已由
+  M11-2 完成**；「`gdn_pre_gated_delta_rule_fusion` 的 KDA 缺口」**已由 M12-1 关闭**（结构差异
+  + 专属 fused pre-GDR 契约锚定/drop-in，见 `docs/14`）。若继续，仅剩「按 `docs/14` §5 契约把
+  KDA 专属 fused pre-GDR 真正实现成 Triton 核族并接到 `kda.py:399` 分支」（属实现工程，非分析缺口）。
 
 ## 阻塞
 
