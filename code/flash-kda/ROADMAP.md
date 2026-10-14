@@ -1892,6 +1892,21 @@
   `ca`**（§51.6/§52 结论不变、理由更正）。**新判据**：`l1tex 扇区/请求 > 最小值` → 地址/行距不对齐（路径
   无关）；`srcunit = l1tex × 复用因子` → L1-bypass。**边界**：理想化地址（无 smem swizzle/mma 依赖）、
   只 `sm_90a`/16-8-4 B/fp32，不复现 §51 具体字节，只给机制归属。默认部署仍 §45 的 `cf`。见 `docs/07` §113。
+- [x] **P7-111** 关闭 §99.5 / §102.4 两条写侧 `待验证`——**同一批 store 字节下 `dram__bytes_write` 为何差
+      （+35 MB / 跨重放 ~19 MB）**：用一个**只隔离写路径**的受控微基准（`harness/probe_l2_write_evict.cu` +
+      `...py` ctypes 驱动 + `..._ncu.sh` 主表 + `harness/check_l2_write_evict.py` 解析），只换**读流与写流的
+      先后**（store-only / read-then-store / store-then-read / interleaved），store 指令、地址、字节逐位不动。
+      **Part A（store 流逐位不变）**：输出 8 MiB 下 `S_L1` 与 L2 收到写扇区在四种顺序**恒 270,592**，
+      而 `dram__bytes_write` 从 **0.00 → 2.58 → 11.12 MB** 摆动。**Part B（机制）**：`dram__bytes_write`
+      = 「窗口关闭前有多少脏 L2 行被逐出」——输出装得进 L2（~50 MB）时 store-only **0.00×**、
+      read-then-store **0.31×**（把 L2 先填满干净读行、脏输出行留到窗末）、store-then-read **1.33×**（随后
+      的读流把脏行逐出，> 输出本身）；读流量大小（64/128/256 MiB）几乎不影响（恒 ~0.31×）——关键是**顺序**。
+      **Part C（输出 ≫ L2 逐出被强制）**：64 MiB 输出 store-only/read-then-store = 45.76/45.15 MB
+      （0.68/0.67×）、96 MiB = 79.08 MB（0.79×），读序只剩 ~1.6% 残差——真实 B2 的 +35 MB ≈ GB 级核上的
+      残差摆动。**Part D（复现性）**：同配置连跑 3 实例 `dram__bytes_write` 抖动（0→256/512 B、2.58/2.75/2.59）
+      **只在逐出项**，`S_L1` 逐位稳——§102.4 的「~19 MB」即同一计数残差随核规模的缩放。**结论**：写量比
+      判据（`S_L1`/解析输出，弃 `dram__bytes_write`）从「经验」升为「机制」，§99–§111 逐条结论不变、
+      与 §45 `cf` 部署无关。见 `docs/07` §114、`docs/08` §114 bullet（P8-16）。
 
 
 ### P8 小结 / 一页纸
@@ -2226,7 +2241,11 @@
    ——六形态（dtype×staging）的 L1 全局 store 扇区**逐位相同**（TMA 的独立引擎只在输入侧、输出仍是
    generic `st.global`）；`dram__bytes_write` 相对解析输出的偏差是**跨配置 [−8,+33] MB 的散点、正负
    都有**（`bf16tma` 比解析输出还低），且**非 dtype/非 TMA/非 duration/非占用率的单调函数**（`bf16mma`
-   更快却少写）。`BVK` 对写侧零影响（`prod`==`prod64`）。
+   更快却少写）。`BVK` 对写侧零影响（`prod`==`prod64`）。**机制已由 P7-111（§114）钉死**：自包含
+   微基准（只换读/写顺序、store 逐位不动）证明窗内 `dram__bytes_write` = 「窗口关闭前有多少脏 L2 行被
+   逐出」——同批 8 MiB 输出 store-only **0.00×** / read-then-store **0.31×** / store-then-read **1.33×**
+   （`S_L1` 恒 270,592），输出 ≫ L2 时逐出被强制（只剩 ~1.6% 残差）；跨重放 ~19 MB 即该逐出项随核规模
+   缩放的计数残差。故「纯 L2 写回窗口残影」有了逐出级解释。
 - **`ncu` 的 `gpu__time_duration.sum` 每次 launch 自选单位（`ns`/`us`/`ms`/`s`），解析必须读单位**（P7-100，
   §103.1）：`ncu --metrics gpu__time_duration.sum` 打印形如 `gpu__time_duration.sum  us  600.48`，单位在
   数值前一列。早前 `check_bwd_b2_write_cross.py`/`cross2.py` 一律把数值当 `ms` 读，只因那些配置恰好落入
@@ -2252,9 +2271,18 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-110 补测 + P8-3…P8-15**；子专题
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-111 补测 + P8-3…P8-16**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
   M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
+  - P7-111 + P8-16（本轮）：**用自包含微基准闭合 §99.5/§102.4 两条写侧 `待验证`**——窗内
+    `dram__bytes_write` 不是输出大小、而是「窗口关闭前脏 L2 行的逐出份额」：同批 8 MiB 输出，store-only
+    **0.00×** / read-then-store **0.31×** / store-then-read **1.33×**（`S_L1` 与 L2 写扇区恒 **270,592**
+    逐位不变），输出 ≫ L2 时强制逐出（64/96 MiB 输出 0.68/0.79×、读序只剩 ~1.6% 残差）、跨实例抖动只
+    在逐出项（0→256/512 B）。真实 +35 MB = GB 级核上的残差摆动、~19 MB = 同残差随核规模缩放。新增
+    `harness/probe_l2_write_evict.cu`/`...py`/`..._ncu.sh`（`..._ncu.out.txt`）+ `harness/check_l2_write_evict.py`
+    （`..._out.txt`）+ `docs/07` §114 + `docs/08` §114 bullet。**判据从「经验」升为「机制」**，写量比
+    一律用 `S_L1`/解析输出、弃 `dram__bytes_write`；§99–§111 逐条结论与 §45 `cf` 部署不变。**下一步（可选）**：
+    专题维持维护态——写侧两条 `待验证` 至此全关，无剩余「值得测」的写侧格子。
   - megatron-port M13-3（本轮）：**兑现 M13-2 的「下一步（融合反向 conv/l2norm）」，但先逐 kernel 剖析
     再动手**。新增 `harness/profile_port_pregdr_bwd.py`（逐 kernel `self_device_time`）定位 M13-2 反向的
     `dev` 回归——**≈45% 不在 Triton kernel、在 torch glue**（`cat(dq,dk)` + `dconv`/`da` 两次 slice-copy +

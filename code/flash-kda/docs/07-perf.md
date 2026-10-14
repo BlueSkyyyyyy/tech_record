@@ -12109,3 +12109,102 @@ L2。
   ncu 记录）。
 - `l2hit` 指标在 L1-bypass 列（`cg16`）远高于 L1 列，与「reuse 落 L2」自洽，但未单独展开。
 
+
+## 114. 定位写侧 `dram__bytes_write` 散布（§99.5 / §102.4 待验证）的逐出级机制：窗内它**不是输出大小**，而是「窗口关闭前有多少脏行被逐出」（P7-111）
+
+§99.5（P7-96）留下一条诚实观察没有收口：`b2_mma_probe.cu` 生产核 bf16 vs fp32 在 `V=256` 下
+`dram__bytes_write` 差 **+35 MB**，**但同 `V` 下 L1 全局 store 扇区 `S_L1` 与 `lts__t_sectors_op_write`
+都逐位相同**（输出 fp32、逐位相同）、bf16 的 L2 write 扇区**反而更少**、把 bf16 受控按到 1 block/SM 只
+收回约 1/3——当时把成因标成「L2 脏行逐出时机 / replacement 级」并**留白**。§102.4（P7-99）又补一条：
+**同一配置跨 ncu 重放的 `dram__bytes_write` 也可差 ~19 MB**（> 多数配置间差），连「同配置可复现」都只
+在特定窗口内成立。§100–§111 把这个量收窄成「跨配置 [−8,+33] MB 的散点、正负都有、非 dtype/TMA/duration/
+占用率的单调函数」，但**没给出机制**。本轮用一个**只隔离写路径**的受控微基准把机制钉死。
+
+证据：`harness/probe_l2_write_evict.cu`（自包含微基准）+ `harness/probe_l2_write_evict.py`（ctypes 驱动）+
+`harness/probe_l2_write_evict_ncu.sh`（`harness/probe_l2_write_evict_ncu.out.txt`，主表）+
+`harness/check_l2_write_evict.py`（`harness/check_l2_write_evict.out.txt`，解析）。
+
+### 114.1 微基准：只换「读流与写流的先后」，地址/字节/store 指令完全不动
+
+一个核 `writeKernel<MODE>`：对一块输出缓冲发**同样的 `float4` 全覆盖 store**（8 B 一小段 → 整 128 B 行，
+`nout` 由驱动给），可选地对一块 scratch 缓冲发**同样的 `float4` grid-stride 读流**（`nread` 由驱动给）。
+只有**读/写顺序**不同：
+
+- `MODE 0`：只写（store-only）。
+- `MODE 1`：先读整段，再写（read-then-store）。
+- `MODE 2`：先写整段，再读（store-then-read）。
+- `MODE 3`：交错（写一个 float4、读一个 float4）。
+
+指标取 `l1tex__t_sectors_pipe_lsu_mem_global_op_st`（`S_L1`，store 指令流）、
+`lts__t_sectors_srcunit_tex_op_write`（**L2 收到的写扇区**）、`dram__bytes_write`、`dram__bytes_read`、
+`gpu__time_duration`。全部输出值经 `out.sum` 逐位相同（`2.0972e+07`）——即**同一批 store、同一批字节**。
+
+### 114.2 主表：store 流逐位相同，`dram__bytes_write` 随读取顺序从 **0 摆到 1.33× 输出**
+
+（输出 8 MiB；1 扇区 = 32 B；`S_L1` 含 270,336 B 的 `sink` 落盘 8,448 扇区，纯输出 = 262,144 扇区 = 8.39 MB）
+
+| tag | mode | read | `S_L1`(扇区) | L2_wr(扇区) | `dram__bytes_write` | ÷输出 |
+|---|---|---|---|---|---|---|
+| A1 | store-only | 0 | 270,592 | 270,592 | **0.00 MB** | **0.00×** |
+| A2 | read-then-store | 128 MiB | 270,592 | 270,592 | 2.58 MB | 0.31× |
+| A3 | store-then-read | 128 MiB | 270,592 | 270,592 | **11.12 MB** | **1.33×** |
+| A4 | interleaved | 128 MiB | 270,592 | 270,592 | 11.08 MB | 1.32× |
+| A5 | read-then-store | 64 MiB | 270,592 | 270,592 | 2.58 MB | 0.31× |
+| A6 | read-then-store | 256 MiB | 270,592 | 270,592 | 2.63 MB | 0.31× |
+
+三条结论：
+
+1. **store 流逐位相同**：`S_L1` 与「L2 收到的写扇区」在 A1–A4 全部**恒为 270,592**，而
+   `dram__bytes_write` 从 **0 → 2.58 → 11.12 MB** 摆动——同一个 store 指令流、同一批输出字节，
+   **DRAM 写入量差出 >11 MB**。这就是 §99.5「同字节、不同逐出份额」的干净复现（§99 的 +35 MB 是其
+   在 GB 级核、输出 ≫ L2 下的同现象）。
+2. **`dram__bytes_write` = 窗口关闭前的脏行逐出份额，由「写之后还有没有 L2 流量」决定**：输出 8 MiB
+   **装得进 H100 L2（~50 MB）**时，read-then-store 把 L2 先填满**干净**的读行，随后写的脏输出行
+   **留在 L2 到窗口结束**，几乎不落 DRAM（2.58 MB = 0.31× 输出）；store-then-read 让**随后的读流把
+   脏行逐出**，窗内落 DRAM 11.12 MB（**1.33× 输出**，> 输出本身）；只写不读则**恰好 0**。
+   读流量大小（A5 64 MiB / A2 128 MiB / A6 256 MiB）**几乎不影响**结果（恒 ~0.31×）——关键是**顺序**
+   （读是否在写之后），不是读了多少。
+3. **输出 ≫ L2 时逐出被强制、顺序不再有用**：`MODE 0/1` 输出 64 MiB 分别 45.76/45.15 MB（**0.68/0.67×**）、
+   输出 96 MiB 79.08 MB（0.79×）——一旦工作集超过 L2，绝大部分脏行无论如何都要在窗内被逐出，读顺序
+   只剩 ~1.6% 的残差摆动。这正是真实 `b2_mma_probe.cu` 的情形（输出几百 MB ≫ L2 ⟹ +35 MB ≈ 5.9% 的
+   残差摆动），量级自洽。
+
+### 114.3 复现性：抖动**只**在逐出项，store 项逐位稳
+
+同一配置连跑 3 个 kernel 实例（`ncu -c 3`）：
+
+| tag | `dram__bytes_write`（3 次） | `S_L1`（3 次） |
+|---|---|---|
+| C1 store-only out8 | 0 / 0 / 256 B | 270592 / 270592 / 270592 |
+| C2 read-then-store out8 | 2.58 / 2.75 / 2.59 MB | 270592 / 270592 / 270592 |
+| C3 store-only out8 | 0 / 512 B / 0 | 270592 / 270592 / 270592 |
+
+store 扇区**逐位不变**，而 `dram__bytes_write` 每次实例都可不同（0 → 256/512 B 即同配置的窗内抖动）。
+§102.4 的「同配置跨重放差 ~19 MB」因此**不是新现象**，而是同一个「窗口关闭时还剩多少脏行未落盘」的
+计数残差——它的**大小随核规模缩放**（本微基 MB 级，B2 生产核 GB 级 → 十几 MB）。
+
+### 114.4 结论与设计输入
+
+- **§99.5 / §102.4 的机制关闭**：单个 ncu kernel 窗口里的 `dram__bytes_write` **不是输出大小**，而是
+  **「窗口关闭前有多少脏 L2 行被逐出」**；它由 (a) **写之后是否还有 L2 流量把脏行逐出**（本微基准里
+  顺序一项就把 8 MiB 输出从 0 摆到 1.33×）、(b) **输出工作集是否超过 L2**（超过则逐出被强制、只剩残差）
+  共同决定。同样的机制解释了真实的 +35 MB（残差摆动）与跨重放 ~19 MB（窗内残差抖动）——都是**同一批
+  字节**在 L2→DRAM 的**逐出份额**差异，不是「多写」。
+- **判据（复用 §99.5、§100.4）**：跨配置比写量用 **`l1tex__t_sectors_pipe_lsu_mem_global_op_st`**
+  （`S_L1`）或解析输出大小，**不用 `dram__bytes_write`**；本微基准把这条判据从「经验」升级为「机制」——
+  store 项在任何读序下逐位不变，而 `dram__bytes_write` 可相差 >11 MB。
+- **对目标卡 CUDA 反向的含义**：B2 生产核的写侧读数**只**取 `S_L1`（或解析 `U`），
+  `-DB2M_VECST` 之类改的是 `S_L1`（半 sector→整 sector）故仍可用；一切基于 `dram__bytes_write`
+  的「dtype/staging/占用率省字节」推断**作废**（§99–§111 已逐条如此处理）。这条口径**与 §45 的
+  `cf` 默认部署无关**，只影响 ncu 读法。
+
+### 114.5 边界（诚实）
+
+- 微基准是**理想化**的：连续/规则地址、纯 `float4` 全覆盖 store、无 mma 依赖、单缓冲；真实核里叠加
+  smem staging、多 warp 竞争、`st.global` 与操作数 `cp.async`/TMA 混排——故它给出的是**机制归属**，
+  不复现 B2 的具体 +35 MB。
+- store 用 `float4`（16 B/线程、warp 覆盖 512 B=16 扇区），`S_L1` 为纯指令流计数；**未**用
+  `st.global.wt`（write-through）/`discard` 等会改变写回语义的指令，故「脏行留 L2」的默认写回行为是
+  结论成立的前提（生产核亦为默认写回）。
+- 只测 `sm_90a`、fp32、H100 L2 ~50 MB；未扫 `cudaLimitPersistingL2`/L2 set-aside、未做 bf16 操作数版，
+  也未把 ncu 的 `--replay-mode` 切到 application 复测（§111 已证本核该口径两类 replay 一致）。

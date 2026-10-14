@@ -1,0 +1,46 @@
+parsed 12 tags from harness/probe_l2_write_evict_ncu.out.txt
+
+[i] per-config table (outMB is MiB; output bytes = outMB*1MiB)
+  tag                      mode                    outMB  readMB       S_L1      L2_wr   dram_wr  wr/out   dram_rd   dur_us
+  A1_sO8r0_mode0           store-only                8.0     0.0     270592     270592      0.00   0.000      0.01      4.6
+  A2_sO8r128_mode1         read-then-store           8.0   128.0     270592     270592      2.58   0.308    134.23     48.3
+  A3_sO8r128_mode2         store-then-read           8.0   128.0     270592     270592     11.12   1.326    134.23     53.1
+  A4_sO8r128_mode3         interleaved store/read    8.0   128.0     270592     270592     11.08   1.321    134.23     71.7
+  A5_sO8r64_mode1          read-then-store           8.0    64.0     270592     270592      2.58   0.308     67.12     27.4
+  A6_sO8r256_mode1         read-then-store           8.0   256.0     270592     270592      2.63   0.314    268.45     91.8
+  B1_sO64r0_mode0          store-only               64.0     0.0    2105600    2105600     45.76   0.682      0.01     21.4
+  B2_sO64r128_mode1        read-then-store          64.0   128.0    2105600    2105600     45.15   0.673    134.23     63.7
+  B3_sO96r0_mode0          store-only               96.0     0.0    3154176    3154176     79.08   0.786      0.01     32.0
+  C1_sO8r0_mode0_x3        store-only                8.0     0.0     270592     270592      0.00   0.000      0.01      4.6
+  C1_sO8r0_mode0_x3        store-only                8.0     0.0     270592     270592      0.00   0.000      0.01      4.7
+  C1_sO8r0_mode0_x3        store-only                8.0     0.0     270592     270592      0.00   0.000      0.01      4.8
+  C2_sO8r128_mode1_x3      read-then-store           8.0   128.0     270592     270592      2.58   0.308    134.23     48.4
+  C2_sO8r128_mode1_x3      read-then-store           8.0   128.0     270592     270592      2.75   0.328    134.23     49.3
+  C2_sO8r128_mode1_x3      read-then-store           8.0   128.0     270592     270592      2.59   0.309    134.24     48.5
+  C3_sO8r0_mode0_x3b       store-only                8.0     0.0     270592     270592      0.00   0.000      0.01      4.7
+  C3_sO8r0_mode0_x3b       store-only                8.0     0.0     270592     270592      0.00   0.000      0.01      4.6
+  C3_sO8r0_mode0_x3b       store-only                8.0     0.0     270592     270592      0.00   0.000      0.01      4.6
+
+[A] store stream identical across read/write orderings (Part A, out=8 MiB)
+  A1_sO8r0_mode0         S_L1=270592     L2_wr=270592      identical=True  dram_wr=0.00 MB
+  A2_sO8r128_mode1       S_L1=270592     L2_wr=270592      identical=True  dram_wr=2.58 MB
+  A3_sO8r128_mode2       S_L1=270592     L2_wr=270592      identical=True  dram_wr=11.12 MB
+  A4_sO8r128_mode3       S_L1=270592     L2_wr=270592      identical=True  dram_wr=11.08 MB
+
+[B] dram__bytes_write = dirty-line FLUSH share, set by ordering (out=8 MiB < L2~50 MiB)
+  A1_sO8r0_mode0         store-only             dram_wr=0.00     MB = 0.00x output (dram_rd=0.01 MB)
+  A2_sO8r128_mode1       read-then-store        dram_wr=2.58     MB = 0.31x output (dram_rd=134.23 MB)
+  A3_sO8r128_mode2       store-then-read        dram_wr=11.12    MB = 1.33x output (dram_rd=134.23 MB)
+  A4_sO8r128_mode3       interleaved store/read dram_wr=11.08    MB = 1.32x output (dram_rd=134.23 MB)
+  A5_sO8r64_mode1        read-then-store        dram_wr=2.58     MB = 0.31x output (dram_rd=67.12 MB)
+  A6_sO8r256_mode1       read-then-store        dram_wr=2.63     MB = 0.31x output (dram_rd=268.45 MB)
+
+[C] output > L2 forces the flush regardless of ordering (Part B)
+  B1_sO64r0_mode0        out=64   MiB store-only             dram_wr=45.76    MB = 0.68x output
+  B2_sO64r128_mode1      out=64   MiB read-then-store        dram_wr=45.15    MB = 0.67x output
+  B3_sO96r0_mode0        out=96   MiB store-only             dram_wr=79.08    MB = 0.79x output
+
+[D] repeatability: jitter lives in the flush term, not the store term
+  C1_sO8r0_mode0_x3      dram_wr = [0.00, 0.00, 0.00] MB    S_L1 = [270592, 270592, 270592]
+  C2_sO8r128_mode1_x3    dram_wr = [2.58, 2.75, 2.59] MB    S_L1 = [270592, 270592, 270592]
+  C3_sO8r0_mode0_x3b     dram_wr = [0.00, 0.00, 0.00] MB    S_L1 = [270592, 270592, 270592]
