@@ -11,9 +11,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-export DEEPEP_ROOT=~/github/DeepEP
-export DEEPGEMM_ROOT=~/github/DeepGEMM
-python '~/proj/tech_record/code/mega-moe/harness/exp_deepep_cmake_build.py'
+export DEEPEP_ROOT=${HOME}/github/DeepEP
+export DEEPGEMM_ROOT=${HOME}/github/DeepGEMM
+python '${HOME}/proj/tech_record/code/mega-moe/harness/exp_deepep_cmake_build.py'
 EOS
 )
 

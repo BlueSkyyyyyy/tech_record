@@ -8,12 +8,13 @@ Usage (inside kernel_lab):
     python /ssd/.../code/flash-kda/harness/check_kda_ref.py
 """
 
+import os
 import math
 import sys
 
 import torch
 
-sys.path.insert(0, "~/proj/tech_record/code/flash-kda/src")
+sys.path.insert(0, os.path.expanduser("~/proj/tech_record/code/flash-kda/src"))
 from kda_ref import kda_chunked_fwd, kda_token_recurrent, l2_normalize  # noqa: E402
 
 

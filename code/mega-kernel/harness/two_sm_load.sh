@@ -3,7 +3,7 @@
 #           （目标卡 H100 / sm90a）。每个配置单独一次进程调用（cluster launch failure 会 sticky）。
 set -u
 DEV=${DEV:-2}
-SRC=~/proj/tech_record/code/mega-kernel/src/two_sm_load.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/two_sm_load.cu
 BIN=/tmp/two_sm_load
 nvcc -O3 -arch=sm_90a "$SRC" -o "$BIN" -lcuda 2>/dev/null || exit 1
 run(){ echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN $*"; CUDA_VISIBLE_DEVICES="$DEV" "$BIN" "$@"; }

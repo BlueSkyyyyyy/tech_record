@@ -7,7 +7,7 @@
 #   分支选择载体」**；并给出「抬寄存器上限（降占用率）能否收回 §66 的 plain/TMA 慢」。
 # 目标卡 H100 / sm90a，DEV 自动选空闲 device（可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/worker_carrier_cpasync_ring.cu
 BIN=/tmp/carrier_reg_budget
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

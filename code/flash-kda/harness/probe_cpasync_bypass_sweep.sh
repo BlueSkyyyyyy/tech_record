@@ -16,7 +16,7 @@
 #   bash .../probe_cpasync_bypass_sweep.sh > .../probe_cpasync_bypass_sweep.out.txt 2>&1
 set -uo pipefail
 
-DIR=~/proj/tech_record/code/flash-kda
+DIR=${HOME}/proj/tech_record/code/flash-kda
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 cd "$DIR"
 

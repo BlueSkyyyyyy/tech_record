@@ -8,7 +8,7 @@
 #           否则 ncu 会在 replay 前 flush L2，看不到 persisting 差异——P40-1 §29.2 已踩过）。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/l2_persist_tuning.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/l2_persist_tuning.cu
 BIN=/tmp/l2_persist_tuning
 nvcc -O3 -arch=sm_90 "$SRC" -o "$BIN" || exit 1
 

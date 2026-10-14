@@ -11,7 +11,7 @@
 # 用法：bash harness/exp_deepep_context.sh > harness/exp_deepep_context.out.txt
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEEPEP="${DEEPEP_ROOT:-~/github/DeepEP}"
+DEEPEP="${DEEPEP_ROOT:-${HOME}/github/DeepEP}"
 INC="$DEEPEP/deep_ep/include"
 
 echo "DeepEP comm::Context host 算术 + NCCL 运行时版本闸门 —— H100 真机"

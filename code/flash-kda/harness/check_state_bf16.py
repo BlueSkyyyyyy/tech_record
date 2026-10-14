@@ -16,12 +16,13 @@ Usage (inside kernel_lab, absolute path):
     python ~/proj/tech_record/code/flash-kda/harness/check_state_bf16.py
 """
 
+import os
 import math
 import sys
 
 import torch
 
-sys.path.insert(0, "~/proj/tech_record/code/flash-kda/src")
+sys.path.insert(0, os.path.expanduser("~/proj/tech_record/code/flash-kda/src"))
 from kda_ref import kda_token_recurrent, l2_normalize  # noqa: E402
 
 LOG2E = 1.4426950408889634

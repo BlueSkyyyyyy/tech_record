@@ -6,7 +6,7 @@
 # 用 DEV 选择空闲 device。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/device_graph.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/device_graph.cu
 BIN=/tmp/device_graph
 nvcc -O2 -arch=sm_90a -rdc=true "$SRC" -o "$BIN" -lcudadevrt || exit 1
 echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN 20000 5"

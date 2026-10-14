@@ -12,7 +12,7 @@
 # 计时项取 min-of-20、报 ok/20；可行性探针报 ok/N。
 set -u
 DEV=${DEV:-6}
-SRC=~/proj/tech_record/code/mega-kernel/src/cluster_concurrency.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/cluster_concurrency.cu
 TS=(64 128 256 512 1024)
 
 for T in "${TS[@]}"; do

@@ -10,11 +10,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DG=~/github/DeepGEMM
-DE=~/github/DeepEP
+DG=${HOME}/github/DeepGEMM
+DE=${HOME}/github/DeepEP
 DJ=$DG/third-party/deep_jit
-SRC=~/proj/tech_record/code/mega-moe/src/deepep_compiled_abi.cu
-PROBE=~/proj/tech_record/code/mega-moe/harness/deepep_jit_config_probe.cpp
+SRC=${HOME}/proj/tech_record/code/mega-moe/src/deepep_compiled_abi.cu
+PROBE=${HOME}/proj/tech_record/code/mega-moe/harness/deepep_jit_config_probe.cpp
 
 echo "== 环境坐标 =="
 ( cd $DE && git -c safe.directory='*' log --oneline -1 )

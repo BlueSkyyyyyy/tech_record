@@ -13,7 +13,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/harness/exp_ep_backward_adjoint.py"
-DEEPEP=~/github/DeepEP
+DEEPEP=${HOME}/github/DeepEP
 
 echo "MoE dispatch/combine 的反向（伴随）语义与路由权重梯度 —— H100 真机"
 "$ROOT/scripts/lab.sh" exec "nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1"

@@ -5,7 +5,7 @@
 #   四问：Q1 可复现性 / Q2 多起点 / Q3 oracle 穷举 / Q4 评价噪声地板。
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_sm_global.cu
 BIN=/tmp/hetero_sm_global
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

@@ -28,7 +28,7 @@
 #   bash /ssd/.../harness/probe_b2_write_cross_ncu.sh > /ssd/.../probe_b2_write_cross_ncu.out.txt 2>&1
 set -uo pipefail
 
-DIR=~/proj/tech_record/code/flash-kda
+DIR=${HOME}/proj/tech_record/code/flash-kda
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 cd "$DIR"
 CU="$DIR/harness/b2_mma_probe.cu"

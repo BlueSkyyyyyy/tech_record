@@ -10,7 +10,7 @@
 
 set -uo pipefail
 
-DIR=~/proj/tech_record/code/flash-kda
+DIR=${HOME}/proj/tech_record/code/flash-kda
 DRIVER=$DIR/harness/ncu_b3_mma_driver.py
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 cd "$DIR"

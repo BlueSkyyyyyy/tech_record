@@ -11,7 +11,7 @@
 #   bash harness/exp_mega_mhc_test.sh > harness/exp_mega_mhc_test.out.txt
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-INC="~/github/DeepGEMM/deep_gemm/include"
+INC="${HOME}/github/DeepGEMM/deep_gemm/include"
 
 CMD=$(cat <<EOS
 set -e

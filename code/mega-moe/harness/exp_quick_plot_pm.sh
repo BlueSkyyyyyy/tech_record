@@ -11,8 +11,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DG=~/github/DeepGEMM
-PY=~/proj/tech_record/code/mega-moe/harness/exp_quick_plot_pm.py
+DG=${HOME}/github/DeepGEMM
+PY=${HOME}/proj/tech_record/code/mega-moe/harness/exp_quick_plot_pm.py
 
 echo "== 环境坐标 =="
 ( cd $DG && git -c safe.directory='*' describe --tags )

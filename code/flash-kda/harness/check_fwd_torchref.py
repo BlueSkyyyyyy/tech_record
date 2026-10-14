@@ -29,16 +29,17 @@ Run inside `kernel_lab` (needs the built ``flash_kda_C`` + nvcc for the inline s
     python ~/proj/tech_record/code/flash-kda/harness/check_fwd_torchref.py
 """
 
+import os
 import math
 import sys
 
 import torch
 
-SRC = "~/proj/tech_record/code/flash-kda/src"
+SRC = os.path.expanduser("~/proj/tech_record/code/flash-kda/src")
 sys.path.insert(0, SRC)
 from kda_ref import kda_chunked_fwd, l2_normalize  # noqa: E402
 
-FLASHKDA = "~/github/FlashKDA"
+FLASHKDA = os.path.expanduser("~/github/FlashKDA")
 sys.path.insert(0, FLASHKDA)
 sys.path.insert(0, f"{FLASHKDA}/tests")
 from torch_ref import torch_ref, l2_normalize_kernel_match, fp32_ex2_ftz, sigmoid_ext  # noqa: E402

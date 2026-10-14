@@ -8,7 +8,7 @@
 #           否则 ncu 会在 replay 前 flush L2，看不到常驻差异——首版就栽在这）。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/l2_residency.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/l2_residency.cu
 BIN=/tmp/l2_residency
 nvcc -O3 -arch=sm_90 "$SRC" -o "$BIN" || exit 1
 

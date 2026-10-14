@@ -77,8 +77,8 @@ def normalize_citations(line, merges=None):
 
 
 def _find_repo(name, env):
-    for c in (os.environ.get(env, ""), f"~/github/{name}",
-              os.path.expanduser(f"~/github/{name}"), f"~/github/{name}"):
+    for c in (os.environ.get(env, ""), os.path.expanduser(f"~/github/{name}"),
+              os.path.expanduser(f"~/github/{name}"), os.path.expanduser(f"~/github/{name}")):
         if c and os.path.isdir(c):
             return c
     return os.path.expanduser(f"~/github/{name}")
@@ -168,13 +168,13 @@ def doc_dir_hints(doc_lines):
 
 
 def repo_of(p):
-    if p.startswith("~/github/DeepGEMM") or "/github/DeepGEMM/" in p:
+    if p.startswith(os.path.expanduser("~/github/DeepGEMM")) or "/github/DeepGEMM/" in p:
         return "DeepGEMM"
-    if p.startswith("~/github/DeepEP") or "/github/DeepEP/" in p:
+    if p.startswith(os.path.expanduser("~/github/DeepEP")) or "/github/DeepEP/" in p:
         return "DeepEP"
-    if p.startswith("~/github/DeepGEMM"):
+    if p.startswith(os.path.expanduser("~/github/DeepGEMM")):
         return "DeepGEMM"
-    if p.startswith("~/github/DeepEP"):
+    if p.startswith(os.path.expanduser("~/github/DeepEP")):
         return "DeepEP"
     return "mega-moe"
 

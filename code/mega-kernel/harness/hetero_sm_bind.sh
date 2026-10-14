@@ -4,7 +4,7 @@
 #   判定共驻税/毒化是 SM 内（发射槽共享）还是 SM 间（HBM/全局）现象。
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_sm_bind.cu
 BIN=/tmp/hetero_sm_bind
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

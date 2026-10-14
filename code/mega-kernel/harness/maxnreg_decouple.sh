@@ -5,7 +5,7 @@
 #   占用率用 grid=numSM·O 钉死；每块线程数 T 独立；寄存器上限用 __maxnreg__(R) 精确钉死。
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/maxnreg_decouple.cu
 BIN=/tmp/maxnreg_decouple
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

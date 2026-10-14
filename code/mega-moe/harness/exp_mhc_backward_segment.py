@@ -5,9 +5,10 @@
 #   - TMEM 列预算（与 device 侧同式）
 #   - 「G0 累加器留在 TMEM 直喂 K1」相对「先落 global scratch 再读回」省掉的往返字节
 #   - K1 阶段的算术强度（元素级）与 H100 roofline 归属
+import os
 import re, os, math, json
 
-INC = "~/github/DeepGEMM/deep_gemm/include"
+INC = os.path.expanduser("~/github/DeepGEMM/deep_gemm/include")
 LAYOUT = os.path.join(INC, "deep_gemm/layout/mega_mhc.cuh")
 src = open(LAYOUT).read()
 

@@ -13,9 +13,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DE=~/github/DeepEP
-DG=~/github/DeepGEMM
-SRC=~/proj/tech_record/code/mega-moe
+DE=${HOME}/github/DeepEP
+DG=${HOME}/github/DeepGEMM
+SRC=${HOME}/proj/tech_record/code/mega-moe
 TORCH=$(python -c "import torch,os;print(os.path.dirname(torch.__file__))")
 NCCL_INC=/tmp/nccl229/include
 NCCL_LIB=/tmp/nccl229/lib

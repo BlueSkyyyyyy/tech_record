@@ -21,7 +21,7 @@ os.environ.setdefault("FLA_DISABLE_BACKEND_DISPATCH", "1")
 
 import torch
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
 sys.path.insert(0, HARNESS)
 from ncu_b2_k128_dtype_driver import build_inputs, launch_reps  # noqa: E402
 from check_bwd_b1_bf16_e2e import profile_dev, time_wall        # noqa: E402

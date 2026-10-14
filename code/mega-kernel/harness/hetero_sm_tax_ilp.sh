@@ -7,7 +7,7 @@
 #   仍复用 §72–§79 的四访存模式 / 逻辑字节 / XOR 参考 / 误差扩散 assign[] / SM 分配 / per-SM 原子子段游标。
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_sm_tax_ilp.cu
 BIN=/tmp/hetero_sm_tax_ilp
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

@@ -8,13 +8,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DJ=~/github/DeepGEMM/third-party/deep_jit/include
+DJ=${HOME}/github/DeepGEMM/third-party/deep_jit/include
 TORCH=/usr/local/lib/python3.12/dist-packages/torch
 PYSITE=/usr/local/lib/python3.12/dist-packages
-SRC=~/proj/tech_record/code/mega-moe/src/deepjit_posthook.cpp
+SRC=${HOME}/proj/tech_record/code/mega-moe/src/deepjit_posthook.cpp
 
 echo "== DeepJIT 版本坐标 =="
-( cd ~/github/DeepGEMM/third-party/deep_jit && git log --oneline -1 ) 2>/dev/null || true
+( cd ${HOME}/github/DeepGEMM/third-party/deep_jit && git log --oneline -1 ) 2>/dev/null || true
 sha256sum $DJ/deep_jit/backend/cuda/options.hpp $DJ/deep_jit/backend/cuda/backend.hpp \
           $DJ/deep_jit/runtime/runtime.hpp $DJ/deep_jit/runtime/config.hpp \
           $DJ/deep_jit/cache/disk.hpp $DJ/deep_jit/backend/ascend/options.hpp

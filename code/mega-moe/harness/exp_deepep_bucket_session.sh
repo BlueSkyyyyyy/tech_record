@@ -14,7 +14,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/harness/exp_deepep_bucket_session.py"
-DEEPEP=~/github/DeepEP
+DEEPEP=${HOME}/github/DeepEP
 
 echo "DeepEP BucketSession（会话式临时张量注册 + 生命周期守卫）—— H100 真机"
 "$ROOT/scripts/lab.sh" exec "nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1"

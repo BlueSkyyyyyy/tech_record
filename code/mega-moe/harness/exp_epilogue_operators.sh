@@ -9,12 +9,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/epilogue_operators.cu"
-INC="~/github/DeepGEMM/deep_gemm/include"
+INC="${HOME}/github/DeepGEMM/deep_gemm/include"
 OPC="$INC/deep_gemm/epilogue/operators.cuh"
 
 CMD=$(cat <<'EOS'
 set -e
-INC=~/github/DeepGEMM/deep_gemm/include
+INC=${HOME}/github/DeepGEMM/deep_gemm/include
 OPC=$INC/deep_gemm/epilogue/operators.cuh
 GEN=/tmp/epilogue_operators.inc
 {

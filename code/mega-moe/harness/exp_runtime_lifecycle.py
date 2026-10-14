@@ -30,7 +30,7 @@ DEEPGEMM_DIR = os.environ.get('DEEPGEMM_DIR', os.path.expanduser('~/github/DeepG
 DEEPGEMM_DIR = os.path.realpath(
     os.path.expanduser('~/github/DeepGEMM') if not os.path.isdir(DEEPGEMM_DIR) else DEEPGEMM_DIR)
 if not os.path.isdir(DEEPGEMM_DIR):
-    DEEPGEMM_DIR = '~/github/DeepGEMM'
+    DEEPGEMM_DIR = os.path.expanduser('~/github/DeepGEMM')
 
 # --- 复用 tests/test_lazy_init.py 的 LD_PRELOAD 探针源（逐行照抄，见该文件 :22-52）---
 PROBE_SOURCE = r'''

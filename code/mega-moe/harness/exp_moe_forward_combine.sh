@@ -7,7 +7,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 H="$ROOT/harness"
-INC="~/github/DeepGEMM/deep_gemm/include"
+INC="${HOME}/github/DeepGEMM/deep_gemm/include"
 
 CMD=$(cat <<EOS
 set -e

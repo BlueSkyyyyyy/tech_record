@@ -55,7 +55,7 @@ def _load_kda_ref():
 def _import_megatron():
     mega = os.environ.get("MEGATRON_LM_DIR", os.path.expanduser("~/proj/Megatron-LM"))
     if not os.path.isdir(mega):
-        for cand in ("~/proj/Megatron-LM", "~/proj/Megatron-LM"):
+        for cand in (os.path.expanduser("~/proj/Megatron-LM"), os.path.expanduser("~/proj/Megatron-LM")):
             if os.path.isdir(cand):
                 mega = cand
                 break

@@ -15,12 +15,13 @@ Usage (inside kernel_lab):
     python ~/proj/tech_record/code/flash-kda/harness/probe_state_layout.py
 """
 
+import os
 import math
 import sys
 
 import torch
 
-sys.path.insert(0, "~/proj/tech_record/code/flash-kda/src")
+sys.path.insert(0, os.path.expanduser("~/proj/tech_record/code/flash-kda/src"))
 from kda_ref import kda_gate, kda_token_recurrent, l2_normalize  # noqa: E402
 
 import flash_kda  # noqa: E402

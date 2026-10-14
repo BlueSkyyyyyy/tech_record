@@ -4,7 +4,7 @@
 #   （补 §69.7 明文尾巴「未测 T 与 O 同时大于 1 的二维面（O·T 联合钉『每 SM 总线程』）」。）
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/t_occ_surface.cu
 BIN=/tmp/t_occ_surface
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

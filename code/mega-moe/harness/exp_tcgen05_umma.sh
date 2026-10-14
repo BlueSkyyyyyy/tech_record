@@ -12,8 +12,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DG=~/github/DeepGEMM
-SRC=~/proj/tech_record/code/mega-moe/src/tcgen05_umma.cu
+DG=${HOME}/github/DeepGEMM
+SRC=${HOME}/proj/tech_record/code/mega-moe/src/tcgen05_umma.cu
 INC="-I$DG/deep_gemm/include -I$DG/third-party/cutlass/include -I$DG/third-party/deep_jit/include -I$DG/csrc"
 
 echo "== 环境坐标 =="

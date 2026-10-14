@@ -33,7 +33,7 @@ from deep_gemm.testing import get_arch_major
 
 DGH = None
 for p in (os.environ.get('DEEPGEMM_DIR'), os.path.expanduser('~/github/DeepGEMM'),
-          '~/github/DeepGEMM', '~/github/DeepGEMM'):
+          os.path.expanduser('~/github/DeepGEMM'), os.path.expanduser('~/github/DeepGEMM')):
     if p and os.path.isdir(os.path.join(p, 'tests')):
         DGH = p
         break

@@ -12,7 +12,7 @@
 # 目标卡 H100 / sm90a，DEV 选空闲 device（默认 3）。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/multi_worker_desc_fetch.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/multi_worker_desc_fetch.cu
 BIN=/tmp/multi_worker_desc_fetch
 nvcc -O3 -arch=sm_90a "$SRC" -o "$BIN" || exit 1
 

@@ -11,7 +11,7 @@
 #   bash .../probe_b2_k128_intra_ncu.sh > .../probe_b2_k128_intra_ncu.out.txt 2>&1
 set -uo pipefail
 
-DIR=~/proj/tech_record/code/flash-kda
+DIR=${HOME}/proj/tech_record/code/flash-kda
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-3}
 cd "$DIR"
 CU="$DIR/harness/b2_mma_probe.cu"

@@ -14,7 +14,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/harness/exp_deepep_epbuffer_handle.py"
-DEP=~/github/DeepEP
+DEP=${HOME}/github/DeepEP
 
 echo "DeepEP EPHandle 句柄契约 + dispatch/combine host 编排层 —— H100 真机"
 "$ROOT/scripts/lab.sh" exec "nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1"

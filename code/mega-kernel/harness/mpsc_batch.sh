@@ -13,7 +13,7 @@
 # 目标卡 H100 / sm90，DEV 选空闲 device（默认 3）。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/mpsc_batch.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/mpsc_batch.cu
 BIN=/tmp/mpsc_batch
 nvcc -O3 -arch=sm_90 "$SRC" -o "$BIN" || exit 1
 

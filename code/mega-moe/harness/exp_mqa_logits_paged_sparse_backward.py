@@ -72,8 +72,8 @@ def ceil_div(a, b):
 # 抽取 DeepGEMM 官方测试里纯 torch 的参考函数（真正核对过的锚）
 # ---------------------------------------------------------------------------
 DG = None
-for _c in (os.environ.get("DEEPGEMM_DIR", ""), "~/github/DeepGEMM",
-           os.path.expanduser("~/github/DeepGEMM"), "~/github/DeepGEMM"):
+for _c in (os.environ.get("DEEPGEMM_DIR", ""), os.path.expanduser("~/github/DeepGEMM"),
+           os.path.expanduser("~/github/DeepGEMM"), os.path.expanduser("~/github/DeepGEMM")):
     if _c and os.path.isdir(_c):
         DG = _c
         break

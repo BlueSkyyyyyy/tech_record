@@ -15,7 +15,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/deepep_token_layout_sf.cu"
 PY="$ROOT/harness/exp_deepep_refs_fp8.py"
-DEP=~/github/DeepEP
+DEP=${HOME}/github/DeepEP
 
 echo "DeepEP refs.dispatch 的 FP8 分支 + 设备端 token SF 布局 —— H100 真机"
 "$ROOT/scripts/lab.sh" exec "nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1"

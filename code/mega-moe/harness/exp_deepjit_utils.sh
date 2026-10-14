@@ -8,14 +8,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DJ=~/github/DeepGEMM/third-party/deep_jit/include
-SRC=~/proj/tech_record/code/mega-moe/src
+DJ=${HOME}/github/DeepGEMM/third-party/deep_jit/include
+SRC=${HOME}/proj/tech_record/code/mega-moe/src
 PYINC=$(python3 -c "import sysconfig; print(sysconfig.get_path('include'))")
 PBINC=$(python3 -c "import pybind11; print(pybind11.get_include())")
 PYEXT=$(python3-config --extension-suffix)
 
 echo "== DeepJIT 版本坐标 =="
-( cd ~/github/DeepGEMM/third-party/deep_jit && git log --oneline -1 ) 2>/dev/null || true
+( cd ${HOME}/github/DeepGEMM/third-party/deep_jit && git log --oneline -1 ) 2>/dev/null || true
 nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1
 g++ --version | head -1
 
@@ -61,7 +61,7 @@ echo "build OK"
 
 echo
 echo "== Python 侧判定 =="
-python3 ~/proj/tech_record/code/mega-moe/harness/exp_deepjit_utils.py
+python3 ${HOME}/proj/tech_record/code/mega-moe/harness/exp_deepjit_utils.py
 EOS
 )
 

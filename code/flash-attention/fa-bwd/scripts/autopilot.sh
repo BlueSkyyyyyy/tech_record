@@ -10,7 +10,7 @@ LOG="$DIR/autopilot.log"
 STOP="$DIR/AUTOPILOT_STOP"
 LOCK="$DIR/autopilot.lock"
 PIDFILE="$DIR/autopilot.pid"
-OPENCODE="~/.opencode/bin/opencode"
+OPENCODE="${HOME}/.opencode/bin/opencode"
 MODEL="local-vllm//ssd/models/DeepSeek-V4.1-Flash"
 
 MAX_ROUNDS="${MAX_ROUNDS:-14}"
@@ -21,7 +21,7 @@ PROMPT='你是 tech_record 仓库的长期自驱 agent，负责推进「flash-at
 1. 先读 code/flash-attention/fa-bwd/ROADMAP.md 的「下一步」「当前进度」，再读 docs/00-fa-bwd-optimization-catalog.md、code/kernel-opt/agent_skills/kernel-opt.md（环境/ncu 权限/峰值常量）。
 2. 完成 ROADMAP 里的**一个 P 项**（例如 P1-1 单文件 fp16 反向），代码写到 code/flash-attention/fa-bwd/src/<dtype>/。
 3. 用 code/flash-attention/fa-bwd/scripts/run.sh 在 kernel_lab 容器里编译运行；用 scripts/ncu.sh 剖析；把实测原始输出留在同目录 *.out.txt。
-4. 数值对拍：用自己的 kernel 读 ~/proj/output/fa-bwd/<case>/ 的 q,k,v,do.npy，算 dq,dk,dv，
+4. 数值对拍：用自己的 kernel 读 ${HOME}/proj/output/fa-bwd/<case>/ 的 q,k,v,do.npy，算 dq,dk,dv，
    与 ref_*.npy（以及 TE/FA）比对，报告 max abs/rel diff；必要时用 harness/fa_bwd_bench.py dump 新 shape。
 5. 性能对标：用 harness/fa_bwd_bench.py bench 或自己写计时，与 FA2/TE 同 shape 对比，给出 TFLOPS 与峰值占比。
 6. 更新 docs/ 分析文档（实现与优化逐条说明、ncu bound 结论）与 ROADMAP（状态/进度/下一步），git add/commit/push，必要时验证线上（本项目文档不上站点，可只 push 代码与 md）。

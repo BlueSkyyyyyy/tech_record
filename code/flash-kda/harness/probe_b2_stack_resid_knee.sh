@@ -4,7 +4,7 @@
 # (`B*ceil(T/16)*H = 2048`) at fixed `(K,V)=(64,256)`.  Reuses the `.so` built by probe_b2_stack_resid.sh.
 # Usage (inside kernel_lab):  bash .../probe_b2_stack_resid_knee.sh > ..._knee.out.txt 2>&1
 set -uo pipefail
-DIR=~/proj/tech_record/code/flash-kda
+DIR=${HOME}/proj/tech_record/code/flash-kda
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 cd "$DIR"
 K=64; V=256

@@ -17,5 +17,5 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   echo \"[exp_sm_bandwidth_budget] pinned to GPUs \$IDLE\"; \
   CUDA_VISIBLE_DEVICES=\$IDLE /tmp/sm_bandwidth_budget | tee /tmp/sm_bandwidth_budget.raw.txt; \
   echo; echo '== Python 侧：重构 DeepEP SM 模型 =='; \
-  BANDWIDTH_RAW=/tmp/sm_bandwidth_budget.raw.txt DEEPEP_ROOT=~/github/DeepEP \
+  BANDWIDTH_RAW=/tmp/sm_bandwidth_budget.raw.txt DEEPEP_ROOT=${HOME}/github/DeepEP \
     python '$ROOT/harness/exp_sm_bandwidth_budget.py'"

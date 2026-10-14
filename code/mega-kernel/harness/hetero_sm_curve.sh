@@ -4,7 +4,7 @@
 #   问：①按曲线配平能否收回 bind_bal 的分区自伤？ ②能否收回 coal+scalar 的全局发射税？
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_sm_curve.cu
 BIN=/tmp/hetero_sm_curve
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

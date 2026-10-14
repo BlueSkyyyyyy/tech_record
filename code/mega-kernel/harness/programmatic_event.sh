@@ -4,7 +4,7 @@
 # 用 DEV 选择空闲 device。programmatic / LCE 事件必须 cudaEventDisableTiming。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/programmatic_event.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/programmatic_event.cu
 BIN=/tmp/programmatic_event
 nvcc -O3 -arch=sm_90 "$SRC" -o "$BIN" || exit 1
 echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN 30 100000 100000 20000"

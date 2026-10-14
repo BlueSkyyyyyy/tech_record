@@ -3,7 +3,7 @@
 #           （目标卡 H100 / sm90a）。固定空闲 device。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/mega_gate_cluster.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/mega_gate_cluster.cu
 BIN=/tmp/mega_gate_cluster
 nvcc -O3 -arch=sm_90a "$SRC" -o "$BIN" -lcuda 2>/dev/null || exit 1
 run(){ echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN $*"; CUDA_VISIBLE_DEVICES="$DEV" "$BIN" "$@"; }

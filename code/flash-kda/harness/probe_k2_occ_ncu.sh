@@ -3,7 +3,7 @@
 # baseline (2 CTA/SM) vs cond_in2_out2 (3 CTA/SM) K2, at a grid that fills the
 # GPU (B*H=512 CTAs on 132 SMs).
 set -uo pipefail
-DRIVER=~/proj/tech_record/code/flash-kda/harness/ncu_driver_occ.py
+DRIVER=${HOME}/proj/tech_record/code/flash-kda/harness/ncu_driver_occ.py
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 
 SECTIONS="--section SpeedOfLight --section Occupancy --section LaunchStats"

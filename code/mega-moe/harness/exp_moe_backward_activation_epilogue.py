@@ -7,7 +7,7 @@
 # 纯 host / Python，架构无关；行号对着 ~/github/DeepGEMM 真实核对。
 import os, re, sys
 
-DG = os.environ.get("DEEPGEMM_DIR", "~/github/DeepGEMM")
+DG = os.environ.get("DEEPGEMM_DIR", os.path.expanduser("~/github/DeepGEMM"))
 EPI = os.path.join(DG, "csrc/jit_kernels/impls/epilogue_class.hpp")
 OPC = os.path.join(DG, "deep_gemm/include/deep_gemm/epilogue/operators.cuh")
 BF16HPP = os.path.join(DG, "csrc/jit_kernels/impls/sm100_bf16_gemm.hpp")

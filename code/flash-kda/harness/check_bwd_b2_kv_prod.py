@@ -39,8 +39,8 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
-SRC = "~/proj/tech_record/code/flash-kda/src"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
+SRC = os.path.expanduser("~/proj/tech_record/code/flash-kda/src")
 sys.path.insert(0, HARNESS)
 sys.path.insert(0, SRC)
 
@@ -91,7 +91,7 @@ def orig_source():
                        capture_output=True, text=True)
     if r.returncode != 0:
         # fall back: the harness dir's git root may differ; try the repo root
-        r = subprocess.run(["git", "-C", "~/proj/tech_record", "show",
+        r = subprocess.run(["git", "-C", os.path.expanduser("~/proj/tech_record"), "show",
                             "HEAD:code/flash-kda/harness/b2_mma_probe.cu"],
                            capture_output=True, text=True)
     if r.returncode != 0:

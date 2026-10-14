@@ -16,6 +16,7 @@ kernel_lab 容器里按「case × 配置」矩阵跑一遍，解析 `[timing]` �
     ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
         scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --dir=... --iters=5
 """
+import os
 import argparse
 import json
 import re
@@ -24,7 +25,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-OUT_ROOT = Path("~/proj/output/fa-bwd")
+OUT_ROOT = Path(os.path.expanduser("~/proj/output/fa-bwd"))
 CONTAINER = "kernel_lab"
 BIN = "fa_bwd_fp8_main.out"
 BIN_DIR = "src/fp8"

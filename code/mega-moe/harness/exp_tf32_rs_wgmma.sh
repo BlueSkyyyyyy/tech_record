@@ -19,13 +19,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-INC=~/github/DeepGEMM/deep_gemm/include
-CUTE=~/github/DeepGEMM/third-party/cutlass/include
+INC=${HOME}/github/DeepGEMM/deep_gemm/include
+CUTE=${HOME}/github/DeepGEMM/third-party/cutlass/include
 echo "== 真实头文件 sha256 =="
 sha256sum $INC/deep_gemm/mma/sm90.cuh $INC/deep_gemm/impls/sm90_tf32_hc_prenorm_gemm.cuh $CUTE/cute/atom/mma_traits_sm90_gmma.hpp
 nvcc -gencode=arch=compute_90a,code=sm_90a -O3 -std=c++17 --expt-relaxed-constexpr -diag-suppress 20012 \
   -I"$INC" -I"$CUTE" -I"$CUTE/cutlass" -I"$CUTE/cute" \
-  '~/proj/tech_record/code/mega-moe/src/tf32_rs_wgmma.cu' -o /tmp/tf32_rs_wgmma -lcuda
+  '${HOME}/proj/tech_record/code/mega-moe/src/tf32_rs_wgmma.cu' -o /tmp/tf32_rs_wgmma -lcuda
 nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1
 /tmp/tf32_rs_wgmma > /tmp/tf32_rs_wgmma.raw.txt
 cat /tmp/tf32_rs_wgmma.raw.txt

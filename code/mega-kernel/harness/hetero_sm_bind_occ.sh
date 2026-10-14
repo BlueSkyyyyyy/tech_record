@@ -6,7 +6,7 @@
 #   O 稳健性，并兑现 §72.8 缓解 (a) 的「加 warp 摊」。
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_sm_bind_occ.cu
 BIN=/tmp/hetero_sm_bind_occ
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

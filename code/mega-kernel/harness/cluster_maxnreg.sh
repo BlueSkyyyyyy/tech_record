@@ -5,7 +5,7 @@
 # 边界项 §G 用 probe（每配置试 3 次，报 ok/3）。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/cluster_maxnreg.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/cluster_maxnreg.cu
 BIN=/tmp/cluster_maxnreg
 nvcc -O3 -arch=sm_90a "$SRC" -o "$BIN" || exit 1
 

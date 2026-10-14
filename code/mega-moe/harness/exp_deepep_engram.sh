@@ -15,7 +15,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/deepep_engram_fetch.cu"
 PY="$ROOT/harness/exp_deepep_engram.py"
-DEP=~/github/DeepEP
+DEP=${HOME}/github/DeepEP
 DEV_DUMP=/tmp/deepep_engram_dev.txt
 "$ROOT/scripts/lab.sh" exec "nvcc -arch=sm_90a -O3 -std=c++17 --expt-relaxed-constexpr -w \
   -I$DEP/deep_ep/include -I/usr/local/cuda/include/cccl \

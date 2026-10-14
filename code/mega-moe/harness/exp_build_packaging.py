@@ -61,8 +61,8 @@ def sha256(path):
         return hashlib.sha256(f.read()).hexdigest()
 
 
-DEP = os.environ.get('DEEPEP_ROOT', '~/github/DeepEP')
-DGEMM = os.environ.get('DEEPGEMM_ROOT', '~/github/DeepGEMM')
+DEP = os.environ.get('DEEPEP_ROOT', os.path.expanduser('~/github/DeepEP'))
+DGEMM = os.environ.get('DEEPGEMM_ROOT', os.path.expanduser('~/github/DeepGEMM'))
 
 FP = os.path.join(DEP, 'deep_ep', 'utils', 'find_pkgs.py')
 DEP_SETUP = os.path.join(DEP, 'setup.py')

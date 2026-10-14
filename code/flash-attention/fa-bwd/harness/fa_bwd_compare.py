@@ -35,6 +35,7 @@ P3-3e：`--apply` / `--check` 操作 docs/04 里被下面两个标记围起来�
 """
 from __future__ import annotations
 
+import os
 import argparse
 import difflib
 import json
@@ -44,7 +45,7 @@ from pathlib import Path
 
 import numpy as np
 
-OUT_ROOT = Path("~/proj/output/fa-bwd")
+OUT_ROOT = Path(os.path.expanduser("~/proj/output/fa-bwd"))
 VEC = ("dq", "dk", "dv")
 IMPL_ORDER = ("fa3", "fa", "te", "ours")
 

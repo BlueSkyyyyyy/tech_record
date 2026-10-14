@@ -13,7 +13,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/locality_domain_probe.cu"
-DGEMM=~/github/DeepGEMM
+DGEMM=${HOME}/github/DeepGEMM
 PY="import torch, deep_gemm as dg; \
 n=torch.cuda.get_device_properties(0).multi_processor_count; \
 print('get_num_locality_domains  =', dg.locality_domain.get_num_locality_domains()); \

@@ -24,8 +24,8 @@ os.environ.setdefault("FLA_DISABLE_BACKEND_DISPATCH", "1")
 
 import torch
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
-SRC = "~/proj/tech_record/code/flash-kda/src"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
+SRC = os.path.expanduser("~/proj/tech_record/code/flash-kda/src")
 sys.path.insert(0, HARNESS)
 sys.path.insert(0, SRC)
 

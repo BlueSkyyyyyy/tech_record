@@ -29,16 +29,17 @@ Run inside `kernel_lab` (needs the built ``flash_kda_C``):
     python ~/proj/tech_record/code/flash-kda/harness/check_varlen_forward.py
 """
 
+import os
 import math
 import sys
 
 import torch
 
-SRC = "~/proj/tech_record/code/flash-kda/src"
+SRC = os.path.expanduser("~/proj/tech_record/code/flash-kda/src")
 sys.path.insert(0, SRC)
 from kda_ref import kda_gate, kda_token_recurrent, l2_normalize  # noqa: E402
 
-CSRC = "~/github/FlashKDA"  # only for the module path fallback
+CSRC = os.path.expanduser("~/github/FlashKDA")  # only for the module path fallback
 sys.path.insert(0, CSRC)
 
 D = 128

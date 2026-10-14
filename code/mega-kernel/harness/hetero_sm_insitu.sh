@@ -5,7 +5,7 @@
 #   问：in-situ 能否收回 §74 里 coal+sparse 从 0.936 崩到 0.664 的分配崩盘？
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_sm_insitu.cu
 BIN=/tmp/hetero_sm_insitu
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

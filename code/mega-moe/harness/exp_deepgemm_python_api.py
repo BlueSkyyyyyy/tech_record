@@ -22,7 +22,7 @@ import deep_gemm
 from deep_gemm import _C
 
 
-DG = os.environ.get('DEEPGEMM_ROOT', '~/github/DeepGEMM')
+DG = os.environ.get('DEEPGEMM_ROOT', os.path.expanduser('~/github/DeepGEMM'))
 if not os.path.isdir(DG):
     DG = os.path.expanduser('~/github/DeepGEMM')
 

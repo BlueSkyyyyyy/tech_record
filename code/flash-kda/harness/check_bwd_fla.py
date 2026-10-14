@@ -21,12 +21,13 @@ Usage (inside kernel_lab, GPU):
     python /ssd/.../code/flash-kda/harness/check_bwd_fla.py
 """
 
+import os
 import math
 import sys
 
 import torch
 
-SRC = "~/proj/tech_record/code/flash-kda/src"
+SRC = os.path.expanduser("~/proj/tech_record/code/flash-kda/src")
 sys.path.insert(0, SRC)
 from kda_bwd_ref import kda_token_backward  # noqa: E402
 from kda_ref import (kda_token_recurrent, l2_normalize,  # noqa: E402

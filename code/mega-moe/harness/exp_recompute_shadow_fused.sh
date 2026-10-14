@@ -17,7 +17,7 @@
 # 本机 8 卡共享，GPU0 常被其它自驱任务占满；用 CUDA_VISIBLE_DEVICES=1（或 2）避开它。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DG=~/github/DeepGEMM
+DG=${HOME}/github/DeepGEMM
 INC=$DG/deep_gemm/include
 
 echo "重算 × shadow 的单 kernel 融合资源账（H100 真机；避开被占用的 GPU0）"

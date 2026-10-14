@@ -33,8 +33,8 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
-SRC = "~/proj/tech_record/code/flash-kda/src"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
+SRC = os.path.expanduser("~/proj/tech_record/code/flash-kda/src")
 sys.path.insert(0, HARNESS)
 sys.path.insert(0, SRC)
 

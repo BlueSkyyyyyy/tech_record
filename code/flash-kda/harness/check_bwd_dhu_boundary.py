@@ -26,14 +26,15 @@ sanitity rerun on a divisible T to show the fix is a no-op there.
 Run inside `kernel_lab`:
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_dhu_boundary.py
 """
+import os
 import math
 import sys
 
 import torch
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
 sys.path.insert(0, HARNESS)
-sys.path.insert(0, "~/proj/tech_record/code/flash-kda/src")
+sys.path.insert(0, os.path.expanduser("~/proj/tech_record/code/flash-kda/src"))
 
 import check_bwd_dhu_kernel as M  # reuse make_inputs / fla_forward / fla_dhu
 

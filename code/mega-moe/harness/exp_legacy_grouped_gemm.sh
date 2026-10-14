@@ -6,4 +6,4 @@
 # deep_gemm/legacy/*.py、tests/test_legacy.py、tests/generators.py。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-"$ROOT/scripts/lab.sh" exec "cd '~/github/DeepGEMM/tests' && nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader | head -1 && python '$ROOT/harness/exp_legacy_grouped_gemm.py'"
+"$ROOT/scripts/lab.sh" exec "cd '${HOME}/github/DeepGEMM/tests' && nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader | head -1 && python '$ROOT/harness/exp_legacy_grouped_gemm.py'"

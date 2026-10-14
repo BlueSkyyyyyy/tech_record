@@ -8,7 +8,7 @@
 #   只跑 scalar+l2res（seq=0,0,1,1）与其两个单模式对照 + coal+scalar 控制组。
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_sm_tax_T.cu
 BIN=/tmp/hetero_sm_tax_T_attr
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

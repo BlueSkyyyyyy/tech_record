@@ -4,7 +4,7 @@
 #   （补 §70.7 明文尾巴「只测连续/规则的 __ldcs uint4 流，未扫 strided / 非对齐 / L2 命中等访存模式」。）
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/access_pattern_surface.cu
 BIN=/tmp/access_pattern_surface
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

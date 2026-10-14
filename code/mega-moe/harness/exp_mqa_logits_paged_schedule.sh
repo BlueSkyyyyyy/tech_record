@@ -17,7 +17,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/mqa_logits_paged_schedule.cu"
-DGEMM=~/github/DeepGEMM
+DGEMM=${HOME}/github/DeepGEMM
 "$ROOT/scripts/lab.sh" exec "nvcc -arch=sm_90a -O3 -std=c++17 --expt-relaxed-constexpr -diag-suppress 20012 \
   -I$DGEMM/deep_gemm/include -I$DGEMM/third-party/cutlass/include \
   '$SRC' -o /tmp/mqa_logits_paged_schedule \

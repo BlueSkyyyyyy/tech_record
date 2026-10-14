@@ -12,7 +12,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/harness/exp_deepep_sm_qp.py"
-DEEPEP=~/github/DeepEP
+DEEPEP=${HOME}/github/DeepEP
 
 echo "DeepEP dispatch/combine 自动 SM/QP 选择模型 + 带宽探测层 —— H100 真机"
 "$ROOT/scripts/lab.sh" exec "nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1"

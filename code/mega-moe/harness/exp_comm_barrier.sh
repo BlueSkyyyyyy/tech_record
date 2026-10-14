@@ -14,12 +14,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-INC=~/github/DeepGEMM/deep_gemm/include
+INC=${HOME}/github/DeepGEMM/deep_gemm/include
 echo "== 真实头文件 sha256 =="
 sha256sum $INC/deep_gemm/comm/barrier.cuh $INC/deep_gemm/layout/sym_buffer.cuh $INC/deep_gemm/layout/mega_moe.cuh
 nvcc -arch=sm_90 -O3 -std=c++17 --expt-relaxed-constexpr -diag-suppress 2389 \
   -I"$INC" -I"$INC/cutlass" -I"$INC/cute" \
-  '~/proj/tech_record/code/mega-moe/src/comm_barrier.cu' -o /tmp/comm_barrier
+  '${HOME}/proj/tech_record/code/mega-moe/src/comm_barrier.cu' -o /tmp/comm_barrier
 nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader | head -1
 /tmp/comm_barrier > /tmp/comm_barrier.raw.txt 2>&1 || { echo "RUN FAILED"; cat /tmp/comm_barrier.raw.txt; exit 1; }
 cat /tmp/comm_barrier.raw.txt

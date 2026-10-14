@@ -41,7 +41,7 @@ import weakref
 
 import torch  # noqa: F401  —— 真实 torch（加载 envs.py 需要；本实验本身不用 CUDA）
 
-DEP = os.environ.get('DEEPEP_ROOT', '~/github/DeepEP')
+DEP = os.environ.get('DEEPEP_ROOT', os.path.expanduser('~/github/DeepEP'))
 if not os.path.isdir(DEP):
     DEP = os.path.expanduser('~/github/DeepEP')
 

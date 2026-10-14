@@ -31,7 +31,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-DEP = os.environ.get('DEEPEP_ROOT', '~/github/DeepEP')
+DEP = os.environ.get('DEEPEP_ROOT', os.path.expanduser('~/github/DeepEP'))
 if not os.path.isdir(DEP):
     DEP = os.path.expanduser('~/github/DeepEP')
 os.environ.setdefault('NCCL_NVLS_ENABLE', '0')   # 本机无 Fabric Manager，禁用 NVLS（否则 all_gather 报 NVLS bind 失败）

@@ -12,12 +12,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/sm100_fp8_fp4_geometry.cu"
-INC="~/github/DeepGEMM/deep_gemm/include"
+INC="${HOME}/github/DeepGEMM/deep_gemm/include"
 KER="$INC/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh"
 
 CMD=$(cat <<'EOS'
 set -e
-INC=~/github/DeepGEMM/deep_gemm/include
+INC=${HOME}/github/DeepGEMM/deep_gemm/include
 KER=$INC/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh
 # A) 抽取 SF warp 转置的 lambda 体（去掉签名与收尾 `};`），逐行原样
 sed -n '465,471p' "$KER" > /tmp/utccp_body.inc

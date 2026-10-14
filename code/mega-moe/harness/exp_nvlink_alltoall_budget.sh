@@ -17,5 +17,5 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   echo \"[exp_nvlink_alltoall_budget] pinned to GPUs \$IDLE\"; \
   CUDA_VISIBLE_DEVICES=\$IDLE /tmp/nvlink_alltoall_budget | tee /tmp/nvlink_alltoall_budget.raw.txt; \
   echo; echo '== Python 侧：把多对多膝点代回 DeepEP SM 模型 =='; \
-  A2A_RAW=/tmp/nvlink_alltoall_budget.raw.txt DEEPEP_ROOT=~/github/DeepEP \
+  A2A_RAW=/tmp/nvlink_alltoall_budget.raw.txt DEEPEP_ROOT=${HOME}/github/DeepEP \
     python '$ROOT/harness/exp_nvlink_alltoall_budget.py'"

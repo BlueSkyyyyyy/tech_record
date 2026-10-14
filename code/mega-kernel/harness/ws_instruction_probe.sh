@@ -7,12 +7,12 @@
 #    UMMA 封装层的 9 个 struct 的调用者数、MaxShift 引用、WS trait 消费者数。
 set -u
 DEV=${DEV:-3}
-DG=${DG:-~/github/DeepGEMM}
+DG=${DG:-${HOME}/github/DeepGEMM}
 MPK=${MPK:-/ssd/mirage_mpk_build}
 DGCUTLASS="$DG/deep_gemm/include"
 TPCUTLASS="$DG/third-party/cutlass/include"
 MPKCUTLASS="$MPK/deps/cutlass/include"
-SRC=~/proj/tech_record/code/mega-kernel/src/ws_instruction_probe.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/ws_instruction_probe.cu
 BIN=/tmp/ws_instruction_probe
 nvcc -std=c++17 -O2 -arch=sm_90a -I"$DGCUTLASS" "$SRC" -o "$BIN" || exit 1
 echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN"

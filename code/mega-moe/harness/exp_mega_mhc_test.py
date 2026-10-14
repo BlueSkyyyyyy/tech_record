@@ -27,8 +27,8 @@ import torch
 _CANDIDATES = [
     os.environ.get('DEEPGEMM_TESTS', ''),
     os.path.expanduser('~/github/DeepGEMM/tests'),
-    '~/github/DeepGEMM/tests',
-    '~/github/DeepGEMM/tests',
+    os.path.expanduser('~/github/DeepGEMM/tests'),
+    os.path.expanduser('~/github/DeepGEMM/tests'),
 ]
 TESTS_DIR = next(p for p in _CANDIDATES if p and os.path.isfile(os.path.join(p, 'test_mega_mhc.py')))
 if TESTS_DIR not in sys.path:

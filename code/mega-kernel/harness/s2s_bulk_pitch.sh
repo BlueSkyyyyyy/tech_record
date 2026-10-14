@@ -10,7 +10,7 @@ if [ -z "${DEV:-}" ]; then
   DEV=$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
         | sort -t, -k2 -n | head -1 | cut -d, -f1)
 fi
-SRC=~/proj/tech_record/code/mega-kernel/src/s2s_bulk_nd.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/s2s_bulk_nd.cu
 BIN=/tmp/s2s_bulk_nd
 nvcc -O3 -arch=sm_90a "$SRC" -o "$BIN" || exit 1
 

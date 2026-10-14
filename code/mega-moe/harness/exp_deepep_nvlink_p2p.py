@@ -31,7 +31,7 @@ import types
 
 import torch
 
-DEP = os.environ.get('DEEPEP_ROOT', '~/github/DeepEP')
+DEP = os.environ.get('DEEPEP_ROOT', os.path.expanduser('~/github/DeepEP'))
 if not os.path.isdir(DEP):
     DEP = os.path.expanduser('~/github/DeepEP')
 

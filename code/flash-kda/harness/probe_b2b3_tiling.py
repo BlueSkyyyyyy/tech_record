@@ -11,7 +11,7 @@ os.environ.setdefault("FLA_DISABLE_BACKEND_DISPATCH", "1")
 import torch
 import triton
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
 sys.path.insert(0, HARNESS)
 
 from check_bwd_dqkg_kernel import build_kernel as build_dqkg  # noqa: E402

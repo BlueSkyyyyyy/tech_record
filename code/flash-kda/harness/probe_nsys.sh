@@ -11,7 +11,7 @@
 # Everything is tee'd to probe_nsys.out.txt.
 #
 # Usage (inside kernel_lab):
-#   bash ~/proj/tech_record/code/flash-kda/harness/probe_nsys.sh
+#   bash ${HOME}/proj/tech_record/code/flash-kda/harness/probe_nsys.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT="$HERE/probe_nsys.out.txt"

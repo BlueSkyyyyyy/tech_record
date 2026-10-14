@@ -3,7 +3,7 @@
 # Run inside kernel_lab on an idle card:
 #   CUDA_VISIBLE_DEVICES=1 bash /ssd/.../harness/probe_bwd_fused_ncu.sh
 set -u
-cd ~/proj/tech_record/code/flash-kda
+cd ${HOME}/proj/tech_record/code/flash-kda
 export FLA_DISABLE_BACKEND_DISPATCH=1
 B=${B:-8}; T=${T:-2048}; H=${H:-8}
 MET="dram__bytes_read.sum,dram__bytes_write.sum,dram__throughput.avg.pct_of_peak_sustained_elapsed,gpu__time_duration.sum,sm__throughput.avg.pct_of_peak_sustained_elapsed,lts__throughput.avg.pct_of_peak_sustained_elapsed,sm__warps_active.avg.pct_of_peak_sustained_active,launch__registers_per_thread,launch__occupancy_limit_registers,launch__occupancy_limit_shared_mem"

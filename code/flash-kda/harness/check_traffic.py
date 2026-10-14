@@ -31,8 +31,8 @@ import sys
 D = 128
 CHUNK = 16
 PER_TILE = 3 * CHUNK * D * 2 + D * 4 + 2 * CHUNK * CHUNK * 2  # 13824, utils.cuh:70-76
-FLASHKDA = "~/github/FlashKDA"
-DRIVER = "~/proj/tech_record/code/flash-kda/harness/ncu_driver.py"
+FLASHKDA = os.path.expanduser("~/github/FlashKDA")
+DRIVER = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness/ncu_driver.py")
 
 METRICS = [
     "dram__bytes_read.sum",

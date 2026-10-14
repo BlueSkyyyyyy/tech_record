@@ -12,12 +12,13 @@ list the Triton kernel launch counts, i.e. the actual kernel decomposition.
 Run inside `kernel_lab`:
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_kernel_map.py
 """
+import os
 import math
 import sys
 
 import torch
 
-sys.path.insert(0, "~/proj/tech_record/code/flash-kda/src")
+sys.path.insert(0, os.path.expanduser("~/proj/tech_record/code/flash-kda/src"))
 
 RCP_LN2 = 1.4426950408889634  # log2(e); FLA uses it to turn natural-log decay into log2
 

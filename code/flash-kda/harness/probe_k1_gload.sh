@@ -13,14 +13,14 @@
 #      share contributed by that load (sectors * 32B).
 #
 # Usage (inside kernel_lab):
-#   bash ~/proj/tech_record/code/flash-kda/harness/probe_k1_gload.sh \
-#       > ~/proj/tech_record/code/flash-kda/harness/probe_k1_gload.out.txt 2>&1
+#   bash ${HOME}/proj/tech_record/code/flash-kda/harness/probe_k1_gload.sh \
+#       > ${HOME}/proj/tech_record/code/flash-kda/harness/probe_k1_gload.out.txt 2>&1
 
 set -uo pipefail
 
-HARNESS=~/proj/tech_record/code/flash-kda/harness
+HARNESS=${HOME}/proj/tech_record/code/flash-kda/harness
 DRIVER=$HARNESS/ncu_driver.py
-FK=~/github/FlashKDA
+FK=${HOME}/github/FlashKDA
 SO=$FK/flash_kda_C.cpython-312-x86_64-linux-gnu.so
 SASS=/tmp/k1_gload_sass.txt
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}

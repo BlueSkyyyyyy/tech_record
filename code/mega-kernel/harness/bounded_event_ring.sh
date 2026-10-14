@@ -14,7 +14,7 @@
 # 安全：设备侧无进度守门狗（clock64）检测死锁并置 flag，kernel 正常返回（host 不挂）。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/bounded_event_ring.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/bounded_event_ring.cu
 BIN=/tmp/bounded_event_ring
 nvcc -O3 -arch=sm_90 "$SRC" -o "$BIN" || exit 1
 

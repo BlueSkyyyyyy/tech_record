@@ -34,15 +34,16 @@ Run inside `kernel_lab` (needs the built ``flash_kda_C`` + nvcc for the inline s
     CUDA_VISIBLE_DEVICES=<idle> python ~/proj/tech_record/code/flash-kda/harness/check_varlen_torchref.py
 """
 
+import os
 import math
 import sys
 
 import torch
 
-SRC = "~/proj/tech_record/code/flash-kda/src"
+SRC = os.path.expanduser("~/proj/tech_record/code/flash-kda/src")
 sys.path.insert(0, SRC)  # noqa: E402
 
-FLASHKDA = "~/github/FlashKDA"
+FLASHKDA = os.path.expanduser("~/github/FlashKDA")
 sys.path.insert(0, FLASHKDA)
 sys.path.insert(0, f"{FLASHKDA}/tests")
 from torch_ref import torch_ref  # noqa: E402

@@ -7,7 +7,7 @@
 #   以及同一 Wsm 内 meas/E 与 solo 是否与拆分无关（合量 Wsm 是否唯一支配量）。
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_sm_warps_split.cu
 BIN=/tmp/hetero_sm_warps_split
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

@@ -10,8 +10,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DE=~/github/DeepEP
-PY=~/proj/tech_record/code/mega-moe/harness/exp_deepep_python_caching.py
+DE=${HOME}/github/DeepEP
+PY=${HOME}/proj/tech_record/code/mega-moe/harness/exp_deepep_python_caching.py
 
 echo "== 环境坐标 =="
 ( cd $DE && git -c safe.directory='*' log --oneline -1 )

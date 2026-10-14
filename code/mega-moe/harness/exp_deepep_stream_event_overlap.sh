@@ -14,7 +14,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/deepep_stream_event.cu"
 PY="$ROOT/harness/exp_deepep_stream_event_overlap.py"
-DEP=~/github/DeepEP
+DEP=${HOME}/github/DeepEP
 
 echo "DeepEP 通信-计算重叠 Python 调度地基（事件 / 流 / BufferBase）—— H100 真机"
 "$ROOT/scripts/lab.sh" exec "nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1"

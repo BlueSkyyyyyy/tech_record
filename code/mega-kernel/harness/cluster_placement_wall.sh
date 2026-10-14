@@ -9,7 +9,7 @@
 set -u
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
         | sort -t, -k2 -n | head -1 | cut -d, -f1)}
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 MO=$DIR/src/multicast_occupancy.cu
 BIN=/tmp/mcast_occ_pw
 

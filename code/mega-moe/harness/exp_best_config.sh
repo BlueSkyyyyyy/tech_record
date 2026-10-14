@@ -3,4 +3,4 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 exec "$(cd "$HERE/../../kernel-opt/scripts" && pwd)/lab.sh" exec \
-  "cd ~/proj/tech_record/code/mega-moe && DG_PRINT_CONFIGS=1 PYTHONUNBUFFERED=1 python harness/exp_best_config.py"
+  "cd ${HOME}/proj/tech_record/code/mega-moe && DG_PRINT_CONFIGS=1 PYTHONUNBUFFERED=1 python harness/exp_best_config.py"

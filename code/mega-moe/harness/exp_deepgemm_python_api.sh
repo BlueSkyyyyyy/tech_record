@@ -12,7 +12,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/harness/exp_deepgemm_python_api.py"
-DG=~/github/DeepGEMM
+DG=${HOME}/github/DeepGEMM
 
 echo "DeepGEMM Python 绑定面 —— H100 真机"
 "$ROOT/scripts/lab.sh" exec "nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1"

@@ -8,12 +8,12 @@
 # and read SpeedOfLight / Occupancy / stall reasons / memory traffic.
 #
 # Usage (inside kernel_lab):
-#   bash ~/proj/tech_record/code/flash-kda/harness/probe_bwd_ncu.sh \
-#       > ~/proj/tech_record/code/flash-kda/harness/probe_bwd_ncu.out.txt 2>&1
+#   bash ${HOME}/proj/tech_record/code/flash-kda/harness/probe_bwd_ncu.sh \
+#       > ${HOME}/proj/tech_record/code/flash-kda/harness/probe_bwd_ncu.out.txt 2>&1
 
 set -uo pipefail
 
-DIR=~/proj/tech_record/code/flash-kda
+DIR=${HOME}/proj/tech_record/code/flash-kda
 DRIVER=$DIR/harness/ncu_bwd_driver.py
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 cd "$DIR"

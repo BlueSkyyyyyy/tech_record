@@ -15,7 +15,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/deepep_comm_barrier.cu"
 PY="$ROOT/harness/exp_deepep_comm_barrier.py"
-DEP=~/github/DeepEP
+DEP=${HOME}/github/DeepEP
 DEV_DUMP=/tmp/deepep_comm_barrier_dev.txt
 "$ROOT/scripts/lab.sh" exec "nvcc -arch=sm_90a -O3 -std=c++17 --expt-relaxed-constexpr -w \
   -I$DEP/deep_ep/include -I/usr/local/cuda/include/cccl \

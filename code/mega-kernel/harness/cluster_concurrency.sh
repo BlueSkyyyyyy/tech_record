@@ -4,7 +4,7 @@
 # 计时项 try_run 重试（最多 5 次）；边界项 probe 每配置起 3 个独立进程各 launch 1 次、报 ok/3。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/cluster_concurrency.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/cluster_concurrency.cu
 BIN=/tmp/cluster_concurrency
 nvcc -O3 -arch=sm_90a "$SRC" -o "$BIN" || exit 1
 

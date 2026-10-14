@@ -14,7 +14,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/harness/exp_deepep_ep_test.py"
-DEEPEP=~/github/DeepEP
+DEEPEP=${HOME}/github/DeepEP
 
 echo "DeepEP EP dispatch/combine 端到端验收测试即正确性规范 —— H100 真机（测试侧架构无关部分）"
 "$ROOT/scripts/lab.sh" exec "nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1"

@@ -13,10 +13,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DG=~/github/DeepGEMM
+DG=${HOME}/github/DeepGEMM
 TORCH=/usr/local/lib/python3.12/dist-packages/torch
 PYSITE=/usr/local/lib/python3.12/dist-packages
-SRC=~/proj/tech_record/code/mega-moe/src/mma_kind_swizzle.cu
+SRC=${HOME}/proj/tech_record/code/mega-moe/src/mma_kind_swizzle.cu
 
 echo "== 环境坐标 =="
 ( cd $DG && git -c safe.directory='*' log --oneline -1 )
@@ -46,7 +46,7 @@ echo
 echo "== Python 公开布局别名层（deep_gemm/utils/layout.py）=="
 python3 - <<'PY'
 import ast
-path = "~/github/DeepGEMM/deep_gemm/utils/layout.py"
+path = "${HOME}/github/DeepGEMM/deep_gemm/utils/layout.py"
 tree = ast.parse(open(path).read())
 imported, aliases = [], {}
 for node in ast.walk(tree):

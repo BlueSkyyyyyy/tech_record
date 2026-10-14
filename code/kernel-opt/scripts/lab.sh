@@ -25,7 +25,7 @@ up() {
       --gpus all --ipc=host \
       --ulimit memlock=-1 --ulimit stack=67108864 \
       --cap-add SYS_ADMIN --cap-add SYS_PTRACE \
-      -v /ssd:/ssd -v ~:~ \
+      -v /ssd:/ssd -v ${HOME}:${HOME} \
       -w "$REPO/code/kernel-opt" \
       "$IMAGE" sleep infinity >/dev/null
   fi

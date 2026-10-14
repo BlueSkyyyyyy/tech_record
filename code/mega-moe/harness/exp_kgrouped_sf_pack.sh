@@ -10,12 +10,12 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/kgrouped_sf_pack.cu"
-INC="~/github/DeepGEMM/deep_gemm/include"
+INC="${HOME}/github/DeepGEMM/deep_gemm/include"
 DEEPG="$INC/deep_gemm/impls/smxx_layout.cuh"
 
 CMD=$(cat <<'EOS'
 set -e
-INC=~/github/DeepGEMM/deep_gemm/include
+INC=${HOME}/github/DeepGEMM/deep_gemm/include
 DEEPG=$INC/deep_gemm/impls/smxx_layout.cuh
 GEN=/tmp/kgrouped_pack_kernel.inc
 {

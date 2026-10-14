@@ -12,16 +12,16 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/ptx_primitives.cu"
-INC="~/github/DeepGEMM/deep_gemm/include"
+INC="${HOME}/github/DeepGEMM/deep_gemm/include"
 
 CMD=$(cat <<'EOS'
 set -e
-INC=~/github/DeepGEMM/deep_gemm/include
+INC=${HOME}/github/DeepGEMM/deep_gemm/include
 echo "== 真实头文件 sha256 =="
 sha256sum $INC/deep_gemm/ptx/ld_st.cuh $INC/deep_gemm/ptx/utils.cuh $INC/deep_gemm/common/ring_pipeline.cuh
 nvcc -arch=sm_90 -O3 -std=c++17 --expt-relaxed-constexpr \
   -I"$INC" -I"$INC/cutlass" -I"$INC/cute" \
-  '~/proj/tech_record/code/mega-moe/src/ptx_primitives.cu' -o /tmp/ptx_primitives
+  '${HOME}/proj/tech_record/code/mega-moe/src/ptx_primitives.cu' -o /tmp/ptx_primitives
 nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1
 /tmp/ptx_primitives > /tmp/ptx_prim.raw.txt
 cat /tmp/ptx_prim.raw.txt

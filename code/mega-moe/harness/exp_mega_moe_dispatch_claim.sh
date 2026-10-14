@@ -10,8 +10,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DG=~/github/DeepGEMM
-SRC=~/proj/tech_record/code/mega-moe/src/mega_moe_dispatch_claim.cu
+DG=${HOME}/github/DeepGEMM
+SRC=${HOME}/proj/tech_record/code/mega-moe/src/mega_moe_dispatch_claim.cu
 
 echo "== 环境坐标 =="
 ( cd $DG && git -c safe.directory='*' log --oneline -1 )
@@ -28,7 +28,7 @@ echo
 
 echo
 echo "== 独立 host/Python oracle（不做 lane/ballot 模拟）=="
-cd ~/proj/tech_record/code/mega-moe/harness
+cd ${HOME}/proj/tech_record/code/mega-moe/harness
 python3 -u exp_mega_moe_dispatch_claim.py
 EOS
 )

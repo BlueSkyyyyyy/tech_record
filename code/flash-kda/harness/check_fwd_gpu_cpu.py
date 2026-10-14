@@ -20,12 +20,13 @@ Usage (inside kernel_lab; CPU-only works, GPU parts skipped):
     python ~/proj/tech_record/code/flash-kda/harness/check_fwd_gpu_cpu.py
 """
 
+import os
 import math
 import sys
 
 import torch
 
-SRC = "~/proj/tech_record/code/flash-kda/src"
+SRC = os.path.expanduser("~/proj/tech_record/code/flash-kda/src")
 sys.path.insert(0, SRC)
 import kda_ref  # noqa: E402
 from kda_bwd_ref import kda_chunked_backward, kda_token_backward  # noqa: E402

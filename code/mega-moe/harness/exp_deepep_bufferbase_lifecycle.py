@@ -22,7 +22,7 @@ import tempfile
 import textwrap
 import traceback
 
-DEEPEP = os.environ.get("DEEPEP_ROOT", "~/github/DeepEP")
+DEEPEP = os.environ.get("DEEPEP_ROOT", os.path.expanduser("~/github/DeepEP"))
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CXX_SRC = os.path.join(ROOT, "src", "bufferbase_lifecycle.cpp")
 

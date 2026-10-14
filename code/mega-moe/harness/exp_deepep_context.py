@@ -17,7 +17,7 @@ import os
 import re
 import sys
 
-DEEPEP = os.environ.get("DEEPEP_ROOT", "~/github/DeepEP")
+DEEPEP = os.environ.get("DEEPEP_ROOT", os.path.expanduser("~/github/DeepEP"))
 CUDA_OUT = os.environ.get("CUDA_ARITH_OUT", "/tmp/deepep_context_arith.txt")
 
 PASS = 0

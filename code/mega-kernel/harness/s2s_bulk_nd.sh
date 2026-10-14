@@ -10,7 +10,7 @@
 # 目标卡 H100 / sm90a。每配置单独进程（cluster launch failure 会 sticky 污染 CUDA context）。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/s2s_bulk_nd.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/s2s_bulk_nd.cu
 BIN=/tmp/s2s_bulk_nd
 nvcc -O3 -arch=sm_90a "$SRC" -o "$BIN" || exit 1
 

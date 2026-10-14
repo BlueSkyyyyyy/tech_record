@@ -4,7 +4,7 @@
 # 必须隔离。用 DEV 选择空闲 device。
 set -u
 DEV=${DEV:-1}
-SRC=~/proj/tech_record/code/mega-kernel/src/cluster_dsm.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/cluster_dsm.cu
 BIN=/tmp/cluster_dsm
 nvcc -O3 -arch=sm_90 "$SRC" -o "$BIN" || exit 1
 run(){ echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN $*"; CUDA_VISIBLE_DEVICES="$DEV" "$BIN" "$@"; }

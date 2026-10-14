@@ -21,7 +21,7 @@ import subprocess
 import sys
 import textwrap
 
-DEP = '~/github/DeepEP'
+DEP = os.path.expanduser('~/github/DeepEP')
 if not os.path.isdir(DEP):
     DEP = os.path.expanduser('~/github/DeepEP')
 PASS = 0

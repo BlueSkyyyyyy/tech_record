@@ -13,8 +13,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-INC=~/github/DeepGEMM/deep_gemm/include
-SRC=~/proj/tech_record/code/mega-moe/src/probe_clock64.cu
+INC=${HOME}/github/DeepGEMM/deep_gemm/include
+SRC=${HOME}/proj/tech_record/code/mega-moe/src/probe_clock64.cu
 echo "== 真实头文件 sha256 =="
 sha256sum $INC/deep_gemm/common/probe.cuh
 echo

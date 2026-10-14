@@ -19,7 +19,7 @@ import pathlib
 import re
 import sys
 
-REPO = pathlib.Path('~/github/DeepGEMM')
+REPO = pathlib.Path(os.path.expanduser('~/github/DeepGEMM'))
 SCRIPTS = REPO / 'scripts'
 GEN_DIR = pathlib.Path(os.environ.get('MEGAMOE_GEN', '/tmp/megamoe_prof'))
 

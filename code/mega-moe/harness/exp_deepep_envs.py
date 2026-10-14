@@ -25,10 +25,10 @@ import sys
 
 import torch  # noqa: F401  —— 让 torch 把它的 libnccl 载入 /proc/self/maps，忠实复现 check_nccl_so 场景
 
-DEP = os.environ.get('DEEPEP_ROOT', '~/github/DeepEP')
+DEP = os.environ.get('DEEPEP_ROOT', os.path.expanduser('~/github/DeepEP'))
 if not os.path.isdir(DEP):
     DEP = os.path.expanduser('~/github/DeepEP')
-DEG = os.environ.get('DEEPGEMM_ROOT', '~/github/DeepGEMM')
+DEG = os.environ.get('DEEPGEMM_ROOT', os.path.expanduser('~/github/DeepGEMM'))
 if not os.path.isdir(DEG):
     DEG = os.path.expanduser('~/github/DeepGEMM')
 

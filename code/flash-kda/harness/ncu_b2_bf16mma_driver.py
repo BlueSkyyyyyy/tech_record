@@ -4,13 +4,14 @@ Kept dependency-free (torch + ctypes only) so the profile holds exactly one kern
 
     python .../ncu_b2_bf16mma_driver.py --mode base|bf16|bmm --shape b8t2048h8 --reps 3
 """
+import os
 import argparse
 import ctypes
 import sys
 
 import torch
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
 sys.path.insert(0, HARNESS)
 
 SHAPES = {"b8t2048h8": (8, 2048, 8), "t512h4": (1, 512, 4)}

@@ -19,7 +19,7 @@ import importlib.util
 
 import torch
 
-DEEPGEMM_DIR = os.environ.get('DEEPGEMM_DIR', '~/github/DeepGEMM')
+DEEPGEMM_DIR = os.environ.get('DEEPGEMM_DIR', os.path.expanduser('~/github/DeepGEMM'))
 sys.path.insert(0, DEEPGEMM_DIR)
 BIN = os.environ.get('SWIGLU_BIN', '/tmp/swiglu_mega_epilogue')
 

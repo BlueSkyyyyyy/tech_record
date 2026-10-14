@@ -14,7 +14,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/harness/exp_deepep_pp_engram_test.py"
-DEEPEP=~/github/DeepEP
+DEEPEP=${HOME}/github/DeepEP
 
 echo "DeepEP PP send/recv 与 Engram fetch 的验收测试即正确性规范 —— H100 真机（测试侧）"
 "$ROOT/scripts/lab.sh" exec "nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1"

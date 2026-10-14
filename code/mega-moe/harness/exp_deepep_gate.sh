@@ -8,5 +8,5 @@
 #           ~/github/DeepEP@93eb6eb tests/utils/test_gate.py:7-53
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEP=~/github/DeepEP
+DEP=${HOME}/github/DeepEP
 "$ROOT/scripts/lab.sh" exec "cd '$ROOT/harness' && nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader | head -1 && TORCHDYNAMO_DISABLE=1 DEEPEP_ROOT='$DEP' python exp_deepep_gate.py"

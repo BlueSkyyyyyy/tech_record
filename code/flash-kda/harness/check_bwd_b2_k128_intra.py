@@ -46,7 +46,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
 sys.path.insert(0, HARNESS)
 
 from check_bwd_dqkg_kernel import make_inputs as dqkg_make_inputs        # noqa: E402
@@ -113,7 +113,7 @@ def ptxas_info(txt):
 
 def orig_source():
     out = "/tmp/b2_k128_intra_orig.cu"
-    r = subprocess.run(["git", "-C", "~/proj/tech_record", "show",
+    r = subprocess.run(["git", "-C", os.path.expanduser("~/proj/tech_record"), "show",
                         "HEAD:code/flash-kda/harness/b3_intra_probe.cu"],
                        capture_output=True, text=True)
     if r.returncode != 0:

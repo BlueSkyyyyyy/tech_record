@@ -7,7 +7,7 @@ set -u
 DEV=${DEV:-3}
 MB=${MB:-256}
 ROUNDS=${ROUNDS:-64}
-SRC=~/proj/tech_record/code/mega-kernel/src/green_ctx_sched.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/green_ctx_sched.cu
 BIN=/tmp/green_ctx_sched
 nvcc -O2 -arch=sm_90 "$SRC" -o "$BIN" || exit 1
 echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN $MB $ROUNDS"

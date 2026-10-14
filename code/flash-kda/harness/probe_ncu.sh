@@ -6,12 +6,12 @@
 # names are enormous, so we strip them and rely on the section headers).
 #
 # Usage (inside kernel_lab):
-#   bash ~/proj/tech_record/code/flash-kda/harness/probe_ncu.sh \
-#       > ~/proj/tech_record/code/flash-kda/harness/probe_ncu.out.txt 2>&1
+#   bash ${HOME}/proj/tech_record/code/flash-kda/harness/probe_ncu.sh \
+#       > ${HOME}/proj/tech_record/code/flash-kda/harness/probe_ncu.out.txt 2>&1
 
 set -uo pipefail
 
-DRIVER=~/proj/tech_record/code/flash-kda/harness/ncu_driver.py
+DRIVER=${HOME}/proj/tech_record/code/flash-kda/harness/ncu_driver.py
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}
 
 SECTIONS="--section SpeedOfLight --section Occupancy --section SchedulerStats \
@@ -52,7 +52,7 @@ run() {  # label B T H kernel_regex
   echo "################################################################################"
   echo "# ${label}  B=${B} T=${T} H=${H}  kernel=${k}"
   echo "################################################################################"
-  ( cd ~/github/FlashKDA && \
+  ( cd ${HOME}/github/FlashKDA && \
     ncu -k "regex:${k}" -c 1 --launch-skip 3 $SECTIONS --metrics "$METRICS" \
         python "$DRIVER" --B "$B" --T "$T" --H "$H" 2>&1 ) | tag | grep -vE '^DONE'
 }

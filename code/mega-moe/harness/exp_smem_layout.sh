@@ -10,8 +10,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DG=~/github/DeepGEMM
-SRC=~/proj/tech_record/code/mega-moe/src/smem_layout.cu
+DG=${HOME}/github/DeepGEMM
+SRC=${HOME}/proj/tech_record/code/mega-moe/src/smem_layout.cu
 
 echo "== 环境坐标 =="
 ( cd $DG && git -c safe.directory='*' log --oneline -1 )

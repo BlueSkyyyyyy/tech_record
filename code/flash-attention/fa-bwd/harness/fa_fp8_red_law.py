@@ -20,7 +20,7 @@ import sys
 
 SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "src", "fp8")
 BIN = "fa_bwd_fp8_main.out"
-OUTBASE = "~/proj/output/fa-bwd"
+OUTBASE = os.path.expanduser("~/proj/output/fa-bwd")
 # (case, H, Hkv, causal)
 CASES = [
     ("b1_s1024_h32_d128_causal_fp8", 32, 32, True),

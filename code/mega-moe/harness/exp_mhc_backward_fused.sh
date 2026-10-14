@@ -10,5 +10,5 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/mhc_backward_fused.cu"
 PY="$ROOT/harness/exp_mhc_backward_fused.py"
-OUT=~/tmp/mhc_bwd_fused
+OUT=${HOME}/tmp/mhc_bwd_fused
 "$ROOT/scripts/lab.sh" exec "nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1 && echo '--- CUDA (sm90) ---' && nvcc -arch=sm_90 -O3 -std=c++17 -Xptxas -v '$SRC' -o $OUT 2>&1 | grep -E 'Used|stack frame|spill' && echo '--- RUN CU ---' && $OUT && echo '--- PYTHON ---' && python3 '$PY'"

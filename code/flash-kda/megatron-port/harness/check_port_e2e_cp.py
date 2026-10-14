@@ -52,7 +52,7 @@ import torch
 import torch.nn.functional as F
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_MEGA_DEFAULT = "~/proj/Megatron-LM"
+_MEGA_DEFAULT = os.path.expanduser("~/proj/Megatron-LM")
 
 
 # ---------------------------------------------------------------------------------------

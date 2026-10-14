@@ -5,7 +5,7 @@
 # csrc/runtime/runtime.hpp、third-party/deep_jit/.../backend/cuda/kernel.hpp、tests/test_mega_mhc.py。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DG=~/github/DeepGEMM
+DG=${HOME}/github/DeepGEMM
 CMD=$(cat <<EOS
 set -e
 echo "== 环境坐标 =="

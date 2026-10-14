@@ -15,13 +15,13 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DJ=~/github/DeepGEMM/third-party/deep_jit/include
-MEGA=~/proj/tech_record/code/mega-moe
+DJ=${HOME}/github/DeepGEMM/third-party/deep_jit/include
+MEGA=${HOME}/proj/tech_record/code/mega-moe
 
 echo "== 真实头文件 sha256 =="
 sha256sum $DJ/deep_jit/backend/cuda/options.hpp $DJ/deep_jit/backend/cuda/kernel.hpp \
           $DJ/deep_jit/runtime/runtime.hpp \
-          ~/github/DeepGEMM/csrc/apis/config.hpp
+          ${HOME}/github/DeepGEMM/csrc/apis/config.hpp
 nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1
 nvcc --version | tail -1
 

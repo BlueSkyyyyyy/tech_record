@@ -11,7 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/mega_moe_shared_schedule.cu"
 PY="$ROOT/harness/exp_mega_moe_shared_expert.py"
-DGEMM=~/github/DeepGEMM
+DGEMM=${HOME}/github/DeepGEMM
 "$ROOT/scripts/lab.sh" exec "nvcc -arch=sm_90a -O3 -std=c++17 --expt-relaxed-constexpr -w \
   -diag-suppress 20012 -diag-suppress 2388 -diag-suppress 2389 \
   -I$DGEMM/deep_gemm/include -I$DGEMM/third-party/cutlass/include \

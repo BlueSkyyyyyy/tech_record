@@ -12,11 +12,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CMD=$(cat <<'EOS'
 set -e
-DEP=~/github/DeepEP
-DG=~/github/DeepGEMM
+DEP=${HOME}/github/DeepEP
+DG=${HOME}/github/DeepGEMM
 TORCH=/usr/local/lib/python3.12/dist-packages/torch
 PYSITE=/usr/local/lib/python3.12/dist-packages
-SRC=~/proj/tech_record/code/mega-moe/src/lazy_driver_compat.cu
+SRC=${HOME}/proj/tech_record/code/mega-moe/src/lazy_driver_compat.cu
 
 echo "== 环境坐标 =="
 ( cd $DEP && git -c safe.directory='*' log --oneline -1 )

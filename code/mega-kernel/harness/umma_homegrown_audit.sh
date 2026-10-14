@@ -7,7 +7,7 @@
 #    MPK 侧 tcgen05_mma/commit 消费者与私有 ptx 副本。
 # 纯 host 侧文本审计，不 launch kernel（SM100 本体在目标卡 H100/sm90 不可执行）。
 set -u
-DG=${DG:-~/github/DeepGEMM}
+DG=${DG:-${HOME}/github/DeepGEMM}
 MPK=${MPK:-/ssd/mirage_mpk_build}
 DGHOME="$DG/deep_gemm/include/deep_gemm/ptx/tcgen05.cuh"
 DGCUT="$MPK/deps/cutlass/include/cute/arch/mma_sm100_umma.hpp"
@@ -17,7 +17,7 @@ BARRIER="$MPK/deps/cutlass/include/cutlass/arch/barrier.h"
 MPKUTILS="$MPK/include/mirage/persistent_kernel/tasks/blackwell/sm100_utils.cuh"
 MPKFP8="$MPK/include/mirage/persistent_kernel/tasks/blackwell/linear_fp8_sm100_sm100_utils.cuh"
 MPKDIR="$MPK/include/mirage/persistent_kernel/tasks/blackwell"
-SRC=~/proj/tech_record/code/mega-kernel/src/umma_homegrown_audit.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/umma_homegrown_audit.cu
 BIN=/tmp/umma_homegrown_audit
 
 g++ -x c++ -std=c++17 -O2 "$SRC" -o "$BIN" || exit 1

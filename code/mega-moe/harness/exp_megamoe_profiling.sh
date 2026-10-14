@@ -7,7 +7,7 @@
 #   scripts/generate_pyi.py、stubs/_C.pyi、csrc/indexing/main.cu、CMakeLists.txt
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DG=~/github/DeepGEMM
+DG=${HOME}/github/DeepGEMM
 
 "$ROOT/scripts/lab.sh" exec "
 set -e
@@ -15,7 +15,7 @@ GEN=/tmp/megamoe_prof
 rm -rf \$GEN && mkdir -p \$GEN/work \$GEN/cap
 DG=$DG
 echo '== 真实源码 sha256 / 规模 =='
-sha256sum \$DG/scripts/run_ncu_mega_moe.sh \$DG/scripts/quick_plot_pm.py \$DG/scripts/generate_pyi.py \$DG/stubs/_C.pyi \$DG/csrc/indexing/main.cu | sed 's#~/github/DeepGEMM/##'
+sha256sum \$DG/scripts/run_ncu_mega_moe.sh \$DG/scripts/quick_plot_pm.py \$DG/scripts/generate_pyi.py \$DG/stubs/_C.pyi \$DG/csrc/indexing/main.cu | sed 's#${HOME}/github/DeepGEMM/##'
 wc -l \$DG/scripts/run_ncu_mega_moe.sh \$DG/scripts/quick_plot_pm.py \$DG/scripts/generate_pyi.py \$DG/tests/test_mega_moe.py \$DG/stubs/_C.pyi \$DG/csrc/indexing/main.cu
 nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader | head -1
 

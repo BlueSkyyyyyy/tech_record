@@ -7,7 +7,7 @@ import os
 from torch.utils.cpp_extension import load_inline
 
 BASE = "/tmp/kda_occ/src_cond/csrc"
-CUTLASS = "~/github/FlashKDA/cutlass"
+CUTLASS = os.path.expanduser("~/github/FlashKDA/cutlass")
 
 cpp = "std::vector<long> sizes();"
 cu = r"""

@@ -5,7 +5,7 @@
 # 无需 SM100 硬件（目标卡 H100/sm90 也没有）。快照 mirage f9eb70c。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/sf_segments_probe.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/sf_segments_probe.cu
 BIN=/tmp/sf_segments_probe
 nvcc -std=c++17 -O2 -arch=sm_90a "$SRC" -o "$BIN" || exit 1
 echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN"

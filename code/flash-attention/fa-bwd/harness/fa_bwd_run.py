@@ -60,7 +60,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent          # code/flash-attention/fa-bwd
-OUT_ROOT = Path("~/proj/output/fa-bwd")
+OUT_ROOT = Path(os.path.expanduser("~/proj/output/fa-bwd"))
 RUN_SH = ROOT / "scripts" / "run.sh"
 CONTAINER = os.environ.get("LAB_NAME", "kernel_lab")
 

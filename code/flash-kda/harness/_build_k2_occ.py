@@ -26,7 +26,7 @@ import os
 import re
 import shutil
 
-UP = "~/github/FlashKDA"
+UP = os.path.expanduser("~/github/FlashKDA")
 BASE = "/tmp/kda_occ"
 
 

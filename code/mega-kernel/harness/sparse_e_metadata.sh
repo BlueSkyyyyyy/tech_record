@@ -8,7 +8,7 @@ set -u
 DEV=${DEV:-3}
 CUTLASS=${CUTLASS:-/ssd/mirage_mpk_build/deps/cutlass}
 MPK=${MPK:-/ssd/mirage_mpk_build}
-SRC=~/proj/tech_record/code/mega-kernel/src/sparse_e_metadata.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/sparse_e_metadata.cu
 BIN=/tmp/sparse_e_metadata
 nvcc -std=c++17 -O2 -arch=sm_90a -I"$CUTLASS/include" "$SRC" -o "$BIN" || exit 1
 echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN"
@@ -27,6 +27,6 @@ printf 'StructuredSparseCompressor selector arms          : %s\n' \
 printf 'MPK (f9eb70c) refs Sm1xx/Sm90GemmSparseConfig    : %s\n' \
   "$(grep -rn 'GemmSparseConfig\|StructuredSparseCompressor' "$MPK/include" "$MPK/src" 2>/dev/null | wc -l)"
 printf 'DeepGEMM (057ca59) refs GemmSparseConfig/compressor: %s\n' \
-  "$(grep -rln 'GemmSparseConfig\|StructuredSparseCompressor' ~/github/DeepGEMM/csrc 2>/dev/null | wc -l)"
+  "$(grep -rln 'GemmSparseConfig\|StructuredSparseCompressor' ${HOME}/github/DeepGEMM/csrc 2>/dev/null | wc -l)"
 printf 'DeepGEMM "sparse" files (block-sparse, NOT 2:4)  : %s\n' \
-  "$(grep -rln -i 'sparse' ~/github/DeepGEMM/csrc 2>/dev/null | wc -l)"
+  "$(grep -rln -i 'sparse' ${HOME}/github/DeepGEMM/csrc 2>/dev/null | wc -l)"

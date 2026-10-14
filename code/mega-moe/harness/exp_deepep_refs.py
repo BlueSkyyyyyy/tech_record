@@ -26,7 +26,7 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-DEP = os.environ.get('DEEPEP_ROOT', '~/github/DeepEP')
+DEP = os.environ.get('DEEPEP_ROOT', os.path.expanduser('~/github/DeepEP'))
 if not os.path.isdir(DEP):
     DEP = os.path.expanduser('~/github/DeepEP')
 WORLD = int(os.environ.get('EP_REFS_WORLD', '8'))

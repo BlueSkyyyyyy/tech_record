@@ -8,7 +8,7 @@
 #   §85C 方差分解：进程内样本 std vs 跨进程 median std；§85D 设备间一致性；§85E 逐进程显著性计数。
 # 目标卡 H100 / sm90a。REPS / S / DEVICES 可用环境变量覆盖。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_sm_tax_T.cu
 PY=$DIR/harness/hetero_sm_tax_T_xproc.py
 BIN=/tmp/hetero_sm_tax_T_xproc

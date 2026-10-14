@@ -9,7 +9,7 @@ DEV=${DEV:-3}
 MB=${MB:-256}
 VPASS=${VPASS:-20}
 ROUNDS=${ROUNDS:-40000}
-SRC=~/proj/tech_record/code/mega-kernel/src/mps_isolation.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/mps_isolation.cu
 BIN=/tmp/mps_isolation
 nvcc -O2 -arch=sm_90 "$SRC" -o "$BIN" || exit 1
 

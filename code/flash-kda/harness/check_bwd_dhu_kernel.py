@@ -29,12 +29,13 @@ Notation (docs/05 §7, docs/06 Part A mapping, all per chunk `c`, `t` = intra-ch
 Run inside `kernel_lab`:
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_dhu_kernel.py
 """
+import os
 import math
 import sys
 
 import torch
 
-sys.path.insert(0, "~/proj/tech_record/code/flash-kda/src")
+sys.path.insert(0, os.path.expanduser("~/proj/tech_record/code/flash-kda/src"))
 
 RCP_LN2 = 1.4426950408889634
 

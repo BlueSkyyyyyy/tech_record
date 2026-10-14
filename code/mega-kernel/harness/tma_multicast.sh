@@ -4,7 +4,7 @@
 # 用 DEV 选择空闲 device。
 set -u
 DEV=${DEV:-3}
-SRC=~/proj/tech_record/code/mega-kernel/src/tma_multicast.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/tma_multicast.cu
 BIN=/tmp/tma_multicast
 nvcc -O3 -arch=sm_90a "$SRC" -o "$BIN" -lcuda || exit 1
 run(){ echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN $*"; CUDA_VISIBLE_DEVICES="$DEV" "$BIN" "$@"; }

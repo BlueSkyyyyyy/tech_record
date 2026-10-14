@@ -5,13 +5,14 @@ launches exactly one kernel so the profile holds a single launch.
 
     python .../ncu_b2_bf16mma_tma_driver.py --mode bmm64 --shape b8t2048h8 --reps 1
 """
+import os
 import argparse
 import ctypes
 import sys
 
 import torch
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
 sys.path.insert(0, HARNESS)
 
 SHAPES = {"b8t2048h8": (8, 2048, 8), "t512h4": (1, 512, 4), "b2t1024h8": (2, 1024, 8)}

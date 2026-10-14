@@ -9,8 +9,8 @@
 set -u
 DEV=${DEV:-3}
 MPK=${MPK:-/ssd/mirage_mpk_build}
-DEEPGEMM=${DEEPGEMM:-~/github/DeepGEMM}
-SRC=~/proj/tech_record/code/mega-kernel/src/fp8_scheduler_order.cu
+DEEPGEMM=${DEEPGEMM:-${HOME}/github/DeepGEMM}
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/fp8_scheduler_order.cu
 BIN=/tmp/fp8_scheduler_order
 nvcc -std=c++17 -O2 -arch=sm_90a "$SRC" -o "$BIN" || exit 1
 echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN"

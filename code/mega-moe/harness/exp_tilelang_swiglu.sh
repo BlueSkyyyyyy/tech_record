@@ -8,7 +8,7 @@
 #   bash harness/exp_tilelang_swiglu.sh > harness/exp_tilelang_swiglu.out.txt
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DG=~/github/DeepGEMM
+DG=${HOME}/github/DeepGEMM
 INC="$DG/deep_gemm/include"
 
 CMD=$(cat <<EOS

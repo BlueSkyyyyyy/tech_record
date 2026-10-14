@@ -7,7 +7,7 @@
 #   的『加 warp 摊』）能否随 Wsm↑ 收回，及 §73「税是全局」在高 warp 下是否仍成立。
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_sm_warps.cu
 BIN=/tmp/hetero_sm_warps
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

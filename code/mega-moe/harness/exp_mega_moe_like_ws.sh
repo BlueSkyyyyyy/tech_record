@@ -15,7 +15,7 @@
 # 本机 8 卡共享，GPU0 常被其它自驱任务占满；本脚本用 -DWORLD=7 + CUDA_VISIBLE_DEVICES=1..7 避开它。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DG=~/github/DeepGEMM
+DG=${HOME}/github/DeepGEMM
 INC=$DG/deep_gemm/include
 
 echo "Mega-MoE-like 单 kernel warp specialization 原型（H100 真机，7×H100 避开被占用的 GPU0）"

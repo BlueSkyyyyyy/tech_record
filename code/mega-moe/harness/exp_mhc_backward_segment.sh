@@ -12,8 +12,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/mhc_backward_segment.cu"
 PY="$ROOT/harness/exp_mhc_backward_segment.py"
-INC=~/github/DeepGEMM/deep_gemm/include
-OUTDIR=~/tmp
+INC=${HOME}/github/DeepGEMM/deep_gemm/include
+OUTDIR=${HOME}/tmp
 BIN=$OUTDIR/mhc_backward_segment
 
 "$ROOT/scripts/lab.sh" exec "

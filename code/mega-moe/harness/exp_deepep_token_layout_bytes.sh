@@ -9,7 +9,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/deepep_token_layout_bytes.cu"
-DEP=~/github/DeepEP
+DEP=${HOME}/github/DeepEP
 "$ROOT/scripts/lab.sh" exec "nvcc -gencode arch=compute_90a,code=sm_90a -O3 -std=c++17 --expt-relaxed-constexpr -w \
   -I$DEP/deep_ep/include -I/usr/local/cuda/include/cccl \
   '$SRC' -o /tmp/deepep_token_layout_bytes \

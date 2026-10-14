@@ -13,7 +13,7 @@
 # 计时项取 min-of-20、报 ok/20；边界/可行性用单发/重复发 probe。
 set -u
 DEV=${DEV:-6}
-SRC=~/proj/tech_record/code/mega-kernel/src/cluster_concurrency.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/cluster_concurrency.cu
 BIN=/tmp/cluster_mbar_warp
 nvcc -O3 -arch=sm_90a "$SRC" -o "$BIN" || exit 1
 

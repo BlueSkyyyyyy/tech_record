@@ -4,13 +4,13 @@
 #    核对四份 mxf8f6f4.block_scale wrapper 的逐字相等性。
 #  - grep audit：DeepGEMM 自建层的 9 struct 调用者、elect_one_sync 守卫、MPK 侧各层消费者。
 set -u
-DG=${DG:-~/github/DeepGEMM}
+DG=${DG:-${HOME}/github/DeepGEMM}
 MPK=${MPK:-/ssd/mirage_mpk_build}
 DGHOME="$DG/deep_gemm/include/deep_gemm/ptx/tcgen05.cuh"
 DGCUT="$DG/deep_gemm/include/cute/arch/mma_sm100_umma.hpp"
 MPKDIR="$MPK/include/mirage/persistent_kernel/tasks/blackwell"
 MPKCUT="$MPK/deps/cutlass/include/cute/arch/mma_sm100_umma.hpp"
-SRC=~/proj/tech_record/code/mega-kernel/src/umma_paths_audit.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/umma_paths_audit.cu
 BIN=/tmp/umma_paths_audit
 
 g++ -x c++ -std=c++17 -O2 "$SRC" -o "$BIN" || exit 1

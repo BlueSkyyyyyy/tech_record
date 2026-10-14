@@ -31,7 +31,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-OUT_ROOT = Path("~/proj/output/fa-bwd")
+OUT_ROOT = Path(os.path.expanduser("~/proj/output/fa-bwd"))
 DEV = "cuda"
 DTYPES = {"fp16": torch.float16, "bf16": torch.bfloat16, "fp8": torch.bfloat16}
 

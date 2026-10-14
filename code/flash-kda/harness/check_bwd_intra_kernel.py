@@ -35,7 +35,7 @@ os.environ.setdefault("FLA_DISABLE_BACKEND_DISPATCH", "1")
 
 import torch
 
-sys.path.insert(0, "~/proj/tech_record/code/flash-kda/src")
+sys.path.insert(0, os.path.expanduser("~/proj/tech_record/code/flash-kda/src"))
 
 
 def stats(name, a, b):

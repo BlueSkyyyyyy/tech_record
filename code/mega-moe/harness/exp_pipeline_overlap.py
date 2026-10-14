@@ -54,7 +54,7 @@ M_LIST = (1, 2, 4, 8)
 
 def _find_deepgemm_dir():
     for p in (os.environ.get('DEEPGEMM_DIR'), os.path.expanduser('~/github/DeepGEMM'),
-              '~/github/DeepGEMM'):
+              os.path.expanduser('~/github/DeepGEMM')):
         if p and os.path.isdir(os.path.join(p, 'tests')):
             return p
     raise RuntimeError('DeepGEMM source dir not found')

@@ -32,6 +32,10 @@ static/katex/                   # 自托管 KaTeX，勿删
 6. **博客内联渲染 `code/` 下的文档**：`layouts/shortcodes/fa_include.html` 用 `readFile` + `markdownify` 把 `code/.../docs/*.md` 实时渲染进文章，docs 更新后博客自动同步、无需复制。注意：**`{{< relref >}}` 必须写在 markdown 链接里**（`[文字]({{< relref "slug" >}})`），裸用只会把 URL 当纯文本输出；且 `readFile`/`markdownify` 内容里的 `{{< >}}` 不会被二次处理。
 5. **frontmatter 的裸 `date: YYYY-MM-DD` 会被解析成当天 00:00 UTC**（= 北京时间 08:00）。如果在**北京时间 08:00 之前**构建/部署，这个日期就落在「未来」，Hugo 会**静默跳过该页**（不打 ERROR，`hugo list all` 也能看到它，但 `public/` 里没有、线上 404）。凌晨发文章要写带时区的时间，例如 `date: 2026-09-22T01:00:00+08:00`。排查方法：`ls public/posts/<slug>/` 是否存在。
 
+6. **禁止在仓库文件里写宿主绝对路径**（`~`、`~`）——公开仓库会泄露本机用户名。
+   写法：`.py` 用 `os.path.expanduser("~/...")`，`.sh` 用 `${HOME}/...`，文档/注释/`.cu` 用 `~/...`；
+   实验原始输出（`*.out` / `*.txt`）已被 `.gitignore` 忽略，**不要 `git add -f`** 强行入库。
+
 ## 内容组织惯例
 
 - 系列文章用统一 slug 前缀（如 `flash-attention-01-theory` … `-05-dsl-zoo`），篇间用 `{{</* relref */>}}` 互链，第一篇开头放全系列目录。

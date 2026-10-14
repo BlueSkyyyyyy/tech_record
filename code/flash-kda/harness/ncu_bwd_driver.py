@@ -28,7 +28,7 @@ os.environ.setdefault("FLA_DISABLE_BACKEND_DISPATCH", "1")
 import torch
 
 D = 128
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
 import sys  # noqa: E402
 
 sys.path.insert(0, HARNESS)

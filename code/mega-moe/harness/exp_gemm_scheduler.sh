@@ -17,7 +17,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/gemm_scheduler.cu"
-DGEMM=~/github/DeepGEMM
+DGEMM=${HOME}/github/DeepGEMM
 "$ROOT/scripts/lab.sh" exec "set -e
   echo '-- 环境坐标 --'
   ( cd $DGEMM && git -c safe.directory='*' log --oneline -1 )

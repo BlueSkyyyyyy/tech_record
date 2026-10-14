@@ -12,8 +12,8 @@ set -u
 DEV=${DEV:-3}
 MPK=${MPK:-/ssd/mirage_mpk_build}
 CUTLASS=${CUTLASS:-$MPK/deps/cutlass}
-DEEPGEMM=${DEEPGEMM:-~/github/DeepGEMM}
-SRC=~/proj/tech_record/code/mega-kernel/src/umma_desc_paths.cu
+DEEPGEMM=${DEEPGEMM:-${HOME}/github/DeepGEMM}
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/umma_desc_paths.cu
 BIN=/tmp/umma_desc_paths
 nvcc -std=c++17 -O2 -arch=sm_90a -I"$CUTLASS/include" "$SRC" -o "$BIN" || exit 1
 echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN"

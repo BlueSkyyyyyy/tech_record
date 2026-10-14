@@ -6,7 +6,7 @@
 #   再加 SMEM-padding 作独立占用率口径交叉验证，以及 cp.async 载体的免疫性对照。
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/reg_occ_decouple.cu
 BIN=/tmp/reg_occ_decouple
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \

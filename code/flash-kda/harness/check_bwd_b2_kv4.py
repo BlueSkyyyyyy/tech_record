@@ -30,7 +30,7 @@ import torch
 
 torch.backends.cuda.matmul.allow_tf32 = False
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
 sys.path.insert(0, HARNESS)
 from ncu_b2_kv2_driver import build_inputs  # noqa: E402
 from check_bwd_b2_prod import run_prod       # noqa: E402

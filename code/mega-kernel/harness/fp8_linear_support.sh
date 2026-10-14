@@ -13,7 +13,7 @@ set -u
 DEV=${DEV:-3}
 MPK=${MPK:-/ssd/mirage_mpk_build}
 CUTLASS=${CUTLASS:-$MPK/deps/cutlass}
-SRC=~/proj/tech_record/code/mega-kernel/src/fp8_linear_support.cu
+SRC=${HOME}/proj/tech_record/code/mega-kernel/src/fp8_linear_support.cu
 BIN=/tmp/fp8_linear_support
 nvcc -std=c++17 -O2 -arch=sm_90a -I"$CUTLASS/include" "$SRC" -o "$BIN" || exit 1
 echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN"

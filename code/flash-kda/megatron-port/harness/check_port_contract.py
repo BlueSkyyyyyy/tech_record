@@ -37,7 +37,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_HERE, "..", "src"))
 from kda_ref import kda_gate, kda_l2norm, kda_chunked_fwd  # noqa: E402
 
-MEGATRON_ROOT = os.environ.get("MEGATRON_ROOT", "~/proj/Megatron-LM")
+MEGATRON_ROOT = os.environ.get("MEGATRON_ROOT", os.path.expanduser("~/proj/Megatron-LM"))
 KDA_PY = os.path.join(MEGATRON_ROOT, "megatron/core/ssm/gated_delta_net/kda.py")
 COMMON_PY = os.path.join(MEGATRON_ROOT, "megatron/core/ssm/gated_delta_net/common.py")
 GDN_PY = os.path.join(MEGATRON_ROOT, "megatron/core/ssm/gated_delta_net/gdn.py")

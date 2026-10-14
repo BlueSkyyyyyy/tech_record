@@ -19,7 +19,7 @@ os.environ.setdefault("FLA_DISABLE_BACKEND_DISPATCH", "1")
 import torch                                                              # noqa: E402
 
 D = 128
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
 sys.path.insert(0, HARNESS)
 
 from check_bwd_b1_reg import build, load, run, REG_SO, BASE_SO            # noqa: E402

@@ -16,7 +16,7 @@ import sys
 
 os.environ["B2K_CFLAGS"] = "-DB2M_TMA"   # must be set before importing the harness
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
 sys.path.insert(0, HARNESS)
 
 import torch                                                             # noqa: E402

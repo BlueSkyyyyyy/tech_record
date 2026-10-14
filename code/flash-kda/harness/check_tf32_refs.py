@@ -29,8 +29,8 @@ import sys
 
 import torch
 
-HARNESS = "~/proj/tech_record/code/flash-kda/harness"
-SRC = "~/proj/tech_record/code/flash-kda/src"
+HARNESS = os.path.expanduser("~/proj/tech_record/code/flash-kda/harness")
+SRC = os.path.expanduser("~/proj/tech_record/code/flash-kda/src")
 sys.path.insert(0, SRC)
 from kda_bwd_ref import kda_chunked_backward, kda_token_backward  # noqa: E402
 from kda_ref import kda_chunked_fwd, kda_token_recurrent, l2_normalize  # noqa: E402

@@ -13,7 +13,7 @@
 
 set -uo pipefail
 
-DIR=~/proj/tech_record/code/flash-kda
+DIR=${HOME}/proj/tech_record/code/flash-kda
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-2}
 cd "$DIR"
 

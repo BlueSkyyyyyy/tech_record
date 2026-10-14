@@ -15,12 +15,12 @@ SRC="$ROOT/src/wgmma_desc.cu"
 
 CMD=$(cat <<'EOS'
 set -e
-INC=~/github/DeepGEMM/deep_gemm/include
+INC=${HOME}/github/DeepGEMM/deep_gemm/include
 echo "== 真实头文件 sha256 =="
 sha256sum $INC/deep_gemm/mma/sm90.cuh $INC/deep_gemm/ptx/wgmma.cuh
 nvcc -gencode=arch=compute_90a,code=sm_90a -O3 -std=c++17 --expt-relaxed-constexpr -diag-suppress 20012 \
   -I"$INC" -I"$INC/cutlass" -I"$INC/cute" \
-  '~/proj/tech_record/code/mega-moe/src/wgmma_desc.cu' -o /tmp/wgmma_desc
+  '${HOME}/proj/tech_record/code/mega-moe/src/wgmma_desc.cu' -o /tmp/wgmma_desc
 nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv,noheader | head -1
 /tmp/wgmma_desc > /tmp/wgmma_desc.raw.txt
 cat /tmp/wgmma_desc.raw.txt

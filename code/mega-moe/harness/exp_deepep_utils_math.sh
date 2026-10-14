@@ -9,6 +9,6 @@
 #                                  deep_gemm/utils/math.py:19-49
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DEP=~/github/DeepEP
-DGEMM=~/github/DeepGEMM
+DEP=${HOME}/github/DeepEP
+DGEMM=${HOME}/github/DeepGEMM
 "$ROOT/scripts/lab.sh" exec "cd '$ROOT/harness' && nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader | head -1 && TORCHDYNAMO_DISABLE=1 DEEPEP_ROOT='$DEP' DEEPGEMM_ROOT='$DGEMM' python exp_deepep_utils_math.py"

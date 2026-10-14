@@ -7,7 +7,7 @@
 # 目标卡 H100 / sm90a，DEV 选空闲 device（默认 3）。
 set -u
 DEV=${DEV:-3}
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/sched_dataplane_sat.cu
 BIN=/tmp/sched_dataplane_sat
 nvcc -O3 -arch=sm_90a "$SRC" -o "$BIN" || exit 1

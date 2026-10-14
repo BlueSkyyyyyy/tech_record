@@ -8,7 +8,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 H="$ROOT/harness"
 SRC="$ROOT/src/moe_backward_activation_epilogue.cu"
-DG="${DEEPGEMM_DIR:-~/github/DeepGEMM}"
+DG="${DEEPGEMM_DIR:-${HOME}/github/DeepGEMM}"
 INC="$DG/deep_gemm/include"
 
 CMD=$(cat <<EOS

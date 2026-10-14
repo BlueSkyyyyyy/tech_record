@@ -48,7 +48,7 @@ def load_variant(name):
     from torch.utils.cpp_extension import load
     os.environ.setdefault("TORCH_CUDA_ARCH_LIST", "9.0a")
     base = os.path.join("/tmp/kda_occ", "src_cond" if c else "src_plain", "csrc")
-    cutlass = "~/github/FlashKDA/cutlass"
+    cutlass = os.path.expanduser("~/github/FlashKDA/cutlass")
     return load(
         name={"plain_in3_out2": "kda_occ_plain_in3_out2",
               "plain_in2_out1": "kda_occ_plain_in2_out1",

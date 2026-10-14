@@ -11,7 +11,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SRC="$ROOT/src/deepep_symmetric_alloc.cu"
 PY="$ROOT/harness/exp_deepep_symmetric_alloc.py"
-DEP=~/github/DeepEP
+DEP=${HOME}/github/DeepEP
 DUMP=/tmp/deepep_sym_alloc_dev.txt
 SHA="$(sha256sum "$DEP/csrc/kernels/comm/symmetric.hpp" | cut -c1-16)"
 "$ROOT/scripts/lab.sh" exec "nvcc -arch=sm_90a -O3 -std=c++17 --expt-relaxed-constexpr -w \

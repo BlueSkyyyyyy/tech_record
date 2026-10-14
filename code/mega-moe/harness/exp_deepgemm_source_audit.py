@@ -28,8 +28,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)                      # code/mega-moe
 DOCS = os.path.join(ROOT, "docs")
 def _find_repo(name, env):
-    cands = [os.environ.get(env, ""), f"~/github/{name}",
-             os.path.expanduser(f"~/github/{name}"), f"~/github/{name}"]
+    cands = [os.environ.get(env, ""), os.path.expanduser(f"~/github/{name}"),
+             os.path.expanduser(f"~/github/{name}"), os.path.expanduser(f"~/github/{name}")]
     for c in cands:
         if c and os.path.isdir(c):
             return c

@@ -17,7 +17,7 @@ import subprocess
 import sys
 import json
 
-DE = os.environ.get('DEEPEP_ROOT', '~/github/DeepEP')
+DE = os.environ.get('DEEPEP_ROOT', os.path.expanduser('~/github/DeepEP'))
 BUILD = os.environ.get('DEEPEP_CMAKE_BUILD', '/tmp/deepep-cmake-build-debug')
 VERBOSE_LOG = '/tmp/deepep_cmake_verbose.log'
 
@@ -125,7 +125,7 @@ def main():
     print('  setup.py ignore_patterns：', m.group(1) if m else '(none)')
 
     section('8. DeepGEMM 对偶（同一套调试 CMake）')
-    dg = os.environ.get('DEEPGEMM_ROOT', '~/github/DeepGEMM')
+    dg = os.environ.get('DEEPGEMM_ROOT', os.path.expanduser('~/github/DeepGEMM'))
     dgcm = open(os.path.join(dg, 'CMakeLists.txt')).read()
     print('  DeepGEMM/CMakeLists.txt 首行注释：', dgcm.splitlines()[0].strip())
     print('  DeepGEMM 有 runtime_comm/driver 静态库：', 'runtime_' in dgcm)

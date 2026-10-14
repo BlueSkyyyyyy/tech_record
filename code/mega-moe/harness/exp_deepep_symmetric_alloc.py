@@ -11,12 +11,13 @@
   * 与 `src/deepep_symmetric_alloc.cu` 打印的设备/驱动常量（kNumAllocationAlignmentBytes=2MiB、
     recommended granularity）逐项交叉核对。
 """
+import os
 import sys
 import importlib.util
 import types
 import torch
 
-DEP = "~/github/DeepEP"
+DEP = os.path.expanduser("~/github/DeepEP")
 ALIGN_BYTES = 2 * 1024 * 1024          # deep_ep/include/deep_ep/common/compiled.cuh:69
 
 G_PASS = G_FAIL = 0

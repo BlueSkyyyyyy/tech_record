@@ -29,8 +29,8 @@ import torch
 # 动态形状的 `.view` 有已知图断裂，故本实验强制 eager（语义与编译版一致，仅不做图优化）。
 torch._dynamo.config.disable = True
 
-DEP = os.environ.get('DEEPEP_ROOT', '~/github/DeepEP')
-DGEMM = os.environ.get('DEEPGEMM_ROOT', '~/github/DeepGEMM')
+DEP = os.environ.get('DEEPEP_ROOT', os.path.expanduser('~/github/DeepEP'))
+DGEMM = os.environ.get('DEEPGEMM_ROOT', os.path.expanduser('~/github/DeepGEMM'))
 if not os.path.isdir(DEP):
     DEP = os.path.expanduser('~/github/DeepEP')
 if not os.path.isdir(DGEMM):

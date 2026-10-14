@@ -64,7 +64,7 @@ def relerr(a, b):
 # ---------------------------------------------------------------------------
 DG = None
 for _c in (os.environ.get("DEEPGEMM_DIR", ""), os.path.expanduser("~/github/DeepGEMM"),
-           "~/github/DeepGEMM"):
+           os.path.expanduser("~/github/DeepGEMM")):
     if _c and os.path.isdir(_c):
         DG = _c
         break

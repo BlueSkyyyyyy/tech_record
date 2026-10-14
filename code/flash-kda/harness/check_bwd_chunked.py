@@ -14,6 +14,7 @@ Usage (inside kernel_lab, CPU or GPU):
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_chunked.py
 """
 
+import os
 import math
 import sys
 
@@ -28,7 +29,7 @@ import torch
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 
-SRC = "~/proj/tech_record/code/flash-kda/src"
+SRC = os.path.expanduser("~/proj/tech_record/code/flash-kda/src")
 sys.path.insert(0, SRC)
 from kda_bwd_ref import kda_chunked_backward, kda_token_backward  # noqa: E402
 from kda_ref import kda_chunked_fwd, kda_token_recurrent, l2_normalize  # noqa: E402

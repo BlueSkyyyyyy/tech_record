@@ -4,7 +4,7 @@
 #   （补 §71.7 明文尾巴「四模式各自单独跑、未测同一 grid 内多模式共驻」。）
 # 目标卡 H100 / sm90a，DEV 选空闲 device（自动选最闲；可 DEV=n 覆盖）。
 set -u
-DIR=~/proj/tech_record/code/mega-kernel
+DIR=${HOME}/proj/tech_record/code/mega-kernel
 SRC=$DIR/src/hetero_access_mix.cu
 BIN=/tmp/hetero_access_mix
 DEV=${DEV:-$(nvidia-smi --query-gpu=index,memory.used --format=csv,noheader,nounits \
