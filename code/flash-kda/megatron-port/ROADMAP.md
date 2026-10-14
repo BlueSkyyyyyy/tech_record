@@ -19,12 +19,14 @@
 | `docs/06-chunk-varlen.md` | 锚定扩到 chunk_size/pad/varlen/CP（M8-1） | [x] |
 | `docs/07-cp-backward.md` | 锚定扩到 CP 反向 + varlen×CP 梯度（M8-2） | [x] |
 | `docs/08-megatron-contract.md` | Megatron `kda.py` 调用契约逐项对齐（M9-1） | [x] |
+| `docs/09-e2e.md` | 真实层端到端前反向对拍（M10-1） | [x] |
 | `src/kda_ref.py` | 最小可运行参考实现（纯 PyTorch、fp64、自带自测；M7 起支持 GVA + state_v_first） | [x] |
 | `harness/check_port_fla.py` | 参考 vs FLA 正反向数值锚定脚本（GPU） | [x] |
 | `harness/check_port_fla_m7.py` | 参考 vs FLA 门控/布局边界锚定（M7，GPU） | [x] |
 | `harness/check_port_fla_m8.py` | 参考 vs FLA `chunk_size`/pad/varlen/CP 锚定（M8-1，GPU；CP 用真实 NCCL rank） | [x] |
 | `harness/check_port_fla_m8b.py` | 参考 vs FLA CP 反向 / varlen×CP 梯度锚定（M8-2，GPU；真实 NCCL rank） | [x] |
 | `harness/check_port_contract.py` | Megatron `kda.py` 调用契约对齐（M9-1，GPU；加载 FLA `chunk_kda` + 参考） | [x] |
+| `harness/check_port_e2e.py` | 真实 `KimiDeltaAttention` 层端到端前反向对拍（M10-1，GPU） | [x] |
 
 ## 任务清单
 
@@ -123,7 +125,26 @@
       Megatron 因 `nvidia-resiliency-ext` 版本断言无法 import，见「已知坑」）。
 
 ### M10 端到端对拍
-- [ ] **M10-1** 在 Megatron 路径上跑 KDA，对本参考/ FLA 做端到端前反向对拍。
+- [x] **M10-1** 在 Megatron 路径上跑 KDA，对本参考/ FLA 做端到端前反向对拍。
+      新增 `harness/check_port_e2e.py`（`check_port_e2e.out.txt`）+ `docs/09-e2e.md`。
+      **先拆 import 阻塞**（此前 M9-1 只跑 shim）：容器里 `import megatron.core` 有**两条**
+      import 期版本断言——(1) `nvidia-resiliency-ext` 装 0.5.0 而 Megatron 断言 ≥0.6.0
+      （`dist_checkpointing/strategies/nvrx.py:44-46`，比较运行时 `nvrx.__version__`），
+      在 `import megatron` 前把内存版本号改成 `"0.6.0"`；(2) DeepEP 的
+      `check_nccl_so()`（`deep_ep/__init__.py:55`）逐字节比对 libnccl、本机不一致，
+      用其逃生开关 `EP_SUPPRESS_NCCL_CHECK=1`（`:24`）绕过。两条置好后**首次 import 真实
+      `KimiDeltaAttention` 并实例化**（照 `tests/unit_tests/ssm/gated_delta_net/test_kda.py`
+      小配置，单卡 tp=cp=1）。**Part A**（真层 smoke，`T×B=64×2/128×2/250×1`、fp32+bf16）：
+      输出形状/dtype 正确、`hs.grad` 与**全部**参数梯度有限。**Part B**（核心算子锚定）：用
+      记录器包住 `self.gated_delta_rule`（`kda.py:141/439-449`）截获真层**当次**喂给
+      `chunk_kda` 的操作数，在同一批操作数上比 FLA vs fp64 参考——fp32 `o max_abs=9.565e-05/
+      rel=1.675e-03`、六项梯度 rel 2.7–3.2e-3；bf16 `o rel=4.878e-03`、梯度 rel 3.6–8.5e-3
+      （=tf32/bf16 底噪，同 M6/M7/M8）。**Part C**（整模块端到端）：建第二份**逐位同权重**
+      模块、把核心算子换成 fp64 参考、其余层一字不动——fp32 `out≤5.10e-4 / hs.grad≤2.48e-8 /
+      param.grad≤2.01e-6`；bf16 `out≤2.93e-3 / hs.grad≤1.19e-7 / param.grad≤7.63e-6`。**结论**：
+      真层的核心调用无隐藏布局/门控/精度偏差（M9-1 shim 契约在真层确认），且端到端梯度不被
+      外层模块放大。**边界**：单卡 tp=cp=1、SBHD 非 packed；packed/THD、CP、GVA（Megatron
+      KDA 不支持）、`gdn_pre_gated_delta_rule_fusion` 缺口未覆盖。
 
 ## 已知坑
 
@@ -142,29 +163,36 @@
   `Failed to bind NVLink SHARP (NVLS) Multicast memory`。
 - **varlen 对拍先打印 `final_state.shape`**：参考逐序列的终态若带 `[N,1,...]` 的 B=1 维，
   与 FLA 的 `[N,...]` 相比会在损失里隐式广播成 `[N,N,...]`，把形状错伪装成 O(1) 数值差。
-- **容器内 `import megatron.core.ssm.gated_delta_net.kda` 失败**（`kernel_lab`，2026-10）：
-  `megatron/core/dist_checkpointing/strategies/nvrx.py:45` 的
-  `Minimum required nvidia-resiliency-ext package version is 0.6.0` 断言在 import 期触发，
-  故 M9-1 用**逐字复刻 `kda.py`/`common.py` 变换的 shim** 核验调用契约，而非实例化真实层。
-  M10-1 端到端若要跑真层，需先在容器里升级 `nvidia-resiliency-ext`。
+- **容器内 `import megatron.core` 有两条 import 期版本断言**（`kernel_lab`，2026-10）：
+  (1) `megatron/core/dist_checkpointing/strategies/nvrx.py:44-46` 的
+  `Minimum required nvidia-resiliency-ext package version is 0.6.0`（容器装 0.5.0），
+  在 `import megatron` 前设 `nvidia_resiliency_ext.__version__ = "0.6.0"` 骗过版本比较
+  （真正的 async-ckpt 能力仍走符号探测，不改 KDA 数值）；
+  (2) `deep_ep/__init__.py:55` 的 `check_nccl_so()` 逐字节比对运行时 libnccl 与链接期望
+  （本机 `libnccl.so.2.29.7` vs `.../nvidia/nccl/lib/libnccl.so.2`），设逃生开关
+  `EP_SUPPRESS_NCCL_CHECK=1`（`:24`）绕过。两条都置好后真实层可 import（M10-1 已跑通）；
+  M9-1 当年只用 shim 是因为不知道这两条开关。
 - **Megatron KDA 不支持 GVA**：`_compute_gates` 只产 H-head `raw_g`（`kda.py:180`），FLA 断言
   `g.shape==(B,T,HV,K)`（`chunk.py:411`）；`num_value_heads==num_key_heads` 是硬约束。勿把 M7 的
   GVA 锚定当成 Megatron 已具备能力。
 
 ## 当前进度 / 下一步
 
-- 当前进度：M0–M8 完成 + **M9-1 完成**（docs 00–08 + 参考实现 + FLA 数值锚定
-  [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 + CP 反向/varlen×CP 梯度] + Megatron 调用契约对齐）。
-- 本轮（M9-1）：`harness/check_port_contract.py` + `docs/08-megatron-contract.md`。用一个逐字复刻
-  `kda.py::pre_gated_delta_rule` + `common.py::_prepare_input_for_gated_delta_rule` 的 shim，把
-  SBHD→BHSD 转置、切段、l2norm、GVA、beta sigmoid 全走一遍再喂 FLA，逐项核对调用契约（真机 ALL PASS）：
-  Part A 转置 `max_abs=0`；Part B 原样参数调 `chunk_kda` vs fp64 参考 `rel|do|=1.9e-3`；Part C beta
-  核外 sigmoid 逐位；Part D `A_log`/`dt_bias` bf16 化 → 门控 `max_abs=0.127`；Part E l2norm 核外 vs
-  核内 `rel|do|=2.5e-4`；Part G bf16 `initial_state` 被拒；Part H 12 条静态契约行全命中。**契约更正**：
-  FLA/参考支持 GVA，但 **Megatron KDA 不支持**（`num_value_heads==num_key_heads` 硬约束）。**缺口**：
-  `gdn_pre_gated_delta_rule_fusion` 对 KDA 未实现。**边界**：shim 只覆盖 tp/cp=1，未跑真实层
-  （容器内 Megatron 因 `nvidia-resiliency-ext` 版本断言无法 import）。
-- 下一步：M10-1（在 Megatron 路径上端到端前反向对拍；若跑真层需先升级 `nvidia-resiliency-ext`）。
+- 当前进度：M0–M8 完成 + M9-1 完成 + **M10-1 完成**（docs 00–09 + 参考实现 + FLA 数值锚定
+  [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 + CP 反向/varlen×CP 梯度] + Megatron
+  调用契约对齐 + **真实层端到端前反向对拍**）。
+- 本轮（M10-1）：`harness/check_port_e2e.py` + `docs/09-e2e.md`。**首次 import 并实例化真实
+  `KimiDeltaAttention`**（先拆两条 import 期版本断言：nvrx 版本号 patch + `EP_SUPPRESS_NCCL_CHECK=1`）。
+  **Part A** 真层 fwd/bwd、全部参数梯度有限。**Part B** 截获真层当次喂 `chunk_kda` 的操作数，
+  FLA vs fp64 参考：fp32 `o rel=1.675e-03`、六项梯度 rel 2.7–3.2e-3；bf16 `o rel=4.878e-03`、
+  梯度 rel 3.6–8.5e-3。**Part C** 逐位同权重的「参考芯」模块端到端：fp32 `out≤5.10e-4 /
+  hs.grad≤2.48e-8 / param.grad≤2.01e-6`；bf16 `out≤2.93e-3 / hs.grad≤1.19e-7 / param.grad≤7.63e-6`。
+  **结论**：真层核心调用无隐藏偏差、M9-1 shim 契约在真层确认、端到端梯度不被外层放大。
+  **边界**：单卡 tp=cp=1、SBHD 非 packed；packed/THD、CP、GVA、`gdn_pre_gated_delta_rule_fusion`
+  缺口未覆盖。
+- 下一步（可选）：retire 到维护态（M0–M10 全完成）；若继续，把 M10-1 扩到 **packed/THD 与
+  headwise/chunkwise CP** 的真层对拍，或补 `gdn_pre_gated_delta_rule_fusion` 的 KDA 专属
+  streamed 融合前处理（`kda.py:399-402` 的缺口）。
 
 ## 阻塞
 

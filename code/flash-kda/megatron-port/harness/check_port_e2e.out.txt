@@ -1,0 +1,58 @@
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+/usr/local/lib/python3.12/dist-packages/torch/utils/_config_module.py:540: FutureWarning: torch._dynamo.config.skip_code_recursive_on_recompile_limit_hit is deprecated and does not do anything. It will be removed in a future version of PyTorch.
+  config[key] = copy.deepcopy(getattr(self, key))
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2387: UserWarning: Dynamo detected a call to a `functools.lru_cache`-wrapped function at '_common.py:45'. Dynamo ignores the cache wrapper and directly traces the wrapped function. Silent incorrectness is only a *potential* risk, not something we have observed. Enable TORCH_LOGS=+dynamo for a DEBUG stack trace.
+
+This call originates from:
+  File "/usr/local/lib/python3.12/dist-packages/transformer_engine/pytorch/ops/_common.py", line 45, in maybe_autocast_dtype
+    if torch_version() >= (2, 4, 3):
+
+  torch._dynamo.utils.warn_once(msg)
+/usr/local/lib/python3.12/dist-packages/torch/_dynamo/variables/functions.py:2262: UserWarning: Dynamo does not know how to trace the builtin `transformer_engine_torch.pybind11_detail_function_record_v1_system_libstdcpp_gxx_abi_1xxx_use_cxx11_abi_1.rmsnorm_fwd.` This function is either a Python builtin (e.g. _warnings.warn) or a third-party C/C++ Python extension (perhaps created with pybind).
+If it is a Python builtin, please file an issue on GitHub so the PyTorch team can add support for it and see the next case for a workaround.
+If it is a third-party C/C++ Python extension, please either wrap it into a PyTorch-understood custom operator (see https://pytorch.org/tutorials/advanced/custom_ops_landing_page.html for more details) or, if it is traceable, use `torch.compiler.allow_in_graph`.
+  torch._dynamo.utils.warn_once(explanation + "\n" + "\n".join(hints))
+~/proj/Megatron-LM/megatron/core/transformer/transformer_config.py:3116: UserWarning: full scope is deprecated. Use empty cuda_graph_modules to capture the whole layer.
+  warnings.warn(
+Megatron-LM: ~/proj/Megatron-LM
+=== dtype=float32 cases=[(64, 2), (128, 2), (250, 1)] ===
+  -- Part A: real-layer fwd/bwd smoke (float32)
+     T=  64 B=2  shape/dtype=True  hs.grad finite=True  nonfinite_params=0
+     T= 128 B=2  shape/dtype=True  hs.grad finite=True  nonfinite_params=0
+     T= 250 B=1  shape/dtype=True  hs.grad finite=True  nonfinite_params=0
+  -- Part B: core-operator anchor on captured operands (FLA vs fp64 ref)
+     (captured flags: use_gate_in_kernel=True safe_gate=True lower_bound=-5.0)
+     fwd o: shapes (2, 64, 4, 32) vs (2, 64, 4, 32)  max_abs=9.565e-05  rel=1.675e-03
+     grad q     max_abs=2.098e-09  rel=2.679e-03
+     grad k     max_abs=5.134e-09  rel=3.087e-03
+     grad v     max_abs=3.087e-09  rel=3.073e-03
+     grad g     max_abs=3.611e-11  rel=2.920e-03
+     grad beta  max_abs=9.237e-09  rel=3.232e-03
+     core worst grad max_abs=9.237e-09
+  -- Part C: full-module end-to-end (FLA-core vs ref-core, identical weights)
+     T=  64 B=2  out max_abs=4.671e-04  hs.grad max_abs=2.476e-08  param.grad max_abs=1.312e-06
+     T= 128 B=2  out max_abs=4.926e-04  hs.grad max_abs=1.445e-08  param.grad max_abs=1.567e-06
+     T= 250 B=1  out max_abs=5.095e-04  hs.grad max_abs=1.394e-08  param.grad max_abs=2.011e-06
+     worst: out=5.095e-04  hs.grad=2.476e-08  param.grad=2.011e-06
+=== dtype=bfloat16 cases=[(64, 2), (128, 2), (250, 1)] ===
+  -- Part A: real-layer fwd/bwd smoke (bfloat16)
+     T=  64 B=2  shape/dtype=True  hs.grad finite=True  nonfinite_params=0
+     T= 128 B=2  shape/dtype=True  hs.grad finite=True  nonfinite_params=0
+     T= 250 B=1  shape/dtype=True  hs.grad finite=True  nonfinite_params=0
+  -- Part B: core-operator anchor on captured operands (FLA vs fp64 ref)
+     (captured flags: use_gate_in_kernel=True safe_gate=True lower_bound=-5.0)
+     fwd o: shapes (2, 64, 4, 32) vs (2, 64, 4, 32)  max_abs=2.441e-04  rel=4.878e-03
+     grad q     max_abs=3.725e-09  rel=4.082e-03
+     grad k     max_abs=7.451e-09  rel=6.061e-03
+     grad v     max_abs=7.451e-09  rel=8.511e-03
+     grad g     max_abs=1.164e-10  rel=4.673e-03
+     grad beta  max_abs=9.238e-09  rel=3.579e-03
+     core worst grad max_abs=9.238e-09
+  -- Part C: full-module end-to-end (FLA-core vs ref-core, identical weights)
+     T=  64 B=2  out max_abs=2.441e-03  hs.grad max_abs=1.192e-07  param.grad max_abs=7.629e-06
+     T= 128 B=2  out max_abs=2.808e-03  hs.grad max_abs=6.706e-08  param.grad max_abs=3.815e-06
+     T= 250 B=1  out max_abs=2.930e-03  hs.grad max_abs=8.941e-08  param.grad max_abs=4.768e-06
+     worst: out=2.930e-03  hs.grad=1.192e-07  param.grad=7.629e-06
+ALL DONE
+[rank0]:[W1014 02:27:45.232975529 ProcessGroupNCCL.cpp:1601] Warning: WARNING: destroy_process_group() was not called before program exit, which can leak resources. For more info, please see https://pytorch.org/docs/stable/distributed.html#shutdown (function operator())
