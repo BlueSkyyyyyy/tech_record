@@ -5040,7 +5040,34 @@
        = 均匀 FP8 的 `1.66e-2`。**实务准则**：KV 用低精扫、高精精读 top-2k 短名单；不要全量低精、
        也不要全量高精。主 kernel UMMA 部分 SM100 专属、仅分析。→ `docs/177-indexer-coarse-refine-precision.md`
        （真实行号核对），实验 `harness/exp_indexer_cascade_precision.{py,sh,out.txt}`。配套博客
-       `content/posts/mega-moe-177-indexer-coarse-refine-precision`（索引页新增第 177 篇）。
+        `content/posts/mega-moe-177-indexer-coarse-refine-precision`（索引页新增第 177 篇）。
+
+### P168 增量（opt-in，补齐 indexer 一直「解析推导 / 一次性拟合」、没真训过的「可训练容量」）
+
+- [x] **P168-1** **indexer 的可训练容量：把 KL 蒸馏真的跑起来，indexer 到底需要多少秩**
+      （`csrc/apis/attention.hpp:18-44/67-134/124-130`、README `:88-110`、
+      `deep_gemm/utils/math.py:13-16/26-49/75-81/84-125`、`tests/test_attention.py`）。第 175 篇（P165-1）
+      用**自由打分**做稠密 KL 训练、解析给出不动点 `softmax_S(I)=p_λ`（`λ` 唯一决定学到的排序）；
+      第 166 篇（P166-1）用**真实低秩 q/k** 量到主注意力头高度冗余、逐头对齐 `ρ_h` 是一个谱，并留口子
+      「用真实训练（非参数化）的 indexer 复核」。生产里 indexer 恰是**另训的小模型**（README `:88-110`），
+      但前面各篇要么解析推导、要么一次性拟合，**从没真的用梯度下降训过它**。本篇补上，追问
+      「优化是不是瓶颈、表示（秩）是不是瓶颈、indexer 需要多少秩才够下游用」。**H100(sm90) 真机**：
+      真实 SM90 `fp8_fp4_mqa_logits` 锚定 max-abs-rel **2.538e-04**（与第 166 篇逐位一致），
+      真实低秩共享 q/k（`rank=8`、头间相关 `+0.641`、`H_eff=1.97/32`；`T=256,C=16384,H_q=32,G=4,D=128,
+      top-k=2048`），训练/评估全纯 torch。① **优化不是瓶颈**——自由 logits `I∈R^{T×C}` 用 Adam 训 300 步即
+      `KL=0.00e+00`、`recall@k=1.0000`（随机基线 0.125）；② **表示才是瓶颈、所需秩远比直觉大**——
+      低秩 `I=U Vᵀ` 的 `recall(R)`：`1→0.236`、`8→0.795`、`64→0.955`、`128→0.977`、`256→0.995`，
+      **`recall≥0.95` 需 R=64、FP8 级（≥0.96）需 R=128、≥0.99 要 R=256**；③ **蒸馏目标不是低秩**——
+      共享子空间 rank=8，但 `p_λ` 经 softmax 混合后 `log p_λ` 的 99% 能量秩 **176/256**（softmax 混合放大秩）；
+      ④ **梯度训练 ≫ 最优秩-R 近似**——R=64 训练 **0.955** vs `svd_lowrank` **0.635**（R=256：0.995 vs 0.835），
+      top-k 是局部目标、KL 对准 softmax 顶部；⑤ **秩需求由内在秩决定**——扫 `srank 1→32`：内在秩 `2→236`、
+      `recall@R=16` `0.913→0.493`（`H_eff` 反向下降 ⇒ 内在谱秩才是预测器）；⑥ **下游误差很快饱和**——
+      `recall=0.76`（R=8）下游 `relL2=3.36e-2` 仅比满秩 `3.05e-2` 抬 **10%**、R=32 已 `3.13e-2`
+      （逐头 oracle 下界 `2.90e-2`），复现第 172 篇「选择翻转二阶」。**结论**：瓶颈是**容量/秩**不是优化，
+      但分两把尺子——撑 top-k recall 要 R≈64–128，撑下游质量只要 R≈32。主 kernel UMMA/MX 档 SM100 专属、仅分析。
+      → `docs/178-indexer-trained-capacity.md`（真实行号核对），实验
+      `harness/exp_indexer_train_capacity.{py,sh,out.txt}`。配套博客
+      `content/posts/mega-moe-178-indexer-trained-capacity`（索引页新增第 178 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -5079,8 +5106,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P167 各增量完成（P15-1…P41-1、P42-1…P167-1）。**
-  本轮 P167-1：新建 `docs/177-indexer-coarse-refine-precision.md` +
+- 当前进度：**P0~P14 全部完成；P15~P168 各增量完成（P15-1…P41-1、P42-1…P168-1）。**
+  本轮 P168-1：新建 `docs/178-indexer-trained-capacity.md` +
+  `harness/exp_indexer_train_capacity.{py,sh,out.txt}`——第 175/166 篇把 indexer 的 KL 蒸馏当
+  **解析不动点**或**一次性拟合**，从没用梯度下降真训过。本篇把 KL 蒸馏真的跑起来（真实 SM90
+  `fp8_fp4_mqa_logits` 锚定 max-abs-rel **2.538e-04**，与第 166 篇逐位一致；真实低秩共享 q/k
+  `rank=8`、头间相关 `+0.641`、`H_eff=1.97/32`；`T=256,C=16384,H_q=32,G=4,D=128,top-k=2048`）：
+  ① **优化不是瓶颈**（自由 logits 训到 `KL=0`、`recall=1.0`）；② **表示才是瓶颈**——低秩 `I=U Vᵀ`
+  的 `recall(R)`：`8→0.795`、`64→0.955`、`128→0.977`、`256→0.995`，`recall≥0.95` 需 **R=64**、
+  FP8 级需 **R=128**；③ `log p_λ` 内在秩 **176/256**（softmax 混合放大秩）；④ 训练 **≫** SVD（R=64
+  0.955 vs 0.635）；⑤ 秩需求随内在秩升（`srank 1→32`：recall@R=16 `0.913→0.493`）；⑥ **下游很快饱和**
+  （R=8 recall 0.76 时下游只抬 10%、R=32 已贴满秩）——**排序 recall 与下游质量要的秩不是一个量级**。
+  索引页新增第 178 篇。
+  上一轮 P167-1：新建 `docs/177-indexer-coarse-refine-precision.md` +
   `harness/exp_indexer_cascade_precision.{py,sh,out.txt}`——第 171/174 篇把 indexer 打分当**单级、
   均匀精度**（第 174 篇发现 KV 主导带宽、换 MXFP4 字节 0.50× 但 recall 0.9616→0.8743）；本篇拆成
   **粗筛-精排两级**（便宜精度扫全 C 拿短名单 M → 只用高精重算这 M 个）。
@@ -6949,7 +6987,13 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P167 已完成（最新 **P167-1 把 indexer 打分的「单级均匀精度」拆成粗筛-精排两级**：
+- **下一步**：P0~P168 已完成（最新 **P168-1 把 indexer 的 KL 蒸馏真的跑起来、量出「可训练容量」**：
+  自由 logits SGD 训到 `KL=0`/`recall=1.0`（第 175 篇不动点由真实优化复核）；低秩 `I=U Vᵀ` 下
+  `recall(8)=0.795`/`recall(64)=0.955`/`recall(128)=0.977`，`recall≥0.95` 需 R=64、FP8 级需 R=128；
+  `log p_λ` 内在秩 176/256（softmax 混合放大秩）；训练远优于 `svd_lowrank`（R=64：0.955 vs 0.635）；
+  秩需求随内在秩升（`srank 1→32`：recall@R=16 0.913→0.493）；**下游很快饱和**（R=8 recall 0.76 只抬
+  10%、R=32 已贴满秩）——**排序 recall 与下游质量要的秩不是一个量级**。详见 `docs/178`，索引页新增第 178 篇）。
+  上一轮 P167-1 把 indexer 打分的「单级均匀精度」拆成粗筛-精排两级：
   均匀 MXFP4 省一半字节（0.50×）但 recall 从 0.9616 掉到 0.8743（8.7 点）；**级联**（coarse MXFP4
   全 C + refine FP8 仅 2k 短名单）字节 **0.5625×** 就把 recall 拉回 **0.9612**（= FP8 级），只比均匀
   MXFP4 多 **12.5%** 字节、且**支配均匀 FP8**（56% 字节同档 recall）；机制是 MXFP4 粗筛 `recall@M`
@@ -6977,8 +7021,10 @@
   （需 NCCL≥2.32.3，见「阻塞」）；② indexer 剩余的 **varlen（SM100）**变体定点复核；**head 结构续**：
    **已由 P166-1 完成**「低秩/共享 q/k + 逐头 ρ_h 不均」这一格（结论：头冗余、逐头权重零头、
    `ρ_h` 才是误差主因）；**已由 P167-1 完成**「MXFP4 indexer 的『排序精度 vs 2× 带宽』净收益」
-   （结论：粗筛-精排级联 0.5625× 字节达 FP8 级 recall）；剩下可做的是用**真实训练权重**的
-   indexer↔主注意力（非参数化 q/k）复核，或把两级粗筛在 **SM100 真 kernel** 上端到端确认（本机不可跑）；
+   （结论：粗筛-精排级联 0.5625× 字节达 FP8 级 recall）；**已由 P168-1 完成**「用梯度下降
+   真训 indexer」这一格（结论：瓶颈是容量/秩不是优化；撑 recall 要 R≈64–128、撑下游只要 R≈32）；
+   剩下可做的是用**真实训练权重**的 indexer↔主注意力（非参数化 q/k）复核，或把两级粗筛在
+   **SM100 真 kernel** 上端到端确认（本机不可跑）；
   ③ **已由 P157-1 完成**：单进程「Mega-MoE-like 单 kernel」原型（结论：融合需异步张量核）；
   ④ **已由 P160-1 完成**：`deep_jit/utils/` 剩余 7 个支撑头；继续可选 DeepGEMM/DeepEP `csrc/utils/`
   或 `deep_jit/utils/` 之外的小角落做定点复核。详见上。
