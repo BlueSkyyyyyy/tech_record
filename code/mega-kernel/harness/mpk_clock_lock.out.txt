@@ -1,3 +1,0 @@
-  locked-clock none         EXIT=124  
-  locked-clock cast_1elem   EXIT=0    RESULT=PASS
-clocks reset

@@ -1,8 +1,0 @@
-===== A. launcher stream-ordering macros (no prewarm) =====
-  baseline(none)             EXIT=124  HANG after 20s
-  LAUNCH_SYNC                EXIT=124  HANG after 20s
-  DEVICE_SYNC                EXIT=124  HANG after 20s
-
-===== B. control: cast prewarm with/without LAUNCH_SYNC =====
-  cast(none)                 EXIT=0    RESULT=PASS
-  cast + LAUNCH_SYNC         EXIT=0    RESULT=PASS

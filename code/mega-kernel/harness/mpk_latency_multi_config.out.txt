@@ -1,9 +1,0 @@
-[env] multi-op megakernel: rmsnorm -> linear(gate+up) -> silu_mul -> linear+residual; hidden=4096 inter=2048 dtype=torch.bfloat16 iters=200 warmup=20
- batch workers sched   max|out-ref|   mean(us)   median      min      max      sd  torch(us)
-[MPK INIT] Total tasks: 178, Total events: 37
-    16     128    16   1.562500e-02     47.083   47.072   44.544   58.816   1.179    200.724  (compile 29.0s)
-[MPK INIT] Total tasks: 178, Total events: 37
-    16      64    16   1.562500e-02     41.575   41.552   39.424   56.960   1.438    204.598  (compile 28.4s)
-[MPK INIT] Total tasks: 178, Total events: 37
-    16      16    16   1.562500e-02     42.508   42.496   38.816   52.064   1.123    204.394  (compile 27.8s)
-exit=0

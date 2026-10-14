@@ -1,5 +1,0 @@
-# P177-1（§102）核实：PTX 是否有 S2S 的 cp.async.bulk.tensor？
-# 命令: nvcc -O3 -arch=sm_90a -c harness/tensor_s2s_ptx_probe.cu -o /tmp/tensor_s2s.o
-ptxas /tmp/tmpxft_003b43cc_00000000-7_tensor_s2s_ptx_probe.compute_90.ptx, line 26; error   : State space incorrect for instruction 'cp.async.bulk.tensor'
-ptxas fatal   : Ptx assembly aborted due to errors
-# 结论: ptxas 拒绝 S2S tensor 形式 -> 该形式不存在（S2S 只有线性 cp.async.bulk）

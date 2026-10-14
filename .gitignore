@@ -3,3 +3,8 @@ resources/
 .hugo_build.lock
 .DS_Store
 __pycache__/
+
+# 实验原始输出（.out / .txt，可能内嵌宿主绝对路径）：只留本地，不入库
+*.out
+*.txt
+!themes/PaperMod/layouts/robots.txt

@@ -1,8 +1,0 @@
-=== printf-only watchdog in worker wait-loop (mpk_wlwatch.py) ===
-[wlwatch] applied
-Saved compiled kernel to: /ssd/mirage_mpk_build/mpk_launcher_rank0.cpython-312-x86_64-linux-gnu.so
-[MPK INIT] Total tasks: 18, Total events: 3
-[probe] compiled in 27.5s workers=128 sched=16
-Finished Launching Persistent Kernel (Async)
-[probe] RESULT=PASS max|out-ref|=3.125000e-02
-[wlwatch] restored
