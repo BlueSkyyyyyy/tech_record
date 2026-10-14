@@ -5461,6 +5461,34 @@
       与原始 NVLink 带宽（`harness/exp_nvlink_alltoall_budget.{sh,py,out.txt}`）。配套博客
       `content/posts/mega-moe-192-nvlink-alltoall-budget`（索引页新增第 192 篇）。
 
+### P183 增量（opt-in，把「给通信让 SM」两侧的账合起来：超配 64 的机会成本）
+
+- [x] **P183-1** **给通信让 SM 的机会成本：DeepEP 自动 SM 模型超配的 48 个 SM 值多少计算**
+      （`~/github/DeepEP`：`deep_ep/buffers/ep.py:431-541`（`get_theoretical_num_sms`：`:522-529`
+      四候选、`:528` combine 写回腿、`:530`/`:531`/`:532` clamp）；`deep_ep/utils/envs.py:194-197`
+      `/ `:201-204`（180/45）、`:208-234`（`get_nvlink_gbs`）；配套第 190/191/192 篇）。第 190 篇量了
+      「给通信让一个 SM，计算腿付多少」、第 191/192 篇量了「一条 NVLink 的膝点（单链路 ~8 / 多对多
+      8–16 SM）」，但两侧的账从没合起来给「模型错拧到 64」定价。**源码事实**：`direct EP8` 四个候选里
+      **起决定作用的是 combine 的 NVLink 写回腿**（`:528`，分子分母都在 `nvlink_gbs` 上）⇒ **模型的
+      SM 数线性正比于「每 rank NVLink 总带宽」**（与 `envs.py` 写死的 180/45 成反比）；`:531` 的
+      `prefer_overlap=False` 分支 `max(·,64)` 把 `direct EP8` 顶到 **64=膝点 4×**，`:532` 封顶
+      `device_sms//2`、**不建模链路膝点**。**H100(sm90) 真机**（`harness/exp_comm_sm_opportunity_cost.{sh,py,out.txt}`；
+      Part A 复用 P180-1 真实 SM90 FP8 grouped kernel、逐迭代 CUDA event **取最小值**排除共享节点争用；
+      Part B 用 P63-1 `ast` 抽取跑**未修改的真实**方法体）：① 把 `nvlink_gbs` 从模型默认 **430.3**
+      换成真机 **372（单 P2P）/ 325.7（满负荷 all-to-all）**，`direct EP8` 从 **16 → 16 → 12**
+      ——**默认路径的 16（换满负荷带宽后 12）恰落在真机膝点（8–16）内、不离谱**，只有 `max(·,64)`
+      越界（`direct EP4` 20→16、`hybrid`/`EP1` 不动，坐实「∝ nvlink_gbs 只在 NVLink 是瓶颈时成立」）；
+      ② 计算腿真机曲线（`reserve=132−num_sms`）**复现第 190 篇**——L1（计算受限）`132→116` +13.9%、
+      `→68` **+81.6%**（360.3→654.4 μs）；wgrad（访存受限）`→116` 仅 +1.3%（且**非单调**，116 的
+      530.8 比 124/120 都快）、`→68` +14.8%；③ **机会成本定价**：超配 64 相比膝点 16，前向 L1
+      **+243.9 μs**（=膝点损失 50.1 的 **6.8×**）、反向 wgrad **+70.6 μs**；膝点敏感性
+      （n_knee∈{8,16,22}）下恒为正（L1 ~248–275 μs、wgrad 48–71 μs），`n_knee=64` 才为 0
+      ——**`max(·,64)` 是「零收益、纯损失」旋钮**（膝点外 SM 对通信白给，见第 192 篇）。
+      `PASS=7 / FAIL=0`。**结论**：正确的 SM 预算就是**链路膝点**（约 8–16），印证 Mega MoE 主 kernel
+      **不做 SM 分区**（`heuristics/mega_moe.hpp:66-70` `get_num_sms_for_mega_moe()` 钉死全设备 SM）、
+      把通信与计算放进同一块 SM 不同 warp 的选择。DeepEP dispatch/combine 设备端（NCCL GIN）**仅分析**。
+      配套博客 `content/posts/mega-moe-193-comm-sm-opportunity-cost`（索引页新增第 193 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -5498,8 +5526,19 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P182 各增量完成（P15-1…P41-1、P42-1…P182-1）。**
-  本轮 P182-1：新建 `docs/192-nvlink-alltoall-budget.md` + `src/nvlink_alltoall_budget.cu` +
+- 当前进度：**P0~P14 全部完成；P15~P183 各增量完成（P15-1…P41-1、P42-1…P183-1）。**
+  本轮 P183-1：新建 `docs/193-comm-sm-opportunity-cost.md` +
+  `harness/exp_comm_sm_opportunity_cost.{sh,py,out.txt}`——把「给通信让 SM」两侧的账合起来，
+  给 DeepEP 模型 `prefer_overlap=False` 的 `max(·,64)` 定价。**源码事实**：`direct EP8` 四个候选里
+  **起决定作用的是 combine 的 NVLink 写回腿**（`ep.py:528`，分子分母都在 `nvlink_gbs` 上）⇒ 模型的
+  SM 数**线性正比于「每 rank NVLink 总带宽」**。**H100(sm90) 真机**（Part A 复用 P180-1 真实 SM90 FP8
+  grouped kernel、逐迭代取最小值排除共享争用；Part B 用 P63-1 `ast` 抽取跑未修改真实方法体）：
+  ① `nvlink_gbs` 从模型默认 **430.3** 换成真机 **372/325.7**，`direct EP8` **16→16→12**——**默认路径
+  落在真机膝点（8–16）内、不离谱**，只有 `max(·,64)` 越界；② 计算腿曲线复现第 190 篇（L1 计算受限
+  `→116` +13.9%、`→68` **+81.6%**；wgrad 访存受限 `→116` 仅 +1.3% 且非单调）；③ **机会成本**：超配 64
+  相比膝点 16，前向 L1 **+243.9 μs（6.8×）**、反向 wgrad **+70.6 μs**，膝点取 8/16/22 恒为正
+  ——**`max(·,64)` 是「零收益、纯损失」旋钮**。`PASS=7/FAIL=0`。DeepEP 设备端仅分析。索引页新增第 193 篇。
+  上一轮 P182-1：新建 `docs/192-nvlink-alltoall-budget.md` + `src/nvlink_alltoall_budget.cu` +
   `harness/exp_nvlink_alltoall_budget.{sh,py,out.txt}`——补「给通信让 SM」这条设计轴里第 191 篇
   留下的**多对多**缺口：一条 NVLink 的膝点要乘以 peer 数吗？**H100(sm90) 真机**（纯 CUDA + 7 张
   空闲卡 UVA peer 全互联 + P63-1 的 `ast` 抽取跑真实 `get_theoretical_num_sms`）：① **每 rank 的
@@ -7574,7 +7613,17 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P182 已完成（最新 **P182-1 把「一条 NVLink 膝点要乘以 peer 数吗」量出来**：`docs/192`。
+- **下一步**：P0~P183 已完成（最新 **P183-1 把「给通信让 SM 的机会成本」合账定价**：`docs/193`。
+    第 190 篇量了计算侧汇率、第 191/192 篇量了通信侧膝点，本篇合账给 DeepEP 模型
+    `prefer_overlap=False` 的 `max(·,64)` 定价：**H100(sm90) 真机**——① 模型 `direct EP8` 四个候选里
+    起决定的是 combine 的 NVLink 写回腿（`ep.py:528`，分子分母都在 `nvlink_gbs` 上）⇒ SM 数
+    **线性 ∝ 每 rank NVLink 总带宽**，把 `nvlink_gbs` 430.3→372/325.7，`direct EP8` **16→16→12**
+    （落在真机膝点 8–16 内、**默认路径不离谱**）；② 计算腿曲线复现第 190 篇（L1 计算受限 `→68`
+    **+81.6%**、wgrad 访存受限 `→116` 仅 +1.3% 且非单调）；③ **机会成本**：超配 64 相比膝点 16，
+    L1 **+243.9 μs（6.8× 膝点损失）**、wgrad **+70.6 μs**，膝点取 8/16/22 恒为正——**`max(·,64)`
+    是「零收益、纯损失」旋钮**（膝点外 SM 对通信白给）。`PASS=7/FAIL=0`。DeepEP 设备端仅分析。
+    索引页新增第 193 篇）。
+    上一轮 P182-1：`docs/192`——**一条 NVLink 膝点要乘以 peer 数吗**：
     第 191 篇只量了一条 P2P，本篇补多对多：**一个 rank 的 NVLink 聚合带宽是常数，与 peer 数无关**
     （6 peer 与 1 peer 同 SM 数下逐点相同、峰值 375.7 vs 371.6 = 1.011×；固定 grid=64 扫 peer 1→6 稳在
     372–428 GB/s）；**膝点也不随 peer 放大**（单 peer 16 / 多 peer 12 / striped 8 SM 饱和于 ~375，
@@ -7601,8 +7650,10 @@
      top-k / block_m 扫描接到目标卡端到端（需 SM100）；③ 把第 170 篇的 dispatch 行序与第 174 篇的累积序
      **放进同一次端到端训练步**计时（需 DeepEP 运行期，见「阻塞」）；④ ~~把第 191 篇的 NVLink P2P 膝点
      换成 8 卡 all-to-all 聚合的「每 SM 带宽」曲线~~（**已由 P182-1 完成**：纯 CUDA 7 卡多对多实测，
-     每 rank 聚合带宽是常数、膝点不随 peer 放大）；可继续：把该曲线接到**真实 DeepEP dispatch/combine
-     运行期**（需 NCCL ≥2.31，见「阻塞」），或把 `nvlink_gbs=430.3` 按满负荷实测 **325.7** 重跑模型看 SM 数移动。
+     每 rank 聚合带宽是常数、膝点不随 peer 放大）；④ ~~把 `nvlink_gbs=430.3` 按满负荷实测 **325.7**
+     重跑模型看 SM 数移动~~（**已由 P183-1 完成并进一步定价**：SM 数线性 ∝ nvlink_gbs，`direct EP8`
+     16→16→12；`max(·,64)` 超配的机会成本 L1 +244 μs / wgrad +71 μs）；可继续：把该曲线接到**真实
+     DeepEP dispatch/combine 运行期**（需 NCCL ≥2.31，见「阻塞」），或把超配代价接到目标卡端到端（需 SM100）。
   上一轮 P176-1：`docs/186`——第 12 篇讲的 SM90 FP8 `k_grouped_nt` 是 K-major、本机可跑，但目标卡生产
   wgrad 走 **MN-major 的 `k_grouped_fp8_gemm_tn_contiguous`**（仅 SM100，`gemm.hpp:369` 拒 sm90）。补上
   布局/架构矩阵与 tn v.s. nt 契约、SM100 tn kernel 每条输出 tile 一条**独立、单调的 fp32 累加链**（K 块外
