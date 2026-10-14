@@ -82,6 +82,7 @@ $\sim10^{-9}\!\sim\!10^{-7}$，只是计算顺序的舍入。**KDA vs GLA/DeltaN
 | **varlen/packed vs 逐序列 batched**（P4-4） | `o`/`S` **max_abs = 0** | 7 组 `lens`（含 $L{=}1<$CHUNK、非整除 $T$）× 4 状态组合，逐位相同 |
 | **varlen/packed vs fp64 golden**（P4-4） | $o$ **5.6e-3 ~ 8.0e-3** / $S^T$ **5.6e-3 ~ 1.25e-2** | 与 batched 同带 ⟹ packing 无额外误差 |
 | **`StateFP32` fp32 状态壳 vs bf16 壳**（P4-5） | `o`/`S` **max_abs = 0**；vs golden 误差**逐值相同** | `StateFP32` 是 I/O dtype 壳、**非精度旋钮**（内部恒 bf16） |
+| **varlen/packed vs kernel-逐位 oracle**（P4-7） | `o`/`S^T` **`torch.equal`（max_abs = 0）** | 7 组 `lens`（含 $L{=}1<$CHUNK、非整除 $T$、$g{=}0/4$），packed kernel ≡ `torch_ref(cu_seqlens)` ≡ `torch_ref` 逐序列 |
 | 反向六项 vs autograd（fp64） | **max_abs = 0** | 显式 adjoint 与链式法则逐位相等 |
 | 反向 chunked vs 逐 token（fp64） | max_rel **~1e-15**（含 $D=128,T=512$） | 13 组 case 全机器精度 |
 | FLA `chunk_kda` 反向（bf16） | 六项 max_rel **3e-3 ~ 8.2e-3** | 与前向误差同阶，无算法级偏差 |
@@ -95,6 +96,12 @@ $\sim10^{-9}\!\sim\!10^{-7}$，只是计算顺序的舍入。**KDA vs GLA/DeltaN
   （`fwd_kernel2.cuh:82`）；`StateFP32=true` 只在载入时把 fp32 `initial_state` round 成 bf16、
   落盘时把 bf16 精确升回 fp32。故七组 `lens` × 四状态组合下 fp32 壳与 bf16 壳 `o`/`S` **逐位相同**、
   与 fp64 golden 的误差**逐值相同**；真 fp32 `h0` 的余下尾数在载入即丢。**想要真 fp32 状态须改 kernel。**
+- **varlen × kernel-逐位 oracle 的逐位三角（P4-7）**：§7 只把 packed 锚到「另一个 kernel 运行」、§9 只用
+  等长 batched。本轮让 **packed kernel** 直接对 FlashKDA 自带的 kernel-逐位 `torch_ref` 的 **`cu_seqlens`
+  分支**（`torch_ref.py:141-142/178/185-193/202-206/241`，此前未被本专题用到）比：7 组 `lens`（distinct
+  逐序列 `h0`）`o`/`final_state` **`torch.equal`**；再比 `torch_ref(cu_seqlens)` vs `torch_ref` 逐序列
+  （`B=1` 无 `cu_seqlens`）**全部 `max_abs=0`** ⟹ `packed-kernel == ref-packed == ref-per-seq`。packed
+  路径至此同时被「另一 kernel 运行」与「独立转录的 kernel 代数」两方逐位钉死。
 
 ## 5. 性能（H100 80GB HBM3，bf16，$D=128$）
 
@@ -779,3 +786,11 @@ vs 金标」对拍**前一律显式关 tf32**（`allow_tf32=False` 或 `fp32_pre
   操作数，`o`/`S^T` **逐位相同（`max_abs=0`）** ⟹ P1-2 分块公式获迄今最强独立确认；「精确解 vs bf16 参考」
   总误差 `o max_rel` 4.4e-3~1.1e-2 与 Part B 同带。**副产物**：`docs/03` §18.5 的「未逐位复现 kernel 累加序」
   有了现成对照物（引用 `docs/04` §9）。不改变任何部署结论。
+
+- **（`docs/04` §10，P4-7）varlen × kernel-逐位 oracle 的逐位三角**：§7 把 packed 锚到的是「另一个 kernel
+  运行」、§9 只用等长 batched。本轮让 **packed kernel** 直接对 `tests/torch_ref.py` 的 **`cu_seqlens` 分支**
+  （`torch_ref.py:141-142/178/185-193/202-206/241`，此前从未被本专题用到）比：7 组 `lens`（含 $L{=}1<$CHUNK、
+  非整除 $T$、$g{=}0/4$；distinct 逐序列 `h0`）`o`/`final_state` **`torch.equal`（`max_abs=0`）**；再比
+  `torch_ref(cu_seqlens)` vs `torch_ref` 逐序列（`B=1` 无 `cu_seqlens`）**全部 `max_abs=0`** ⟹
+  `packed-kernel == ref-packed == ref-per-seq`。新增 `harness/check_varlen_torchref.py`（`.out.txt`）。
+  不改变任何部署结论。

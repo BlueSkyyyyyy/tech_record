@@ -106,6 +106,21 @@
       （`max_abs=0`，五组）** ⟹ P1-2 分块公式获迄今最强独立确认；「精确解 vs bf16 参考」总误差 `o max_rel`
       4.4e-3~1.1e-2 与 Part B 同带。**副产物**：`docs/03` §18.5 的 caveat「未逐位复现 kernel 累加序」有了
       现成对照物（引用 `docs/04` §9）。不改变任何部署结论。
+- [x] **P4-7** 把两条最近的前向线索（varlen §7/P4-4 与 kernel-逐位 oracle §9/P4-6）**在同一点交叉**：
+      §7 把 packed 锚到的是「另一个 kernel 运行」、§9 只用等长 batched；而 `tests/torch_ref.py` 自带一条
+      **`cu_seqlens` 分支**（`torch_ref.py:141-142` 断言 `B==1`、`:178` `N=len(cu)-1`、`:185-193` 逐序列
+      `[bos,eos)` 循环 + 逐序列 `work_state[seq_idx]`、`:202-206` 按 `actual_len` 补零、`:241` 只写有效
+      token）**此前从未被本专题用到**。新增 `harness/check_varlen_torchref.py`
+      （`harness/check_varlen_torchref.out.txt`）+ `docs/04` §10。**Part A**：同一份 packed 操作数 +
+      distinct 逐序列 `initial_state [N,H,D,D]`，packed kernel vs `torch_ref(cu_seqlens)`，7 组 `lens`
+      （含 $L{=}1<$CHUNK、非整除 $T{=}257/199$、$g{=}0/4$）的 `o`/`final_state` **`torch.equal`
+      （`max_abs=0`）**——把「packed 路径 = kernel 代数」从「另一个 kernel 运行」升级到「独立转录的
+      oracle」，同时验证跨序列边界映射、`B=1` cu_seqlens 分支、逐序列 `h0` 索引、尾块补零。**Part B**：
+      `torch_ref(cu_seqlens)` vs `torch_ref` 逐序列（`B=1` 无 `cu_seqlens`）**全部 `max_abs=0`**——把
+      「packing 无序列间状态泄漏」单独立在 oracle 自己身上（§7.2 的 oracle 侧对偶）。**结论**：逐位三角
+      `packed-kernel == ref-packed == ref-per-seq`；packed 路径至此同时被「另一 kernel 运行」与「独立转录的
+      kernel 代数」两方逐位钉死。不改变任何部署结论。**边界**：`B==1`（与 kernel varlen 同硬约束）、
+      `D=128`/bf16 操作数与状态、未跑 fp32 状态壳（§8 已覆盖）。
 
 ### P5 反向的推导与实现（`docs/05-kda-bwd.md`）
 
@@ -2396,10 +2411,27 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P4-5/P4-6 + P6-3…P6-9 / P7-3…P7-113 补测 + P8-3…P8-19**；子专题
+- 当前进度：**P0–P8 全部完成 + P4-4/P4-5/P4-6/P4-7 + P6-3…P6-9 / P7-3…P7-113 补测 + P8-3…P8-19**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
   M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成 + **M14-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - P4-6（本轮）：**引入第三个前向 oracle——FlashKDA 自带的 kernel-逐位 torch 参考 `tests/torch_ref.py`**。
+  - P4-7（本轮）：**把两条最近的前向线索——varlen（§7/P4-4）与 kernel-逐位 oracle（§9/P4-6）——在同一点交叉**。
+    §7 把 packed 锚到的是「另一个 kernel 运行」、§9 只用等长 batched；而 FlashKDA 自带的 kernel-逐位
+    `tests/torch_ref.py` 有一条**专用 `cu_seqlens` 分支**（`torch_ref.py:141-142` 断言 `B==1`、`:178`
+    `N=len(cu)-1`、`:185-193` 逐序列 `[bos,eos)` 循环 + 逐序列 `work_state[seq_idx]`、`:202-206` 按
+    `actual_len` 补零、`:241` 只写有效 token）——**此前从未被本专题用到**。新增
+    `harness/check_varlen_torchref.py`（`harness/check_varlen_torchref.out.txt`）+ `docs/04` §10 +
+    `docs/08` bullet。**Part A**：同一份 packed 操作数 + distinct 逐序列 `initial_state [N,H,D,D]`，
+    packed kernel vs `torch_ref(cu_seqlens)`，7 组 `lens`（含 $L{=}1<$CHUNK、非整除 $T{=}257/199$、
+    $g{=}0/4$）的 `o`/`final_state` **`torch.equal`（`max_abs=0`）**——把「packed 路径 = kernel 代数」从
+    「另一个 kernel 运行」升级到「独立转录的 oracle」，并同时验证跨序列边界映射、`B=1` cu_seqlens 分支、
+    逐序列 `h0` 索引、尾块补零四件事。**Part B**：`torch_ref(cu_seqlens)` vs `torch_ref` 逐序列
+    （`B=1` 无 `cu_seqlens`）**全部 `max_abs=0`**——把「packing 无序列间状态泄漏」单独立在 oracle 自己身上
+    （§7.2 的 oracle 侧对偶）。**结论**：逐位三角 `packed-kernel == ref-packed == ref-per-seq`；packed 路径
+    至此同时被「另一 kernel 运行」与「独立转录的 kernel 代数」两方逐位钉死。不改变任何部署结论。
+    **边界**：`B==1`（与 kernel varlen 同硬约束）、`D=128`/bf16 操作数与状态、未跑 fp32 状态壳（§8 已覆盖）。
+    **下一步（可选）**：专题维持维护态——主系列 `P7`/`docs/05`/P4-4…P4-7 均无剩余 `待验证`；megatron-port
+    仅剩「把 shim 落成真实 Megatron 树分支」（需改 Megatron 树、历轮刻意不改）。
+  - P4-6（上轮）：**引入第三个前向 oracle——FlashKDA 自带的 kernel-逐位 torch 参考 `tests/torch_ref.py`**。
     此前前向数值只用「fp64 逐 token golden」与「FLA」两方（均独立于 kernel）；该参考**故意逐位复刻
     kernel**（warp-shuffle 树 L2 范数 + FMA、`tanh.approx` sigmoid、FTZ `exp2`、8×8 前代 + 16×16 bf16-HMMA
     求逆，`torch_ref.py:62-74/7-34/51-57/81-122`），其自身测试断言 `torch.equal(out_kernel,out_ref)`

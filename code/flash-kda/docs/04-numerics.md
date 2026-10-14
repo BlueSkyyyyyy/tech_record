@@ -441,7 +441,60 @@ FlashKDA 自己的 `tests/test_fwd.py:260–261` 断言 `torch.equal(out_kernel,
 - 这也给 `docs/03` §18.5 的 caveat（「纯 PyTorch 消融，未逐位复现 kernel 累加序」）补上了对照物：
   需要「kernel 累加序」时可直接用这份 bit-exact 参考，而不必再自建。
 
-## 10. 小结与下一步
+## 10. varlen × kernel-逐位 oracle 的交叉锚定（P4-7）
+
+§7（P4-4）把 packed 前向锚到的是**另一个 kernel 运行**（逐序列 batched）与 fp64 golden；§9（P4-6）
+引入了 FlashKDA 自带的 **kernel-逐位** torch 参考 `tests/torch_ref.py`，但只用它跑过 **batched**
+（等长 $B$）。而 `torch_ref` 自己有一条**专用 `cu_seqlens` 分支**（`torch_ref.py:141-142` 断言
+`B==1`、`torch_ref.py:178` 取 `N=len(cu_seqlens)-1`、`:185-193` 逐序列 `[bos,eos)` 循环 + 逐序列
+`work_state[seq_idx]`、`:202-206` 按 `actual_len` 补零尾块、`:241` 只写有效 token）——这条分支
+**此前从未被本专题用到过**，packed kernel 也**从未与一个 bit-exact oracle 直接比过**。
+
+本节用 `harness/check_varlen_torchref.py`（原始输出 `harness/check_varlen_torchref.out.txt`）把两个
+最近线索（varlen 与第三 oracle）在**同一点**合起来，给出一个「逐位三角」。
+
+### 10.1 Part A：packed kernel vs `torch_ref(cu_seqlens)` —— **逐位相同**
+
+同一份 packed 操作数 `[1,T_total,H,D]`、同一份**逐序列不同的** `initial_state [N,H,D,D]`，一侧跑
+`flash_kda_C.fwd(..., cu_seqlens=...)`、另一侧跑 `torch_ref(..., cu_seqlens=...)`，比 `o` 与
+`final_state`（$S^\top$）：
+
+| case | `T_total` | `N` | `o` `torch.equal` | `S^T` `torch.equal` | `o` max_abs | `S` max_abs |
+|---|---|---|---|---|---|---|
+| `lens=[30,16,5,50]` | 101 | 4 | **True** | **True** | 0.000e+00 | 0.000e+00 |
+| `lens=[1,16,17,64,3]`（$L{=}1<$CHUNK） | 101 | 5 | **True** | **True** | 0.000e+00 | 0.000e+00 |
+| `lens=[64,64,64]`（均 16 倍数） | 192 | 3 | **True** | **True** | 0.000e+00 | 0.000e+00 |
+| `lens=[250,7]`（$T$ 非 16 倍数） | 257 | 2 | **True** | **True** | 0.000e+00 | 0.000e+00 |
+| `lens=[33,47,19,100]` | 199 | 4 | **True** | **True** | 0.000e+00 | 0.000e+00 |
+| `g=0`（无衰减） | 101 | 4 | **True** | **True** | 0.000e+00 | 0.000e+00 |
+| `g=N(0,4)`（强衰减） | 101 | 4 | **True** | **True** | 0.000e+00 | 0.000e+00 |
+
+七组（含单 token 序列、非整除 $T$、极端门控）全部**逐位相同**。注意这**比 §7.2 更强**：§7.2 比的
+是「packed kernel vs 逐序列 kernel」，两方共享同一份 kernel 代码；本节比的是「packed kernel vs
+一个**独立转录**的 kernel 代数」。它一次性同时验证了：
+
+- packed 路径的 tile→(序列,块) 映射在**跨序列边界**处正确（否则 `o` 会在某序列内 O(1) 偏移）；
+- **b=1 的 cu_seqlens 分支**（`torch_ref.py:185-193`）与 kernel 的 varlen 分派**代数一致**，
+  且**逐序列 `initial_state` 索引**（distinct-$h_0$）在两方都按 `seq_idx` 生效；
+- 参考的尾块补零（`:196-206`）与 kernel 的 pad-tile mask 对非整除 $L$ 等价。
+
+### 10.2 Part B：`torch_ref` packed vs `torch_ref` 逐序列 —— **逐位相同**
+
+为把「packing 是否引入序列间状态泄漏」从 kernel 身上剥离开、单独钉在 oracle 自己身上，再拿同一份
+序列分别跑 `torch_ref(cu_seqlens)` 与「逐序列 `B=1`、无 `cu_seqlens`」两条路径：七组的 `o` 切片与
+`final_state` 行**全部 `max_abs=0`**（`S^T` 亦然）。即 oracle 的 `work_state[seq_idx]` 累加在 packed
+循环里**没有跨序列串扰**——这是 §7.2 对 kernel 所做隔离测试的 oracle 侧对偶。
+
+### 10.3 结论
+
+- Part A + Part B 给出一个**逐位三角**：`packed-kernel == ref-packed == ref-per-seq`。packed 路径
+  现在同时被（i）另一个 kernel 运行（§7）、（ii）一个独立转录的 kernel 代数（本节）两方逐位钉死。
+- 这也**首次把 `torch_ref` 的 `cu_seqlens` 分支纳入专题**（§9 只用了等长 batched）——若将来要把
+  kernel-逐位 oracle 用于 varlen 相关的反向/重算锚定，此分支已被证实可用且与 kernel 代数一致。
+- 不改变任何部署结论。**边界**：`B==1`（与 kernel varlen 同硬约束）；只 `D=128`/bf16 操作数与状态；
+  未跑 fp32 状态壳（§8 已单独覆盖）。
+
+## 11. 小结与下一步
 
 - FlashKDA 前向 kernel 在全部测试 shape / seed / 门控区间下，与 fp64 golden 的 `o` 峰值相对误差
   为 $4\times10^{-3}\sim7.6\times10^{-3}$、终态为 $5\times10^{-3}\sim1.4\times10^{-2}$，符合 bf16 精度预期。
@@ -456,7 +509,8 @@ FlashKDA 自己的 `tests/test_fwd.py:260–261` 断言 `torch.equal(out_kernel,
   受控消融 `harness/check_state_bf16.py`（P3-3）；varlen 锚定 `harness/check_varlen_forward.py`、
   `harness/check_varlen_forward.out.txt`（P4-4）；`StateFP32` 壳 `harness/check_varlen_forward_fp32state.py`（P4-5）；
   第三 oracle（FlashKDA 自带 kernel-逐位 torch 参考）`harness/check_fwd_torchref.py`、
-  `harness/check_fwd_torchref.out.txt`（P4-6）。
+  `harness/check_fwd_torchref.out.txt`（P4-6）；varlen × 该 oracle 的逐位三角
+  `harness/check_varlen_torchref.py`、`harness/check_varlen_torchref.out.txt`（P4-7）。
 
 **下一步（P5）**：进入反向。用 FLA `chunk_kda` 的 `torch.autograd` 拿参考梯度，先在
 `src/kda_bwd_ref.py` 里实现逐 token 反向（adjoint）并与 autograd 对拍（P5-1/P5-2），再做分块化推导。
