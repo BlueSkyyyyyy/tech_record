@@ -1,6 +1,6 @@
 # KDA 前向 / 反向算子实现解析：一页纸汇总
 
-> 本文是「Kimi Delta Attention（KDA）前向 / 反向算子实现解析」的收尾篇（路线图 **P8-1…P8-14**）。
+> 本文是「Kimi Delta Attention（KDA）前向 / 反向算子实现解析」的收尾篇（路线图 **P8-1…P8-15**）。
 > 把前七篇（数学 `01`、K1 `02`、K2 `03`、数值 `04`、反向推导 `05`、反向 kernel `06`、
 > 性能 `07`）压成一张可独立阅读的速查表：**公式 → 结构 → 误差 → 性能 → 反向要点**。
 > 所有数字都来自本机实测，出处见各篇与 `code/flash-kda/harness/*.out.txt`。
@@ -372,7 +372,13 @@ P7-44 把「放弃 `tl.dot` 手写 SIMT」读法**证伪**（慢同 op Triton �
   （`-DB2M_DGKCF` 归零，但部署 shape 不兑现）；L2 **+35%** 拆成 **`cp.async .BYPASS` 读路径（+0.64GB）
   \+ 逐标量 32-bit store（+0.13GB）**，**TMA 输入**把读放大整条消掉且**净赢 ~5%**（`tma_vecst` 比 identical-op
   Triton 快 **1.12×**、贴 DRAM 地板 1.11×）；`TMA+BVK=64` 只能走 **NAT 个 128B swizzle atom** 拆分
-  （`SWIZZLE_NONE` 2.5–3× 不可用），`atom64/base32` **0.853–0.974×**。**向量化 store 一律做**（免费逐位、小 shape 10%+）。
+   （`SWIZZLE_NONE` 2.5–3× 不可用），`atom64/base32` **0.853–0.974×**。**向量化 store 一律做**（免费逐位、小 shape 10%+）。
+- **§113（P7-110）把 §51.7 那条读放大的扇区级机制钉死**（自包含微基准 `probe_cpasync_bypass`）：`l1tex`
+  扇区/请求**恒 16**（512 B/32 B 最小值，与 `cp.async`/`ld`/宽度无关）⟹ §51 的 18/请求是 staging 行距
+  **不对齐**（路径无关）；`srcunit` **只按 L1 是否缓存分叉**——L1-allocating（`ld.global.v4`/`cp.async.ca`）
+  把工作集从 L2 读**一次**、L1-bypass（`cp.async.cg`≡`ld.global.cg.v4`）**每次复用都读**（`srcunit = 复用
+  因子 × 数据`、`dram` 不变）。**故 §51 的 1.5× = 真实核的操作数复用因子**（×行距不对齐 1.125×），
+  **不是 cp.async 的取数粒度**；消它仍是 TMA/L1-allocating `ca`（§51.6/§52 结论不变、理由更正）。
 - **§55–§60（P7-52…57）六段非 GEMM 全搬进 CUDA**：`dv2`(tf32)/`dkgb`(tf32)/`dApre`(fp32 **5.31e-7**，但贵
   1.49–1.84×，收缩维是全 `V`/`K` 的标量 FMA)/`dA` sandwich(近免费 1.02–1.10×，**并更正 §57 的 `dw` 符号**)/
   `db`(fp32 1.3–1.8e-7，+2~13%)/门控链(`dq` 逐位、`dg` fp32 序 2.2e-7，**最贵 +30~38%**)。

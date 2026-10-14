@@ -1,0 +1,167 @@
+== built ==
+
+=== Sweep A: reuse factor (pat=0 contiguous, 8MB working set), iters in {1,2,4,8} ===
+--- mode=0 iters=1 ---
+mode=0(cp.async.cg 16B (L1-bypass)) pat=0 nunits=16384 iters=1 pitch=128 grid=264 block=256
+  out.sum=-9.6682e+02  wall=109.2 us
+    dram__bytes_read.sum                                  Mbyte         8.39
+    gpu__time_duration.sum                                   us         6.98
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    16384
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       262144
+    lts__t_sectors_op_read_lookup_hit.sum                sector          986
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+--- mode=0 iters=2 ---
+mode=0(cp.async.cg 16B (L1-bypass)) pat=0 nunits=16384 iters=2 pitch=128 grid=264 block=256
+  out.sum=-1.9336e+03  wall=72.3 us
+    dram__bytes_read.sum                                  Mbyte         8.39
+    gpu__time_duration.sum                                   us         8.70
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    32768
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       524288
+    lts__t_sectors_op_read_lookup_hit.sum                sector       263164
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       524288
+--- mode=0 iters=4 ---
+mode=0(cp.async.cg 16B (L1-bypass)) pat=0 nunits=16384 iters=4 pitch=128 grid=264 block=256
+  out.sum=-3.8673e+03  wall=78.3 us
+    dram__bytes_read.sum                                  Mbyte         8.39
+    gpu__time_duration.sum                                   us        12.10
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    65536
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector      1048576
+    lts__t_sectors_op_read_lookup_hit.sum                sector       787472
+    lts__t_sectors_srcunit_tex_op_read.sum               sector      1048576
+--- mode=0 iters=8 ---
+mode=0(cp.async.cg 16B (L1-bypass)) pat=0 nunits=16384 iters=8 pitch=128 grid=264 block=256
+  out.sum=-7.7346e+03  wall=97.9 us
+    dram__bytes_read.sum                                  Mbyte         8.39
+    gpu__time_duration.sum                                   us        19.04
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                   131072
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector      2097152
+    lts__t_sectors_op_read_lookup_hit.sum                sector      1836130
+    lts__t_sectors_srcunit_tex_op_read.sum               sector      2097152
+--- mode=1 iters=1 ---
+mode=1(cp.async.ca 16B (L1)) pat=0 nunits=16384 iters=1 pitch=128 grid=264 block=256
+  out.sum=-9.6682e+02  wall=89.5 us
+    dram__bytes_read.sum                                  Mbyte         8.39
+    gpu__time_duration.sum                                   us         6.98
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    16384
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       262144
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1018
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+--- mode=1 iters=2 ---
+mode=1(cp.async.ca 16B (L1)) pat=0 nunits=16384 iters=2 pitch=128 grid=264 block=256
+  out.sum=-1.9336e+03  wall=113.4 us
+    dram__bytes_read.sum                                  Mbyte         8.39
+    gpu__time_duration.sum                                   us         7.58
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    32768
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       524288
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1016
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+--- mode=1 iters=4 ---
+mode=1(cp.async.ca 16B (L1)) pat=0 nunits=16384 iters=4 pitch=128 grid=264 block=256
+  out.sum=-3.8673e+03  wall=89.7 us
+    dram__bytes_read.sum                                  Mbyte         8.39
+    gpu__time_duration.sum                                   us         9.12
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    65536
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector      1048576
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1032
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+--- mode=1 iters=8 ---
+mode=1(cp.async.ca 16B (L1)) pat=0 nunits=16384 iters=8 pitch=128 grid=264 block=256
+  out.sum=-7.7346e+03  wall=77.4 us
+    dram__bytes_read.sum                                  Mbyte         8.39
+    gpu__time_duration.sum                                   us        12.64
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                   131072
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector      2097152
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1056
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+--- mode=4 iters=1 ---
+mode=4(ld.global.v4 16B (L1)) pat=0 nunits=16384 iters=1 pitch=128 grid=264 block=256
+  out.sum=-9.6682e+02  wall=90.9 us
+    dram__bytes_read.sum                                  Mbyte         8.40
+    gpu__time_duration.sum                                   us         6.02
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    16384
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       262144
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1618
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+--- mode=4 iters=2 ---
+mode=4(ld.global.v4 16B (L1)) pat=0 nunits=16384 iters=2 pitch=128 grid=264 block=256
+  out.sum=-1.9336e+03  wall=126.7 us
+    dram__bytes_read.sum                                  Mbyte         8.40
+    gpu__time_duration.sum                                   us         6.53
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    32768
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       524288
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1630
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+--- mode=4 iters=4 ---
+mode=4(ld.global.v4 16B (L1)) pat=0 nunits=16384 iters=4 pitch=128 grid=264 block=256
+  out.sum=-3.8673e+03  wall=99.7 us
+    dram__bytes_read.sum                                  Mbyte         8.40
+    gpu__time_duration.sum                                   us         6.78
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    65536
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector      1048576
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1624
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+--- mode=4 iters=8 ---
+mode=4(ld.global.v4 16B (L1)) pat=0 nunits=16384 iters=8 pitch=128 grid=264 block=256
+  out.sum=-7.7346e+03  wall=91.9 us
+    dram__bytes_read.sum                                  Mbyte         8.40
+    gpu__time_duration.sum                                   us         7.78
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                   131072
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector      2097152
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1632
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+
+=== Sweep B: rows-pattern pitch (pat=1, mode 0=cg vs 4=ld, iters=4, 4096 units) ===
+--- mode=0 pitch=32 ---
+mode=0(cp.async.cg 16B (L1-bypass)) pat=1 nunits=4096 iters=4 pitch=32 grid=264 block=256
+  out.sum=-2.0928e+03  wall=94.3 us
+    dram__bytes_read.sum                                  Mbyte         2.10
+    gpu__time_duration.sum                                   us         5.28
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    16384
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       262144
+    lts__t_sectors_op_read_lookup_hit.sum                sector       197662
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+--- mode=0 pitch=40 ---
+mode=0(cp.async.cg 16B (L1-bypass)) pat=1 nunits=4096 iters=4 pitch=40 grid=264 block=256
+  out.sum=-3.3859e+03  wall=73.5 us
+    dram__bytes_read.sum                                  Mbyte         2.63
+    gpu__time_duration.sum                                   us         5.54
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    16384
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       262144
+    lts__t_sectors_op_read_lookup_hit.sum                sector       197664
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       262144
+--- mode=0 pitch=68 ---
+mode=0(cp.async.cg 16B (L1-bypass)) pat=1 nunits=4096 iters=4 pitch=68 grid=264 block=256
+  out.sum=-2.1155e+03  wall=78.4 us
+    dram__bytes_read.sum                                  Mbyte         2.89
+    gpu__time_duration.sum                                   us         5.63
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    16384
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       294912
+    lts__t_sectors_op_read_lookup_hit.sum                sector       324618
+    lts__t_sectors_srcunit_tex_op_read.sum               sector       393216
+--- mode=4 pitch=32 ---
+mode=4(ld.global.v4 16B (L1)) pat=1 nunits=4096 iters=4 pitch=32 grid=264 block=256
+  out.sum=-2.0928e+03  wall=95.0 us
+    dram__bytes_read.sum                                  Mbyte         2.10
+    gpu__time_duration.sum                                   us         4.48
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    16384
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       262144
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1718
+    lts__t_sectors_srcunit_tex_op_read.sum               sector        65536
+--- mode=4 pitch=40 ---
+mode=4(ld.global.v4 16B (L1)) pat=1 nunits=4096 iters=4 pitch=40 grid=264 block=256
+  out.sum=-3.3859e+03  wall=74.8 us
+    dram__bytes_read.sum                                  Mbyte         2.63
+    gpu__time_duration.sum                                   us         4.54
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    16384
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       262144
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1718
+    lts__t_sectors_srcunit_tex_op_read.sum               sector        65536
+--- mode=4 pitch=68 ---
+mode=4(ld.global.v4 16B (L1)) pat=1 nunits=4096 iters=4 pitch=68 grid=264 block=256
+  out.sum=-2.1155e+03  wall=78.5 us
+    dram__bytes_read.sum                                  Mbyte         2.89
+    gpu__time_duration.sum                                   us         4.64
+    l1tex__t_requests_pipe_lsu_mem_global_op_ld.sum                    16384
+    l1tex__t_sectors_pipe_lsu_mem_global_op_ld.sum       sector       294912
+    lts__t_sectors_op_read_lookup_hit.sum                sector         1722
+    lts__t_sectors_srcunit_tex_op_read.sum               sector        73728

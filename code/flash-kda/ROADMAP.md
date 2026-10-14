@@ -1872,6 +1872,27 @@
   上判**（本核 K=256 有效余量 4480 B ≪ 折叠 staging 50688 B），不能只看该段自己的增量。
   **边界**：只 `BT=16`、`K=V∈{128,256}`、非 TMA/非 HDW×INTRA 的 smem 记 HDW 口径、未做 ncu。
 
+- [x] **P7-110** 关闭 §51.7（P7-48）P7 线里**最后一条读侧 `待验证`**——`cp.async` L1-bypass 路径读放大
+  （§51.4 的「L2 srcunit 1.5×、L1TEX 18/请求、srcunit 24/请求」）的**扇区级机制**。不用真实核、改用
+  **只隔离读路径**的自包含微基准：`harness/probe_cpasync_bypass.cu`（同一块 8 MB、同样 512 B/warp/迭代，
+  只换 load 指令：`cp.async.cg`16 / `cp.async.ca`16/8/4 / `ld.global.v4` / `ld.global.cg.v4` / 标量；
+  `PAT`＝连续 512 B vs「4 行 × 128 B、行距 `pitch`」）+ `harness/probe_cpasync_bypass.py`（ctypes 驱动）
+  + `harness/probe_cpasync_bypass_ncu.sh`（`probe_cpasync_bypass_ncu.out.txt`，14 配置主表）+
+  `harness/probe_cpasync_bypass_sweep.sh`（`..._sweep.out.txt`，复用/对齐两扫描）+ `harness/check_cpasync_bypass.py`
+  （`check_cpasync_bypass.out.txt`，解析+正确性）。**Part A**：同 `PAT` 下七种取数指令累加输出**逐位相同**。
+  **Part B（关键）**：`l1tex` 扇区/请求**恒 16**（=512 B/32 B 最小值，与路径/宽度无关）→ §51 的 18/请求
+  不是 `cp.async` 属性；`srcunit` **只按 L1 是否缓存分叉**——L1-allocating（`ld16`/`ca16/8/4`）把工作集
+  从 L2 **读一次**（262144=8 MB=数据量，与复用无关），L1-bypass（`cg16`/`ldcg16`）**每次复用都读**
+  （1048576=4×8 MB），`dram` 两侧 8.39 MB 不变（多出的= L2 re-touch）。**Part C**：`cg16` 的 `srcunit`
+  = `262144 × iters`（1.00/2.00/4.00/8.00×）、`ca16`/`ld16` 恒 1.00× → **放大倍数 = 复用因子、只在
+  L1-bypass 出现**；`PAT=1` 行距 68 float（=`OPS=BVK+8`、128 B 不对齐）令 `cg` 与 `ld` 的 `l1tex`
+  **都**从 16→**18/请求**，而 `cg` 的 `srcunit/req` 仍是 **24.0**（=18×1.333）——**§51.4 的 `l1tex 18/srcunit
+  24` 被行距 68 的 `cg` 逐值复现**。**结论**：§51 的读放大 = 「L1-bypass 不承接复用，复用全部再触 L2」
+  （× staging 行距不对齐的 1.125×），**不是 cp.async 的取数粒度**；消它的正解仍是 **TMA/L1-allocating
+  `ca`**（§51.6/§52 结论不变、理由更正）。**新判据**：`l1tex 扇区/请求 > 最小值` → 地址/行距不对齐（路径
+  无关）；`srcunit = l1tex × 复用因子` → L1-bypass。**边界**：理想化地址（无 smem swizzle/mma 依赖）、
+  只 `sm_90a`/16-8-4 B/fp32，不复现 §51 具体字节，只给机制归属。默认部署仍 §45 的 `cf`。见 `docs/07` §113。
+
 
 ### P8 小结 / 一页纸
 
@@ -1968,6 +1989,11 @@
         §97.3 的措辞），「最终部署建议」口径标 `§100–§111`→`§100–§112`，弧标题 `P7-97…P7-108`→`P7-97…P7-109`，
         文档头 `P8-1…P8-13`→`P8-1…P8-14`。数字全部复用 `docs/07` §112 本机实测（同一轮新增实验）。
         见 `docs/08-summary.md`。
+- [x] **P8-15** 补全一页纸（`docs/08-summary.md`）——新增 **§113 bullet**（`cp.async` L1-bypass 读放大
+        扇区级机制关闭：`l1tex` 扇区/请求恒 16 与路径无关、`srcunit` 由 L1 是否缓存决定——L1-bypass 令复用
+        全触 L2、`srcunit=复用因子×数据`；行距 68 不对齐复现 §51 的 `l1tex 18/srcunit 24`），并在
+        —紧接 §50–§54 的 bullet 之后新增，收口 §51.7 的读侧机制；文档头 `P8-1…P8-14`→
+        `P8-1…P8-15`。数字全部复用 `docs/07` §113 本机实测（同一轮新增实验）。
 
 ## 每轮增量流程（autopilot）
 
@@ -2226,7 +2252,7 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
+- 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-110 补测 + P8-3…P8-15**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
   M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
   - megatron-port M13-3（本轮）：**兑现 M13-2 的「下一步（融合反向 conv/l2norm）」，但先逐 kernel 剖析
@@ -2396,7 +2422,17 @@
     （`o/S` ≤6.4e-3、`dq/dk/dv/dg/dbeta/dh0` ≤4.4e-3），Part B 与 Part A 同量级 ⟹ 核内门控相对
     显式 $g$ **无额外可测误差**；`dA_log` 相对量到 **2.95e-2** 但绝对仅 **5.7e-4**（逐 head 标量求和
     近抵消，看绝对不看相对）。**结论**：参考可作为移植主对拍的 golden。
-  - P7-109 + P8-14（上轮）：**兑现 §94.5/§95.3/§96.3/§97.3 四次点名却从未执行的「`intra` staging 降
+   - P7-110 + P8-15（本轮）：**关闭 §51.7（P7-48）P7 线最后一条读侧 `待验证`——`cp.async` L1-bypass
+     读放大的扇区级机制**。自包含微基准（`harness/probe_cpasync_bypass.cu` + `..._ncu.sh` 主表 14 配置 +
+     `..._sweep.sh` 复用/对齐两扫描 + `check_cpasync_bypass.py`），同一块 8 MB、同 512 B/warp/迭代、只换
+     load 指令。**关键**：`l1tex` 扇区/请求**恒 16**（512 B/32 B 最小值，与路径/宽度无关）→ §51 的 18/请求
+     非 `cp.async` 属性；`srcunit` **只按 L1 是否缓存分叉**——L1-allocating（`ld16`/`ca16/8/4`）把工作集从
+     L2 **读一次**、L1-bypass（`cg16`/`ldcg16`）**每次复用都读**（`cg16` 的 `srcunit=262144×iters` 严格
+     1/2/4/8×、`ca`/`ld` 恒 1×、`dram` 8.39 MB 不变）；`PAT=1` 行距 68（=`OPS=BVK+8` 不对齐）令 `cg` 与
+     `ld` 的 `l1tex` **都** 16→18/请求，`cg` 的 `srcunit/req` 仍 24.0=18×1.333 —— **§51.4 的 `l1tex 18/srcunit
+     24` 被逐值复现**。**结论**：放大 = 「L1-bypass 不承接复用 → 复用全部再触 L2」（×行距不对齐 1.125×），
+     **非 cp.async 取数粒度**；消它仍是 TMA / L1-allocating `ca`（§51.6/§52 结论不变、理由更正）。`docs/07` §113。
+   - P7-109 + P8-14（上轮）：**兑现 §94.5/§95.3/§96.3/§97.3 四次点名却从未执行的「`intra` staging 降
     bf16 = K=256 折叠容量杠杆」——测后为三负并更正 §97**。给 `b2_mma_probe.cu` 加 `-DB2M_INTRA_BF16`
     （`=1` `q/k/g` 全 bf16、`=2` 只 `q/k` 降位 `g` 保 fp32；staging `:658-662`、写 `:1681`、读
     `:1715-1720/1738/1752-1753/1765`，**tf32 mma 一字未动**）。新增 `harness/check_bwd_b2_intra_bf16.py`

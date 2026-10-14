@@ -12019,3 +12019,93 @@ smem 读的字节/重放；把读宽度减半只改重放次数、不改这段�
   （§96/§97）。默认部署仍 §45 的 `cf`。
 - **方法学**：「把某段的 staging 降 bf16」的收益/可行性**必须在整核 smem 余量上判**，不能只看
   该段自己的增量（本核 K=256 的有效余量 4480 B ≪ 折叠 staging 50688 B）。
+
+## 113. 定位 §51.7 的「`cp.async` L1-bypass 读放大」扇区级机制：**它是 L1 不缓存 → 复用全部回到 L2**，不是 cp.async 的取数粒度（P7-110）
+
+§51.4（P7-48）把 B2 K2-mma 核相对 identical-op Triton 核的「L2 字节 +35%」拆成读侧 `cp.async`
+`.BYPASS` **+0.64 GB** + 写侧逐标量 store +0.13 GB，并给出一组很干净的对照：同 16 B、同「每 warp 跨
+4 行 × 128 B」的普通 `ld.global.v4`（`-DB2M_NOASYNC`）请求数**完全相同**（2,490,368），但 L2 srcunit 读
+从 **59.77 M 扇区降到 39.85 M（= DRAM 扇区数，1.0×）**；于是当时把 1.5× 归给「`cp.async` 的 `.BYPASS`
+路径属性、非 16 B 宽度/模式」，但**扇区级成因留白**，§51.7 明确点名了要做的实验（换 `cp.async.ca`
+走 L1 对照 / SASS / PC-sampling）。本轮用一个**只隔离读路径**的受控微基准把它钉死。
+
+证据：`harness/probe_cpasync_bypass.cu`（自包含微基准）+ `harness/probe_cpasync_bypass.py`（ctypes 驱动）
++ `harness/probe_cpasync_bypass_ncu.sh`（`harness/probe_cpasync_bypass_ncu.out.txt`，主表）
++ `harness/probe_cpasync_bypass_sweep.sh`（`harness/probe_cpasync_bypass_sweep.out.txt`，两个扫描）
++ `harness/check_cpasync_bypass.py`（`harness/check_cpasync_bypass.out.txt`，解析+正确性）。
+
+### 113.1 微基准：只换「哪条 load 指令」，地址/字节/模式完全不动
+
+每个变体对**同一块 8 MB 缓冲**发**同样的 512 B / warp / 迭代**访问，只有 load 指令不同：
+
+- `MODE ∈ {cg16, ca16, ca8, ca4, ld16, ldcg16, ld4}` ＝ `cp.async.cg`(16 B，L1-bypass，即
+  `LDGSTS.E.BYPASS.128`)、`cp.async.ca`(16/8/4 B，L1-allocating)、`ld.global.v4`(L1)、
+  `ld.global.cg.v4`(L1-bypass)、标量 `ld.global.f32`。
+- `PAT ∈ {0,1}` ＝ 连续 512 B/warp；或「4 行 × 32 float（128 B）/行、行距 `pitch`」。
+- 工作集 8 MB（262144 扇区）× `iters` 次；指标取 `l1tex__t_requests/sectors_pipe_lsu_mem_global_op_ld`、
+  `lts__t_sectors_srcunit_tex_op_read`、`dram__bytes_read`、`gpu__time_duration`。
+
+**Part A（正确性）**：同一 `PAT` 下七个 `MODE` 的累加输出**逐位相同**（`PAT=0` 全部 `-3.8673e+03`、
+`PAT=1` 全部 `3.9130e+03`，`harness/check_cpasync_bypass.out.txt`）——即只换了取数指令，未改地址/值。
+
+### 113.2 主表：`l1tex` 扇区/请求**与路径无关**，`srcunit` 由「L1 是否缓存」决定
+
+（`PAT=0`，8 MB × `iters=4`；1 扇区 = 32 B）
+
+| mode | req | l1tex 扇区/req | **srcunit 读/req** | srcunit 读总量 | dram 读 | dur |
+|---|---|---|---|---|---|---|
+| `cg16`（L1-bypass） | 65536 | 16.0 | **16.0** | **1,048,576** | 8.39 MB | 11.9 µs |
+| `ldcg16`（L1-bypass） | 65536 | 16.0 | **16.0** | **1,048,576** | 8.39 MB | 11.7 µs |
+| `ca16`（L1） | 65536 | 16.0 | 4.0 | 262,144 | 8.39 MB | 9.1 µs |
+| `ca8`（L1） | 131072 | 16.0 | 2.0 | 262,144 | 8.39 MB | 10.1 µs |
+| `ca4`（L1） | 262144 | 16.0 | 1.0 | 262,144 | 8.39 MB | 12.4 µs |
+| `ld16`（L1） | 65536 | 16.0 | 4.0 | 262,144 | 8.40 MB | 6.8 µs |
+| `ld4`（L1） | 262144 | 16.0 | 1.0 | 262,144 | 8.40 MB | 8.8 µs |
+
+三条结论：
+1. **`l1tex` 扇区/请求恒为 16**（= 512 B/warp ÷ 32 B，对齐连续访问的最小值），`cp.async`、`ld`、
+   不同宽度**都相同**——`cp.async` **没有**取数粒度的过取；§51.4 记的「L1TEX 18/请求」不是路径属性。
+2. **`srcunit` 只由 L1 缓存与否分叉**：L1-allocating（`ca16`/`ca8`/`ca4`/`ld16`/`ld4`）把工作集**从 L2
+   读一次**（262144 = 8 MB = 数据量，**与复用次数无关**）；L1-bypass（`cg16`/`ldcg16`）把它**每次复用
+   都读一遍**（1,048,576 = 4 × 8 MB）。即 `ld.global.cg.v4` 与 `cp.async.cg` **完全一样**——放大来自
+   **「绕过 L1」本身**，不是 `cp.async` 这个指令。
+3. `dram__bytes_read` 两侧都 8.39 MB **不变**——多出的扇区是 **L2 hit（re-touch）**，与 §51.4 一致。
+
+### 113.3 扫描：放大倍数 = 复用因子；`l1tex` 18/请求 = 行距不对齐
+
+**(C1) 复用因子**（`PAT=0`，工作集 262144 扇区）：`cg16` 的 `srcunit` = `262144 × iters`
+（`iters=1/2/4/8` → **1.00×/2.00×/4.00×/8.00×**），`ca16`、`ld16` 恒 **262144（1.00×）**、
+`dram` 恒 8.39 MB。**放大倍数严格等于该工作集的复用因子**，且只在 L1-bypass 路径出现——这就是
+§51 那个「1.5×」的本质：真实核里 `h/dh`/`do/vn/dv` 的操作数复用因子约 1.5，L1-bypass 让它全部落到
+L2。
+
+**(C2) 行距对齐**（`PAT=1`，`iters=4`）：行距 32/40 float 时 `cg` 与 `ld` 的 `l1tex` 都是 **16.0/req**；
+行距 **68 float（= `OPS=BVK+8`，128 B 不对齐）** 时**两者都变 18.0/req**——而 `srcunit/req` 仍是
+`cg=24.0`（= 18 × 1.333 复用）、`ld=4.5`（被 L1 吸收）。**§51.4 的 `cp.async` `l1tex 18/req + srcunit
+24/req` 被行距 68 的 `cg` 逐值复现**，证明那个 +2 扇区/请求是**staging 行距不对齐**造成的（路径无关），
+而 24/18 = 1.333 的额外比就是 L1-bypass 的复用再触。
+
+### 113.4 结论与设计输入
+
+- **§51.7 的「扇区级成因」关闭**：`cp.async`（`.cg`）的读放大**不是**取数粒度、不是 16 B 宽度、不是
+  「每 warp 跨 4 行」模式，而是 **L1-bypass 路径没有 L1 承接复用**——凡被多次触及的操作数，其复用次数
+  全部变成 L2 再触（`srcunit = 复用因子 × 数据`）；对照的 L1-allocating `ld.global.v4`/`cp.async.ca`
+  只从 L2 读一次（`= 数据`）。§51 的 1.5× = 真实核的操作数复用因子，`l1tex` 的 1.125× = staging 行距
+  不对齐。
+- **设计输入不变但归因更正**：消这条放大的**正解是让搬运走独立引擎**——`cp.async.ca`（L1-allocating）
+  或 **TMA**（§52）都能让 L2 只读一次；而 §51 已证换**同步**普通 load 会丢流水（`Duration +21%`）。
+  故 §51.6/§52 的「读侧下一杠杆＝TMA」结论不变，但**理由从「`cp.async` 有神秘的扇区过取」更正为
+  「L1-bypass 不承接复用」**——这也解释了为何 TMA 消放大后**连 L1TEX 全局读请求都归零**（数据不再经
+  L1/LSU 逐 lane 发）。
+- **判据（新）**：看到「L2 读扇区 > 数据量」先分两步——(a) `l1tex` 扇区/请求是否 > 数据最小扇区数
+  （→ 地址/行距**不对齐**，路径无关）；(b) `srcunit` 是否 = `l1tex × 复用因子`（→ **L1-bypass**）。
+  两者都不要归给「cp.async 的取数粒度」。
+
+### 113.5 边界（诚实）
+
+- 微基准是**理想化**的：连续/规则地址、无 smem swizzle、无 mma 依赖；真实核里还叠加 smem staging、
+  `BVP=BVK+4`/`OPS=BVK+8` 行距、多 warp 竞争——故它给出的是**机制归属**，不复现 §51 的具体字节数。
+- 只测 `sm_90a`、16/8/4 B、fp32；bf16 操作数与 TMA 的对照未在本微基准做（TMA 的读放大消除已由 §52–§54
+  ncu 记录）。
+- `l2hit` 指标在 L1-bypass 列（`cg16`）远高于 L1 列，与「reuse 落 L2」自洽，但未单独展开。
+
