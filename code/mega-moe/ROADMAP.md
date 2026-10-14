@@ -5166,6 +5166,40 @@
       主 kernel SM100 专属、仅分析。→ `docs/181-moe-activation-recompute.md`（真实行号核对）。配套
       博客 `content/posts/mega-moe-181-moe-activation-recompute`（索引页新增第 181 篇）。
 
+### P172 增量（opt-in，把 P171 的「重算 shadow 预算」在真机并发下兑现）
+
+- [x] **P172-1** **重算的 shadow 预算能不能兑现：真机并发下的 SM 预算分区**
+      （`csrc/jit_kernels/impls/sm90_fp8_gemm_1d2d.hpp:125`、`csrc/jit_kernels/heuristics/sm90.hpp:14`、
+      `csrc/jit_kernels/heuristics/config.hpp:60`、`csrc/runtime/runtime.hpp:78-91`、
+      `third-party/deep_jit/include/deep_jit/backend/cuda/kernel.hpp:164-166`、
+      `deep_gemm/include/deep_gemm/scheduler/gemm.cuh:87-104`、
+      `deep_gemm/include/deep_gemm/scheduler/mega_moe.cuh:225/345-369`；
+      对照第 148/167/180/181 篇）。第 181 篇量到反向重算 linear1 GEMM 的**时间预算**只有 shadow
+      （dgrad L2 + wgrad L2）的 `0.47×/0.73×`，但明确「那是预算、不是实测重叠」。本篇把它放到
+      **真机并发**下兑现。**核心机制**：DeepGEMM persistent kernel 每 block 独占一个 SM 的 `smem`
+      （`sm90.hpp:14` `smem_capacity=232448`），发射 block 数 = `num_sms`
+      （`sm90_fp8_gemm_1d2d.hpp:125` `.grid_dim=num_sms`），故满 SM 时两 stream 的 kernel
+      **无法 co-reside**；把 `num_sms` 当「SM 预算」分区后两 kernel 各占一组 SM 才真正并行
+      （同源 Mega MoE 的 locality domain 分域 `scheduler/mega_moe.cuh:345-369`、`kNumMinStealWaves=2 :225`）。
+      实现要点：`set_num_sms` host 全局、但每 kernel 在**发射那刻**把 num_sms 烘进 grid/编译键，
+      故「先 set 发 rec、再 set 发 sh」可给两并发 kernel **不同**预算；launch 走当前 stream
+      （`kernel.hpp:164-166` 默认 `getCurrentCUDAStream()`）。**H100(sm90) 真机**（真实 SM90 FP8
+      grouped kernel；`T=4096,H=7168,I=2048,E=8,topk=2`、`m_total=total_k=8192`）：
+      ① **满 132 SM 双 stream = 串行**——`overlap_factor=(rec+sh)/ovl=0.985×`（RECOMPUTE `356.7us`/
+      1349 TFLOPS、dgrad L2 `193.3us`/1244、wgrad L2 `535.9us`/449，与第 181 篇逐位吻合），第二个
+      kernel 排队；② **对称分区** `N=66` 达 `ovf=1.50×`≈理想 `1.49×`，但每 kernel 限核后自身变慢
+      （rec `362→642us`）→ **净速度仅 `0.98×`**；③ **非对称分区** `n_rec+n_sh=132`：最优 `(56,76)`
+      并发 `993us` vs 满 SM 串行 `1086us` = **`1.09×`**——远达不到预算隐含的 `1.49×`；④ **重叠不改
+      正确性**：五种切分下 recompute/dgrad/wgrad 输出 vs 串行**逐位相等**（复用第 180 篇结构性
+      bit 确定）；⑤ **为什么只有 1.09×**：SM 分区只把吞吐切两半再并发，**没让重算去吃 shadow 闲着的
+      张量核**——wgrad L2 恰访存受限（449 TFLOPS、第 15 篇 ncu SM 占用 ~12%）。**结论**：第 181 篇的
+      `1.49×` 预算为真，但**不是靠「两个 kernel + 两条 stream」兑现**（最好 1.09×），而是靠**单 kernel
+      内让计算腿的异步张量核去吃访存腿的闲张量核**（第 167 篇 CUDA-core 0.62→WGMMA 0.93）——这正是
+      Mega MoE 单 mega-kernel + `setmaxnreg` 的量化动机。主 kernel SM100 专属、仅分析。
+      → `docs/182-moe-recompute-overlap.md`（真实行号核对），实验
+      `harness/exp_moe_recompute_overlap.{py,sh,out.txt}`。配套博客
+      `content/posts/mega-moe-182-moe-recompute-overlap`（索引页新增第 182 篇）。
+
 ## 每轮增量流程（autopilot）
 
 
@@ -5203,8 +5237,25 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P171 各增量完成（P15-1…P41-1、P42-1…P171-1）。**
-  本轮 P171-1：新建 `docs/181-moe-activation-recompute.md` +
+- 当前进度：**P0~P14 全部完成；P15~P172 各增量完成（P15-1…P41-1、P42-1…P172-1）。**
+  本轮 P172-1：新建 `docs/182-moe-recompute-overlap.md` +
+  `harness/exp_moe_recompute_overlap.{py,sh,out.txt}`——第 181 篇量到反向重算 linear1 GEMM 的
+  **时间预算**只有 shadow（dgrad L2 + wgrad L2）的 `0.47×/0.73×`、但明确「是预算不是实测重叠」；
+  本篇把它放到**真机并发**下兑现。**核心机制**：DeepGEMM persistent kernel 每 block 独占一个 SM 的
+  `smem`（`heuristics/sm90.hpp:14` `smem_capacity=232448`），发射 block 数 = `num_sms`
+  （`sm90_fp8_gemm_1d2d.hpp:125` `.grid_dim=num_sms`），故满 SM 时两 stream 无法 co-reside；
+  把 `num_sms` 当 SM 预算分区后才真正并行（同源 Mega MoE locality domain `scheduler/mega_moe.cuh:345-369`）。
+  **H100(sm90) 真机**（真实 SM90 FP8 grouped kernel；`T=4096,H=7168,I=2048,E=8,topk=2`）：
+  ① **满 132 SM 双 stream = 串行**（`overlap_factor=0.985×`；RECOMPUTE `356.7us`/1349 TFLOPS、
+  dgrad L2 `193.3us`/1244、wgrad L2 `535.9us`/449，与第 181 篇逐位吻合）；② **对称分区** `N=66`
+  `ovf=1.50×`≈理想 `1.49×`，但每 kernel 限核变慢 → **净速度 `0.98×`**；③ **非对称分区**最优
+  `(56,76)` 并发 `993us` vs 满 SM 串行 `1086us` = **`1.09×`**（远达不到预算隐含的 `1.49×`）；
+  ④ 五种切分下输出 vs 串行**逐位相等**（复用第 180 篇结构性 bit 确定）；⑤ **为什么只有 1.09×**：
+  SM 分区只把吞吐切两半再并发，**没让重算吃 shadow 闲着的张量核**（wgrad L2 访存受限、第 15 篇 ncu
+  SM 占用 ~12%）。**结论**：`1.49×` 预算为真，但要靠**单 kernel 内异步张量核吃闲张量核**兑现（第 167
+  篇 WGMMA 0.62→0.93），而非两 kernel 两 stream——这正是 Mega MoE 单 mega-kernel 的量化动机。
+  主 kernel SM100 专属、仅分析。索引页新增第 182 篇。
+  上一轮 P171-1：新建 `docs/181-moe-activation-recompute.md` +
   `harness/exp_moe_activation_recompute.{py,sh,out.txt}`——第 144 篇拆了反向的 SwiGLU 段、指出
   「前提是前向不单独存 gate/up」；第 145/156 篇试图折进 dgrad epilogue；第 159 篇给了完整前反向
   账——但**从没量过**：融合前向确实不存 `h` 时反向**重算**一次的代价/显存/数值。**来源事实**：
@@ -7133,7 +7184,14 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P171 已完成（最新 **P171-1 把反向 SwiGLU 的输入 `h`「存 vs 重算」量出来**：
+- **下一步**：P0~P172 已完成（最新 **P172-1 把第 181 篇的「重算 shadow 预算」在真机并发下兑现**：
+  `1.49×` 预算为真，但**两个 kernel + 两条 stream 兑现不了**——满 132 SM 双 stream = 串行
+  （`overlap_factor=0.985×`，`smem_capacity=232448`/SM 使 block 无法 co-reside）；把 `num_sms`
+  当 SM 预算分区后才重叠（对称 `N=66` `ovf=1.50×`≈理想），但限核损失使**净速度最优仅 `1.09×`**
+  （非对称 `(56,76)`，`993 vs 1086us`）。真兑现要**单 kernel 内让异步张量核吃 shadow 访存受限腿
+  闲着的张量核**（第 167 篇 WGMMA 0.62→0.93）——Mega MoE 单 mega-kernel 的量化动机。输出 vs 串行
+  逐位一致（复用第 180 篇）。主 kernel SM100 专属、仅分析。详见 `docs/182`，索引页新增第 182 篇）。
+  上一轮 P171-1 把反向 SwiGLU 的输入 `h`「存 vs 重算」量出来：
   来源事实是 Mega MoE 前向**不存 `h`**——L1 epilogue 在寄存器/TMEM 里原地 SwiGLU 再量化
   （`sm100_fp8_fp4_mega_moe.cuh:1108-1134`）、持久 buffer 只有 `x`/量化 `a`/topk 权重
   （`layout/mega_moe.cuh:360-365/427-445`）。三选一里 **RECOMPUTE 支配 STORE-ALL**：同一确定 kernel

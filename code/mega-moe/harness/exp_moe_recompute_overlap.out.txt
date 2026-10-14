@@ -1,0 +1,55 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+--- PYTHON (GPU=1) ---
+deep_gemm 2.8.1, arch_major=9, device=NVIDIA H100 80GB HBM3, SM=132
+P172-1：把第 181 篇的「重算 shadow 预算」兑现成真机并发重叠——要 SM 预算分区才成立。
+Mega MoE 融合主 kernel 是 SM100 专属、本机不可跑；本实验用真实 SM90 FP8 grouped kernel。
+====================================================================================================
+workload: T=4096 H=7168 I=2048 E=8 topk=2  m_total=8192 total_k=8192
+  RECOMPUTE flops = 481.0 GF ; SHADOW flops = 481.0 GF (dgrad 240.5 + wgrad 240.5)
+
+## A. 满 SM 并发 vs 单流串行（预期：负结果——co-residency 闸门）
+====================================================================================================
+   RECOMPUTE only (满 132 SM):    356.7 us    1349 TFLOPS
+   SHADOW①dgrad L2 (满 132 SM):    193.3 us    1244 TFLOPS
+   SHADOW②wgrad L2 (满 132 SM):    535.9 us     449 TFLOPS
+   SHADOW   合计    (满 132 SM):    729.3 us     660 TFLOPS   RECOMPUTE/SHADOW = 0.49x
+   serial (rec; sh) 单流            :   1091.0 us
+   concurrent (两 stream, 都满 SM)  :   1102.1 us   ideal(max)=729.3
+   ⇒ speedup vs 串行 = 0.990x，overlap_factor = (rec+sh)/ovl = 0.985x
+      （=1.0 表示完全不重叠=串行；=1.49 表示完美。满 SM 下 smem 占满 →
+       kernel 无法 co-reside，第二个 kernel 排队，故 ovf ≈ 1.0。）
+
+## B. 对称 SM 预算分区：两个 kernel 同一 limit，扫 num_sms
+   132 SM 的 H100：设 num_sms=N 时每个 kernel 发 N 个 persistent block；
+   2N ≤ 132 时两 kernel 各占不同 SM → 真正并行；N=132 时挤同一批 SM → 排队。
+====================================================================================================
+      N   rec us    sh us  serial rec+sh  concurrent  ideal=max  ovf=(rec+sh)/ovl    spd vs 满SM串行
+    132    362.4    741.1         1103.5      1116.1      741.1              0.99            0.97
+     96    486.2    825.9         1312.1      1269.4      825.9              1.03            0.86
+     66    642.0   1020.8         1662.8      1108.1     1020.8              1.50            0.98
+     44    940.5   1323.4         2263.9      1388.5     1323.4              1.63            0.78
+     34   1088.4   1565.7         2654.1      1626.5     1565.7              1.63            0.67
+
+## C. 非对称分区 n_rec + n_sh = 132：把重算藏进 shadow 的最优切分
+   重算小（0.32× shadow），不必平分 SM；给 shadow 更多 SM、给重算刚好够用的量。
+====================================================================================================
+    (n_rec,n_sh)   rec us    sh us  concurrent  ideal=max  ovf=(rec+sh)/ovl    spd vs 满SM串行
+      (132, 132)    358.5    725.3      1099.1      725.3              0.99            0.99  <-- best
+        (66, 66)    671.0   1041.0      1115.6     1041.0              1.53            0.97
+        (44, 88)    905.1    800.8      1139.0      905.1              1.50            0.95
+        (34, 98)   1177.6    834.6      1443.1     1177.6              1.39            0.75
+        (48, 84)    800.8    819.9      1104.0      819.9              1.47            0.98
+        (56, 76)    775.2    883.9       993.1      883.9              1.67            1.09  <-- best
+       (24, 108)   1666.3    789.0      1863.1     1666.3              1.32            0.58
+   ⇒ 最优切分 (56, 76)，并发 993 us（vs 满 SM 串行 1086 us，1.09x）。
+
+## D. 重叠不改正确性：并发输出 == 串行输出
+====================================================================================================
+   (n_rec,n_sh)=(132,132) 并发 vs 满SM串行: recompute h: equal=True max|d|/max|r|=0.00e+00 | dgrad dA: equal=True max|d|/max|r|=0.00e+00 | wgrad dW2: equal=True max|d|/max|r|=0.00e+00
+   (n_rec,n_sh)=(66,66) 并发 vs 满SM串行: recompute h: equal=True max|d|/max|r|=0.00e+00 | dgrad dA: equal=True max|d|/max|r|=0.00e+00 | wgrad dW2: equal=True max|d|/max|r|=0.00e+00
+   (n_rec,n_sh)=(44,88) 并发 vs 满SM串行: recompute h: equal=True max|d|/max|r|=0.00e+00 | dgrad dA: equal=True max|d|/max|r|=0.00e+00 | wgrad dW2: equal=True max|d|/max|r|=0.00e+00
+   (n_rec,n_sh)=(34,98) 并发 vs 满SM串行: recompute h: equal=True max|d|/max|r|=0.00e+00 | dgrad dA: equal=True max|d|/max|r|=0.00e+00 | wgrad dW2: equal=True max|d|/max|r|=0.00e+00
+   (n_rec,n_sh)=(56,76) 并发 vs 满SM串行: recompute h: equal=True max|d|/max|r|=0.00e+00 | dgrad dA: equal=True max|d|/max|r|=0.00e+00 | wgrad dW2: equal=True max|d|/max|r|=0.00e+00
+   （grouped GEMM 结构性 bit 确定——第 180 篇；分区只改 SM 数不改累加序，故输出逐位一致。）
+
+ALL DONE
