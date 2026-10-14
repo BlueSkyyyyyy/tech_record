@@ -20,6 +20,7 @@
 | `docs/07-cp-backward.md` | 锚定扩到 CP 反向 + varlen×CP 梯度（M8-2） | [x] |
 | `docs/08-megatron-contract.md` | Megatron `kda.py` 调用契约逐项对齐（M9-1） | [x] |
 | `docs/09-e2e.md` | 真实层端到端前反向对拍（M10-1） | [x] |
+| `docs/10-packed-thd.md` | 真层 packed / THD（varlen）端到端对拍（M10-2） | [x] |
 | `src/kda_ref.py` | 最小可运行参考实现（纯 PyTorch、fp64、自带自测；M7 起支持 GVA + state_v_first） | [x] |
 | `harness/check_port_fla.py` | 参考 vs FLA 正反向数值锚定脚本（GPU） | [x] |
 | `harness/check_port_fla_m7.py` | 参考 vs FLA 门控/布局边界锚定（M7，GPU） | [x] |
@@ -27,6 +28,7 @@
 | `harness/check_port_fla_m8b.py` | 参考 vs FLA CP 反向 / varlen×CP 梯度锚定（M8-2，GPU；真实 NCCL rank） | [x] |
 | `harness/check_port_contract.py` | Megatron `kda.py` 调用契约对齐（M9-1，GPU；加载 FLA `chunk_kda` + 参考） | [x] |
 | `harness/check_port_e2e.py` | 真实 `KimiDeltaAttention` 层端到端前反向对拍（M10-1，GPU） | [x] |
+| `harness/check_port_e2e_packed.py` | 真层 packed / THD（varlen）端到端对拍（M10-2，GPU） | [x] |
 
 ## 任务清单
 
@@ -145,6 +147,23 @@
       真层的核心调用无隐藏布局/门控/精度偏差（M9-1 shim 契约在真层确认），且端到端梯度不被
       外层模块放大。**边界**：单卡 tp=cp=1、SBHD 非 packed；packed/THD、CP、GVA（Megatron
       KDA 不支持）、`gdn_pre_gated_delta_rule_fusion` 缺口未覆盖。
+- [x] **M10-2** 把 M10-1 的真层对拍扩到 **packed / THD（varlen）**路径：多序列沿 token 维
+      拍平、`cu_seqlens` 切分、`batch==1`（`kda.py:272-289`），三组 pack 含非 64 整除段长
+      （`[0,64,128]`/`[0,50,130]`/`[0,64,100,250]`）。新增 `harness/check_port_e2e_packed.py`
+      （`check_port_e2e_packed.out.txt`）+ `docs/10-packed-thd.md`。参考芯改成 **packed-aware**
+      （按相邻 `cu_seqlens` 逐序列循环调 `kda_chunked_fwd`，与 FLA varlen 语义一致，M8-1）。
+      **Part A** 三组 pack × fp32/bf16 真层 fwd/bwd 全部有限、输出 `[T_total,1,H]` 正确。
+      **Part B**（核心算子）截获真层当次喂 `chunk_kda` 的操作数（`cu_seqlens=[0,64,128]`、
+      `q=(1,128,4,32)`），FLA vs 逐序列 fp64 参考：fp32 `o rel=1.993e-03`、六项梯度 rel
+      3.2–3.6e-3；bf16 `o rel=3.676e-03`、梯度 rel 4.3–9.4e-3——落 tf32/bf16 底噪，**同时
+      证明 packed 段间状态隔离无泄漏**（若串状态误差会 O(1)）。**Part C**（整模块）FLA 芯 vs
+      参考芯：fp32 `out≤5.23e-4 / hs.grad≤2.45e-8 / param.grad≤1.95e-6`；bf16 `out≤2.93e-3 /
+      hs.grad≤1.34e-7 / param.grad≤5.25e-6`，与 M10-1 SBHD 同量级。**Part D** packed == unpacked
+      自洽（`[T,B,H]` vs `transpose(0,1).reshape(T*B,1,H)`、`cu_seqlens=[0,T,2T]`）：bf16 输出与
+      `hs.grad` **逐位相同（0）**、fp32 `out≤3.16e-5 / hs.grad≤2.4e-9`（差仅来自归约顺序）、
+      param.grad ≤2.4e-7。**结论**：packed 的 `cu_seqlens` 记账（切段/隔离/conv1d 跨段）在核心
+      与整模块两个粒度都无隐藏偏差；M9-1 shim 契约在 packed 真层再确认。**边界**：单卡 tp=cp=1、
+      packed 无 padding（`cu_seqlens_padded` 未用）、cp>1 的 packed CP（zigzag）未覆盖。
 
 ## 已知坑
 
@@ -178,21 +197,23 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：M0–M8 完成 + M9-1 完成 + **M10-1 完成**（docs 00–09 + 参考实现 + FLA 数值锚定
-  [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 + CP 反向/varlen×CP 梯度] + Megatron
-  调用契约对齐 + **真实层端到端前反向对拍**）。
-- 本轮（M10-1）：`harness/check_port_e2e.py` + `docs/09-e2e.md`。**首次 import 并实例化真实
-  `KimiDeltaAttention`**（先拆两条 import 期版本断言：nvrx 版本号 patch + `EP_SUPPRESS_NCCL_CHECK=1`）。
-  **Part A** 真层 fwd/bwd、全部参数梯度有限。**Part B** 截获真层当次喂 `chunk_kda` 的操作数，
-  FLA vs fp64 参考：fp32 `o rel=1.675e-03`、六项梯度 rel 2.7–3.2e-3；bf16 `o rel=4.878e-03`、
-  梯度 rel 3.6–8.5e-3。**Part C** 逐位同权重的「参考芯」模块端到端：fp32 `out≤5.10e-4 /
-  hs.grad≤2.48e-8 / param.grad≤2.01e-6`；bf16 `out≤2.93e-3 / hs.grad≤1.19e-7 / param.grad≤7.63e-6`。
-  **结论**：真层核心调用无隐藏偏差、M9-1 shim 契约在真层确认、端到端梯度不被外层放大。
-  **边界**：单卡 tp=cp=1、SBHD 非 packed；packed/THD、CP、GVA、`gdn_pre_gated_delta_rule_fusion`
-  缺口未覆盖。
-- 下一步（可选）：retire 到维护态（M0–M10 全完成）；若继续，把 M10-1 扩到 **packed/THD 与
-  headwise/chunkwise CP** 的真层对拍，或补 `gdn_pre_gated_delta_rule_fusion` 的 KDA 专属
-  streamed 融合前处理（`kda.py:399-402` 的缺口）。
+- 当前进度：M0–M8 完成 + M9-1 完成 + M10-1 完成 + **M10-2 完成**（docs 00–10 + 参考实现 +
+  FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 + CP 反向/varlen×CP 梯度] +
+  Megatron 调用契约对齐 + **真实层端到端前反向对拍 [SBHD + packed/THD]**）。
+- 本轮（M10-2）：`harness/check_port_e2e_packed.py` + `docs/10-packed-thd.md`。把 M10-1 的
+  真层对拍扩到 **packed / THD（varlen）**（`cu_seqlens` 切分、`batch=1`、参考芯改逐序列循环）。
+  **Part A** 三组 pack（含非 64 整除段长）× fp32/bf16 fwd/bwd 全有限。**Part B** 截获真层
+  当次喂 `chunk_kda` 的操作数（`cu_seqlens=[0,64,128]`），FLA vs 逐序列 fp64 参考：fp32
+  `o rel=1.993e-03`、六项梯度 rel 3.2–3.6e-3；bf16 `o rel=3.676e-03`、rel 4.3–9.4e-3（落底噪，
+  且证明 packed 段间无状态泄漏）。**Part C** 整模块 packed：fp32 `out≤5.23e-4 / hs.grad≤2.45e-8 /
+  param.grad≤1.95e-6`；bf16 `out≤2.93e-3 / hs.grad≤1.34e-7 / param.grad≤5.25e-6`。**Part D**
+  packed == unpacked：bf16 输出与 `hs.grad` 逐位相同、fp32 仅归约序微差。**结论**：packed 的
+  `cu_seqlens` 记账在核心/整模块两粒度都无隐藏偏差。**边界**：单卡 tp=cp=1、packed 无 padding、
+  cp>1 的 packed CP（zigzag）未覆盖。
+- 下一步（可选）：retire 到维护态（M0–M10 全完成）；若继续，把 M10-2 扩到 **cp>1 的
+  headwise/chunkwise CP packed**（多 rank + zigzag，需真 NCCL）真层对拍、测 **带 padding** 的
+  pack（`cu_seqlens_q_padded`/`_validate_packed_cu_seqlens`），或补
+  `gdn_pre_gated_delta_rule_fusion` 的 KDA 专属 streamed 融合前处理（`kda.py:399-402` 的缺口）。
 
 ## 阻塞
 

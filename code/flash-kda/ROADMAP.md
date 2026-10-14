@@ -2227,9 +2227,24 @@
 ## 当前进度 / 下一步
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-109 补测 + P8-3…P8-14**；子专题
-  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 + M10-1 完成**
+  **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 + M10-1/M10-2 完成**
   （见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - megatron-port M10-1（本轮）：**首次 import 并实例化真实 `KimiDeltaAttention`，做端到端
+  - megatron-port M10-2（本轮）：**把 M10-1 的真层对拍扩到 packed / THD（varlen）路径**——
+    多序列沿 token 维拍平、`cu_seqlens` 切分、`batch==1`（`kda.py:272-289`），参考芯改成
+    **packed-aware**（按相邻 `cu_seqlens` 逐序列循环调 `kda_chunked_fwd`，与 FLA varlen 语义
+    一致）。`harness/check_port_e2e_packed.py`（`check_port_e2e_packed.out.txt`）+
+    `docs/10-packed-thd.md`。**Part A** 三组 pack（含非 64 整除段长）× fp32/bf16 真层 fwd/bwd
+    全有限。**Part B**（核心算子）截获真层当次喂 `chunk_kda` 的操作数（`cu_seqlens=[0,64,128]`），
+    FLA vs 逐序列 fp64 参考：fp32 `o rel=1.993e-03`、六项梯度 rel 3.2–3.6e-3；bf16
+    `o rel=3.676e-03`、梯度 rel 4.3–9.4e-3（落 tf32/bf16 底噪，**同时证明 packed 段间状态隔离
+    无泄漏**）。**Part C** 整模块 packed：fp32 `out≤5.23e-4 / hs.grad≤2.45e-8 / param.grad≤1.95e-6`；
+    bf16 `out≤2.93e-3 / hs.grad≤1.34e-7 / param.grad≤5.25e-6`。**Part D** packed == unpacked
+    自洽：bf16 输出与 `hs.grad` **逐位相同（0）**、fp32 仅归约序微差（`out≤3.16e-5`）。**结论**：
+    packed 的 `cu_seqlens` 记账（切段/隔离/conv1d 跨段）在核心与整模块两个粒度都无隐藏偏差；
+    M9-1 shim 契约在 packed 真层再确认。**边界**：单卡 tp=cp=1、packed 无 padding
+    （`cu_seqlens_padded` 未用）、cp>1 的 packed CP（zigzag）未覆盖。**下一步**：megatron-port
+    进维护态，或把 M10-2 扩到 cp>1 的 packed CP 真层对拍。
+  - megatron-port M10-1：**首次 import 并实例化真实 `KimiDeltaAttention`，做端到端
     前反向对拍**。先拆两条 import 期版本断言（`nvidia_resiliency_ext.__version__="0.6.0"`
     骗过 `nvrx.py:44-46` 的 ≥0.6.0 断言；`EP_SUPPRESS_NCCL_CHECK=1` 绕过 `deep_ep` 的
     `check_nccl_so()`）。`harness/check_port_e2e.py`（`check_port_e2e.out.txt`）+
@@ -2239,9 +2254,9 @@
     （=tf32/bf16 底噪，同 M6/M7/M8）。**Part C** 逐位同权重的「参考芯」模块端到端：fp32
     `out≤5.10e-4 / hs.grad≤2.48e-8 / param.grad≤2.01e-6`；bf16 `out≤2.93e-3 / hs.grad≤1.19e-7 /
     param.grad≤7.63e-6`。**结论**：真层核心调用无隐藏布局/门控/精度偏差（M9-1 shim 契约在真层
-    确认），端到端梯度不被外层模块放大。**边界**：单卡 tp=cp=1、SBHD 非 packed；packed/THD、
-    CP、GVA（Megatron KDA 不支持）、`gdn_pre_gated_delta_rule_fusion` 缺口未覆盖。**下一步**：
-    megatron-port 进维护态，或把 M10-1 扩到 packed/THD + CP 真层对拍。
+    确认），端到端梯度不被外层模块放大。**边界**：单卡 tp=cp=1、SBHD 非 packed；packed/THD
+    （已由 M10-2 覆盖）、CP、GVA（Megatron KDA 不支持）、`gdn_pre_gated_delta_rule_fusion`
+    缺口未覆盖。
   - megatron-port M9-1（本轮）：**把 Megatron `kda.py` 的调用契约逐项对齐到 FLA `chunk_kda` / 参考**。
     `harness/check_port_contract.py`（`check_port_contract.out.txt`）+ `docs/08-megatron-contract.md`。
     用一个逐字复刻 `kda.py::pre_gated_delta_rule`+`common.py::_prepare_input_for_gated_delta_rule`
