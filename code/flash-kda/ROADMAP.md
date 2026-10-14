@@ -2353,8 +2353,20 @@
 
 - 当前进度：**P0–P8 全部完成 + P6-3…P6-9 / P7-3…P7-113 补测 + P8-3…P8-19**；子专题
   **`megatron-port`（把 FLA KDA 算子移植进 Megatron-LM）M0–M8 完成 + M9-1 完成 +
-  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
-  - P7-113 + P8-19（本轮）：**关闭 §116.2 要点 3 / `docs/05` §7.4 的最后一条 `待验证`**——fp32 分块前向
+  M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 + M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成 + **M14-1 完成**（见 `code/flash-kda/megatron-port/ROADMAP.md`）。
+  - megatron-port M14-1（本轮）：**兑现 megatron-port 路线图最后一项**——让 `KimiDeltaAttention`
+    自己的 `gdn_pre_gated_delta_rule_fusion` 开关真的**分派到** KDA 专属原生 fused pre-GDR（前向 +
+    原生反向），而非上游那样在两处 `raise`；**用运行时 shim，未改 Megatron-LM 一行**。新增
+    `src/kda_pregdr_fusion_shim.py`（`TransformerConfig.__post_init__` 临时屏蔽字段绕过配置 guard
+    `transformer_config.py:1936-1938`；`KimiDeltaAttention.forward` 临时把 `pre_gated_delta_rule` 换成
+    `kda_pre_gdr_fused_native` 绕过前向 guard `kda.py:399-402`）+ `harness/check_port_pregdr_fusion_wire.py`
+    （`check_port_pregdr_fusion_wire.out.txt`，空闲卡）+ `docs/18-pregdr-fusion-wire.md`。**Part A**
+    两处 guard 如约触发；**Part B** shim 安装后 `fusion=True` 配置可构造、模块属性 True、前向跑通；
+    **Part C**（同权重逐层前反向，7 参数全比）fp32 `out 1.095e-4 / param.grad rel 1.810e-4`、bf16
+    `out 1.953e-3 / rel 3.472e-3`（与 M13-1 整层 drop-in 同阶；`conv1d.weight.grad` 非逐位、只差
+    fp32 舍入序）；**Part D** 整层 fwd+bwd `wall` 1.03–1.13×、`dev` 小 shape 0.87–0.96×/大 shape ~1.0×。
+    至此 **megatron-port M0–M14 全完成、路线图无剩余**。见 `docs/18`。
+  - P7-113 + P8-19（上轮）：**关闭 §116.2 要点 3 / `docs/05` §7.4 的最后一条 `待验证`**——fp32 分块前向
     「GPU 比 CPU 差 $\sim3\times10^{-4}$」的成因。新增 `harness/check_fwd_gpu_cpu.py`
     （`harness/check_fwd_gpu_cpu.out.txt`）；**未改 `src/` 任何算术**（只更正
     `harness/check_bwd_chunked.py::forward_precision_note` 的错误文档串）。**根因**：本 NGC 容器

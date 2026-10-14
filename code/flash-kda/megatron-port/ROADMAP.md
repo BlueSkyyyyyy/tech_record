@@ -315,8 +315,30 @@
        （M13-2 为 0.69/0.76/0.76/0.79），大 shape 翻正；`wall` 仍 1.4–1.8×。**数值**：新增 **Part F**
        （融合前后同中间量逐项）fp32 ≤1e-6、bf16 3.9e-3（出口 ulp）；新增 **Part E**（`conv_bias=True`
        非零端到端 stub）`dbias` fp32 2.4–3.8e-6、`bias.grad` 两侧同值——关闭 `docs/16` 的 `dbias=nan` 边界；
-       Part A/B/C 与 M13-2 同阶。见 `docs/17-fused-pregdr-bwd-perf.md`。**边界**：`BT=64`/fp32-internal、
-       反向仍 4 kernel、**未做 ncu**（性能口径为 CUPTI self-dev + 自有 wall/dev）、仍未接 `kda.py:399`。
+        Part A/B/C 与 M13-2 同阶。见 `docs/17-fused-pregdr-bwd-perf.md`。**边界**：`BT=64`/fp32-internal、
+        反向仍 4 kernel、**未做 ncu**（性能口径为 CUPTI self-dev + 自有 wall/dev）、仍未接 `kda.py:399`。
+
+### M14 fused pre-GDR 接线到层开关
+- [x] **M14-1** 兑现 M12-1/M13-1/2/3 反复点名的**最后一项实现工程**——让 `KimiDeltaAttention` 自己的
+       `gdn_pre_gated_delta_rule_fusion` 开关真的**分派到** KDA 专属 native fused pre-GDR（前向 + 原生
+       反向），而不是像上游那样在两处 `raise`。**用运行时 shim 完成，未改 Megatron-LM 一行**（与历轮一致）。
+       新增 `src/kda_pregdr_fusion_shim.py`（`install()` 打两个补丁：`TransformerConfig.__post_init__`
+       在 `fusion=True`+`variant=="kda"` 时临时屏蔽该字段 → 绕过配置 guard；`KimiDeltaAttention.forward`
+       在实例属性为真时临时置 False + 把 `pre_gated_delta_rule` 换成 `MethodType(fused_fn,self)` → 绕过
+       前向 guard 并把 pre-GDR 交给原生核）+ `harness/check_port_pregdr_fusion_wire.py`
+       （`check_port_pregdr_fusion_wire.out.txt`，空闲卡）+ `docs/18-pregdr-fusion-wire.md`。native 入口
+       取 `kda_pregdr_bwd.kda_pre_gdr_fused_native`（含 conv 参数梯度）。**Part A（shim OFF）**：两处 guard
+       在 fp32/bf16 都如约 `NotImplementedError`。**Part B**：`install` 后同一份 `fusion=True` 配置可构造
+       （`flag=True`）、模块属性 True、前向跑通（`out (64,2,128) finite=True`）。**Part C**（同权重逐层前
+       反向，**7 个参数全比**）：fp32 `out 1.095e-4 / hs.grad 2.298e-4 / param.grad rel 1.810e-4`、bf16
+       `out 1.953e-3 / hs.grad 3.906e-3 / rel 3.472e-3`——与 M13-1 整层 drop-in（fp32 `out 1.230e-4`/
+       `rel 2.082e-4`）同阶；`conv1d.weight.grad` 两侧**非逐位**（eager 走 FLA `causal_conv1d` 反向、
+       fused 走 Triton conv 反向，只差 fp32 舍入序，已含在 rel 内）。**Part D**（整层 fwd+bwd 计时）：
+       `wall` 1.03–1.13×、CUPTI `dev` 小 shape 0.87–0.96×、大 shape ~1.0×（同 M13-3 隔离口径的形）。
+       **边界**：SBHD、tp=cp=1、GVA 因子 1、`use_qk_l2norm=True`；shim 对 `pre_gated_delta_rule` 的
+       cp/varlen 参数按契约忽略（原生核族仅 cp=1），packed THD / cp>1 的 fused pre-GDR 未覆盖。真实树里
+       这一步应写成 `kda.py:399` / `transformer_config.py:1936` 的分派分支；本 shim 是那段分支的语义等价物
+       与数值前哨。**至此 megatron-port 路线图已无剩余**（M0–M14 全完成）。
 
 ## 已知坑
 
@@ -384,13 +406,23 @@
 ## 当前进度 / 下一步
 
 - 当前进度：M0–M8 完成 + M9-1 完成 + M10-1/M10-2/M10-3 完成 + M11-1 完成 + M11-2 完成 +
-  M12-1 完成 + M13-1 完成 + M13-2 完成 + **M13-3 完成**
-  （docs 00–17 + 参考实现 + FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 +
+  M12-1 完成 + M13-1 完成 + M13-2 完成 + M13-3 完成 + **M14-1 完成**
+  （docs 00–18 + 参考实现 + FLA 数值锚定 [默认 + 门控/布局边界 + chunk/pad/varlen/CP 前向 +
   CP 反向/varlen×CP 梯度] + Megatron 调用契约对齐 + **真实层端到端前反向对拍 [SBHD +
   packed/THD + 带 padding 的 packed/THD + cp>1 headwise/chunkwise + **packed THD 多序列 CP**]** +
   `gdn_pre_gated_delta_rule_fusion` 的 KDA 缺口分析 + 专属 fused pre-GDR 契约锚定/drop-in +
   **KDA 专属 fused pre-GDR 的 Triton 核族实现** + **原生 Triton 反向 + conv 参数梯度修复** +
-  **反向融合 + 逐 kernel 剖析**）。
+  **反向融合 + 逐 kernel 剖析** + **运行时接线到层开关 `gdn_pre_gated_delta_rule_fusion`**）。
+- 本轮（M14-1）：`src/kda_pregdr_fusion_shim.py`（运行时抬起两处 guard 并把 pre-GDR 交给原生核）+
+  `harness/check_port_pregdr_fusion_wire.py` + `docs/18-pregdr-fusion-wire.md`。**未改 Megatron-LM
+  一行**。**Part A**：`fusion=True`+`kda` 的 config guard（`transformer_config.py:1936-1938`）与
+  forward guard（`kda.py:399-402`）如约触发。**Part B**：shim 安装后同配置可构造、模块属性 True、
+  前向跑通。**Part C**（同权重逐层前反向，7 参数全比）：fp32 `out 1.095e-4 / hs.grad 2.298e-4 /
+  param.grad rel 1.810e-4`、bf16 `out 1.953e-3 / hs.grad 3.906e-3 / rel 3.472e-3`（与 M13-1 整层
+  drop-in 同阶；`conv1d.weight.grad` 非逐位、只差 fp32 舍入序）。**Part D**（整层 fwd+bwd）：`wall`
+  1.03–1.13×、`dev` 小 shape 0.87–0.96× / 大 shape ~1.0×。**下一步（可选）**：megatron-port 路线图
+  已无剩余（M0–M14 全完成）——retire 维护态，或把该 shim 的语义落成真实树分支（需改 Megatron 树、
+  历轮均未做）。
 - 本轮（M13-3）：`harness/profile_port_pregdr_bwd.py` + `src/kda_pregdr_bwd.py` 融合 + 扩展的
   `harness/check_port_pregdr_bwd_kernel.py` + `docs/17-fused-pregdr-bwd-perf.md`。**先剖析再优化**：
   M13-2 反向的 dev 回归**≈45% 在 torch glue**（`cat` + 多次 slice-copy + `fd()` cast/zero-fill），
@@ -453,16 +485,18 @@
   **Part F** padded↔unpadded 真实 token `≤1.08e-4`(fp32)/`1.95e-3`(bf16)。**结论**：带 padding 的
   packed 路径数值健全、跨序列隔离精确，pad 对真实 token 的影响仅剩自身 slot 尾的块尾舍入、低于
   部署底噪。**边界**：单卡 tp=cp=1、`pad_between_seqs` 布局、cp>1 的 packed CP（zigzag）未覆盖。
-- 下一步（可选）：retire 到维护态（M0–M13 全完成）。原列的「打通 packed THD 多序列 CP」**已由
+- 下一步（可选）：retire 到维护态（**M0–M14 全完成**）。原列的「打通 packed THD 多序列 CP」**已由
   M11-2 完成**；「`gdn_pre_gated_delta_rule_fusion` 的 KDA 缺口」**已由 M12-1 关闭**（结构差异
   + 专属 fused pre-GDR 契约锚定/drop-in，见 `docs/14`）；「按 `docs/14` §5 契约把 KDA 专属 fused
   pre-GDR 实现成 Triton 核族」**已由 M13-1 完成**（三 kernel 核族 + 数值锚定 + 整层 drop-in +
   wall/dev 计时，见 `docs/15`）；「原生 Triton 反向」**已由 M13-2 完成**（三反向 kernel + autograd
   重接 + conv 参数梯度修复，见 `docs/16`）；「把反向 conv/l2norm 融合」**已由 M13-3 完成**（先逐
-  kernel 剖析定位 glue、再融合 producer 直写 `da` + conv 直写输出，dev 缺口关闭 + Part E/F，见
-  `docs/17`）。若继续，仅剩「把原生 fused pre-GDR（前向+反向）接到 `kda.py:399` 的
-  `gdn_pre_gated_delta_rule_fusion` guard」——这需要修改 Megatron-LM 树（历轮都刻意不改），
-  属实现工程、非分析缺口。
+   kernel 剖析定位 glue、再融合 producer 直写 `da` + conv 直写输出，dev 缺口关闭 + Part E/F，见
+   `docs/17`）；「把原生 fused pre-GDR（前向+反向）接到 `kda.py:399` 的
+   `gdn_pre_gated_delta_rule_fusion` guard」**已由 M14-1 以运行时 shim 完成**（抬起两处 guard +
+   分派到原生核，整层数值透明 fp32 rel 1.81e-4 / bf16 3.47e-3，见 `docs/18`；未改 Megatron 树）。
+   **路线图已无剩余**；若要把该 shim 落成真实树分支（`raise` → KDA `pre_gated_delta_rule_fused`），
+   那是需改 Megatron 树的实现工程、非分析缺口。
 
 ## 阻塞
 
