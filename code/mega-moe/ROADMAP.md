@@ -5310,7 +5310,39 @@
       二者 **bit 不同 92.2%**、`max|差|=1.14e-4`（复现第 174 篇「可复现性 ≠ 数值精度」）。**结论**：tn 与 nt
       结构同构（每组独立累加器、组内 K 单调）⇒ 第 174/175 篇的累积序结论**迁移成立**；唯一不可从源码判定
       的是 UMMA v.s. WGMMA 的 K=32 内归约序。配套博客 `content/posts/mega-moe-186-k-grouped-tn-mn-major`
-      （索引页新增第 186 篇）。
+       （索引页新增第 186 篇）。
+
+### P177 增量（opt-in，补齐第 186 篇留给第 16 篇的 SF 链路：布局 → SF → kernel 端到端）
+
+- [x] **P177-1** **FP8 K-grouped wgrad 的 SF 链路端到端：布局 → SF → kernel（H100 兑现）**
+      （`csrc/apis/layout.hpp:89-116`；`csrc/jit_kernels/impls/smxx_layout.hpp:60-106/218-283/286-317`；
+      `csrc/apis/gemm.hpp:320-371/373-427`；`deep_gemm/include/deep_gemm/scheduler/gemm.cuh:37/157-168/240-242`；
+      `deep_gemm/include/deep_gemm/impls/sm90_fp8_gemm_1d1d.cuh:161` /
+      `sm100_fp8_fp4_gemm_1d1d.cuh:155/199`；`tests/generators.py:488-540`；`deep_gemm/utils/math.py:52-59`）。
+      第 12 篇拆了 SM90 FP8 `k_grouped_nt` 的 kernel/API，第 16 篇拆了 K-grouped SF 的**打包**（SM100-only），
+      第 186 篇用 BF16 MN-major 同构体证明了目标卡 FP8 `k_grouped_tn` 的累积结构，并把「tn 的 SFA/SFB 也走
+      同一套 `transform_k_grouped_sf_into_required_layout`」（`gemm.hpp:363-364`）留给第 16 篇——**这条链
+      一直没被真正串起来**。本篇把「布局 → SF → kernel」端到端接上，并在 H100 真跑完整链路（量化 → SF →
+      变换 → kernel），回答「目标卡 tn 的 SF 需求与本机能跑的 SM90 nt 是不是同一套几何」。**源码事实**：
+      ① **三条 SF 通路**（`layout.hpp:89-116`）——SM90 fp32→`get_mn_major_tma_aligned_tensor`（`:104-105`）、
+      SM100 fp32→`get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor`（`:108-109`）、SM100 已打包→
+      `check_k_grouped_packed_ue8m0_tensor`（`:112-113`）；② **SF 输入朝向随操作数主序**（`generators.py:488-540`）：
+      K-major(nt) 侧 `[mn,Σsf_k]`、MN-major(tn) 侧 `[Σ k/gran_k, mn]`，两条变换都归一成 **MN 连续**；
+      ③ **SM90 变换不做按组处理**（整份 SF 一次转置）——分组由**量化阶段**逐组补零表达；④ **几何不变量**：
+      每组 SF 行数由 `current_sf_k_cumsum += ceil_div(align(shape_k,KALIGN), kSFKSpan)`（`scheduler:242`）给出，
+      SM90 `kSFKSpan=128`（一行 fp32 覆盖 128 K）、SM100 `kSFKSpan=kGranKA*4`（kernel`:199`，一行 int32 = 4 scale
+      × gran_k）⇒ **gran32 时 SM100 packed 行数 == SM90 fp32 行数**；⑤ packed 行数 `Σ ceil_div(host_k/gran_k,4)`
+      （`smxx_layout.hpp:244-246`），gran128 每组按 512K 向上取整会多出 padding 行；⑥ `host_k-logical_k<128`
+      ⇒ **无「纯 padding 的 SF 行」**。**H100(sm90) 真机**（`harness/exp_kgrouped_sf_chain.{py,sh,out.txt}`，
+      `G=4,m=512,n=1024, logical_ks=[500,300,700,250]` 故意未对齐）：① **显式预变换 SF vs API 内部变换逐位
+      相等**（bit-diff=0.0000）、再次变换早退（`smxx_layout.hpp:63-65`）；② kernel vs 反量化参考 **~1.1e-4**
+      （隔离 kernel 误差）、vs bf16 原值 3.62e-2（=FP8 量化）；③ SF 几何 `[4,3,6,2]` 行、偏移累计 **15 ==
+      a_sf.shape[1]**，与 scheduler 公式逐项一致；④ gran32 packed 行数 `[4,3,6,2]` = SM90 fp32、gran128
+      `[1,1,2,1]`（一行覆盖 128/512 K）；⑤ SM100 打包 API 在 H100 被 `smxx_layout.hpp:224` arch 门控拒；
+      ⑥ FP8 nt vs BF16 tn 同题对拍（3.62e-2 vs 4.05e-7），差异只在精度层；⑦ SF 变换开销可忽略（167 vs 166
+      TFLOPS；8 卡共享仅量级）。**结论**：目标卡 tn 与 H100 nt 的 SF 几何是同一张表，只有存储形态（fp32 vs
+      packed UE8M0）不同。主 kernel SM100 专属、仅分析。配套博客
+      `content/posts/mega-moe-187-k-grouped-sf-chain`（索引页新增第 187 篇）。
 
 ## 每轮增量流程（autopilot）
 
@@ -5349,8 +5381,22 @@
 
 ## 当前进度 / 下一步
 
-- 当前进度：**P0~P14 全部完成；P15~P176 各增量完成（P15-1…P41-1、P42-1…P176-1）。**
-  本轮 P176-1：新建 `docs/186-k-grouped-tn-mn-major.md` +
+- 当前进度：**P0~P14 全部完成；P15~P177 各增量完成（P15-1…P41-1、P42-1…P177-1）。**
+  本轮 P177-1：新建 `docs/187-k-grouped-sf-chain.md` +
+  `harness/exp_kgrouped_sf_chain.{py,sh,out.txt}`——第 186 篇把「tn 的 SFA/SFB 也走同一套
+  `transform_k_grouped_sf_into_required_layout`」（`gemm.hpp:363-364`）留给第 16 篇，本篇把「布局 → SF →
+  kernel」端到端接上并在 H100 真跑完整链路。**源码事实**：① 三条 SF 通路（`layout.hpp:89-116`：SM90 fp32→
+  `get_mn_major_tma_aligned_tensor` `:104-105`、SM100 fp32→packed `:108-109`、SM100 已打包→check `:112-113`）；
+  ② SF 输入朝向随操作数主序（K-major `[mn,Σsf_k]` / MN-major `[Σ k/gran_k, mn]`），变换后都归一成 MN 连续；
+  ③ SM90 变换不做按组处理（整份转置），分组由量化阶段逐组补零表达；④ 几何不变量：每组 SF 行数由
+  `current_sf_k_cumsum += ceil_div(align(shape_k,KALIGN), kSFKSpan)`（`scheduler:242`）给出，SM90 `kSFKSpan=128`
+  / SM100 `kSFKSpan=kGranKA*4`（kernel`:199`）⇒ **gran32 时 packed 行数 == SM90 fp32 行数**；⑤ `host_k-logical_k<128`
+  ⇒ 无纯 padding 的 SF 行。**H100(sm90) 真机**：① 显式预变换 SF vs API 内部变换**逐位相等**、再次变换早退；
+  ② kernel vs 反量化参考 ~1.1e-4、vs bf16 原值 3.62e-2；③ SF 几何 `[4,3,6,2]` 行、偏移累计 15 == `a_sf.shape[1]`，
+  与 scheduler 公式逐项一致；④ gran32 packed 行数 = SM90 fp32、gran128 每 512K 向上取整；⑤ SM100 打包 API
+  在 H100 被 `smxx_layout.hpp:224` 拒；⑥ FP8 nt vs BF16 tn 同题对拍 3.62e-2 vs 4.05e-7。**结论**：目标卡 tn
+  与 H100 nt 的 SF 几何是同一张表，只有存储形态不同。主 kernel SM100 专属、仅分析。索引页新增第 187 篇。
+  上一轮 P176-1：新建 `docs/186-k-grouped-tn-mn-major.md` +
   `harness/exp_kgrouped_tn_mn_major.{py,sh,out.txt}`——反向系列（第 12 篇 wgrad / 第 174 篇累积结合序 /
   第 175 篇跨 rank）用的都是 **SM90 能跑的 FP8 `k_grouped_nt`**（K-major）；但 Mega MoE 的 wgrad 在
   **目标卡（SM100）**上走的是 **MN-major 的 `k_grouped_fp8_gemm_tn_contiguous`**（`A/B:[sum_k,M]`），
@@ -7364,21 +7410,28 @@
   H100 实测：误差干净分两层（vs 隔离量化 2–4e-3、量化本身 3–4e-2）、每头独立且头 0 置零无串扰、
   SF 布局与契约逐条对上、确定性开关对 FP8 路径无效、大形状峰值 **581 TFLOPS**。
   配套博客 `content/posts/mega-moe-21-fp8-einsum-projection`（索引页新增第 21 篇）。Hugo 构建 0 ERROR。
-- **下一步**：P0~P176 已完成（最新 **P176-1 补上第 174/175 篇累积序结论在「目标卡 wgrad 路径」上的迁移**：
-  `docs/186`。第 12 篇讲的 SM90 FP8 `k_grouped_nt` 是 K-major、本机可跑，但目标卡生产 wgrad 走
-  **MN-major 的 `k_grouped_fp8_gemm_tn_contiguous`**（仅 SM100，`gemm.hpp:369` 拒 sm90）。本篇补上：
-  ① 布局/架构矩阵、tn v.s. nt 契约（tn 支持 PSUM/直接输出，nt 在 SM90 强制累积禁 PSUM）；② SM100 tn kernel
-  每条输出 tile 一条**独立、单调的 fp32 累加链**（K 块外循环、UMMA K 内循环、仅首条 UMMA 清零）；③ scheduler
-  每组同一套 (m,n) 块、逐组推进 ⇒ **组间不共享累加器/K 区间**。**H100(sm90) 真机对照**（BF16 MN-major
-  同构 kernel，物理布局与 tn 逐位同构）：**全组一次 launch vs 逐组单独 launch 逐位相等（4/4）**、**组排列
-  置换逐位相等**、PSUM 被 `gemm.hpp:711` 拒（SM100-only）、20 次 0 bit 变动、吞吐 40–77 TFLOPS（只作正确性
-  对照）、kernel 与 torch fp32 **bit 不同 92.2%**。**结论**：tn 与 nt 结构同构 ⇒ 第 174/175 的结论**迁移
-  成立**；唯一不可从源码判定的是 UMMA v.s. WGMMA 的 K=32 内归约序。主 kernel SM100 专属、仅分析。
-  索引页新增第 186 篇）。
-  可继续（均为增量、非承诺）：① 把本轮的 BF16 MN-major 对照接到 **FP8 `k_grouped_tn` 的 SF 打包链路**
-  （第 16 篇）做端到端「布局 → SF → kernel」串联核对；② 把第 170 篇的 dispatch 行序与本篇的累积序
-  **放进同一次端到端训练步**计时（需 DeepEP 运行期，见「阻塞」）；③ 把 NCCL 结论接到**真实 MoE 训练步**
-  的稠密/shared 分支（需 DeepEP 运行期）。
+- **下一步**：P0~P177 已完成（最新 **P177-1 补上第 186 篇留给第 16 篇的 SF 链路：布局 → SF → kernel 端到端**：
+  `docs/187`。第 12 篇拆了 SM90 FP8 `k_grouped_nt` 的 kernel/API、第 16 篇拆了 K-grouped SF 的**打包**
+  （SM100-only）、第 186 篇证明了目标卡 FP8 `k_grouped_tn` 的累积结构并把「tn 的 SFA/SFB 也走同一套变换」
+  留给第 16 篇——**这条链一直没真正串起来**。本篇把「布局 → SF → kernel」接上并在 H100 真跑完整链路。
+  ① 三条 SF 通路（`layout.hpp:89-116`）；② SF 输入朝向随操作数主序、变换后归一成 MN 连续；③ SM90 变换不做
+  按组处理、分组由量化阶段逐组补零表达；④ **几何不变量**：`current_sf_k_cumsum += ceil_div(align(shape_k,KALIGN),
+  kSFKSpan)`（`scheduler:242`），SM90 `kSFKSpan=128` / SM100 `kSFKSpan=kGranKA*4`（kernel`:199`）⇒ gran32 时
+  packed 行数 == SM90 fp32 行数；⑤ `host_k-logical_k<128` ⇒ 无纯 padding SF 行。**H100(sm90) 真机**：显式
+  预变换 SF vs API 内部变换**逐位相等**、SF 几何与 scheduler 公式逐项一致、SM100 打包 API 被 arch 门控拒、
+  FP8 nt vs BF16 tn 同题对拍（3.62e-2 vs 4.05e-7）。**结论**：目标卡 tn 与 H100 nt 的 SF 几何是同一张表，
+  只有存储形态不同。主 kernel SM100 专属、仅分析。索引页新增第 187 篇）。
+  可继续（均为增量、非承诺）：① 把 SF 链路接到**目标卡 FP8 `k_grouped_tn` 的端到端**（需 SM100 环境）；
+  ② 把第 170 篇的 dispatch 行序与第 174 篇的累积序**放进同一次端到端训练步**计时（需 DeepEP 运行期，见
+  「阻塞」）；③ 把 NCCL 结论接到**真实 MoE 训练步**的稠密/shared 分支（需 DeepEP 运行期）。
+  上一轮 P176-1：`docs/186`——第 12 篇讲的 SM90 FP8 `k_grouped_nt` 是 K-major、本机可跑，但目标卡生产
+  wgrad 走 **MN-major 的 `k_grouped_fp8_gemm_tn_contiguous`**（仅 SM100，`gemm.hpp:369` 拒 sm90）。补上
+  布局/架构矩阵与 tn v.s. nt 契约、SM100 tn kernel 每条输出 tile 一条**独立、单调的 fp32 累加链**（K 块外
+  循环、UMMA K 内循环、仅首条 UMMA 清零）、scheduler 每组同一套 (m,n) 块逐组推进 ⇒ **组间不共享累加器/K
+  区间**；**H100(sm90) 真机对照**（BF16 MN-major 同构 kernel）：全组一次 launch vs 逐组单独 launch **逐位
+  相等（4/4）**、组排列置换逐位相等、PSUM 被 `gemm.hpp:711` 拒、20 次 0 bit 变动、kernel 与 torch fp32
+  **bit 不同 92.2%**。**结论**：tn 与 nt 结构同构 ⇒ 第 174/175 的结论**迁移成立**；唯一不可从源码判定的是
+  UMMA v.s. WGMMA 的 K=32 内归约序。主 kernel SM100 专属、仅分析。索引页新增第 186 篇。
   上一轮 P175-1 把第 184 篇 §8 留的「跨 rank all-reduce 序」从纯 torch 模拟推到真实多卡 NCCL
   （`docs/185`；**H100 真机** 4×H100/NCCL 2.29.7：① 固定配置 run-to-run **逐位确定**；② **w=2 全同、
   w=4 才分化** Ring vs Tree 差 **35.6%** bit、relerr 2.967e-08；③ 换算法改 35.6% bit；④ `rs+ag` vs

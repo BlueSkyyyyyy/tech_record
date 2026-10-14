@@ -1,0 +1,48 @@
+NVIDIA H100 80GB HBM3, 9.0, 570.211.01
+deep_gemm 2.8.1, arch_major=9, device=NVIDIA H100 80GB HBM3, cap=(9, 0)
+==============================================================================================
+shape: G=4 m=512 n=1024  logical_ks=[500, 300, 700, 250]  host_ks(padded)=[512, 384, 768, 256]  sum_k=1920  per-group SF rows(host_k/128)=[4, 3, 6, 2]
+----------------------------------------------------------------------------------------------
+A  端到端 FP8 nt：量化 -> SF -> transform -> kernel
+   物理布局：A/B = [sum_k, M] 的 K-major（K 连续），展开 numel=983040
+   输入 SF：a_sf=(512, 15) contiguous=True  （[mn, sum_sf_k] 约定，SM90 nt 侧）
+   显式变换后 SF：a_sf_t=(512, 15) stride=(1, 512) （MN 连续 + MN TMA 对齐 stride=512）
+   再次变换早退：stride 相同=True  值逐位相同=True
+   隐式(API 内部变换) vs 显式(预变换) SF：逐位相等=True  bit-diff=0.0000
+   逐组误差：
+     group 0: logical_k= 500  kernel-vs-反量化参考=1.158e-04   kernel-vs-bf16原值=3.636e-02   (量化本身 vs bf16原值=3.636e-02)
+     group 1: logical_k= 300  kernel-vs-反量化参考=1.058e-04   kernel-vs-bf16原值=3.598e-02   (量化本身 vs bf16原值=3.598e-02)
+     group 2: logical_k= 700  kernel-vs-反量化参考=1.164e-04   kernel-vs-bf16原值=3.628e-02   (量化本身 vs bf16原值=3.627e-02)
+     group 3: logical_k= 250  kernel-vs-反量化参考=1.100e-04   kernel-vs-bf16原值=3.629e-02   (量化本身 vs bf16原值=3.629e-02)
+----------------------------------------------------------------------------------------------
+B  SF 几何：每组行数 / 偏移
+   scheduler 公式 `current_sf_k_cumsum += ceil_div(align(shape_k, 128), kSFKSpan)`（scheduler/gemm.cuh:242），kSFKSpan=128（SM90 fp32）
+     group 0: host_k= 512  sf_rows=4  sf_offset(cumsum)=0
+     group 1: host_k= 384  sf_rows=3  sf_offset(cumsum)=4
+     group 2: host_k= 768  sf_rows=6  sf_offset(cumsum)=7
+     group 3: host_k= 256  sf_rows=2  sf_offset(cumsum)=13
+   累计 SF 行数=15  ==  a_sf.shape[1]=15  => True
+   注意：每组 host_k-logical_k<128，padding 行总落在最后 1 个 K-block 内 ⇒ 无「纯 padding SF 行」；a_sf 全为正=True（真行 amax>0）
+----------------------------------------------------------------------------------------------
+C  目标卡(SM100) tn 的 SF 需求：packed UE8M0（一行恒覆盖 gran_k*4 个 K 元素）
+   kernel `shape_sfa_k = ceil_div(shape_k, kGranKA*4)`（sm100_fp8_fp4_gemm_1d1d.cuh:155），scheduler 传 kSFKSpan=kGranKA*4（:199）
+   输入 SF 约定：MN-major 侧为 [sum(host_k/gran_k), mn]（K 为行）；SM90 nt 侧为 [mn, sum_sf_k]
+     gran_k= 32: 每组 packed 行=[4, 3, 6, 2] 总 packed_sf_k=15  输入 SF 行数=60  一行覆盖 128 个 K
+              gran32 packed 行数 == SM90 fp32 行数(15) = True；gran128 时每组按 512K 向上取整，尾块 padding 会多出额外行
+     gran_k=128: 每组 packed 行=[1, 1, 2, 1] 总 packed_sf_k=5  输入 SF 行数=15  一行覆盖 512 个 K
+              gran32 packed 行数 == SM90 fp32 行数(15) = None；gran128 时每组按 512K 向上取整，尾块 padding 会多出额外行
+   H100 上调用 SM100-only 的打包 API（应被 arch 门控拒，smxx_layout.hpp:224）：
+     拒绝: RuntimeError: Assertion error (csrc/apis/../jit_kernels/impls/smxx_layout.hpp:224): jit->device.get_arch_major() == 10 and (gran_k == 32 or gran_k == 128) and k_ali
+----------------------------------------------------------------------------------------------
+D  FP8 nt（K-major + SF）vs BF16 tn（MN-major，无 SF）同题对拍
+   FP8 nt  vs fp64(bf16原值)  relerr=3.624e-02
+   BF16 tn vs fp64(bf16原值)  relerr=4.049e-07
+   FP8 nt  vs BF16 tn         relerr=3.624e-02  bit-diff=1.0000  (差异=FP8 量化 vs BF16)
+   两者都输出 [G, m, n]，都满足 D[e]=A_e^T B_e；差异只在精度层，不在布局/累加结构。
+----------------------------------------------------------------------------------------------
+E  吞吐（真实 SM90 kernel；8 卡共享，仅量级参考）
+   FP8 nt (SF 已 TMA 对齐->内部早退): G=8 m=4096 n=7168 k/group=4096  t=11546 us  167 TFLOPS
+   FP8 nt (SF 原始->每次内部 transpose): G=8 m=4096 n=7168 k/group=4096  t=11571 us  166 TFLOPS
+   BF16 tn (无 SF): G=8 m=4096 n=7168 k/group=4096  t=17331 us  111 TFLOPS
+==============================================================================================
+B/几何判定 ALL_OK = True
