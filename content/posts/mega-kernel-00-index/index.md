@@ -16,6 +16,21 @@ categories: ["算子开发"]
 
 - 配套代码：[`code/mega-kernel/`](https://github.com/BlueSkyyyyyy/tech_record/tree/main/code/mega-kernel)
 
+## 怎么读这个专题
+
+按你需要挑一条路线：
+
+- **只想搞懂「为什么」**（约一小时）：[第 1 篇]({{< relref "mega-kernel-01-overview" >}}) →
+  [一页纸总结]({{< relref "mega-kernel-06-summary" >}})。第 1 篇算清 kernel-per-operator 的三笔账、
+  给出 C1–C5 判据；总结篇收口成 checklist。
+- **想读懂 MPK 论文**：第 1 篇 → [tGraph 表示]({{< relref "mega-kernel-02-paper" >}}) →
+  [运行层源码]({{< relref "mega-kernel-07-mpk-source" >}}) → [编译器]({{< relref "mega-kernel-09-mpk-compiler" >}})。
+- **想看生产代码怎么写**：[DeepGEMM mega 家族]({{< relref "mega-kernel-03-cases" >}})，
+  再配合平行专题 [Mega MoE]({{< relref "mega-moe-00-index" >}}) 的逐段精读；想自己跑数字走
+  [实验篇]({{< relref "mega-kernel-05-experiments" >}})。
+
+一条主线记到底：**MegaKernel 不是「kernel 变大」，而是「调度权从 host 移到 device、粒度从算子细到 SM」。**
+
 ## 目录
 
 1. [MegaKernel 是什么：动机、定义与谱系]({{< relref "mega-kernel-01-overview" >}}) —— kernel-per-operator 的损失、定义、谱系

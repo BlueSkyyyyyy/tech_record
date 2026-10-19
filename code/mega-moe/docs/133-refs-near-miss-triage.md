@@ -37,7 +37,7 @@
 `file:100`。后果有两层：
 
 - 命中率偏低（本该在区间内的标识符若不在第 100 行，就被判 near_miss）；
-- **偶尔把一个正确引用误报成 near_miss**。典型：`docs/01-moe-ep-basics.md:116` 写
+- **偶尔把一个正确引用误报成 near_miss**。典型：`docs/01-moe-ep-basics.md:172` 写
   `dispatch.cuh:103`-`:105` 的 `ptx::deduplicate`，而 `ptx::deduplicate(...)` 的调用在**第 104 行**
   （区间中段），linter 只看到 `:103` 就报了 near_miss。
 
@@ -47,11 +47,11 @@
 
 | 文档:行 | 合并后区间 |
 |---|---|
-| `01-moe-ep-basics.md:116` | `dispatch.cuh:103-105` |
-| `02-mega-moe-architecture.md:143/151/165/183/247` | `test_mega_moe.py:130-133`、`sm100_fp8_fp4_mega_moe.cuh:1017-1020`/`145-149`、`smxx_layout.hpp:137-138`、`heuristics/mega_moe.hpp:220-221` |
+| `01-moe-ep-basics.md:172` | `dispatch.cuh:103-105` |
+| `02-mega-moe-architecture.md:194/203/218/238/321` | `test_mega_moe.py:130-133`、`sm100_fp8_fp4_mega_moe.cuh:1017-1020`/`145-149`、`smxx_layout.hpp:137-138`、`heuristics/mega_moe.hpp:220-221` |
 | `07-deepep-dispatch-combine.md:58/69/78/90/104/122/169` | `context.cpp:226-232`/`174-183`、`token.cuh:10-30`、`workspace.cuh:9-23`、`dispatch.cuh:78-257`/`258-390`、`combine_utils.cuh:67-70` |
 
-其中 `01:116` 与 `07:169` 合并后标识符落回区间内，near_miss 直接 -2。
+其中 `01:172` 与 `07:169` 合并后标识符落回区间内，near_miss 直接 -2。
 
 ## 3. 五分类：把 near_miss 变成可判读的台账
 

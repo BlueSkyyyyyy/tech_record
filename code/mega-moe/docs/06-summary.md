@@ -9,6 +9,20 @@
 > **约束**：Mega MoE 主体是 **SM100（Blackwell）专属**，本机 H100（sm90）跑不了端到端；
 > 凡 SM100 专属部分均标注「仅分析」，能上 H100 的数值/访存/通信实验给真实数字。
 
+## 0. 三句话版本（先看这个）
+
+1. **MoE 前向像一条「送到别人院区做检查」的流水线**：分诊（router）→ 把病人送到各专家所在 GPU
+   （dispatch）→ 各专家算 FFN → 结果送回并加权（combine）。搬人的时间比干活的时间还长——因为
+   每个病人都要挂 8 个科室，通信量是 token 量的 k 倍。
+2. **Mega MoE 的招数是「一个后厨、五个工位」**：五段塞进一个常驻 kernel，中间只留一个固定格数的
+   传菜窗口（ring buffer）。备菜员（dispatch warp）不等全部备齐才交班，灶台（MMA）见菜就炒，
+   装盘（epilogue）炒好一段就往下传。于是搬人的时间被炒菜的时间盖住。
+3. **反向没有对应的大融合 kernel**：它天然能拆成四个 grouped GEMM（wgrad 走 `k_grouped`、
+   dgrad 走 `m_grouped`），wgrad 还留在专家本地 rank、不用 all-reduce。真正的瓶颈是 wgrad
+   （K 轴是 token，瘦长、算术强度低）。
+
+下面的章节是这三句话的证据与细节。
+
 ## 1. 一句话总览
 
 一个 MoE 层的前向是 **EP dispatch → linear1 → SwiGLU → linear2 → EP combine** 五段串行；朴素实现里

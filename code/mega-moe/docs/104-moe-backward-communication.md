@@ -214,7 +214,7 @@ dispatch warp 与 MMA/epilogue warp 各占一部分 SM/warp 资源（第 3/9 篇
 
 ## 参考
 
-- 前向通信量模型：第 1 篇 §2.1（`docs/01-moe-ep-basics.md:109-131`）。
+- 前向通信量模型：第 1 篇 §2.1（`docs/01-moe-ep-basics.md:167-205`）。
 - 反向数学与四项梯度：第 4 篇（`docs/04-moe-backward.md`）。
 - 反向 kernel 接入与吞吐：第 14 篇（`docs/14-moe-backward-kernels.md`）。
 - dispatch/combine 互为转置 + 路由权重梯度：第 95 篇（`docs/95-ep-backward-adjoint.md`）。

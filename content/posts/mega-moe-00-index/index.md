@@ -17,6 +17,25 @@ categories: ["算子开发"]
 
 - 配套代码：[`code/mega-moe/`](https://github.com/BlueSkyyyyyy/tech_record/tree/main/code/mega-moe)
 
+## 怎么读这个专题
+
+**先读 1–2 两篇**——它们是整个专题的坐标系：
+
+- [第 1 篇]({{< relref "mega-moe-01-basics" >}})讲清 MoE 的计算图、三种 grouped GEMM 布局、
+  以及 EP 通信为什么是「k 倍放大」；
+- [第 2 篇]({{< relref "mega-moe-02-architecture" >}})讲清五段计算怎么塞进一个 kernel：
+  数据流、ring buffer、warp 分工、以及与「先通信后计算」的差别。
+
+然后按兴趣挑路线：
+
+- **想抠 kernel 实现**：3（DeepEP）→ 5 → 6 → 7 → 8（主体 kernel 逐段）。
+- **想搞反向**：9 → 10 → 11 → 12；想解释「wgrad 为什么慢」再看 15 之后的反向性能归因。
+- **想自己跑数字**：先看 4（H100 环境与可用性清单），确认哪些 kernel 本机可跑、哪些 SM100 专属。
+- **只有五分钟**：直接看 14（一页纸总结 + 实测证据台账）。
+
+15 号之后的文章是「一次只深挖一个点」的笔记（布局、调度器、SF 打包、PTX 原语……），
+不必按顺序读，按关键词跳着看即可。每篇开头都会说明它补的是前面哪一篇的哪条尾巴。
+
 ## 目录
 
 1. [MoE 与专家并行（EP）基础]({{< relref "mega-moe-01-basics" >}}) —— 计算图、grouped GEMM、dispatch/combine

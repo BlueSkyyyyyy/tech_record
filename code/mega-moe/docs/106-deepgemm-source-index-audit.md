@@ -220,7 +220,7 @@ kernel 被拆过，连 `locality_domain`（26 行）、`epilogue_class`（27 行
 成因主要是两类：
 
 - **off-by-one / 区间端点**：
-  - `01-moe-ep-basics.md:116` 引 `dispatch.cuh:103` 的 `deduplicate`——实测 `ptx::deduplicate` 在
+  - `01-moe-ep-basics.md:172` 引 `dispatch.cuh:103` 的 `deduplicate`——实测 `ptx::deduplicate` 在
     `:104`（`:103` 是上一行的 `dst_rank_idx`），差一行。
   - `07-deepep-dispatch-combine.md:168` 引 `combine_utils.cuh:55` 的 `combine_reduce`——`:55` 是函数
     模板头，函数名 `combine_reduce` 在 `:58`（整段起于 55，可接受）。
