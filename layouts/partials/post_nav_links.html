@@ -1,0 +1,59 @@
+{{- /*
+  文章底部「上一篇 / 下一篇」。
+
+  只在本篇所属 series 内导航，不跨系列：本站每篇文章的 weight 是「系列内序号」
+  （mega-moe 1–195、leetcode 1–36 …），PaperMod 原版按全站 site.RegularPages 的
+  默认排序（weight, date desc）取相邻页，会把不同系列交错在一起——实测 850 个链接
+  里 608 个跳到了别的系列，例如 leetcode-04 的「上一篇」是 mega-moe-04。
+
+  无 series 的文章按发布时间兜底（早的算上一篇）。
+  与 layouts/series/list.html 共用 series_ordered_pages.html，保证两处顺序一致。
+*/ -}}
+{{- $pages := slice }}
+{{- $series := .Params.series }}
+{{- if reflect.IsSlice $series }}
+  {{- with index $series 0 }}
+    {{- $pages = partialCached "series_ordered_pages.html" . . }}
+  {{- end }}
+{{- else if $series }}
+  {{- $pages = partialCached "series_ordered_pages.html" $series $series }}
+{{- else }}
+  {{- $pages = (where site.RegularPages "Type" "in" site.Params.mainSections).ByDate }}
+{{- end }}
+
+{{- $prev := false }}
+{{- $next := false }}
+{{- $url := .RelPermalink }}
+{{- $idx := -1 }}
+{{- range $i, $p := $pages }}
+  {{- if eq $p.RelPermalink $url }}
+    {{- $idx = $i }}
+  {{- end }}
+{{- end }}
+{{- if ge $idx 0 }}
+  {{- if gt $idx 0 }}
+    {{- $prev = index $pages (sub $idx 1) }}
+  {{- end }}
+  {{- if lt $idx (sub (len $pages) 1) }}
+    {{- $next = index $pages (add $idx 1) }}
+  {{- end }}
+{{- end }}
+
+{{- if or $prev $next }}
+<nav class="paginav">
+  {{- with $prev }}
+  <a class="prev" href="{{ .Permalink }}">
+    <span class="title">« 上一篇</span>
+    <br>
+    <span>{{- .Title -}}</span>
+  </a>
+  {{- end }}
+  {{- with $next }}
+  <a class="next" href="{{ .Permalink }}">
+    <span class="title">下一篇 »</span>
+    <br>
+    <span>{{- .Title -}}</span>
+  </a>
+  {{- end }}
+</nav>
+{{- end }}

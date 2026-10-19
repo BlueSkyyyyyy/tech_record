@@ -36,6 +36,9 @@ static/katex/                   # 自托管 KaTeX，勿删
    写法：`.py` 用 `os.path.expanduser("~/...")`，`.sh` 用 `${HOME}/...`，文档/注释/`.cu` 用 `~/...`；
    实验原始输出（`*.out` / `*.txt`）已被 `.gitignore` 忽略，**不要 `git add -f`** 强行入库。
 
+7. **文章页「上一篇/下一篇」只能在系列内导航**：由项目级 `layouts/partials/post_nav_links.html` 覆盖 PaperMod 原版，取同 `series` 的文章（`layouts/partials/series_ordered_pages.html`，按 `weight` + slug 数字前缀排序）取相邻页；`layouts/series/list.html` 用同一 partial，保证专题页与文章页顺序一致。
+   **不要改回**原版的 `site.RegularPages` + 默认排序：每篇的 `weight` 是**系列内序号**（mega-moe 1–195、leetcode 1–36 …），全站排序会把 12 个系列交错——2026-10 曾因此让 850 个导航链接里 608 个跳到别的系列。新增文章保持 `weight` 与 slug 数字前缀一致即可（`weight` 有重复也不要紧，数字前缀会兜底）。
+
 ## 内容组织惯例
 
 - 系列文章用统一 slug 前缀（如 `flash-attention-01-theory` … `-05-dsl-zoo`），篇间用 `{{</* relref */>}}` 互链，第一篇开头放全系列目录。

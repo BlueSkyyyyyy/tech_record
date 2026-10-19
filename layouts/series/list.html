@@ -23,7 +23,8 @@
   共 {{ len .Pages }} 篇，按系列顺序排列。
 </p>
 
-{{- range .Pages.ByWeight }}
+{{- /* 与文章页「上一篇/下一篇」共用同一顺序（weight + slug 数字前缀），见 partials/series_ordered_pages.html */}}
+{{- range partialCached "series_ordered_pages.html" .Data.Term .Data.Term }}
 <article class="post-entry">
   {{- $isHidden := (.Param "cover.hiddenInList") | default (.Param "cover.hidden") | default false }}
   {{- partial "cover.html" (dict "cxt" . "IsSingle" false "isHidden" $isHidden) }}

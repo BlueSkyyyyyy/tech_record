@@ -1,0 +1,27 @@
+{{- /*
+  返回某个 series 的文章，按「阅读顺序」升序排列：先 weight，再 slug 里的数字前缀。
+  参数：series 名（string）
+  用途：文章页「上一篇/下一篇」与 /series/<term>/ 专题页共用同一顺序，
+        避免两处对同一系列给出不同次序。
+
+  为什么不能直接用 .ByWeight：仓库里有几对 weight 重复（mega-moe 09/10、14/15），
+  ByWeight 的并列项按日期兜底，会把 15 排到 14 前面；这里用 slug 数字前缀做第二键。
+*/ -}}
+{{- $term := . }}
+{{- $pages := where site.RegularPages "Params.series" "intersect" (slice $term) }}
+{{- $items := slice }}
+{{- range $pages }}
+  {{- $num := 0 }}
+  {{- with .File }}
+    {{- with findRESubmatch `(?:^|[-_])(\d+)(?:[-_]|$)` .ContentBaseName 1 }}
+      {{- /* 去掉前导 0：int 按 Go 规则会把 "08" 当八进制而报错 */}}
+      {{- $num = int (replaceRE `^0+` "" (index (index . 0) 1) | default "0") }}
+    {{- end }}
+  {{- end }}
+  {{- $items = $items | append (dict "key" (printf "%06d-%06d" .Weight $num) "page" .) }}
+{{- end }}
+{{- $ordered := slice }}
+{{- range sort $items "key" "asc" }}
+  {{- $ordered = $ordered | append .page }}
+{{- end }}
+{{- return $ordered }}
