@@ -9,6 +9,26 @@
 > 两文件 `fa_bwd_fp16_main_s512.out.txt`、`..._s4096.out.txt`、`..._ncu_main.out.txt`。
 > 对照：`docs/00-fa-bwd-optimization-catalog.md`、`../ROADMAP.md`。
 
+**这一篇是什么**：fp16 反向的**全过程记录**——从标量版（138.33 ms）到张量核 + `cp.async` + `wgmma`（端到端 1.95 ms）。它不是一篇"读一遍就懂"的教程，而是一份"按需查"的工程日志。
+
+**建议读法**（按你的目标选）：
+
+| 你想知道 | 读哪几节 | 预计 |
+|---|---|---|
+| 反向怎么写、每段干什么 | §1–§5 | 15 分钟 |
+| 怎么从标量优化到张量核 | §10（mma）、§12（cp.async）、§14g–§14h（wgmma） | 40 分钟 |
+| GQA / MQA / MLA 怎么支持 | §8、§9、§14b | 20 分钟 |
+| 怎么复现、怎么对拍 | §6、§7 | 10 分钟 |
+| 某一轮优化到底改了什么 | 按 `Oxx` 标题搜（§10 起） | 按需 |
+
+**先给结论**：
+
+- 数值：与 fp32 ref 的 `max_abs` 为 ~1.5–2.2e-3（fp16 正常量级），与 FA2/TE 同量级；单/两文件逐位一致。
+- 性能：S=4096 端到端 **138.33 ms → 1.95 ms**（70.9×），主要收益来自 mma（§10）、`cp.async`（§12）、wgmma/TMA（§14g 起）。
+- 结构：三段式（preprocess 算 LSE+D → main 1colblock → convert）从标量到 wgmma 一直没变；**变的是每一段用什么指令、怎么重叠**。
+
+> **读日志的心态**：不要指望一次记住所有 `Oxx`。重点看每一节的"**改前 bound → 改了什么 → 改后 bound**"三段式；具体的数字和代码位置当字典查。
+
 ---
 
 ## 1. 实现结构（FA2 风格三段式）
@@ -16,8 +36,10 @@
 | 段 | 函数 | 职责 |
 |---|---|---|
 | preprocess | `preprocess_kernel` | 逐行求 `LSE=logsumexp(scale·QKᵀ)` 与 `D=rowsum(dO∘O)` |
-| main | `fa_bwd_fp16_kernel` | 每个 Q 块固定，遍历 K/V 块（1colblock），recompute S/P，累加 dQ/dK/dV |
+| main | `fa_bwd_fp16_kernel` | 每个 Q 块固定，遍历 K/V 块（本项目实际是行并行；`1colblock` 是历史叫法），recompute S/P，累加 dQ/dK/dV |
 | convert | `convert_kernel` | fp32 累加缓冲 `dq/dk/dv` → fp16 写回 |
+
+> **术语提醒（重要）**：代码里 `mblk = blockIdx.x`，即**一个 CTA 固定一个 Q 块、沿 K/V 列循环**（行并行）。FA2 原版的 `1colblock` 正好相反：一个 CTA 固定一个 K/V 列块、沿 Q 行循环。本仓库文档沿用了 `1colblock` 这个历史叫法，**读代码时请以 `mblk`/`blockIdx.x` 为准**。这个差异不影响数学，但影响"dQ/dK/dV 谁在 CTA 内累加、谁跨 CTA 归约"的判断。
 
 ### 1.1 为什么 preprocess 要重算 LSE
 FA 的前向会把 `LSE` 存下来给反向用。本仓库的 dump 里只有 `O/dO`，没有现成的 `LSE`，

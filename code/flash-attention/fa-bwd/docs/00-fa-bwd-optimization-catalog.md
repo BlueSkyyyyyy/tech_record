@@ -5,6 +5,37 @@
 > `~/github/flash-attention` commit `edb5c76`**，标注为 `文件:行`，需在写作/实现时回源码复核。
 > 后续实现与实测见 `../ROADMAP.md`。
 
+## 先记住一个画面
+
+把反向想成一条**三段流水线**：备料（preprocess 算 $D$ 和 LSE）→ 主工序（main 重算 $P$、
+算 $dP/dS$、攒 $dK/dV$）→ 包装（convert 转精度写回）。整条线上只有两种账本：
+
+- **本块账**：$dK/dV$ 只跟当前 KV 块有关，块内算完就能写；
+- **跨块账**：$dQ$ 要把所有 KV 块的贡献加起来，于是有了"在哪里合并、按什么顺序合并"的问题。
+
+本篇先把这条流水线的每一站讲清楚（§1–§3），再专门拆 FP8 这一站（§4）。**读完后再看任何一份 FA 反向代码，都应该能指出它当前卡在三段中的哪一段、账本合并在哪一层。**
+
+> **类比的边界**：流水线可以靠加人提速；GPU 上 SM、smem、寄存器、L2 都是定值，所以"优化"往往是把压力从一段挪到另一段。§4.3 的长记录就是一部"墙迁移"史——**别把某次 1.2× 当成通用方法**。
+
+读完这一篇，你应该能回答：
+
+1. 为什么 $dQ$ 必须跨块归约，而 $dK/dV$ 不用？这个差异如何决定 kernel 的切分？
+2. FP8 反向的四类误差源分别是什么？为什么 $dS = P\circ(dP-D)$ 是最敏感的一步？
+3. FA3 反向相比 FA2，动的到底是算法还是数据通路？
+
+### 结论速查
+
+| 问题 | 一句话结论 | 详见 |
+|---|---|---|
+| 反向三段式 | preprocess（$D$ + LSE）→ main（五 GEMM）→ convert | §2.1、§3 |
+| 归约方向 | $dK/dV$ 沿 Q 归约，$dQ$ 沿 KV 归约，所以 $dQ$ 要跨块合 | §1 |
+| FP8 分工 | 前向 Q/K/V/S/O 用 E4M3；反向 dO/dP/dQKV 用 E5M2，rowwise scale | §4.1 |
+| FP8 最难点 | $dS$ 在 $D$ 附近的灾难性抵消；量化只能发生在 MMA 操作数 | §4.2 |
+| 与 TE 的差异 | 本版 `dS`、`dq/dk/dv` 保留 fp32，先隔离"输入量化"这一项 | §4.2 |
+| 移植要换什么 | 只换 L3（MMA 指令）与 L4（smem 布局），L0–L2/L6 复用 | §5 |
+
+> **行号口径**：本篇基于 `edb5c76`；专题其余篇目基于 `8d3a3b8`。两者行号会漂移，**以函数名/文件名定位为准**，不要跨篇直接套行号。
+
 ---
 
 ## 1. 反向的数学与计算量
@@ -114,38 +145,56 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
 3. **累加精度**：所有 MMA 累加器保持 **fp32**；只在输入侧量化。`D`、`m`、`l` 等统计量用 fp32。
 4. **量化误差对 dQ/dK/dV 的影响**：反向对 S 的误差敏感（softmax 的 `dS` 含 `P` 因子，小 P 处噪声相对大），
    需要对拍确定容差（预期比 fp16 松 1~2 个数量级）。
-5. **确定性**：FP8 kernel 一般非确定性（原子累加）；对拍用容差而非位相等。
-   → **已提供 opt-in 的确定性模式 `--det`（P3-4e，第一百一十八轮）**：把 dK/dV 的跨 CTA
+5. **确定性**：FP8 kernel 一般非确定性（原子累加）；对拍用容差而非位相等。确定性后来长成了一条完整的工程线，逐轮记录见 §4.3。
+
+### 4.3 演进记录：FP8 反向的逐轮增量（可当 changelog 查）
+
+下面的条目按实现轮次追加，每条以 `→` 开头，表示"在前一条基础上的新增量"。**第一次读不必逐条看**：先看这张表，遇到具体问题再回来查对应轮次。
+
+| 主题 | 里程碑 | 关键数字 | 轮次 / 位置 |
+|---|---|---|---|
+| 确定性 $dK/dV$ | `--det`：partial 覆盖写 + 固定次序归约 | 两次跑 bitwise=0；reduce 731.6µs / DRAM 91.5% | 118 / `03` §56 |
+| split-K 确定性 | `--detk=N` | 相对 k=1：S512 1.31×、S4096 1.11× | 119 / §57 |
+| 覆盖扩展 | TMA 快路 / MLA / varlen / MLA-varlen | 全部 bitwise=0 | 120–123 / §58–61 |
+| MLA split-K | 定长 + varlen | 2.4–2.8× / 3.69×（对锁 k=1） | 124–125 / §62–63 |
+| partial 扇区化 | O60→O62：fp16 partial + 8B 写 + 16 列置换 | store 扇区减半；`--det` 首次快过 atomic 1.19× | 129–134 / `01` §17–18、`03` §68–69 |
+| LSE 两趟 softmax | F5：先列 max 再统一 rescale+exp | LSE 1.67×、指令 −38.7% | 136 / `03` §71 |
+| LSE 上 4D-TMA | O70/O72/O74：full / varlen / MLA | 1.77× / 1.88× / 1.90× | 164–169 / §95–98 |
+| 非 main 融合 | O65/O66：prologue、quant+delta | 小 shape 1.02–1.05× | 145–146 / §79 |
+| 跨 stream 重叠 | O109–O111：量化分相 | 1.005–1.030× | 203–205 / §131–133 |
+| 真差距定位 | O67：同 BM 下 TE 的 `red` 仍少 4.4× | 差距 = 工作划分/调度，不是归约宽度 | 147 / §80 |
+
+- **已提供 opt-in 的确定性模式 `--det`（P3-4e，第一百一十八轮）**：把 dK/dV 的跨 CTA
    `atomicAdd` 换成「按 (Q 头, Q 块) 分片的 partial 覆盖写 + 固定次序二次归约」，两次跑
    逐位相同（`runs[1-2] bitwise-diff = 0`）；代价是 ksplit 固定为 1 + 一次纯带宽 bound 的
    归约（S=4096 时 reduce 731.6µs、DRAM 91.5%），见 `docs/03` §56。
-   → **`--detk=N>1`（P3-4f，第一百一十九轮）把 `--det` 扩到 split-K**：dK/dV 的 partial
+- **`--detk=N>1`（P3-4f，第一百一十九轮）把 `--det` 扩到 split-K**：dK/dV 的 partial
    天然无需 part 维（一个 `(mblk,jg)` 只属于一个 part），只需给 dQ 加 part 分片 partial +
    `dq_reduce_kernel`，即可在 ksplit>1 下保持 dq/dk/dv 全逐位可复现；DET 相对 k=1 提速
    S512 **1.31×** / S4096 **1.11×**（k=4 触底）。见 `docs/03` §57。
-   → **`--det` 已扩到 Hopper TMA 快路（P3-4g，第一百二十轮）**：Q/dO/K/V 全 4D-TMA 的
+- **`--det` 已扩到 Hopper TMA 快路（P3-4g，第一百二十轮）**：Q/dO/K/V 全 4D-TMA 的
    `kvtma` 主 kernel 也能走 deterministic dK/dV（定长 HD=128/GQA、ksplit=1）；三 shape ×
    单/两文件两次跑逐位相同、与 atomic 差 e-7–e-6，代价仍是 reduce 的 DRAM partial 写读。
    见 `docs/03` §58。
-   → **`--det` 已扩到 MLA（HD=512，P3-4h，第一百二十一轮）**：`dkv_reduce_kernel<HD,BM>` 与
+- **`--det` 已扩到 MLA（HD=512，P3-4h，第一百二十一轮）**：`dkv_reduce_kernel<HD,BM>` 与
    body 的 DET 分支本就 HD 无关，device 数学一行未改；MLA 的 dQ 无法用寄存器累加 ⇒ 锁
    ksplit=1 的单写者 `red_add2` 保证 dQ 确定。三 shape × 单/两文件两次跑
    `bitwise dq/dk/dv = 0`、`DET-vs-atomic` dq 恒 0 / dk,dv e-7–e-6；代价 S256H2 1.035×、
    S512H4 0.923×、S1024H2 0.940×，bound 仍是 reduce 的 DRAM 带宽。见 `docs/03` §59。
-   → **`--det` 已扩到 varlen（P3-4i，第一百二十二轮）**：body 的 DET 分支对定长/变长通用，
+- **`--det` 已扩到 varlen（P3-4i，第一百二十二轮）**：body 的 DET 分支对定长/变长通用，
    只需 host 传 `S=maxlen/nblk=nblk_max`；新增 `dkv_reduce_varlen_kernel<HD,BM>` 按
    `cu_seqlens` 的逐序列 `len_b/nblk_b` 定界、输出按 packed token 定位。4 个 case（MHA 单长/
    不齐/GQA q32kv8）× 单/两文件、ksplit=1/4 两次跑 `bitwise dq/dk/dv = 0`，
     `DET-vs-atomic` e-7–e-6；代价 0.71–0.91×，bound 仍是 reduce 的 DRAM 带宽（87.4%）。
     见 `docs/03` §60。
-   → **`--det` 已扩到 MLA（HD=512）的 varlen（P3-4j，第一百二十三轮）**：device 一行未改，
+- **`--det` 已扩到 MLA（HD=512）的 varlen（P3-4j，第一百二十三轮）**：device 一行未改，
     host 复用 `dkv_reduce_varlen_kernel<512,64>`（P3-4i 的 HD 参数化布局红利）；MLA 的 dQ
     不可寄存器累加 ⇒ 锁 ksplit=1（单写者 `red_add2`）。3 个 case（b1 causal/b3 causal/b1 full）
     × 单/两文件两次跑 `bitwise dq/dk/dv = 0`、`DET-vs-atomic` dq 恒 0 / dk,dv e-7–e-6；
      代价（只差 DET）0.95–1.02×，但**锁 k=1 相对 auto split 的主 kernel ~3.3–5.6×**（确定性 =
      用单写者换掉 split-K 并行度）；reduce **48.03µs / DRAM 65.8% / L2 67.6%**（纯带宽 bound）。
      见 `docs/03` §61。
-   → **`--det` 的 MLA（HD=512）支持 `ksplit>1`（P3-4k，第一百二十四轮）**：非 `kRegDq` 的 dQ
+- **`--det` 的 MLA（HD=512）支持 `ksplit>1`（P3-4k，第一百二十四轮）**：非 `kRegDq` 的 dQ
    epilogue 在 `DET && ksplit>1` 时把目标从 `dq_acc` 换成按 part 分片的 `dq_part`
    （同 `(mblk,h,part)` 只被一个 CTA 写、CTA 内 nt 程序序 ⇒ 天然确定），再接已就位的
    `dq_reduce_kernel<512>` 固定次序求和；device 只动这一处、host 扩 A/B。3 个定长 shape
@@ -153,7 +202,7 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    相对旧「锁 k=1」主链 **2.4–2.8×**（S1024H2 0.7256→0.2589ms），仍比 atomic 慢
    0.61–0.73×；`DET-vs-atomic` k=1 时 dq 恒 0、k>1 时 e-7。bound = `dkv_reduce_kernel` 的
    纯 DRAM 带宽（29.6µs/DRAM 77%/L2 76%）。见 `docs/03` §62。
-   → **`--det` 的 MLA（HD=512）varlen 也支持 `ksplit>1`（P3-4l，第一百二十五轮）**：P3-4j 的
+- **`--det` 的 MLA（HD=512）varlen 也支持 `ksplit>1`（P3-4l，第一百二十五轮）**：P3-4j 的
    A/B 仍锁 `ksplit=1`；本轮观察与 P3-4k 同构（varlen body 的 DET 分支与定长无关、dQ 的
    per-part partial 用 packed 全局 token），**device 一行未改**，host 只补 `dq_part` 分配/清零
    + `dq_reduce_kernel<512><<<(T,H),512>>>`。b1_t512/b3_t1792 ksplit=1/4/8/16、b1 full k=4
@@ -161,14 +210,14 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    b1 **3.69×**/b3 **2.13×**；ncu `dkv_reduce_varlen_kernel<512,64>` 48.13µs/DRAM 65.7%、
     `dq_reduce_kernel<512>` 23.33µs/DRAM 81.7% ⇒ bound = reduce 的纯 DRAM 带宽。
     见 `docs/03` §63。
-   → **`--det` 接进 MLA 的 K/V `cp.async` 回填流水（kvpipe，P3-4m，第一百二十六轮）**：
+- **`--det` 接进 MLA 的 K/V `cp.async` 回填流水（kvpipe，P3-4m，第一百二十六轮）**：
    此前 host 的 `launch_bwd_main_det` 写死 `KVPIPE=false`，MLA DET 一直走非 kvpipe 主 kernel；
    本轮加 `bool KVPIPE` 模板参、`kSmem` 选 `smem_bytes_kvpipe`（MLA 229888B ≤ 232448），
    P3-4k/P3-4l 的 A/B 各加一个 kvpipe DET 变体。**kvpipe DET 与非 kvpipe DET 的 dq/dk/dv
    逐位相同**（`runs[1-2]=0`、`kvpipe-vs-非kvpipe=0`）；DET 非 kvpipe→kvpipe 5 shape 1.018–1.090×
    （单文件 b3 1.095×）；ncu 主 kernel 243→220µs、`long_scoreboard` 3.93→3.25（机制同 O51）。
    见 `docs/03` §64。
-   → **把两个二次归约融合进一个 kernel（P3-4n，第一百二十七轮）**：DET 的二次归约原本是两次
+- **把两个二次归约融合进一个 kernel（P3-4n，第一百二十七轮）**：DET 的二次归约原本是两次
    launch（`dkv_reduce_kernel` 读 dk/dv partial + `dq_reduce_kernel` 读 dq partial）。新增
    `dkv_dq_reduce_kernel<HD,BM>` / `dkv_dq_reduce_varlen_kernel<HD,BM>`，grid =
    `dkv_blocks + dq_blocks`（1D，前 `dkv_blocks` 做 dK/dV、其余做 dQ），求和次序逐字沿用两个
@@ -177,26 +226,26 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
    reduce-only S512 **1.149×**、varlen D128 b1_t512 **1.170×**、S4096 **1.006×**（纯带宽墙、中性）；
    ncu 融合 22.94µs/DRAM 79.7%/occ 86.1%（分开 dkv 17.31µs/70.4% + dq 8.64µs/58.7%，合计
    25.95µs）。`--nofusered` 退回两次 launch。见 `docs/03` §65。
-   → **varlen DET partial 试换 compact per-sequence 布局（P3-4o，第一百二十八轮）**：
+- **varlen DET partial 试换 compact per-sequence 布局（P3-4o，第一百二十八轮）**：
    `fp8_mma_body` 的两个 DET 写点 + `dkv_reduce_varlen_kernel` / `dkv_dq_reduce_varlen_kernel`
    加行前缀和 `part_base`，非空时紧凑编址，空时逐字退化。**逐位相同**（只改地址）；缓冲大幅
    缩小（b4_t3840 D128 2147→713MB、b8_t2904 4295→575MB、D512 b3 201→88MB），但**耗时
    0.944–0.975×（负结果）**——reduce 只读被写过的条目，stride 空洞不产生 DRAM 流量；两布局都
    DRAM/L2 bound（86.9% vs 84.4%）。默认保持旧布局，`--partcompact` opt-in 只为省显存。真正的
    「减 partial 字节」只能靠 BM=128 跨 warpgroup 偏和（fp8 撞 smem 硬墙）。见 `docs/03` §66。
-   → **partial 降精度存储（O60，第一百二十九轮，fp16）**：把 `--det` 的 dK/dV partial 从 fp32
+- **partial 降精度存储（O60，第一百二十九轮，fp16）**：把 `--det` 的 dK/dV partial 从 fp32
    降到 fp16（`__half2`）。**reduce 单向 1.27–1.66×**（纯 DRAM 读字节减半），**但 DET 主 kernel
    写侧慢 0.84–0.87×**——ncu 实测 fp16 把 DRAM 写字节减半、**store 扇区数却一字不变**（DET
    partial 写是扇区粒度 bound，每 `(j,row)` 仅 16B 落不满 32B 扇区），故端到端只中性偏负
    （S4096 1.006×、S512/GQA 0.93–0.97×）。确定性保留、只改数值口径（~1e-3）。见 `docs/01` §17。
-   → **确定性反向 `--det` 补齐 bf16（O61，第一百三十轮）**：把 fp16 的 O7b（partial + 固定次序
+- **确定性反向 `--det` 补齐 bf16（O61，第一百三十轮）**：把 fp16 的 O7b（partial + 固定次序
    二次归约）+ O60（partial 降精度存 fp16→bf16）逐字 dtype 参数化到 bf16（此前 bf16 无 `--det`），
    **三 dtype（fp16/bf16/fp8）现均有确定性反向**。两档 partial `runs[1-2]=0`；bf16-vs-atomic 仅
    bf16 舍入（7.8e-3–2.2e-2），默认路径逐位不变。性能与 fp16 O60 逐项同构：**reduce 单向
    1.27–1.66×（纯 DRAM 读字节减半），DET 主 kernel 写侧 0.84–0.87×**——bf16 把 DRAM 写字节
    减半但 **`st.global` store 扇区数几乎不变**（35.65M→35.54M），partial 写是扇区粒度 bound，
    端到端 `--det` 仍中性偏负。见 `docs/01b` §6at。
-   → **partial 写扇区化（O62，第一百三十一轮，fp16+bf16；确定性 `--det` 端到端转正）**：
+- **partial 写扇区化（O62，第一百三十一轮，fp16+bf16；确定性 `--det` 端到端转正）**：
    O60/O61 的病根是「每 lane 只写 4B half2，quad 16B 落不满 32B 扇区」。O62 把**相邻两个列组
    `j`/`j+1` 的 4B 拼成一次 8B 写**（`uint2`），quad 4 lane 覆盖连续 32B；为让每 lane 的 8B
    恰好是这两段，partial 的 HD 维做**16 列块内置换**（`dkv_p16_perm`，reduce 端按同一置换读回
@@ -228,7 +277,7 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
       1.21–1.56×（S4096 0.216→0.138）**、端到端 **1.03–1.04×**（S4096 1.888→1.817ms/75.6TF）；
       vs-ref/TE 打印位一致、单两文件 gate 1.335e-5 OK、`--check docs/04` OK。见 `docs/03` §71、
       `docs/08` §5.51。
-   → **fp16/bf16 prologue 融合（O65，第一百四十五轮，小/中 shape 正结果、大 S 中性）**：
+- **fp16/bf16 prologue 融合（O65，第一百四十五轮，小/中 shape 正结果、大 S 中性）**：
      O64 的「小 launch 融合」搬到 fp16/bf16 的固定开销（无 quant，仅 `cudaMemset`×2–3 + `delta`）。
      nsys 定量：memset 33MB/10.6µs = **~3.1 TB/s（已近峰值）**、`delta_warp` 71% DRAM。新增
      `zero_delta_warp_kernel<HD>`（float4 清零 dq/dk/dv + 逐字同 `delta_warp` 几何的 delta），
@@ -237,7 +286,7 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
      6.1µs/DRAM 20.5%，省的是 launch 开销）。**教训：融合只对「不满带宽的小 kernel」有效**——
       fp8 quant 只到 58% 故 O64 有效，fp16/bf16 memset 已 3.1TB/s 故仅小 shape 有 1–5%。见
       `docs/01` §20、`docs/01b` §6aw、`docs/08` §5.59。
-   → **fp8 把 delta 融进「量化 + 清零」单 launch（O66，第一百四十六轮，正结果，默认）**：
+- **fp8 把 delta 融进「量化 + 清零」单 launch（O66，第一百四十六轮，正结果，默认）**：
      delta（`D=rowsum(dO∘O)`）只依赖 dO/O、与 dO 的 rowwise 量化同域同几何。新增
      `quant_delta_row_warp`（量化 dO 时用寄存器值顺便算 delta）+ `quantize_zero_delta_warp_kernel`；
      **delta 必须耦合进 dO 量化任务**（同 launch 内无跨 warp 同步，独立任务读 `do8` 会竞争）。
@@ -283,9 +332,11 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
       （causal 1.2–5.1×10⁻²、full 0–0.5%）。见 `docs/03` §131/§132/§133、`docs/08` §5.117–§5.119。
 
 
-### 4.3 我们的 FP8 反向实现路线（计划）
+### 4.4 我们的 FP8 反向实现路线（计划）
 
-- 以 FA2 的 `1colblock` 结构为骨架，把 `dO`/`V`/`P`/`Q`/`K` 按 rowwise 量化到 FP8，
+> 本节写于 P3-1 计划期，保留**原始路线**以便对照"计划 vs 实际"。实际实现后来走得更远（wgmma、4D-TMA、MLA、varlen），增量见 §4.3 与本节末尾的两条更新。
+
+- 以三段式 + 固定 Q 块的行并行结构为骨架（文档简称 `1colblock`，与 FA2 原版相反），把 `dO`/`V`/`P`/`Q`/`K` 按 rowwise 量化到 FP8，
   用 `mma` FP8（`m16n8k32` e5m2/e4m3）做 `dP=dO·Vᵀ`、`dV=Pᵀ·dO`、`dQ=dS·K`、`dK=dSᵀ·Q`；
 - `D`/`dS` 计算和 `dS` 量化在 fp32 完成后再量化；
 - 先做 **正确性**（对 fp32 ref 的容差），再对标 TE fp8 的时间。
@@ -317,3 +368,13 @@ FA 仓库的**反向没有 FP8**（`csrc/flash_attn/src` 只有 fp16/bf16 的 `f
 
 见 `../ROADMAP.md`：按 fp16→bf16→fp8 的顺序，各做「单文件 / 两文件」实现 + 编译 + ncu + 对拍 + 对标 TE，
 并持续沉淀到本目录 `docs/`。
+
+---
+
+## 7. 五分钟版：如果只记五件事
+
+1. **反向 = 五条公式 + 三段流水**。五条公式是 $dV, dP, dS, dQ, dK$；三段是 preprocess / main / convert。
+2. **$\Delta = \mathrm{rowsum}(dO \circ O)$ 是整个反向的地基**。它把"需要完整 $P$ 才能算的标量"消掉，让 $P$ 可以按块重算、按块消费。
+3. **归约方向决定 kernel 切分**。$dK/dV$ 沿 Q 归约（按 KV 并行），$dQ$ 沿 KV 归约（必须跨块合）；三代硬件分别用 gmem atomic、TMA reduce、TMEM 来合。
+4. **FP8 的难点不是算，是量化误差**。E4M3 放 Q/K/V/P，E5M2 放 dO/dP；`dS = P∘(dP−D)` 的抵消最敏感；累加与统计量必须 fp32。
+5. **优化是"墙迁移"，不是"堆手段"**。先用 ncu 定量 bound，再选手段；打掉一个墙，下一个立刻暴露。§4.3 的记录就是证据。

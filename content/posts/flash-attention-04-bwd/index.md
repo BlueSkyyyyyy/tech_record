@@ -14,45 +14,78 @@ categories: ["算子开发"]
 
 前置阅读：[第 1 篇]({{< relref "flash-attention-01-theory" >}})的 LSE 定义、[第 2 篇]({{< relref "flash-attention-02-triton-fwd" >}})前向的 epilogue。
 
-打个比方：反向传播像一位**审计员**——前向为了省地方，把 $N\times N$ 的凭证（$P$）全烧了，只留下一本每行的总账（$O$ 和 LSE）。审计员要凭这本总账，倒推出每个中间环节（$dQ, dK, dV$）该负多少责。本篇的推导，就是这位审计员的三条"还原公式"。
+## 先记住一个画面
+
+反向传播像一位**审计员**。
+
+前向为了省地方，把 $N\times N$ 的凭证（$P$）全烧了，只留下一本每行的总账（$O$ 和 LSE）。审计员要凭这本总账，倒推出每个中间环节（$dQ, dK, dV$）该负多少责。
+
+本篇的推导，就是这位审计员的三条"还原公式"；而三种实现方式的差别，本质上是**审计工作怎么分班组**：一个人负责一类凭证，还是几个人交叉复核、最后汇总。
+
+> **类比的边界**：审计可以"翻旧账"（把 $P$ 存下来再查），GPU 不行——$O(N^2)$ 的凭证存不下。所以这里的"还原"不是修辞，而是**真的要用 $O(N)$ 的统计量重新算出 $P$**。记住这一点，才能理解为什么反向的每一步都在算"怎么少读一次、少存一份"。
+
+读完这一篇，你应该能回答三个问题：
+
+1. 五个梯度公式里，哪一个不需要完整的 $P$？$\Delta_i = dO_i \cdot O_i$ 这个恒等式是怎么把 $O(N^2)$ 变成 $O(Nd)$ 的？
+2. 为什么 $dK/dV$ 和 $dQ$ 的"最优遍历方向"相反？这个方向差异如何决定了 kernel 要拆成两个还是一个？
+3. Triton 版的"零原子"是怎么做到的？FA2 为什么放弃了它，改用 atomicAdd？
+
+---
 
 ## 1. 完整的梯度推导
 
-记 $S = \sigma QK^\top$（$\sigma = 1/\sqrt d$），$P = \mathrm{softmax}_{\mathrm{row}}(S)$，$O = PV$，上游梯度 $dO \equiv \partial L/\partial O$。
+记 $S = \sigma QK^\top$（$\sigma = 1/\sqrt d$），$P = \mathrm{softmax}_{\mathrm{row}}(S)$，$O = PV$，上游梯度 $dO \equiv \partial L/\partial O$。为简洁，省略 batch/head 下标。
 
 ### 1.1 dV：一个普通 GEMM
 
-对 $O = PV$ 的 $V$ 求导不经过 softmax：
+对 $O = PV$ 的 $V$ 求导不经过 softmax。矩阵形式的链式法则告诉我们 $\partial L/\partial V = P^\top \partial L/\partial O$，即
 
 $$
 \boxed{\ dV = P^\top dO\ }
 $$
 
-### 1.2 softmax 的雅可比：$dS = P \circ (dP - \Delta \mathbf{1}^\top)$
+这一条最简单：它只要求知道 $P$，不涉及 softmax 的雅可比。但"知道 $P$"恰恰是难点——前向没存。
 
-$dP = dO\,V^\top$ 之后，要穿过行 softmax。对第 $i$ 行，$P_{ij} = e^{S_{ij}} / \sum_k e^{S_{ik}}$，求雅可比：
+### 1.2 softmax 的雅可比
+
+$dP = dO\,V^\top$ 之后，梯度要穿过行 softmax。对第 $i$ 行：
+
+$$
+P_{ij} = \frac{e^{S_{ij}}}{\sum_k e^{S_{ik}}}
+$$
+
+对 $S_{ik}$ 求偏导。分两种情况：
+
+- $j = k$：$P_{ij}$ 的分子分母都含 $e^{S_{ij}}$，商法则给出 $P_{ij}(1 - P_{ij})$；
+- $j \neq k$：分子与 $S_{ik}$ 无关，只有分母变化，给出 $-P_{ij}P_{ik}$。
+
+合并成一行：
 
 $$
 \frac{\partial P_{ij}}{\partial S_{ik}} = P_{ij}(\delta_{jk} - P_{ik})
 $$
 
-于是
+其中 $\delta_{jk}$ 在 $j=k$ 时为 1、否则为 0。
+
+于是对 $S_{ij}$ 的梯度是"所有 $P_{ik}$ 的变化对 $S_{ij}$ 的贡献之和"：
 
 $$
-dS_{ij} = \sum_k \frac{\partial L}{\partial P_{ik}} \frac{\partial P_{ik}}{\partial S_{ij}}
-= \sum_k dP_{ik} P_{ik}(\delta_{jk} - P_{ij})
+dS_{ij} = \sum_k dP_{ik}\,\frac{\partial P_{ik}}{\partial S_{ij}}
+= \sum_k dP_{ik}\,P_{ik}(\delta_{kj} - P_{ij})
 = P_{ij}\left(dP_{ij} - \underbrace{\sum_k P_{ik}\, dP_{ik}}_{\Delta_i}\right)
 $$
+
+写成矩阵形式：
 
 $$
 \boxed{\ dS = P \circ (dP - \Delta \mathbf{1}^\top), \qquad \Delta_i = \sum_k P_{ik} dP_{ik}\ }
 $$
 
-直觉读法：$dS_{ij}$ 的第一项 $P_{ij} dP_{ij}$ 是"这条路自己"的贡献，第二项 $-P_{ij}\Delta_i$ 是"整行分母被拉动"的贡献——softmax 把概率质量在行内搬运，拉高任何一个 $S_{ij}$ 都会压低整行其他位置。
+**直觉读法**：$dS_{ij}$ 的第一项 $P_{ij} dP_{ij}$ 是"这条路自己"的贡献；第二项 $-P_{ij}\Delta_i$ 是"整行分母被拉动"的贡献。softmax 把概率质量在行内搬运，拉高任何一个 $S_{ij}$ 都会压低整行其他位置——所以每个位置的梯度都要减去"整行的平均变化"。
 
 ### 1.3 $\Delta$ 恒等式：整个反向最划算的一笔交易
 
-$\Delta_i = \sum_k P_{ik} dP_{ik}$ 看起来需要完整的 $P$ 行（$O(N)$ 每行、$O(N^2)$ 总量）。但代入 $dP_{ik} = dO_i \cdot V_k$：
+$\Delta_i = \sum_k P_{ik} dP_{ik}$ 看起来需要完整的 $P$ 行（每行 $O(N)$、总共 $O(N^2)$）。但代入 $dP_{ik} = dO_i \cdot V_k$：
 
 $$
 \Delta_i = \sum_k P_{ik} (dO_i \cdot V_k) = dO_i \cdot \underbrace{\sum_k P_{ik} V_k}_{= O_i} = \mathrm{rowsum}(dO \circ O)
@@ -62,7 +95,11 @@ $$
 \boxed{\ \Delta_i = dO_i \cdot O_i\ }
 $$
 
-**$O(N \cdot d)$ 的逐行点积替代了 $O(N^2)$ 的重算**——审计员不用翻明细了，因为"总额"本身就能推出来。$O$ 和 $dO$ 都是前向/上游本来就有的矩阵，$\Delta$ 可以在反向开始前用一个极廉价的 kernel 一次性算好。这就是所有实现里那个 "preprocess kernel" 的全部数学内涵。**整个反向最划算的一笔交易，就是把这张 $N\times N$ 的账换成一个 $N$ 维的向量。**
+**$P$ 消失了。** $\Delta$ 只需要前向输出 $O$ 和上游梯度 $dO$ 的逐行点积——两者本来就有，代价 $O(Nd)$。
+
+审计员不用翻明细了，因为"总额"本身就能推出来。$O$ 和 $dO$ 都是前向/上游本来就有的矩阵，$\Delta$ 可以在反向开始前用一个极廉价的 kernel 一次性算好。这就是所有实现里那个 "preprocess kernel" 的全部数学内涵。
+
+> **为什么说这是"最划算"？** 它把反向里唯一一个"需要完整 $P$ 才能算的标量"消除了。剩下的 $dS$ 虽然仍需要 $P$，但 $P$ 可以按块重算、按块消费，不需要整行驻留。**一个恒等式把 $O(N^2)$ 的常驻需求变成了 $O(Nd)$ 的一次性预处理**——这是整个 Flash Attention 反向能成立的前提。
 
 ### 1.4 dQ 与 dK
 
@@ -72,7 +109,20 @@ $$
 \boxed{\ dQ = \sigma\, dS\,K, \qquad dK = \sigma\, dS^\top Q\ }
 $$
 
-五个公式集齐。注意它们的**求和方向**：$dV_j = \sum_i P_{ij}\, dO_i$（对 Q 求和）、$dK_j = \sigma\sum_i dS_{ij} Q_i$（对 Q 求和）、$dQ_i = \sigma \sum_j dS_{ij} K_j$（对 KV 求和）。**dK/dV 天然沿 Q 维归约，dQ 天然沿 KV 维归约**——这个方向差异决定了反向 kernel 的组织方式，是本篇的主线。
+五个公式集齐。把它们排成一张表，重点看**求和方向**：
+
+| 梯度 | 公式 | 逐元素形式 | 沿哪个维度归约 |
+|---|---|---|---|
+| $dV$ | $P^\top dO$ | $dV_j = \sum_i P_{ij}\,dO_i$ | 沿 Q 的行维 $i$ |
+| $dK$ | $\sigma\,dS^\top Q$ | $dK_j = \sigma\sum_i dS_{ij}\,Q_i$ | 沿 Q 的行维 $i$ |
+| $dQ$ | $\sigma\,dS\,K$ | $dQ_i = \sigma\sum_j dS_{ij}\,K_j$ | 沿 KV 的列维 $j$ |
+
+**dK/dV 天然沿 Q 维归约，dQ 天然沿 KV 维归约**——这个方向差异决定了反向 kernel 的组织方式，是本篇的主线。直观地说：
+
+- 要算某个 $K_j$ 的梯度，得把所有 $Q_i$ 扫一遍；
+- 要算某个 $Q_i$ 的梯度，得把所有 $K_j$ 扫一遍。
+
+两者都需要"扫全另一侧"，但**谁做外层循环，决定了谁的部分和能留在寄存器里**。第 2 节会看到 Triton 如何用"两个 kernel、各占一头"来回避这个矛盾。
 
 ### 1.5 P 的重算：LSE 一行搞定
 
@@ -82,11 +132,13 @@ $$
 P_{ij} = e^{S_{ij} - \mathrm{LSE}_i}
 $$
 
-分子分母一次到位——**反向不需要重跑 online softmax，也不需要单独存 $\ell$**。重算多付出的只是又一次 $QK^\top$ GEMM + 一次 exp；换来 $O(N)$ 显存和数值上更干净的 $P$（没有 online rescale 的中间舍入）。所有实现都把 $1/\ln 2$ 折进 scale，让这一步直接用硬件 exp2 指令。
+分子分母一次到位——**反向不需要重跑 online softmax，也不需要单独存 $\ell$**。重算多付出的只是又一次 $QK^\top$ GEMM 加一次 exp；换来 $O(N)$ 显存和数值上更干净的 $P$（没有 online rescale 的中间舍入）。所有实现都把 $1/\ln 2$ 折进 scale，让这一步直接用硬件 exp2 指令。
+
+---
 
 ## 2. Triton 教程版反向：零原子的优雅拆分
 
-### 2.1 `_attn_bwd_preprocess`（L410–433）：Δ 预处理
+### 2.1 `_attn_bwd_preprocess`（L410–433）：$\Delta$ 预处理
 
 ```python
 o = tl.load(O_ptrs)
@@ -94,7 +146,9 @@ do = tl.load(DO_ptrs).to(tl.float32)
 delta = tl.sum(o * do, axis=1)     # Δ = rowsum(dO ∘ O)
 ```
 
-每个 program 处理 `[BLOCK_M=128, HEAD_DIM]` 的行块，$\Delta$ 存为 `[Z, H, N_CTX]`。必须独立成 kernel 的原因：$\Delta$ 被 dK/dV 和 dQ 两个方向**按行反复消费**，预先算好一个 $[N]$ 向量，比在任何 inner loop 里现算便宜一个数量级。
+每个 program 处理 `[BLOCK_M=128, HEAD_DIM]` 的行块，$\Delta$ 存为 `[Z, H, N_CTX]`。
+
+为什么必须独立成 kernel？因为 $\Delta$ 被 dK/dV 和 dQ 两个方向**按行反复消费**。预先算好一个 $[N]$ 向量，比在任何 inner loop 里现算便宜一个数量级；而且它让主 kernel 不必同时持有 $O$ 和 $dO$，省下两份寄存器/smem。
 
 ### 2.2 base-2 域与 K 的预缩放（L862–868）
 
@@ -103,17 +157,27 @@ RCP_LN2 = 1.4426950408889634
 arg_k = k * (ctx.sm_scale * RCP_LN2)     # σ/ln2 预乘进 K
 ```
 
-前向存的 $M_i$ 是以 2 为底的 LSE。反向把 $\sigma/\ln 2$ **预乘进 K 本身**，任何 `tl.dot(q, k)` 的结果天然就是 $S' = \frac{\sigma}{\ln 2} QK^\top$，于是循环体内一行：
+前向存的 $M_i$ 是以 2 为底的 LSE。反向把 $\sigma/\ln 2$ **预乘进 K 本身**，于是任何 `tl.dot(q, k)` 的结果天然就是
+
+$$
+S' = \frac{\sigma}{\ln 2} QK^\top
+$$
+
+循环体内一行就够：
 
 ```python
 p = tl.math.exp2(qk - m)        # L569 / L492：精确 softmax 概率
 ```
 
-循环体内看不到任何 sm_scale 乘法——全部被折叠进 K 的预缩放和出口处的一次性修正（§2.5）。每块逐元素乘法 × 迭代次数，换成每 tile 出口一次乘法。
+循环体内看不到任何 `sm_scale` 乘法——全部被折叠进 K 的预缩放和出口处的一次性修正（§2.5）。**把"每块逐元素乘"换成"每个 tile 出口乘一次"**，这是很典型的强度削减。
 
 ### 2.3 `_attn_bwd_dkdv`（L440–517）：输出所有权决定遍历方向
 
-**设计原则：谁的输出，谁独占 tile**——大白话就是**谁的孩子谁抱**。$dK_j = \sigma\sum_i dS_{ij} Q_i$ 沿 Q 归约，那就让每个 program 抱住一个 K/V 块，把相关的 Q 块一个个算过来、累在自己手里；dQ 反过来。这样任何一块梯度都只有一个"主人"负责写，天生不用抢锁、不用原子加。每个 program 沿 M 维内层循环累加，dk/dv 是寄存器累加器，最后一次性写回：
+**设计原则：谁的输出，谁独占 tile**——大白话就是**谁的孩子谁抱**。
+
+$dK_j = \sigma\sum_i dS_{ij} Q_i$ 沿 Q 归约，那就让每个 program 抱住一个 K/V 块，把相关的 Q 块一个个算过来、累在自己手里；$dQ$ 反过来。这样任何一块梯度都只有一个"主人"负责写，天生不用抢锁、不用原子加。
+
+每个 program 沿 M 维内层循环累加，`dk/dv` 是寄存器累加器，最后一次性写回：
 
 ```python
 qkT = tl.dot(k, qT)                        # L491 (σ/ln2)·K Qᵀ
@@ -121,11 +185,16 @@ pT  = tl.math.exp2(qkT - m[None, :])       # L492 Pᵀ = exp2(S' − M)：LSE �
 if MASK: pT = tl.where(mask, pT, 0.0)
 dv  += tl.dot(pT.to(tl.float16), do)       # L503 dV += Pᵀ @ dO
 dpT = tl.dot(v, tl.trans(do)).to(tl.float32)   # L507 dPᵀ = V dOᵀ
-dsT = pT * (dpT - Di[None, :])             # L508 dSᵀ = Pᵀ ∘ (dPᵀ − Δ)   ← §1.2 的公式
+dsT = pT * (dpT - Di[None, :])             # L508 dSᵀ = Pᵀ ∘ (dPᵀ − Δ)
 dk  += tl.dot(dsT.to(tl.float16), tl.trans(qT)) # L510 dK += dSᵀ @ Q
 ```
 
-L508 就是 $dS = P \circ (dP - \Delta)$ 的转置形态；注意 `qT` 是**未缩放**的原始 Q（scale 的账在出口算）。`Di`（$\Delta$）和 `m`（LSE）按 Q 行加载，随行块推进步进（L487, L513–515）。
+L508 就是 $dS = P \circ (dP - \Delta)$ 的转置形态。注意 `qT` 是**未缩放**的原始 Q（scale 的账在出口算）。`Di`（$\Delta$）和 `m`（LSE）按 Q 行加载，随行块推进步进（L487, L513–515）。
+
+这段代码里有两个值得学的"转置技巧"：
+
+1. 把 $K$ 预缩放后与 $Q^\top$ 相乘，直接得到 $S^\top$——后续所有量都以转置形态存在，**避免了在 kernel 里显式转置 $P$**；
+2. `tl.trans(qT)` 在最后一步才转置 Q，且这个转置可以由 tensor core 的 B 操作数布局吸收。
 
 ### 2.4 `_attn_bwd_dq`（L524–588）：对偶结构
 
@@ -139,29 +208,33 @@ ds = p * (dp - Di[:, None])            # L579 dS = P ∘ (dP − Δ)
 dq += tl.dot(ds.to(tl.float16), tl.trans(kT))   # L581 dQ += dS @ K（K 含 σ/ln2！）
 ```
 
-causal 调度沿用前向的 off-band/on-band 思想但方向更讲究：从右边界 `end_n = start_m + BLOCK_M2` **反向界定**，先用 `MASK_BLOCK_N2`（对角带）带 mask 地走完，再大步无 mask 扫剩余部分（L715–741）。
+causal 调度沿用前向的 off-band/on-band 思想，但方向更讲究：从右边界 `end_n = start_m + BLOCK_M2` **反向界定**，先用 `MASK_BLOCK_N2`（对角带）带 mask 地走完，再大步无 mask 扫剩余部分（L715–741）。
+
+**为什么反向界定？** 因为对角带在右边，先处理"必须 mask 的少数块"，剩下的整块就可以走无 mask 快路径。如果从 0 开始正向扫，你得先扫一大段无 mask、再处理对角带，循环结构反而更复杂。
 
 ### 2.5 出口处的 scale 修正与"一鱼两吃"
 
 三个出口，两笔账（L690, L747）：
 
-- **dK 乘 `sm_scale`**：dkdv 里 L510 用的是未缩放的 Q，结果 = $\sum_i dS_{ij} Q_i$，乘 $\sigma$ 修正；
-- **dQ 乘 `LN2`**：L581 用的是**预乘了 $\sigma/\ln 2$ 的 K**，结果 = $\frac{\sigma}{\ln 2}\sum_j dS_{ij} K_j$，乘 $\ln 2$ 消掉多余的 $1/\ln 2$；
+- **dK 乘 `sm_scale`**：dkdv 里 L510 用的是未缩放的 Q，结果等于 $\sum_i dS_{ij} Q_i$，乘 $\sigma$ 修正；
+- **dQ 乘 `LN2`**：L581 用的是**预乘了 $\sigma/\ln 2$ 的 K**，结果等于 $\frac{\sigma}{\ln 2}\sum_j dS_{ij} K_j$，乘 $\ln 2$ 消掉多余的 $1/\ln 2$；
 - **dV 不修正**：$P^\top dO$ 不过 $S$ 的链式导。
 
-还有一个 grid 复用技巧（L610–613 注释）：`program_id(0)` 同时作为 dK/dV 的 `start_n` 和 dQ 的 `start_m`——这要求 `BLOCK_N1 == BLOCK_M2 == 128`（L860），grid 对两部分同时合法。一个 kernel 双产出，省一次 launch，代价是寄存器压力叠加（num_warps=4, num_stages=5）。
+还有一个 grid 复用技巧（L610–613 注释）：`program_id(0)` 同时作为 dK/dV 的 `start_n` 和 dQ 的 `start_m`——这要求 `BLOCK_N1 == BLOCK_M2 == 128`（L860），grid 对两部分同时合法。一个 kernel 双产出，省一次 launch，代价是寄存器压力叠加（`num_warps=4, num_stages=5`）。
 
 **零原子操作**是这套设计的招牌：每个输出 tile 唯一属主、寄存器累加、一次写回（L686–692, L746–748），确定性好、无 atomic 流量。代价是反向要求 `N_CTX % 128 == 0`（L872 assert），变长序列需另行处理。
 
 ### 2.6 反向的精度纪律
 
-梯度是大量正负项相消的结果，比前向敏感得多。教程版的策略一句话：**"边界 fp32、tensor core 操作数 fp16、硬件累加 fp32"**——
+梯度是大量正负项相消的结果，比前向敏感得多。教程版的策略一句话：**"边界 fp32、tensor core 操作数 fp16、硬件累加 fp32"**。
 
 - dk/dv/dq 三个累加器全程 fp32；$P$ 在 fp32 域算出（`exp2`），只在进 dot 前降精；
-- `dp = tl.dot(...).to(tl.float32)`：$dP - \Delta$ 是两个大数相消，fp16 会直接损失有效位，所以 dP 显式转 fp32 后才做减法；
+- `dp = tl.dot(...).to(tl.float32)`：$dP - \Delta$ 是两个相近大数相减，fp16 会直接损失有效位，所以 dP 显式转 fp32 后才做减法；
 - preprocess 里 dO 强制 `.to(tl.float32)`，$\Delta$ 全程 fp32。
 
 降精只发生在 tensor core 强制要求的"操作数"位置。测试容差 `atol=1e-2`（fp32 参考实现、softmax 强制 fp32 计算）验证了这套纪律够用；FP8 反向干脆不支持。
+
+---
 
 ## 3. FlashAttention-2 CUDA 版：另一种组织方式
 
@@ -169,13 +242,15 @@ CUDA 版（`flash_bwd_kernel.h`，841 行）的数学与上文完全一致，值
 
 ### 3.1 五 GEMM 交错的主循环
 
-`compute_dq_dk_dv_1colblock` 处理一个 KV tile，内层沿 Q 块倒序遍历（m_block 从高到低，L317/L457），每个迭代依次发射 5 个 GEMM：
+`compute_dq_dk_dv_1colblock` 处理一个 KV tile，内层沿 Q 块倒序遍历（`m_block` 从高到低，L317/L457），每个迭代依次发射 5 个 GEMM：
 
 $$
-S \;(L474) \to P\;(\text{exp2, L536}) \to dP\;(L577) \to dV\;(L635) \to dQ\;(L655) \to dK\;(L689)
+S\;(L474) \to P\;(\text{exp2, L536}) \to dP\;(L577) \to dV\;(L635) \to dQ\;(L655) \to dK\;(L689)
 $$
 
-dK 的 GEMM 刻意排在最后、紧挨下一轮 Q tile 的 cp.async 加载（L695–701）——**WGMMA 与异步拷贝重叠**的指令级调度。与前向的对称性：外层 n_block、内层 m_block，`acc_dv/acc_dk` 对应前向的 `acc_o`，$(P^\top, dO) \to dV$ 与前向 $(P, V^\top) \to O$ 是同构的累加结构；tile 尺寸转置（bwd 用 kBlockM=64 / kBlockN=128，launcher 的注释直言 M=128 时 dQaccum 读写翻倍、"quite slow"）。
+dK 的 GEMM 刻意排在最后、紧挨下一轮 Q tile 的 cp.async 加载（L695–701）——**WGMMA 与异步拷贝重叠**的指令级调度。
+
+与前向的对称性：外层 n_block、内层 m_block，`acc_dv/acc_dk` 对应前向的 `acc_o`，$(P^\top, dO) \to dV$ 与前向 $(P, V^\top) \to O$ 是同构的累加结构。tile 尺寸转置（bwd 用 `kBlockM=64` / `kBlockN=128`，launcher 的注释直言 M=128 时 dQaccum 读写翻倍、"quite slow"）。
 
 $P$ 的重算同样是 `scale_apply_exp2<scale_max=false>`（L536）——不减 max，因为 LSE 已含 max；L411 对 OOB 行设 `INFINITY` 让 $P = 0$（注释解释了 ALiBi 场景下的 NaN 坑）。
 
@@ -185,31 +260,52 @@ Triton 教程用"独占 Q 块"解决了 dQ，CUDA 版没这么做——它的主
 
 **dQ 的麻烦，好比全班分工抄同一份作业**：每人只抄一部分，最后要把所有答案合起来；合得对不对、每次合出来是不是同一个结果，都是问题。历史上给出过三种"合成方案"，但**在当前 commit（8d3a3b8）里只有后两种还在被 launch**，第一种已成化石：
 
-**① gmem read-modify-write**（历史路径，现已不 launch）：对应 `compute_dq_dk_dv` / `flash_bwd_dq_dk_dv_loop_kernel`（`flash_bwd_kernel.h:799`、`flash_bwd_launch_template.h:34`），每 (b,h) 一个 block 串行处理全部 KV 块，dQ 部分和从 `dq_accum`（fp32 gmem 缓冲）读进寄存器、累加、写回（`flash_bwd_kernel.h:672-673`）。函数仍在，但没有任何 `run_*` 会调用它。
+| 模式 | 做法 | 复现性 | 位置 |
+|---|---|---|---|
+| ① gmem read-modify-write | 单 block 串行处理全部 KV，读-改-写 `dq_accum` | 确定 | `flash_bwd_kernel.h:672-673`（已不 launch） |
+| ② seq-parallel + atomicAdd | grid `(num_n_block, b, h)`，每 block 一个 KV 块，逐元素 atomicAdd | **不确定** | `:674-679` |
+| ③ deterministic 分片 | `dq_accum` 切成 `{nsplits,...}`，每 block 写自己的切片 | 确定 | `:122-125` + preprocess `:243-248` |
 
-**② seq-parallel + atomicAdd**（当前主干，`flash_bwd_launch_template.h:128-133` 无条件启用）：grid `(num_n_block, b, h)`，每个 block 只处理一个 KV 块，dQ 部和直接对 `dq_accum` 逐元素 `atomicAdd`（`flash_bwd_kernel.h:674-679`）。grid 更大、长序列负载均衡更好，代价是 atomic 流量与浮点归约的不确定性。最后由独立的 `flash_bwd_convert_dq_kernel` 做格式转换——**"dq 转换 kernel"分出来的是累加结果的收尾，不是 dQ 的计算**（dQ 的 GEMM 就在主循环里，`flash_bwd_kernel.h:655`）。
+逐条展开：
+
+**① gmem read-modify-write**（历史路径，现已不 launch）：对应 `compute_dq_dk_dv` / `flash_bwd_dq_dk_dv_loop_kernel`（`flash_bwd_kernel.h:799`、`flash_bwd_launch_template.h:34`），每 (b,h) 一个 block 串行处理全部 KV 块，dQ 部分和从 `dq_accum`（fp32 gmem 缓冲）读进寄存器、累加、写回（`flash_bwd_kernel.h:672-673`）。函数仍在，但没有任何 `run_*` 会调用它。**为什么放弃？** 一个 block 串行扫全部 KV，并行度太低，长序列上 GPU 根本填不满。
+
+**② seq-parallel + atomicAdd**（当前主干，`flash_bwd_launch_template.h:128-133` 无条件启用）：grid `(num_n_block, b, h)`，每个 block 只处理一个 KV 块，dQ 部分和直接对 `dq_accum` 逐元素 `atomicAdd`（`flash_bwd_kernel.h:674-679`）。grid 更大、长序列负载均衡更好，代价是 atomic 流量与浮点归约的不确定性。最后由独立的 `flash_bwd_convert_dq_kernel` 做格式转换——**"dq 转换 kernel"分出来的是累加结果的收尾，不是 dQ 的计算**（dQ 的 GEMM 就在主循环里，`flash_bwd_kernel.h:655`）。
 
 **③ deterministic 分片**：atomicAdd 的浮点加法不可复现。确定性模式把 `dq_accum` 分成 `{nsplits, ...}` 切片，每个 block 通过 `+ blockIdx.x * params.dq_accum_split_stride` 写自己的切片（`flash_bwd_kernel.h:122-125`，归约顺序固定），再由 `convert_dQ` 的跨 split 累加求和（`flash_bwd_preprocess_kernel.h:243-248`）。
 
+三种模式其实是同一个问题的三个权衡：**并行度、确定性、显存/带宽**，三者最多取其二。
+
 ### 3.3 寄存器压力：反向真正的敌人
 
-前向每 warp 持有 `acc_s + acc_o`；反向同一线程要同时持有 $P$、$dP/dS$、$dQ$（M×d）、$dK$（N×d）、$dV$（N×d）、LSE、$\Delta$——约 2.5–3 倍。CUDA 版的应对是一组组合拳：tile 缩小（M=64）；`Is_V_in_regs` 按显存预算切换；`sP` 与 `sdQ` 复用同一块 smem（L176–177 注释警告竞态）；dK/dV 的转换与写回尽量推迟。launcher 里一堆被注释掉的历史配置（L173–201）就是调寄存器/spill 的化石层。
+前向每 warp 持有 `acc_s + acc_o`；反向同一线程要同时持有 $P$、$dP/dS$、$dQ$（M×d）、$dK$（N×d）、$dV$（N×d）、LSE、$\Delta$——约 2.5–3 倍。CUDA 版的应对是一组组合拳：
 
-转置 GEMM（$P^\top dO$、$dS^\top Q$ 要求列主序喂 MMA）靠 smem 双视图（`sP/sPt`、`sdS/sdSt`）+ 寄存器 fragment 重排解决，其中 L29–53 的 `make_tiled_copy_B_warpcontiguousN` 是作者自己注释了 "This gives the correct layout, idk why" 的手写分块拷贝——工业级代码也有认怂的时刻。
+- tile 缩小（M=64）；
+- `Is_V_in_regs` 按显存预算切换；
+- `sP` 与 `sdQ` 复用同一块 smem（L176–177 注释警告竞态）；
+- dK/dV 的转换与写回尽量推迟。
+
+launcher 里一堆被注释掉的历史配置（L173–201）就是调寄存器/spill 的化石层——**读这种注释密集的 launcher，往往比读 kernel 本身更能理解设计约束**。
+
+转置 GEMM（$P^\top dO$、$dS^\top Q$ 要求列主序喂 MMA）靠 smem 双视图（`sP/sPt`、`sdS/sdSt`）加寄存器 fragment 重排解决，其中 L29–53 的 `make_tiled_copy_B_warpcontiguousN` 是作者自己注释了 "This gives the correct layout, idk why" 的手写分块拷贝——工业级代码也有认怂的时刻。
 
 ### 3.4 preprocess kernel 与 dropout 的坑
 
-独立路径的 `compute_dot_do_o`（preprocess L57–140）按行块起 grid 算 $\Delta$：fragment 重排 + warp shuffle Allreduce，**零共享内存**，顺手把 `dq_accum` 清零（省一次 memset kernel）。FA3 的 preprocess 一个 kernel 干四件事：$\Delta$、LSE×log₂e、清零 dQaccum、清零信号量。
+独立路径的 `compute_dot_do_o`（preprocess L57–140）按行块起 grid 算 $\Delta$：fragment 重排加 warp shuffle Allreduce，**零共享内存**，顺手把 `dq_accum` 清零（省一次 memset kernel）。FA3 的 preprocess 一个 kernel 干四件事：$\Delta$、LSE×log₂e、清零 dQaccum、清零信号量。
 
-Dropout 值得一提：前向用 $P_{\text{drop}} = M \circ P/q$（$q$ 为 keep 概率）。反向**把 $1/q$ 推迟到最后统一乘**——dP 不放大，$\Delta$ 反而乘上 $q$（preprocess 的 `scale` 参数，`flash_bwd_preprocess_kernel.h:44` 与 `:128-132` 注释："dP_sum 也要缩小 $q$ 倍，好让 $dP - \Delta$ 同量纲"），出口处再对 dQ/dK 乘 `scale_softmax_rp_dropout`（`flash_bwd_kernel.h:686`）。dropout mask 编码进 $P$ 的**符号位**（负值 = 被丢弃），`pointwise_mult` 对负值分支改用 $d$——恰好给出 softmax 分母路径的正确梯度。把信息藏进符号位这种"便宜存储"的用法，是性能代码里常见的黑话。
+Dropout 值得一提：前向用 $P_{\text{drop}} = M \circ P/q$（$q$ 为 keep 概率）。反向**把 $1/q$ 推迟到最后统一乘**——dP 不放大，$\Delta$ 反而乘上 $q$（preprocess 的 `scale` 参数，`flash_bwd_preprocess_kernel.h:44` 与 `:128-132` 注释："dP_sum 也要缩小 $q$ 倍，好让 $dP - \Delta$ 同量纲"），出口处再对 dQ/dK 乘 `scale_softmax_rp_dropout`（`flash_bwd_kernel.h:686`）。
+
+dropout mask 编码进 $P$ 的**符号位**（负值 = 被丢弃），`pointwise_mult` 对负值分支改用 $d$——恰好给出 softmax 分母路径的正确梯度。把信息藏进符号位这种"便宜存储"的用法，是性能代码里常见的黑话。
 
 ### 3.5 FA3 的反向：把两个瓶颈逐个拆掉
 
-FA3（`hopper/flash_bwd_kernel_sm90.h`）针对 §3.2/§3.3 的两个瓶颈重写：
+FA3（`hopper/flash_bwd_kernel_sm90.h`）针对 §3.2、§3.3 的两个瓶颈重写：
 
-- **寄存器**：CUTLASS 3 式 warp specialization——1 个 load warp group + 2–3 个 MMA warp group，`warpgroup_reg_alloc` 把配额粗分为 24:240，load 线程几乎不占寄存器；
-- **原子加**：hdim<256 时 dQ 部分和经 smem 走 **SM90_BULK_REDUCE_ADD（TMA 硬件归约加）** 直接累加到 gmem（带 `EVICT_LAST` hint），NamedBarrier 双缓冲；hdim=256 放不下才回退 atomicAdd 并把 dQ GEMM 切两半交错发射压寄存器。确定性模式用 `dq_semaphore` 的跨 block 顺序同步取代分片缓冲；
+- **寄存器**：CUTLASS 3 式 warp specialization——1 个 load warp group 加 2–3 个 MMA warp group，`warpgroup_reg_alloc` 把配额粗分为 24:240，load 线程几乎不占寄存器；
+- **原子加**：hdim<256 时 dQ 部分和经 smem 走 **SM90_BULK_REDUCE_ADD（TMA 硬件归约加）**直接累加到 gmem（带 `EVICT_LAST` hint），NamedBarrier 双缓冲；hdim=256 放不下才回退 atomicAdd 并把 dQ GEMM 切两半交错发射压寄存器。确定性模式用 `dq_semaphore` 的跨 block 顺序同步取代分片缓冲；
 - GEMM 全部换 WGMMA 的 swapAB 变体（直接以转置布局喂 wgmma，省掉 §3.3 那套手写拷贝）、persistent tile scheduler 按 causal 负载均衡调度。
+
+---
 
 ## 4. 三种 kernel 组织的对照
 
@@ -220,11 +316,19 @@ FA3（`hopper/flash_bwd_kernel_sm90.h`）针对 §3.2/§3.3 的两个瓶颈重�
 | kernel 数 | 2（dkdv + dq） | 2~3（dkdv+dq 内联 + convert_dq） | 1（三梯度内联） |
 | 主 kernel 并行维度 | 两个 kernel 分别按 KV / Q | 按 KV tile | 按 KV tile |
 | dQ 跨块归约 | 不存在（独占 Q 块） | dq_accum: RMW / atomic / 分片 | atomic_add + swizzle layout 向量化 |
-| QK^T 重算次数 | dkdv、dq 各一次 | 一次（三梯度共享） | 一次（三梯度共享） |
+| $QK^\top$ 重算次数 | dkdv、dq 各一次 | 一次（三梯度共享） | 一次（三梯度共享） |
 | 确定性 | 完全确定 | 默认非确定（atomic），可选分片 | 非确定（atomic） |
-| 约束 | N_CTX % 128 == 0 | tile 启发式 + smem 预算 | 静态 shape 特化 |
+| 约束 | `N_CTX % 128 == 0` | tile 启发式 + smem 预算 | 静态 shape 特化 |
 
-没有唯一正确的答案：Triton 版选确定性、牺牲一次重算；FA2 选负载均衡、接受 atomic；TileLang 选最小访存、用 layout 工程把 atomic 的代价压下来。**kernel 组织 = 归约方向与并行度的拓扑设计**——这与第 2 篇 FA2 前向"换个循环顺序提速 1.8 倍"是同一条规律在反向的再次显形。
+没有唯一正确的答案：
+
+- Triton 版选确定性、牺牲一次重算；
+- FA2 选负载均衡、接受 atomic；
+- TileLang 选最小访存、用 layout 工程把 atomic 的代价压下来。
+
+**kernel 组织 = 归约方向与并行度的拓扑设计**——这与第 2 篇 FA2 前向"换个循环顺序提速 1.8 倍"是同一条规律在反向的再次显形。
+
+---
 
 ## 5. 小结
 
@@ -233,5 +337,11 @@ FA3（`hopper/flash_bwd_kernel_sm90.h`）针对 §3.2/§3.3 的两个瓶颈重�
 - "输出所有权决定遍历方向"是反向 kernel 的第一设计原则；跨块归约（dQ）的三种解法（独占重算 / gmem 累加 / atomic）各有其代价函数。
 - 反向的精度纪律比前向严格：相消运算（$dP - \Delta$）和跨块累加必须 fp32，降精只允许发生在 tensor core 操作数上。
 - FA3 用 warp specialization（寄存器再分配）和 TMA reduce（硬件归约）分别拆掉了反向的两个历史瓶颈。
+
+### 自检三问
+
+1. 不用 $\Delta$ 恒等式，直接按定义 $\Delta_i = \sum_k P_{ik} dP_{ik}$ 算，需要多少额外显存和访存？为什么说它"看起来只是一行公式，实际是反向的分水岭"？
+2. Triton 版为什么能把 dQ 和 dK/dV 拆成两个 kernel 还不重复太多计算？如果要求"一次重算、三梯度共享"，dQ 的归约会变成什么问题？
+3. FA2 的确定性模式用"分片"、FA3 用"信号量"，两者都在解决 atomic 的不可复现。它们各自付出的代价是什么？
 
 最后一篇[（五）]({{< relref "flash-attention-05-dsl-zoo" >}})离开单实现视角，看 TileLang、Gluon、Liger 如何在更高/更低的抽象层级上重写同一算法。

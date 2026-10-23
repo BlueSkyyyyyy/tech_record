@@ -1,10 +1,10 @@
 """Flash Attention 反向变体参考实现（纯 PyTorch，教学用）。
 
 对照博客《Flash Attention 精读（七）》：
-  §1.2  Δ 恒等式      Δ_i = rowsum(dO ∘ O)（即使有 dropout 也成立）
-  §1.4  GQA 反向      dK/dV 沿共享的 Q head 求和
-  §1.5  dropout 反向  1/keep 折进 dP，mask 用乘法（与 FA2 把 mask 藏进符号位等价）
-  §1.6  softcap 反向  dS0 = dS_capped ∘ (1 − (s_capped / c)²)
+  §1.3  Δ 恒等式      Δ_i = rowsum(dO ∘ O)（即使有 dropout 也成立）
+  §1.5  GQA 反向      dK/dV 沿共享的 Q head 求和
+  §1.6  dropout 反向  1/keep 折进 dP，mask 用乘法（与 FA2 把 mask 藏进符号位等价）
+  §1.7  softcap 反向  dS0 = dS_capped ∘ (1 − (s_capped / c)²)
 
 所有变体都用 autograd 对拍。运行: python bwd_variants_ref.py（CPU 即可）
 """

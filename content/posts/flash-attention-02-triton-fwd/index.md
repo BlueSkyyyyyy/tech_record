@@ -8,11 +8,27 @@ tags: ["flash-attention", "triton", "attention", "gpu", "系列"]
 categories: ["算子开发"]
 ---
 
-本篇精读 [Triton 官方教程 `06-fused-attention.py`](https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py) 的**前向**部分（约 L30–403 + autograd 封装 L755–905），约 200 行核心代码，实现了 Flash Attention v2。它是理解这个算法最好的教材——比 CUDA 版短一个数量级，又保留了所有关键的数学与工程决策。反向部分留给[第 4 篇]({{< relref "flash-attention-04-bwd" >}})。
+本篇精读 [Triton 官方教程 `06-fused-attention.py`](https://github.com/triton-lang/triton/blob/main/python/tutorials/06-fused-attention.py) 的**前向**部分（约 L30–403 加 autograd 封装 L755–905），约 200 行核心代码，实现了 Flash Attention v2。它是理解这个算法最好的教材——比 CUDA 版短一个数量级，又保留了所有关键的数学与工程决策。反向部分留给[第 4 篇]({{< relref "flash-attention-04-bwd" >}})。
 
 建议对照[第 1 篇]({{< relref "flash-attention-01-theory" >}})的递推公式阅读：本篇的每一节都是"公式 → 代码"的映射。
 
-> 行号基于本地带中文注译的 `06-fused-attention.py`（Triton commit `932ceaa2b` + 注解）。上游 Triton 会持续更新该教程，行号可能漂移，读者以函数名定位即可。
+> 行号基于本地带中文注译的 `06-fused-attention.py`（Triton commit `932ceaa2b` 加注解）。上游 Triton 会持续更新该教程，行号可能漂移，读者以函数名定位即可。
+
+## 先记住一个画面
+
+第 1 篇把 online softmax 讲成"一边来货、一边称重、一边记账"。这一篇换个视角：**看一位厨师怎么把菜谱做成出餐**。
+
+菜谱只写"放盐少许、翻炒至变色"；后厨却要决定灶眼怎么排、配菜什么时候切、哪口锅先烧热。Triton 教程就是这份"已经写成出餐流程的菜谱"——数学一步没变，但多了大量菜谱里不会写的讲究：**怎么把缩放折进指令、怎么让第一块自动退化、怎么把掩码开销压到只发生在一个块上**。
+
+> **类比的边界**：厨师可以凭手感调整火候，kernel 不行。下面每一处"讲究"背后都是一条硬约束：tensor core 只吃 fp16/bf16/fp8 操作数、SFU 只有 `ex2.approx`、寄存器数量固定。看懂这些约束，比记住代码更重要。
+
+读完这一篇，你应该能回答三个问题：
+
+1. 三组寄存器状态 $m_i, \ell_i, \mathrm{acc}$ 的初值为什么能"自动"处理第一块，而不需要写 `if (first_block)`？
+2. 为什么整个文件找不到一处自然指数 `exp`，全部是 `exp2`？`1.44269504` 这个常数从哪来？
+3. causal 掩码为什么可以只在一个"对角带"上做，其余 key 完全不判定？`STAGE` 的位标志是怎么表达这件事的？
+
+---
 
 ## 1. 文件鸟瞰
 
@@ -26,7 +42,13 @@ categories: ["算子开发"]
 
 前向的数据流一句话：**grid 维度并行 Q 块，循环维度串行 KV 块，三组寄存器状态（$m_i, \ell_i, \mathrm{acc}$）贯穿始终**。
 
-如果把第 1 篇的数学比作"菜谱"，这一篇就是"看厨师怎么颠勺"——同一个算法，落到真实指令上会多出一堆菜谱里不会写的讲究。我们跟着**一个 Q 块**从头走到尾：它怎么被派活、怎么记账、怎么处理边角料（掩码）、最后怎么装盘（归一化）。
+读这份代码时，建议抓住三个"抓手"，其余细节都可以挂在这三根线上：
+
+1. **一个 Q 块的生命周期**：被哪个 program 领走 → 状态怎么初始化 → 怎么扫完所有 KV → 怎么写出 O 和 LSE。
+2. **一条递推式**：$m \to \alpha \to \ell \to \mathrm{acc}$，循环体里每一行都能对应到第 1 篇的公式。
+3. **两处"把开销挪走"的设计**：scale 折进 `exp2`、mask 只在对角带发生。
+
+---
 
 ## 2. 主 kernel `_attn_fwd`：并行结构
 
@@ -39,7 +61,9 @@ off_z = off_hz // H
 off_h = off_hz % H
 ```
 
-`program_id(0)` 是 Q 块索引，`program_id(1)` 是 `batch × head` 展平索引——正是第 1 篇说的"Q 分块是 grid 维度（块间并行）"。Q/K/V 被统一看成 `[Z*H*N_CTX, HEAD_DIM]` 的二维张量（L327–339），当前 batch/head 的行偏移是 `off_z*(N_CTX*H) + off_h*N_CTX`（L342）。二维展开避免了四维 stride 的一堆乘法，也方便 TMA descriptor 使用。
+`program_id(0)` 是 Q 块索引，`program_id(1)` 是 `batch × head` 展平索引——正是第 1 篇说的"Q 分块是 grid 维度（块间并行）"。Q/K/V 被统一看成 `[Z*H*N_CTX, HEAD_DIM]` 的二维张量（L327–339），当前 batch/head 的行偏移是 `off_z*(N_CTX*H) + off_h*N_CTX`（L342）。
+
+为什么要把四维张量拍成二维？两个原因：二维展开避免了四维 stride 的一堆乘法；TMA descriptor 也只需要描述二维 tile。**这是一种"用布局换指令"的典型手法**——数据没变，寻址变简单了。
 
 ### 2.2 状态初始化（L355–357）
 
@@ -49,28 +73,44 @@ l_i = tl.zeros([BLOCK_M], tl.float32) + 1.0
 acc = tl.zeros([BLOCK_M, HEAD_DIM], tl.float32)
 ```
 
-这三个初值就是第 1 篇递推式的寄存器化身，但**初始化本身藏着一个技巧**：$\ell_i$ 初值是 1.0 而不是 0。
+这三个初值就是第 1 篇递推式的寄存器化身。**初始化本身藏着一个技巧**：$m_i$ 取 $-\infty$。
 
-代入第一次迭代：$m^{old}_i = -\infty$，则 $\alpha = \mathrm{exp2}(-\infty - m^{new}) = 0$，于是
+代入第一次迭代：$m^{\text{old}}_i = -\infty$，于是
 
 $$
-\ell_i \leftarrow 1.0 \times 0 + \ell_{ij} = \ell_{ij}, \qquad
-\mathrm{acc} \leftarrow 0 \times \mathrm{acc} + P V = P V
+\alpha = \mathrm{exp2}(-\infty - m^{\text{new}}) = 0
 $$
 
-第一次迭代"自动退化"成普通计算，**不需要为第 0 块写特殊分支**。$\ell_i = 1.0$ 的作用是让被清零的旧值乘出来还是 0——数学上无所谓，代码上省一个 if。
+$$
+\ell_i \leftarrow \ell_i^{\text{old}} \times 0 + \ell_{ij} = \ell_{ij}, \qquad
+\mathrm{acc} \leftarrow \mathrm{acc}^{\text{old}} \times 0 + P V = P V
+$$
 
-**为什么是 1 不是 0？** 因为 $\ell_i$ 要参与"旧值 × α + 新值"的累加，初值取 0 时公式写成 $\ell_i \leftarrow 0\times0 + \ell_{ij}$ 也对；取 1 只是让"空账本"这个占位值也有个好乘性。真正让第一块自动生效的是 $m_i=-\infty$ 带来的 $\alpha=0$——它把"还没有旧账"这件事编码进了一个乘法因子。**用数值本身表达控制流，是 kernel 代码的常见美学**。
+第一次迭代"自动退化"成普通计算，**不需要为第 0 块写特殊分支**。这就是"用数值本身表达控制流"：把"还没有旧账"这件事编码进一个乘法因子 $\alpha=0$。
+
+**那 $\ell_i$ 初值为什么写 1.0 而不是 0？** 说实话，**在这个递推里两者完全等价**：因为 $\alpha=0$，旧值乘出来都是 0。写 1.0 只是 Triton 教程的写法习惯，并没有额外的数学含义。真正让第一块自动生效的是 $m_i=-\infty$ 带来的 $\alpha=0$，不是 $\ell_i$ 的初值。读到这里不必强行给 1.0 找一个"好乘性"的理由——**分清哪一处是关键设计、哪一处只是写法，本身就是读代码的能力**。
 
 ### 2.3 scale 的折叠（L362–363）
 
 ```python
-qk_scale = sm_scale * 1.44269504   # sm_scale / ln(2)
+qk_scale = sm_scale * 1.44269504   # sm_scale * log2(e)
 ```
 
-全文件没有一处自然指数。$1/\ln 2 = 1.44269504$ 被折进 scale，所有 `exp` 变成 `exp2`——GPU 的 SFU 只有 `ex2.approx.f32` 硬件指令，`exp(x)` 需要软件展开成 `ex2(x · log2 e)`，先折进去就省掉每次的乘法。同时前向存下的 LSE 也是以 2 为底的（见 §4），反向一行 `exp2(qk - M)` 就能恢复 softmax 概率——前后向的接口在数值域的选择上就设计好了。
+全文件没有一处自然指数。$1/\ln 2 = 1.44269504$ 被折进 scale，所有 `exp` 变成 `exp2`。原因很硬件：GPU 的 SFU 只有 `ex2.approx.f32` 硬件指令，`exp(x)` 需要软件展开成 `ex2(x · log2 e)`。既然每行都要 exp，不如**把 $\log_2 e$ 提前乘进 scale**，循环里就只剩一条 `ex2`。
 
-**scale 乘在减 max 之前**（L123–125）：正数缩放是保序的，$\max(cx) = c\max(x)$，所以先乘后减与先减后乘等价；但必须保证"减去的 max"与"被指数的量"在同一量纲（缩放后域），$\mathrm{exp2}(S' - m') \le 1$ 才恒成立。若把 scale 留到 exp 之后补乘，未经缩放的 $S$ 稍大就会上溢。
+验证一下等式：
+
+$$
+\mathrm{exp2}(S \cdot \sigma \cdot \log_2 e) = e^{S \cdot \sigma}
+$$
+
+其中 $\sigma = 1/\sqrt d$ 是 softmax scale。所以送进 `exp2` 的量就是"已经缩放好的 logits"。
+
+同时，前向存下的 LSE 也是以 2 为底的（见 §5），反向一行 `exp2(qk - M)` 就能恢复 softmax 概率——**前后向的接口在数值域的选择上就设计好了**，这不是随手优化。
+
+**scale 必须乘在减 max 之前**（L123–125）。正数缩放是保序的，$\max(cx) = c\max(x)$，所以"先乘后减"与"先减后乘"在数学上等价；但必须保证"减去的 max"与"被指数的量"在同一量纲（缩放后的域），$\mathrm{exp2}(S' - m') \le 1$ 才恒成立。若把 scale 留到 exp 之后补乘，未经缩放的 $S$ 稍大就会上溢。
+
+---
 
 ## 3. 主循环 `_attn_fwd_inner`：递推式的逐行翻译
 
@@ -88,12 +128,24 @@ for start_n in tl.range(lo, hi, BLOCK_N, warp_specialize=...):
 
 ```python
 qk = tl.dot(q, k)                       # tensor core，fp32 累加
-qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)   # STAGE==2（带 mask 分支）
-# 或无 mask 分支：
-m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
 ```
 
-causal 掩码是 `offs_m[:, None] >= (start_n + offs_n[None, :])`（下三角）。**哨兵是 `-1.0e6` 而不是 `-inf`**：如果某行整块被 mask 且 $m_i$ 还是 $-\infty$，那么 $-\infty - (-\infty) = \mathrm{NaN}$ 会污染整个 softmax；$-10^6$ 减去有限的 $m_{ij}$ 后经 exp2 干净地下溢为 0。哨兵加在 scale 之后（L125），保证掩码值不随 scale 缩放。
+`tl.dot` 的输出是 fp32（虽然输入 q/k 是 fp16），这一点很重要：**乘法在 tensor core 里做，累加精度由硬件累加器保证**。接着按是否在对角带分两种写法：
+
+```python
+# STAGE==2：对角带，需要逐元素 mask
+qk = qk * qk_scale + tl.where(mask, 0, -1.0e6)
+m_ij = tl.maximum(m_i, tl.max(qk, 1))
+qk -= m_ij[:, None]
+
+# 其余 STAGE：无 mask，省掉 where
+m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
+qk = qk * qk_scale - m_ij[:, None]
+```
+
+注意两段代码的差别不只是"有没有 `where`"，还有 **scale 乘在哪一步**：带 mask 的版本先缩放再加哨兵，无 mask 的版本在求 max 时临时缩放、在减 max 时再缩放。两种写法数学等价，但前者让哨兵不随 scale 缩放，后者省掉一次整块乘法。
+
+**哨兵是 `-1.0e6` 而不是 `-inf`**：如果某行整块被 mask 且 $m_i$ 还是 $-\infty$，那么 $-\infty - (-\infty) = \mathrm{NaN}$ 会污染整个 softmax；$-10^6$ 减去有限的 $m_{ij}$ 后经 exp2 干净地下溢为 0。哨兵加在 scale 之后（L125），保证掩码值不随 scale 缩放。
 
 ### 3.2 更新 max 与修正因子（L127–144）
 
@@ -103,40 +155,52 @@ qk -= m_ij[:, None]                     # 参数 ≤ 0，exp2 安全
 alpha = tl.math.exp2(m_i - m_ij)        # α = 2^(m_old − m_new)
 ```
 
-这就是递推式的前两行。`alpha` 是旧坐标系到新坐标系的搬运工。
+这就是递推式的前两行。`alpha` 是旧坐标系到新坐标系的搬运工。注意 `m_i - m_ij` 一定 $\le 0$（因为 `m_ij` 是两者最大），所以 `alpha ∈ (0, 1]`——**它只会把旧账缩小，不会放大**，这也顺便回答了第 1 篇的自检题。
 
 ### 3.3 重缩放与第二次 GEMM（L162–172）
 
 ```python
-p = tl.math.exp2(qk)                    # 未归一化分子 P_block ∈ [0,1]
+p = tl.math.exp2(qk)                    # 未归一化分子 P_block ∈ (0,1]
 l_ij = tl.sum(p, 1)                     # 本块的行和
 acc = acc * alpha[:, None]              # 旧输出迁移到新坐标系
 l_i = l_i * alpha + l_ij                # 行和迁移 + 累加
 # 数值技巧：p 降到 fp16 再进 tensor core
-v = desc_v.load([0, offsetv_y]).T       # （fp8 路径下 V 转置加载）
-acc = tl.dot(p, v, acc)                 # acc += P_block @ V_block
+acc = tl.dot(p.to(tl.float16), v, acc)  # acc += P_block @ V_block
 ```
 
-三个细节值得停留：
+三个细节值得停留。
 
-**（1）`p.to(tl.float16)` 的安全性边界。** tensor core 的输入必须是 fp16/bf16/fp8。能安全降精的前提写在第 1 篇：减 max 之后 $p \in [0, 1]$，fp16 在 $[0,1]$ 区间有充分有效数字；而 `tl.dot(p, v, acc)` 的三参数形式让**硬件累加器是 fp32**。精度损失只发生在乘法操作数上，落点在 fp16 噪声级别。反过来，$\ell_i$、$m_i$、acc 的所有跨块累加全程 fp32——"降精只发生在 tensor core 强制要求的操作数位置"是贯穿前向反向的铁律。
+**（1）`p.to(tl.float16)` 的安全性边界。** tensor core 的输入必须是 fp16/bf16/fp8。能安全降精的前提写在第 1 篇：减 max 之后 $p \in (0, 1]$，fp16 在 $[0,1]$ 区间有充分有效数字；而 `tl.dot(p, v, acc)` 的三参数形式让**硬件累加器保持 fp32**。精度损失只发生在乘法操作数上，落点在 fp16 噪声级别。反过来，$\ell_i$、$m_i$、`acc` 的所有跨块累加全程 fp32——**"降精只发生在 tensor core 强制要求的操作数位置"是贯穿前向反向的铁律**。
 
-**（2）`m_i/l_i` 的更新放循环末尾（L176–177）**，注释明说是让这两个中间量的生命周期尽早结束、降低寄存器压力。128×128 的 fp32 acc 本身就占满一半寄存器，生存分析这种编译器层面的考虑在这里是手写的。
+**（2）`m_i/l_i` 的更新放循环末尾（L176–177）**，注释明说是让这两个中间量的生命周期尽早结束、降低寄存器压力。128×128 的 fp32 `acc` 本身就占满一半寄存器，这种"生存分析"通常是编译器做的，在这里被手写出来了。
 
-**（3）非 Hopper 架构的寄存器拆分（L152–160）**：当 `BLOCK_M == HEAD_DIM == 128` 且开 warp specialization 时，把 acc reshape/permute/split 成两半、分别乘 `alpha` 再 join 回去。注释直言是为了避免 spilling——128×128 fp32 acc 整体 rescale 会让寄存器分配恶化，拆两半分两次做。这是"为特定 shape 手写指令级 workaround"的典型样本，第 3 篇 CUDA 版你会看到同款考虑如何上升为 warp specialization 的设计动机。
+**（3）非 Hopper 架构的寄存器拆分（L152–160）**：当 `BLOCK_M == HEAD_DIM == 128` 且开 warp specialization 时，把 `acc` reshape/permute/split 成两半、分别乘 `alpha` 再 join 回去。注释直言是为了避免 spilling——128×128 fp32 `acc` 整体 rescale 会让寄存器分配恶化，拆两半分两次做。这是"为特定 shape 手写指令级 workaround"的典型样本，第 3 篇 CUDA 版你会看到同款考虑如何上升为 warp specialization 的设计动机。
+
+---
 
 ## 4. STAGE 两遍遍历：causal 的块级跳过（L91–100, L372–392）
 
-教程版最漂亮的结构设计。STAGE 是**位标志**：bit0 = off-band 遍历，bit1 = on-band 遍历。
+这是教程版最漂亮的结构设计。`STAGE` 是**位标志**：bit0 = off-band 遍历，bit1 = on-band 遍历。
 
-用读书打比方：causal 下每个 query 只允许看它前面的 key。当前 Q 块（一排 query）对应到 key 序列上，会切出三类"页"——**完全在前面、人人可看的**（off-band）、**压在折痕上、得逐行划线的**（on-band），以及**完全在后面、压根不该读的**。STAGE 的两遍遍历就是把"读"和"遮"彻底分开：绝大多数页不需要任何判定，只有折痕那一页才付出 mask 的代价。
+用读书打比方：causal 下每个 query 只允许看它前面的 key。当前 Q 块（一排 query）对应到 key 序列上，会切出三类"页"——**完全在前面、人人可看的**（off-band）、**压在折痕上、得逐行划线的**（on-band），以及**完全在后面、压根不该读的**。`STAGE` 的两遍遍历就是把"读"和"遮"彻底分开：绝大多数页不需要任何判定，只有折痕那一页才付出 mask 的代价。
 
 - **STAGE=1（非 causal）**：一次调用 inner，`lo, hi = 0, N_CTX`，全程无 mask。
 - **STAGE=3（causal）**：两次调用 inner——
   - 第一次（L378–383）处理 $[0,\ start_m \cdot B_M)$：这些 key 严格早于当前 Q 块的所有行，**完全可见、零 mask**（off-band）；
-  - 第二次（L387–392）只处理对角带 $[start_m \cdot B_M,\ (start_m+1) B_M)$：唯一需要 mask 的区域（on-band），宽度恰好一个 BLOCK_M。
+  - 第二次（L387–392）只处理对角带 $[start_m \cdot B_M,\ (start_m+1) B_M)$：唯一需要 mask 的区域（on-band），宽度恰好一个 `BLOCK_M`。
 
-`4 - STAGE`（L382）这个表达式把"非 causal 的全量扫描"与"causal 的第一次 off-band 扫描"统一进同一个调用点。收益：mask 的比较与 `tl.where` 开销只发生在对角带上（占比 $\approx B_M / N$），其余 $N - B_M$ 个 key 的内循环指令流更短；`tl.multiple_of` 提示（L97、L114）再帮编译器做对齐优化。
+`4 - STAGE`（L382）这个表达式把"非 causal 的全量扫描"与"causal 的第一次 off-band 扫描"统一进同一个调用点：非 causal 时 `4-1=3`（全量），causal 时 `4-3=1`（off-band）。第一次读到这里容易卡住，记住这张小表就通了：
+
+| 外层 STAGE | 第一次调用 inner 的 stage | 含义 | 第二次调用 |
+|---|---|---|---|
+| 1（非 causal） | 3 | 扫全量 $[0, N)$ | 不执行 |
+| 3（causal） | 1 | 扫 off-band $[0, start_m B_M)$ | stage=2，扫对角带 |
+
+收益：mask 的比较与 `tl.where` 开销只发生在对角带上（占比 $\approx B_M / N$），其余 $N - B_M$ 个 key 的内循环指令流更短；`tl.multiple_of` 提示（L97、L114）再帮编译器做对齐优化。
+
+> 这类"把条件判断从循环里挪到循环外"的优化，在本系列会出现很多次。它的本质是**让绝大多数迭代跑一条没有分支的快路径**，而不是在每次迭代里都问一遍"我要不要 mask"。
+
+---
 
 ## 5. Epilogue（L399–403）：归一化与 LSE
 
@@ -145,7 +209,15 @@ m_i += tl.math.log2(l_i)   # M_i = log2(ℓ) + m = 以 2 为底的 log-sum-exp
 acc = acc / l_i[:, None]   # O = Σ P·V / ℓ
 ```
 
-循环内不除 $\ell$（中间块的 $\ell$ 不完整，且除法比乘法贵——每块除一次是 $O(N/B_N)$ 次，循环外一次是 1 次）。写入 `M` 的是 $m_i + \log_2 \ell_i$——**以 2 为底的 LSE**，反向 kernel 里 `exp2(qk - M)` 一行恢复精确 softmax 概率（分子分母同除完成），连 $\ell_i$ 都不用单独存。这是前后向之间最重要的接口约定。
+循环内不除 $\ell$：中间块的 $\ell$ 不完整，且除法比乘法贵——每块除一次是 $O(N/B_N)$ 次，循环外一次是 1 次。
+
+写入 `M` 的是 $m_i + \log_2 \ell_i$——**以 2 为底的 LSE**。反向 kernel 里 `exp2(qk - M)` 一行恢复精确 softmax 概率（分子分母同除完成），连 $\ell_i$ 都不用单独存。这是前后向之间最重要的接口约定：
+
+$$
+P_{ij} = e^{S_{ij} - \mathrm{LSE}_i} = 2^{\,S'_{ij} - M_i}, \qquad S' = S \cdot \sigma \cdot \log_2 e
+$$
+
+---
 
 ## 6. Autotune 与 TMA（L214–260, L190–207）
 
@@ -159,11 +231,15 @@ configs = [triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN},
 - autotune key 含 `N_CTX`——**序列长度变化会触发重新调参与重编译**，这是线上服务的常见坑。
 - `_maybe_make_tensor_desc`（L267–277）让同一份 kernel 兼容裸指针与 TMA descriptor 两种寻址；host 侧 pre-hook（L190–207）在 launch 前按最终 block 尺寸动态设置 `desc.block_shape`（构造时先用 `[1,1]` 占位）。
 
+---
+
 ## 7. 测试里读出的工程事实（L914–993）
 
 - 参考实现（L949–955）的 softmax **强制在 fp32 计算**再 cast 回 fp16——参考基准自身先规避了 fp16 softmax 的精度坑。
 - 容差：fp16 前向/反向 `atol=1e-2, rtol=0`；**fp8 前向 `atol=3`**——e5m2 只有 2 位尾数，"量级正确即可"如实反映了 FP8 attention 的精度代价；AMD gfx90a 反向额外放宽 `rtol=1e-2` 是该架构 MFMA/超越函数的硬件特性妥协。
 - 反向不支持 fp8（测试里直接跳过）；`N_CTX` 须被 128 整除（反向假设）。这些"教程没说的限制"正是它与生产实现的差距清单，第 3 篇逐项补齐。
+
+---
 
 ## 8. 小结
 
@@ -174,5 +250,17 @@ configs = [triton.Config({'BLOCK_M': BM, 'BLOCK_N': BN},
 | 数值 | exp2 折叠、scale 位置、`-1e6` 哨兵、p 降 fp16 / 累加 fp32 | L363, L125, L170 |
 | 结构 | off-band/on-band 两遍、$\ell$ 循环外归一化、LSE 接口 | L377–392, L399–403 |
 | 硬件 | constexpr 索引、寄存器拆分、warp specialization、TMA 双模态 | L70, L152–160, L113, L267 |
+
+把这一篇压缩成三句话：
+
+1. **状态只有三组**：$m_i$（行最大）、$\ell_i$（行和）、`acc`（未归一化输出），它们跨 KV 块存活，其余全是临时量。
+2. **控制流藏进数值**：$m_i=-\infty$ 让第一块自动退化；`-1e6` 让被 mask 的块自动变成 0；`STAGE` 位标志让 mask 只发生在对角带。
+3. **精度边界是硬的**：进 tensor core 的操作数必须低精，累加与统计量必须 fp32，这条纪律从 Triton 一直贯穿到 CUDA。
+
+### 自检三问
+
+1. 如果把 `m_i` 初值改成 0 而不是 $-\infty$，第一次迭代会发生什么？$\alpha$ 会是多少？
+2. 为什么带 mask 的代码把哨兵加在 `qk_scale` 之后，而不是之前？如果加在之前，`-1e6 * qk_scale` 会带来什么问题？
+3. `4 - STAGE` 在非 causal 与 causal 下分别等于几？它为什么能把两种扫描合并到一个函数里？
 
 下一篇进入 CUDA：FlashAttention-2 在 sm80 上的 warp 分工与软件流水线，FlashAttention-3 在 Hopper 上的 TMA + warp specialization + pingpong——同一份数学，换一套"把 GPU 榨干"的工程。

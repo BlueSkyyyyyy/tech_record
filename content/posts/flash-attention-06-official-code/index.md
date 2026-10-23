@@ -16,7 +16,27 @@ csrc/     hopper/     flash_attn/cute/     flash_attn/     training/     benchma
 
 同一个算法为什么有三套实现目录（`csrc/`、`hopper/`、`flash_attn/cute/`）？Python 侧的 `flash_attn_func` 到底调用的是哪一个？CUDA 扩展是怎么从这些 `.h` 文件变成几十个 `.cu` 编译单元的？本篇就回答这些问题——**不推导数学，只把仓库的"骨架"讲清楚**，为读源码建立一张地图。
 
-> 所有行号以官方仓库 commit `8d3a3b8`（2026-09-13）为准。这个仓库同时容纳了三个硬件时代的实现，理解它们的分工，比记住任何单个 kernel 都重要。
+> 所有行号以官方仓库 commit `8d3a3b8`（2026-09-13）为准。这个仓库同时容纳了三个 NVIDIA 硬件时代的实现（外加一个 AMD 后端），理解它们的分工，比记住任何单个 kernel 都重要。
+
+## 先记住一个画面
+
+把仓库想成一座**城市**。
+
+- `csrc/` 是**老城**：住的人最多、道路最成熟，大多数下游框架走的还是它；
+- `hopper/` 是**新区**：专门为 Hopper 这种"新式住宅"重新规划，路更宽、管线更复杂；
+- `flash_attn/cute/` 是**高科技园区**：图纸直接用 Python 画，只有最新的机器（Blackwell）才完全住得进去。
+
+三片城区不是"旧城拆了建新城"，而是**同时住人、各管一片**。你从 `flash_attn_func` 这个"市政总入口"进去，走哪条路，取决于你住哪个区（什么硬件、装了什么包）。
+
+> **类比的边界**：城市可以慢慢迁移，kernel 不行。同一份 Python API 背后，三套实现的**数值容差、支持特性、编译方式**都不同；走错入口不会报错，只会得到"能跑但慢"或"功能不支持"的结果。读这个仓库的第一课，就是先确认"我现在站在哪个区"。
+
+读完这一篇，你应该能回答三个问题：
+
+1. 一次 `flash_attn_func(q, k, v)` 调用，从 Python 到 device kernel 要穿过哪六层？每一层各自在"选择"什么？
+2. 为什么仓库里会有 96 个 `.cu` 文件？`generate_kernels.py` 到底在生成什么？
+3. FA2 / FA3 / FA4 的能力边界在哪？什么情况下该装哪个包、从哪个模块导入？
+
+---
 
 ## 1. 一次 attention 调用，代码走了多远
 
@@ -37,19 +57,30 @@ csrc/     hopper/     flash_attn/cute/     flash_attn/     training/     benchma
                            └─ flash_bwd_kernel.h: compute_dq_dk_dv_1colblock:81
 ```
 
-一次前向调用，从上到下要穿过 **6 层**：Python 公开函数 → autograd 封装 → torch custom op → C++ 分派 → host 侧 launch template → device 侧 kernel。这条链路在后文会反复出现，因为**每一层都在做"选择"**：这一章讲清楚各层选什么。
+一次前向调用，从上到下要穿过 **6 层**。每一层都在做"选择"，只是选择的内容不同：
+
+| 层 | 位置 | 在选什么 |
+|---|---|---|
+| 1. Python 公开函数 | `flash_attn_interface.py` | 参数整理、默认值、shape 校验 |
+| 2. autograd 封装 | `FlashAttnFunc.apply` | 前向存什么给反向、要不要建图 |
+| 3. torch custom op | `flash_attn_gpu.fwd` | 跨语言边界，进入 C++ |
+| 4. C++ 分派 | `run_mha_fwd` | dtype、head_dim、causal、split 与否 |
+| 5. launch template | `run_mha_fwd_hdim128` | tile 尺寸、smem、线程数 |
+| 6. device kernel | `compute_attn_1rowblock` | 具体的 online softmax 循环 |
+
+这条链路在后文会反复出现，因为**每一层都在做"选择"**：这一章讲清楚各层选什么。一个实用建议：调试时先确认"错在哪一层"——shape 错误多半在第 1 层，dtype 不支持在第 4 层，性能不对可能在第 5 层，数值不对才轮到第 6 层。
+
+---
 
 ## 2. 三套实现：一个仓库，三个时代
 
-官方仓库最反直觉的一点，是它同时维护了三套并不共享代码的 CUDA/Triton 实现。它们不是"新旧版本替换"，而是**按硬件代际并存**。
-
-把仓库想成一座城市：`csrc/` 是**老城**——住的人最多、道路最成熟，大多数下游框架走的还是它；`hopper/` 是**新区**——专门为 Hopper 这种"新式住宅"重新规划；`flash_attn/cute/` 是**高科技园区**——图纸直接用 Python 画，只有最新的机器（Blackwell）才完全住得进去。
+官方仓库最反直觉的一点，是它同时维护了**三套 NVIDIA 实现 + 一套 AMD 后端**，彼此并不共享代码。它们不是"新旧版本替换"，而是**按硬件代际并存**。
 
 | 目录 | 名字 | 硬件 | 语言/框架 | 入口 | 状态 |
 |---|---|---|---|---|---|
-| `csrc/flash_attn/` | FA2 | sm80 / sm86 / sm89（Ampere 及消费级）| CUTLASS 2.x 风格 CUDA C++ | `flash_api.cpp` | 主力，覆盖最广 |
-| `hopper/` | FA3 | sm90（Hopper）| CUTLASS 3.x C++（TMA + WGMMA）| `hopper/flash_api.cpp` | Hopper 专用 |
-| `flash_attn/cute/` | FA4 | sm90 / sm100 / sm120（Hopper + Blackwell）| **CuTe DSL（Python）** | `cute/interface.py` | 最新，独立 pip 包 |
+| `csrc/flash_attn/` | FA2 | sm80 / sm86 / sm89（Ampere 及消费级） | CUTLASS 2.x 风格 CUDA C++ | `flash_api.cpp` | 主力，覆盖最广 |
+| `hopper/` | FA3 | sm90（Hopper） | CUTLASS 3.x C++（TMA + WGMMA） | `hopper/flash_api.cpp` | Hopper 专用 |
+| `flash_attn/cute/` | FA4 | sm90 / sm100 / sm120（Hopper + Blackwell） | **CuTe DSL（Python）** | `cute/interface.py` | 最新，独立 pip 包 |
 | `csrc/flash_attn_ck/` | — | AMD ROCm | Composable Kernel | — | AMD 后端 |
 
 一句话区分三者：
@@ -58,7 +89,9 @@ csrc/     hopper/     flash_attn/cute/     flash_attn/     training/     benchma
 - **FA3（`hopper/`）**：为 Hopper 重写，把加载交给 TMA、GEMM 交给 WGMMA、用 warp specialization 把 softmax 与 GEMM 解耦。这是第 3 篇的后半部分。
 - **FA4（`flash_attn/cute/`）**：不再写 C++，而是用 CUTLASS 的 **CuTe DSL** 写 Python，再由编译器降到 sm90/sm100/sm120 指令。它支持 Blackwell 的 tcgen05/TMEM，是当前唯一覆盖 sm100 的完整实现。
 
-> 为什么 FA4 用 Python？第 3 篇的结论在这里显形：Hopper/Blackwell 上，"哪条指令等哪条指令"已经复杂到手写 C++ 难以维护。CuTe DSL 允许在 Python 里显式描述布局、mbarrier、TMA，同时保留编译期常量折叠。FA4 是"把 kernel 工程变成可组合的 Python 代码"的一次尝试。
+> **为什么 FA4 用 Python？** 第 3 篇的结论在这里显形：Hopper/Blackwell 上，"哪条指令等哪条指令"已经复杂到手写 C++ 难以维护。CuTe DSL 允许在 Python 里显式描述布局、mbarrier、TMA，同时保留编译期常量折叠。FA4 是"把 kernel 工程变成可组合的 Python 代码"的一次尝试。
+
+---
 
 ## 3. FA2（`csrc/flash_attn/`）：最宽的覆盖面
 
@@ -81,6 +114,12 @@ csrc/flash_attn/
 └── flash_*.cu                 # 约 96 个由脚本生成的 thin instantiation 文件
 ```
 
+读这个目录时，先分清三类文件，就不会迷路：
+
+- **host 逻辑**（`flash_api.cpp`、`*_launch_template.h`）：做分派、选 tile、算 smem、发 launch；
+- **device 逻辑**（`flash_fwd_kernel.h`、`flash_bwd_kernel.h`、`softmax.h` 等）：真正跑在 GPU 上的循环；
+- **胶水/生成物**（`static_switch.h`、`generate_kernels.py`、`flash_*.cu`）：把模板实例化出来，本身没有算法。
+
 ### 3.2 绑定层只暴露 5 个函数
 
 `flash_api.cpp:1535-1541` 的 `PYBIND11_MODULE` 只注册 5 个入口：
@@ -96,6 +135,8 @@ m.def("fwd_kvcache", &mha_fwd_kvcache, ...);  // 推理解码 / KV cache
 Python 侧所有函数（`flash_attn_func`、`..._qkvpacked_func`、`..._varlen_func`、`flash_attn_with_kvcache`）最终都落到这 5 个中的某一个。函数名里的 `varlen` 表示支持 packed 变长序列，`kvcache` 表示推理时的增量解码。
 
 注意：**FA2 没有单独的 `paged` 或 `mla` 入口**。paged KV 是通过给 `varlen_fwd` / `fwd_kvcache` 传 `block_table` 参数复用进来的（`flash_attn_interface.py:1407`）；MLA 完全不在 FA2 里，只在 FA3/FA4（见 §7）。
+
+**"入口少"是好事**：5 个 C++ 函数撑起所有 Python API，说明参数化做得好；读源码时也只需盯这 5 条主线。
 
 ### 3.3 分派：`HEADDIM_SWITCH` 与 `BOOL_SWITCH`
 
@@ -114,7 +155,11 @@ FP16_SWITCH(!params.is_bf16, [&] {                     // 1. dtype: fp16 / bf16
 });
 ```
 
-这套 `XXX_SWITCH` 宏（定义在 `static_switch.h`）把 `if` 梯子变成**编译期模板特化**：每个组合实例化一份独立 kernel，运行时零分支。dtype/causal/head_dim 这三个维度在 `flash_api.cpp` 就定死了；dropout、local(window)、alibi、softcap 这几个则下沉到 launch template 里继续用 `DROPOUT_SWITCH` / `LOCAL_SWITCH` / `ALIBI_SWITCH` / `SOFTCAP_SWITCH` 分派（`flash_fwd_launch_template.h:68-73`）。
+这套 `XXX_SWITCH` 宏（定义在 `static_switch.h`）把 `if` 梯子变成**编译期模板特化**：每个组合实例化一份独立 kernel，运行时零分支。
+
+dtype/causal/head_dim 这三个维度在 `flash_api.cpp` 就定死了；dropout、local(window)、alibi、softcap 这几个则下沉到 launch template 里继续用 `DROPOUT_SWITCH` / `LOCAL_SWITCH` / `ALIBI_SWITCH` / `SOFTCAP_SWITCH` 分派（`flash_fwd_launch_template.h:68-73`）。
+
+**为什么要分两层？** 因为前三个维度决定"kernel 的形状"（模板参数影响 tile、寄存器、smem），必须在最外层定死；后几个只是"开关"，可以在更靠近 launch 的地方决定。**分派层级本身就是一种性能设计**。
 
 ### 3.4 为什么有 96 个 `.cu` 文件
 
@@ -128,11 +173,17 @@ template<> void run_mha_fwd_<cutlass::half_t, 128, true>(Flash_fwd_params &param
 
 这样做的好处是**把编译并行化**：96 个独立编译单元可以由 ninja 并行编译，也方便按需裁剪。`setup.py` 的 arch 列表默认 `FLASH_ATTN_CUDA_ARCHS = "80;90;100;110;120"`（`setup.py:73-74`），通过 `-gencode` 控制每个 arch 的 SASS/PTX 产物。
 
+代价也很明显：**编译时间和 wheel 体积**。这就是为什么"从源码装 flash-attn"经常要等很久——它在给每个架构、每种组合都编一份。
+
 > **读源码的实用建议**：不要从 `.cu` 文件开始读——它们只有一行实例化。直接看 `flash_fwd_kernel.h` / `flash_bwd_kernel.h` 这两个 device 头文件。
 
 ### 3.5 Kernel_traits：tile 尺寸从哪来
 
-`kernel_traits.h` 是所有尺寸决策的集散地。前向 `Flash_fwd_kernel_traits`（`kernel_traits.h:49`）从模板参数推出 `kBlockM/kBlockN/kHeadDim`、MMA atom、smem 布局、总 smem 大小 `kSmemSize`。第 3 篇讲过的那些 tile 尺寸（hdim64→128×128、hdim128→128×64……）实际由 `flash_fwd_launch_template.h` 里的 `run_mha_fwd_hdim*` 函数选定，再喂给 traits。
+`kernel_traits.h` 是所有尺寸决策的集散地。前向 `Flash_fwd_kernel_traits`（`kernel_traits.h:49`）从模板参数推出 `kBlockM/kBlockN/kHeadDim`、MMA atom、smem 布局、总 smem 大小 `kSmemSize`。
+
+第 3 篇讲过的那些 tile 尺寸（hdim64→128×128、hdim128→128×64……）实际由 `flash_fwd_launch_template.h` 里的 `run_mha_fwd_hdim*` 函数选定，再喂给 traits。**traits 是"根据硬件约束算出可用形状"，launch template 是"在可用形状里挑一个"**——两者分工明确。
+
+---
 
 ## 4. FA3（`hopper/`）：Hopper 专属的第二套
 
@@ -161,6 +212,10 @@ hopper/
 - split-KV 的 combine 数学在 `flash_fwd_combine_kernel.h:592-621`，就是第 1 篇 online softmax 递推在 split 粒度的复用。
 
 FA3 的 Python 接口在 `hopper/flash_attn_interface.py`，走的是 `torch.library.custom_op` 注册（`:59`），和 FA2 的风格类似但 API 更丰富：多了 `flash_attn_combine`（`:938`）和 `get_scheduler_metadata`（`:1106`）。
+
+**读 FA3 的顺序**建议反过来：先看 `flash_fwd_combine_kernel.h`（数学最简单、和第 1 篇直接对应），再看 `flash_fwd_kernel_sm90.h`（线程骨架），最后才进 `mainloop_*.hpp`（各种异步交织）。一上来读主循环，很容易被 barrier 淹没。
+
+---
 
 ## 5. FA4（`flash_attn/cute/`）：Python 写的 kernel
 
@@ -208,6 +263,8 @@ FA4 一共 52 个 `.py`、约 5.2 万行。按职责分：
 
 一句话看 FA4 的设计哲学：**把 FA2/FA3 里散落在 `if constexpr` 和宏里的架构差异，收敛成"每代一个类、Python 里选类"**。代价是文件更多，好处是每个架构的 kernel 能独立演化。
 
+---
+
 ## 6. 构建：从源码到 wheel
 
 三套实现的构建方式完全不同：
@@ -217,6 +274,10 @@ FA4 一共 52 个 `.py`、约 5.2 万行。按职责分：
 - **FA4**：不编译 C++/CUDA，只是打包 Python，靠 CuTe DSL 在**运行时 JIT 编译**目标 kernel（并缓存到磁盘，见 `cache_utils.py`）。
 
 所以安装 FA4 后第一次跑某个 shape 会明显变慢（在编译），之后走缓存。这也解释了为什么 FA4 的 `interface.py` 里到处是 `_flash_attn_fwd.compile_cache` 之类的缓存字典。
+
+> **工程启示**：FA2/FA3 把编译成本前移到安装期（装得慢、跑得快），FA4 把编译成本后移到首次运行（装得快、首跑慢）。两种策略没有绝对优劣，取决于部署场景——**批量推理适合前者，交互式实验适合后者**。
+
+---
 
 ## 7. 一张功能矩阵
 
@@ -245,6 +306,8 @@ FA4 一共 52 个 `.py`、约 5.2 万行。按职责分：
 - **FA3 在 Hopper 上通常最快**（专门的 WGMMA + pingpong）。
 - **FA4 是唯一支持 Blackwell 和 MLA 的**，但很多特性仍在补齐。
 
+---
+
 ## 8. 读这个仓库的路线图
 
 如果你是第一次读，建议按这个顺序：
@@ -255,12 +318,26 @@ FA4 一共 52 个 `.py`、约 5.2 万行。按职责分：
 4. **最后读 device kernel**：`flash_fwd_kernel.h` 的 `compute_attn_1rowblock`——这就是第 1、2、3 篇一直在讲的 online softmax 循环。
 5. 想读 Hopper/Blackwell，就直接从 `flash_attn/cute/` 的 Python kernel 入手，比 `hopper/` 的 C++ 模板友好得多。
 
+再补三条"读源码的纪律"：
+
+- **先找入口，再找分派，最后找循环**。不要从上百个 `.h` 里随机点开一个开始读。
+- **看到模板参数，先问"它在运行时对应哪个 if"**。`Is_causal`、`Is_even_MN` 这些参数不是装饰，它们决定了循环边界和分支。
+- **看到 `.cu` 就跳过**。它们只是实例化，真正的逻辑在 `.h` 里。
+
+---
+
 ## 9. 小结
 
 - 官方仓库同时维护 **FA2（`csrc/`，sm80）、FA3（`hopper/`，sm90）、FA4（`flash_attn/cute/`，sm90/sm100/sm120）** 三套实现，按硬件代际并存而非替换。
 - 一次 `flash_attn_func` 要穿过 **Python → autograd → torch op → C++ 分派 → launch template → device kernel** 六层；前几篇讲的 kernel 只是最底层。
-- FA2 的 `XXX_SWITCH` 宏 + `generate_kernels.py` 把组合爆炸变成 **96 个编译期特化实例**；FA4 则把架构差异收敛成 **Python 里按 arch 选类**。
+- FA2 的 `XXX_SWITCH` 宏加 `generate_kernels.py` 把组合爆炸变成 **96 个编译期特化实例**；FA4 则把架构差异收敛成 **Python 里按 arch 选类**。
 - `flash_attn_func` 默认走 FA2（`flash_attn/__init__.py` 只导出 FA2），FA3/FA4 需要显式 `from flash_attn.cute import ...` 或装对应包。
 - MLA、块稀疏、Blackwell 只在 FA4；sm80 和大覆盖率仍是 FA2 的天下。
+
+### 自检三问
+
+1. 如果给 FA2 新增一个 head_dim=80 的支持，你需要改哪几处？（提示：从 `HEADDIM_SWITCH` 一路想到 `kernel_traits.h`。）
+2. 为什么 FA2 把 dropout/local/alibi 的分派下沉到 launch template，而不是和 dtype 一起放在 `flash_api.cpp`？
+3. FA4 的 JIT 缓存 key 里为什么必须包含 `N_CTX`、`causal`、`head_dim` 这些量？漏掉一个会发生什么？
 
 下一篇[（七）：反向传播深潜]({{< relref "flash-attention-07-bwd-deep" >}})，我们把这四套实现（Triton / FA2 / FA3 / FA4）的反向逐个拆开，再补上 MLA 反向与第 4 篇没来得及展开的反向数学（dropout、softcap、GQA 归约、确定性）。

@@ -15,6 +15,19 @@
 > `fa_bwd_bf16_{main,onefile}_p53_mla_*.out.txt` 与 `..._p53_ncu_mla_*.out.txt`（P5-3 续：MLA d=512）。
 > 对照：`docs/01-fp16-bwd-impl.md`、`docs/00-fa-bwd-optimization-catalog.md`、`../ROADMAP.md`。
 
+**这一篇和 fp16 篇的关系**：bf16 版是 fp16 版**逐字 dtype 参数化**来的，算法、三段式、线程映射完全一致。所以本篇不重复讲"反向怎么写"，只讲**两处真正不同**的地方：
+
+1. **bf16 标量生成比 fp16 慢 2.9×**（§2）——同样的代码，换 dtype 就慢，为什么？
+2. **K/V smem 行距 padding +2 个元素**（§3）——消 9.5-way bank conflict，main 3.1–4.7×。
+
+其余章节（§6e 之后的 `Oxx`）是把 fp16 的优化逐条搬过来，看"同款优化在 bf16 上收益是否一致"。
+
+**先给结论**：
+
+- bf16 的数值容差比 fp16 松一个数量级（`max_abs` ~7e-3–1.5e-2），这是 bf16 尾数少 8 位的必然结果，不是实现问题。
+- 性能优化的**范式与 fp16 完全相同**，但 bank conflict 的解法不同（fp16 靠 `LDS.64/HADD2`，bf16 靠行距 padding）。
+- 单/两文件逐位一致；GQA/MQA/MLA/varlen 的支持路径与 fp16 同构。
+
 ---
 
 ## 1. 实现结构
@@ -24,7 +37,7 @@
 | 段 | 函数 | 职责 |
 |---|---|---|
 | preprocess | `preprocess_kernel` | 逐行求 `LSE=logsumexp(scale·QKᵀ)` 与 `D=rowsum(dO∘O)` |
-| main | `fa_bwd_bf16_kernel` | 每个 Q 块固定，遍历 K/V 块（1colblock），recompute S/P，累加 dQ/dK/dV |
+| main | `fa_bwd_bf16_kernel` | 每个 Q 块固定，遍历 K/V 块（本项目实际是行并行；`1colblock` 是历史叫法），recompute S/P，累加 dQ/dK/dV |
 | convert | `convert_kernel` | fp32 累加缓冲 `dq/dk/dv` → bf16 写回 |
 
 分块：`BM=64`、`BN=32`、`THREADS=128`、head_dim=128；fp32 累加；dQ 在 smem 累加、dK/dV 全局
