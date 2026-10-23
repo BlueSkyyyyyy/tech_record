@@ -14,3 +14,4 @@
 | [KDA 前反向算子实现解析](../content/posts/flash-kda-00-index/) | [flash-kda/](flash-kda/README.md) | 以 FlashKDA 为参考拆解 Kimi Delta Attention 前向/反向算子，长期自驱 |
 | [DeepSeek Mega MoE 前反向算子实现解析](../content/posts/mega-moe-00-index/) | [mega-moe/](mega-moe/README.md) | 以 DeepGEMM/DeepEP 为参考分析 Mega MoE 前向与 MoE 反向，长期自驱 |
 | [MegaKernel 资料与实现分析](../content/posts/mega-kernel-00-index/) | [mega-kernel/](mega-kernel/README.md) | MPK 论文 + DeepGEMM mega 家族等 MegaKernel 范式分析，长期自驱 |
+| [Mirage / MPK 项目分析](../content/posts/mirage-00-index/) | [mirage/](mirage/README.md) | 上手路径：两条产品线、compile() 端到端、运行时、H100 构建与实跑记录 |

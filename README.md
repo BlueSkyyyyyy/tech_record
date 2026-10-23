@@ -159,6 +159,48 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 配套代码：[code/flash-attention/fa-bwd/](code/flash-attention/fa-bwd/README.md)
 （各篇正文由 `docs/` 下的 Markdown 通过 `fa_include` shortcode 实时内联渲染）。
 
+### KDA 前反向算子实现解析（专题，8 篇）
+
+以 FlashKDA 为参考，把 **Kimi Delta Attention** 的前向/反向讲透：数学与分块公式 → K1/K2 kernel 精读
+→ 数值对拍 → 反向推导与 kernel → 性能与优化。专题首页（含阅读路线与全目录）：
+[KDA 前反向算子实现解析](content/posts/flash-kda-00-index/index.md)。
+
+1. [数学与分块公式](content/posts/flash-kda-01-theory/index.md)
+2. [前向 K1：prepare](content/posts/flash-kda-02-fwd-k1/index.md)
+3. [前向 K2：recurrence](content/posts/flash-kda-03-fwd-k2/index.md)
+4. [数值对拍](content/posts/flash-kda-04-numerics/index.md)
+5. [反向：推导](content/posts/flash-kda-05-bwd/index.md)
+6. [反向：kernel](content/posts/flash-kda-06-bwd-kernel/index.md)
+7. [性能与优化](content/posts/flash-kda-07-perf/index.md)
+8. [一页纸汇总](content/posts/flash-kda-08-summary/index.md)
+
+配套代码：[code/flash-kda/](code/flash-kda/README.md)
+
+### MegaKernel 资料与实现分析（专题，75 篇）
+
+把「整张算子图融进一个常驻 kernel」讲清楚：动机与判据 → MPK 论文与编译栈 → 运行时与调度 →
+生产 task 目录 → 存储布局与硬件原语 → 实测手册。专题首页（含 6 条阅读路线与按主题的篇目地图）：
+[MegaKernel 资料与实现分析](content/posts/mega-kernel-00-index/index.md)。
+
+入门三篇：[MegaKernel 是什么](content/posts/mega-kernel-01-overview/index.md)、
+[MPK 论文：tGraph](content/posts/mega-kernel-02-paper/index.md)、
+[一页纸总结](content/posts/mega-kernel-06-summary/index.md)。
+
+配套代码：[code/mega-kernel/](code/mega-kernel/README.md)
+
+### Mirage / MPK 项目分析（专题，4 篇）
+
+一个开源项目的上手路径：两条产品线与仓库地图 → 从 HF 模型到 megakernel 的编译链路 →
+生成的 kernel 怎么跑 → 本机构建与实跑记录。专题首页：
+[Mirage / MPK 项目分析](content/posts/mirage-00-index/index.md)。
+
+1. [项目全景](content/posts/mirage-01-overview/index.md)
+2. [从 HF 模型到 megakernel](content/posts/mirage-02-endtoend/index.md)
+3. [生成的 megakernel 怎么跑](content/posts/mirage-03-runtime/index.md)
+4. [构建与实跑记录](content/posts/mirage-04-build/index.md)
+
+配套材料：[code/mirage/](code/mirage/README.md)
+
 ### paper阅读（专题，连载中）
 
 逐篇精读值得读的系统/算法论文：讲清真实问题、设计取舍背后的物理约束、以及能迁移的经验。
