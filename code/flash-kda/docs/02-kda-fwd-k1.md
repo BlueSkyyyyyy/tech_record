@@ -228,7 +228,7 @@ query 要同向乘一次并带 scale（$q^{\text{dec}}$），还原到块首要�
 
 先把 `g_total` 原地取 $2^{g^{\text{total}}} = E^{\text{tot}}$（`fwd_kernel1.cuh:354–357`，
 `ex2_approx_ftz_f32`，`utils.cuh:38–42`），然后构造四个衰减变体
-（对照 `01-kda-theory.md` §3 ②，`fwd_kernel1.cuh:449–469`）：
+（对照 `01-kda-theory.md` §4.1，`fwd_kernel1.cuh:449–469`）：
 
 | 输出 | 公式 | 代码 |
 |---|---|---|
@@ -318,7 +318,7 @@ $16\times16=256$ 个元素，正好 256 线程一人一个（`fwd_kernel1.cuh:49
 - $i>j$：`L_fp32(i,j) *= sigmoid_tanh_approx_f32(beta_i)`（`fwd_kernel1.cuh:501–503`）——
   把写入门 $\beta_i=\sigma(\text{beta\_logit}_i)$ 乘进去。注意用 `beta_smem_offset` 定位到对齐
   载入里的正确 token（`fwd_kernel1.cuh:502`）。
-- $i<j$：`Mqk(i,j)=0`（`fwd_kernel1.cuh:504–506`）——$M_{qk}$ 抹上三角，保留**下三角含对角**。
+- $i\lt j$：`Mqk(i,j)=0`（`fwd_kernel1.cuh:504–506`）——$M_{qk}$ 抹上三角，保留**下三角含对角**。
 
 同时把 $L$ 的 **bf16 版本当作合并矩阵 $M$ 的载体**：`M_bf16` 直接复用已死的 `k_inv` buffer
 （`fwd_kernel1.cuh:490–491`），交给求逆例程内部按块填 $C$（见 §8）。
@@ -703,7 +703,7 @@ $$
 `harness/check_inv_precision.py` 比四条求逆路径（§11.4），`harness/check_inv_identity.py`
 验求逆代数（§10），`harness/check_workspace_layout.py` 对字节账（§12.4）。
 
-所有行号均在 `~/github/FlashKDA` 下按当前源码核对；第 1 篇 §3 的公式记号本文直接沿用。
+所有行号均在 `~/github/FlashKDA` 下按当前源码核对；第 1 篇 §4 的公式记号本文直接沿用。
 
 ## 14. 三句话小结
 

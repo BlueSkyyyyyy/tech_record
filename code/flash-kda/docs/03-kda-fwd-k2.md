@@ -80,7 +80,7 @@ MMA warp 的主循环体里，代码用注释标了 `Phase 1..6`（`fwd_kernel2.
 **K2 只做有串行依赖的那部分。**
 
 K1（第 2 篇）已经把每块 16 个 token 预处理成 workspace 中间件；K2 拿着一块一块的中间件，
-沿序列做 gated delta-rule 递推，用跑动状态 $S\in\mathbb{R}^{D\times D}$ 把输出 $o_t=q_t^\top S_t$
+沿序列做 gated delta-rule 递推，用跑动状态 $S\in\mathbb{R}^{K\times V}$ 把输出 $o_t=q_tS_t$
 投影出来，并在每块末更新状态。
 
 状态在块与块之间串行传递，所以 K2 只能沿 **head 轴**并行：一个 CTA 负责一个 `(seq, head)`
@@ -399,7 +399,7 @@ K2 **没有**像 K1 那样写 `__launch_bounds__(…, N)` 的占用下限
 
 ### 8.1 状态存的是 S 的转置（V×K 布局）
 
-第 1 篇的 `src/kda_ref.py` 用 $S\in\mathbb{R}^{K\times V}$（`kda_ref.py:52,70`）。
+第 1 篇的 `src/kda_ref.py` 用 $S\in\mathbb{R}^{K\times V}$（`kda_ref.py:52,64`）。
 K2 的 CUDA 侧**把状态存成转置** $S^\top\in\mathbb{R}^{V\times K}$，记作 `s_acc`
 （`fwd_kernel2.cuh:82,457`）。
 
