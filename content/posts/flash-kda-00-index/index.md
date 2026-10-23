@@ -8,23 +8,57 @@ tags: ["KDA", "Kimi Delta Attention", "线性注意力", "CUDA", "算子", "系�
 categories: ["算子开发"]
 ---
 
-这个专题逐层拆解 **Kimi Delta Attention（KDA）** 的**前向**与**反向**算子实现。
+这个专题讲 **Kimi Delta Attention（KDA）** 的前向与反向算子：数学怎么来的、分块公式怎么推、
+CUDA kernel 怎么写、数值和性能到底如何。
 
-参考实现是 MoonshotAI 的 **FlashKDA**（`~/github/FlashKDA`，SM90+，`CHUNK=16`，$D=128$）；
-反向以 `flash-linear-attention` 的 `chunk_kda` 与自行推导为参照。我们会先把数学与分块公式讲清，
-再逐阶段精读 CUDA kernel，给出可运行的 PyTorch 参考实现、数值对拍与实测性能。
+参考实现是 MoonshotAI 的 **FlashKDA**（`~/github/FlashKDA`，SM90+，`CHUNK=16`，$D=128$），
+反向参照 `flash-linear-attention` 的 `chunk_kda`，并给出我们自己的目标卡 CUDA 反向设计。
 
 - 配套代码：[`code/flash-kda/`](https://github.com/BlueSkyyyyyy/tech_record/tree/main/code/flash-kda)
 
+## 一条主线
+
+> **KDA 的难点不在「算」，在「怎么把 16 步串行递推变成矩阵乘，又不把精度和带宽赔进去」。**
+
+这句话可以拆成三个问题，整个专题就是回答它们：
+
+1. **数学上**：逐 token 的 delta rule，怎么等价变换成块内矩阵运算？（第 1 篇）
+2. **实现上**：一次前向为什么要拆成 K1、K2 两颗 kernel？各自怎么榨干 SM？（第 2、3 篇）
+3. **工程上**：分块带来哪些数值坑（布局、bf16 状态、求逆精度）？反向怎么复用前向的中间量？（第 4–7 篇）
+
+## 怎么读
+
+按你的目的挑一条：
+
+- **只想搞懂 KDA 在算什么**（30 分钟）：[数学与分块公式]({{< relref "flash-kda-01-theory" >}})
+  → [一页纸汇总]({{< relref "flash-kda-08-summary" >}})。
+- **要照着写 kernel**：[数学]({{< relref "flash-kda-01-theory" >}}) →
+  [K1 精读]({{< relref "flash-kda-02-fwd-k1" >}}) → [K2 精读]({{< relref "flash-kda-03-fwd-k2" >}})
+  → [数值对拍]({{< relref "flash-kda-04-numerics" >}})。
+- **要做反向**：[反向推导]({{< relref "flash-kda-05-bwd" >}}) →
+  [反向 kernel]({{< relref "flash-kda-06-bwd-kernel" >}}) →
+  [性能与优化]({{< relref "flash-kda-07-perf" >}})。
+- **只关心快不快**：[性能与 ncu 剖析]({{< relref "flash-kda-07-perf" >}})。
+
 ## 目录
 
-1. [KDA 数学与分块公式]({{< relref "flash-kda-01-theory" >}}) —— gated delta rule、门控构造、CHUNK=16 分块前向
-2. [KDA 前向 K1 精读]({{< relref "flash-kda-02-fwd-k1" >}}) —— TMA 载入 / L2 norm / 门激活+cumsum / 衰减 / $L$、$M_{qk}$ / 块内求逆 / 写 workspace
-3. [KDA 前向 K2 精读]({{< relref "flash-kda-03-fwd-k2" >}}) —— warp specialization（4 MMA + 1 LOAD + 1 STORE）、输入 3-stage / 输出 2-stage TMA pipeline、八个 Phase 数据流与状态更新精度
-4. [KDA 前向数值对拍]({{< relref "flash-kda-04-numerics" >}}) —— kernel vs fp64 golden，多 shape / seed / 门控区间；状态 $S^\top$ 布局约定；golden/FlashKDA/FLA 三方对比与共模抵消
-5. [KDA 反向：逐 token adjoint 推导与参考实现]({{< relref "flash-kda-05-bwd" >}}) —— 六个梯度（$dq,dk,dv,d\beta,dg,dh_0$）完整推导、gate 链，不依赖 autograd 的显式反向与 $10^{-10}$ 三方核验，并与 FLA `chunk_kda` 的 chunked 反向在 bf16 $D=128$ 对拍
-6. [KDA 反向 kernel：FLA Triton 分解精读与目标卡 CUDA 反向设计]({{< relref "flash-kda-06-bwd-kernel" >}}) —— 5 个 Triton 反向 kernel 与分块反向公式逐式对照、记号映射实测、复用 K1 workspace 的目标卡 CUDA 反向方案
-7. [KDA 前向性能实测与 ncu 剖析]({{< relref "flash-kda-07-perf" >}}) —— 统一口径（CUPTI device + wall）下 FlashKDA vs FLA `chunk_kda`，扫 T/H/B；FLA 的 ~0.8ms host 派发税、K2 沿 T 串行 $\propto T$ 的定量证据、kernel 级分解；`ncu` 逐 kernel 剖析 K1/K2 bound（TensorCore 均非瓶颈、放大后都撞 L2 带宽）与 K1/K2 访存字节拆分（K2 读 ≈ 75% workspace + 22.5% `v`）；反向性能对照：复用 K1 workspace 的链避开 FLA 反向的前向状态重算（占其 dev 22–46%），wall/dev 0.41–0.79× 反超，瓶颈定位在 B1 `dhu`
-8. [KDA 前反向算子实现解析：一页纸汇总]({{< relref "flash-kda-08-summary" >}}) —— 公式、结构、误差、性能、反向要点速查表 + 踩坑清单
+| # | 篇目 | 一句话 | 你会拿到什么 |
+|---|---|---|---|
+| 1 | [数学与分块公式]({{< relref "flash-kda-01-theory" >}}) | 带逐通道遗忘的 delta rule，如何变成 16-token 分块 | 六步公式、源码地图、第一个数值自检 |
+| 2 | [前向 K1：prepare]({{< relref "flash-kda-02-fwd-k1" >}}) | 一个 CTA 干完归一化、门、$L$/$M_{qk}$、块内求逆 | 九段流水逐段拆、16×16 求逆怎么写的、workspace 字节账 |
+| 3 | [前向 K2：recurrence]({{< relref "flash-kda-03-fwd-k2" >}}) | 一个 CTA 串完整个序列，靠 warp 特化 + TMA 流水吃饱 | 六个 Phase 的数据流、`MOVM_T` 省了什么、状态更新精度 |
+| 4 | [数值对拍]({{< relref "flash-kda-04-numerics" >}}) | 三个 oracle 交叉验证：fp64 golden / FLA / 官方 torch_ref | 误差表、$S^\top$ 布局坑、varlen 与 fp32 状态外壳 |
+| 5 | [反向：推导]({{< relref "flash-kda-05-bwd" >}}) | 六个梯度的 adjoint 推导与纯 PyTorch 参考实现 | 逐 token 反向、gate 链、与 FLA 的三方核验 |
+| 6 | [反向：kernel]({{< relref "flash-kda-06-bwd-kernel" >}}) | FLA Triton 反向逐 kernel 精读 + 目标卡 CUDA 反向设计 | 5 个反向 kernel 的公式对照、B1/B2/B3 的实测迭代 |
+| 7 | [性能与优化]({{< relref "flash-kda-07-perf" >}}) | 前向 ncu 剖析、反向工程化、每一步优化的定量收益 | 端到端数字、瓶颈定位、优化日志（含失败的尝试） |
+| 8 | [一页纸汇总]({{< relref "flash-kda-08-summary" >}}) | 公式 / 结构 / 误差 / 性能 / 反向要点速查 | 贴墙上的那一页 |
+
+## 这个专题的可信度怎么保证
+
+- **公式**：分块前向与逐 token 递推在 fp64 下逐元素相等；分块反向与 autograd 对拍。
+- **代码**：每个 `文件:行号` 都在 `~/github/FlashKDA` 上核对过；引用格式统一为 `文件名:行号`。
+- **数字**：所有性能/误差都来自本机实测，原始输出留在 `code/flash-kda/harness/*.out.txt`，
+  正文标注「实测」；纯推导/纯资料分析会明确标注。
+- **失败也写**：走不通的路、被证伪的假设、踩过的坑，都在各篇的「踩坑」小节里，不粉饰。
 
 > 各篇正文由仓库 `code/flash-kda/docs/` 下的 Markdown **实时内联**渲染，随代码与实测一起更新。

@@ -5,7 +5,21 @@
 > 性能 `07`）压成一张可独立阅读的速查表：**公式 → 结构 → 误差 → 性能 → 反向要点**。
 > 所有数字都来自本机实测，出处见各篇与 `code/flash-kda/harness/*.out.txt`。
 
+## 30 秒版本
+
+- KDA 是「**逐通道衰减** $\alpha$ + **写入门** $\beta$」的 delta rule。分块（`CHUNK=16`）后，
+  块内是 16×16 的小矩阵代数，块间只传一个 $D\times D$ 状态。
+- 前向拆成 **K1（token 并行 prepare）+ K2（head 并行 recurrence）**。瓶颈不是 TensorCore，
+  而是 **$D\times D$ 状态与 workspace 的访存**。
+- 性能：小 shape（T=128 H=4）wall **21×** FLA（赢在省 host 税）；真实大 shape（B8 T2048 H8）
+  wall **2.6×**、dev **2.2×**。
+- 反向：FlashKDA 没开源，参照 FLA 的 5 个 Triton kernel。目标卡方案**复用 K1 workspace**，
+  只补一个轻量门控重算 B0。
+- 反向链已端到端跑通：架在真 workspace 上对 autograd 最坏 **6.4e-3**；底噪是 tf32/bf16，不是算法。
+
 ## 1. 一句话
+
+> **什么时候翻到这一页**：只想回忆「KDA 是什么、FlashKDA 怎么拆」的时候。
 
 KDA 是「**逐通道衰减** $\alpha$ + **写入门** $\beta$」的 delta rule；FlashKDA 把它的前向拆成
 **K1（token 并行 prepare）+ K2（head 并行 recurrence）** 两段，块内是 16×16 的小矩阵代数，
@@ -13,6 +27,8 @@ KDA 是「**逐通道衰减** $\alpha$ + **写入门** $\beta$」的 delta rule�
 **复用 K1 落盘的 workspace**，块内并行、块间只传状态伴随。
 
 ## 2. 数学（记号与两套等价形式）
+
+> **什么时候翻到这一页**：要抄公式、或核对某个符号是 log2 还是自然对数的时候。
 
 单头、状态 $S\in\mathbb{R}^{K\times V}$（$K=V=D=128$），$\beta_t\in(0,1)$ 已 sigmoid，
 $g_t\le0$ 是 **log2** 衰减、$\alpha_t=2^{g_t}$ 逐 key 通道，输出 $o_t=\text{scale}\cdot q_tS_t$。
@@ -48,6 +64,8 @@ $\sim10^{-9}\!\sim\!10^{-7}$，只是计算顺序的舍入。**KDA vs GLA/DeltaN
 
 ## 3. 前向结构（FlashKDA，`CHUNK=16`）
 
+> **什么时候翻到这一页**：要对照源码结构、查某个中间量存在哪的时候。
+
 | | **K1 prepare** | **K2 recurrence** |
 |---|---|---|
 | grid | $N\cdot H\cdot\text{num\_chunks}$（token 并行） | $N\cdot H$（head 并行，沿 T 串行） |
@@ -72,6 +90,8 @@ $\sim10^{-9}\!\sim\!10^{-7}$，只是计算顺序的舍入。**KDA vs GLA/DeltaN
   SoA 排布且各 128B 对齐；分配恒取上界 `ceil(T/16)+N`，varlen launch 用精确 `N·ceil(T_seq/16)`。
 
 ## 4. 数值（全部 vs fp64 golden，除非注明）
+
+> **什么时候翻到这一页**：怀疑精度问题、要找「正常误差该是多少」的时候。
 
 | 量 | 误差 | 说明 |
 |---|---|---|
@@ -105,6 +125,8 @@ $\sim10^{-9}\!\sim\!10^{-7}$，只是计算顺序的舍入。**KDA vs GLA/DeltaN
 
 ## 5. 性能（H100 80GB HBM3，bf16，$D=128$）
 
+> **什么时候翻到这一页**：要做性能对比、或判断某条优化值不值得做的时候。
+
 口径：`wall` = 一个 event 对包 50 次取均值（含 host 派发）；`dev` = CUPTI 纯 kernel 时间。
 
 | 规模 | FlashKDA wall/dev | FLA wall/dev | 结论 |
@@ -126,6 +148,8 @@ $\sim10^{-9}\!\sim\!10^{-7}$，只是计算顺序的舍入。**KDA vs GLA/DeltaN
   钉死），强抬到 3 CTA/SM 反而更慢，因为 L2 已 94% SOL。
 
 ## 6. 反向要点
+
+> **什么时候翻到这一页**：要实现反向、或排查反向数值/性能的时候。
 
 **推导（`05`）**：从 $o_t=q_tS_t$ 逐 token 求伴随，状态伴随先合成
 $G=\bar S_t^{\text{rec}}+\text{scale}\,q_t^\top\bar o_t$，再按状态更新/输出/pred/衰减链拆到
@@ -154,6 +178,8 @@ SoA 偏移切六字段 + B0，重建全部反向操作数，六项梯度对 auto
 $B=2$）——「复用 K1 workspace」的设计前提**端到端成立**，不再是逐字段点对点核验。
 
 ## 7. 踩坑速查
+
+> **什么时候翻到这一页**：调不通、结果不对、怀疑布局或精度的时候。
 
 1. **状态布局**：FlashKDA $S^\top$（`[N,H,V,K]`）vs 参考 $[K,V]$；错布局只在初态处暴露。
 2. **FLA `transpose_state_layout=True`** 会把传入的 `initial_state` 也当 V-first 重解释。
@@ -735,7 +761,7 @@ staging）。计时 `fold/(bf16+b3)`：`K=64` 0.88–0.92（净赢）、`K=128` 
   `dram__bytes_read` **恰 = 读工作集（×1.000）**，与读/写顺序、replay 模式、读量（32/64/128/256 MiB）全
   无关——机制上读数据只读、无「写回时机的逐出份额」歧义，故**读侧可放心用 `dram__bytes_read` 当工作集
   大小，写侧不能**。见 `docs/07` §115、`harness/check_l2_write_evict_appreplay.out.txt`。
-- **§116（P7-112）关闭 `docs/05` §7.4 的历史遗留 `待验证`**——K1 的「8×8 前代 + bf16 HMMA 合并」求逆
+- **§116（P7-112）关闭 `docs/05` §9 的历史遗留 `待验证`**——K1 的「8×8 前代 + bf16 HMMA 合并」求逆
   路径（`utils.cuh:213-369`）是否**比 cuSOLVER fp32 更稳**？在**真实 KDA 块矩阵** $L$（$q/k$ L2 归一化、
   $g$ 尺度扫全、含近共线 key）上量 $P=(I+L)^{-1}$：cuSOLVER fp32 就到 **$\sim10^{-8}$**（且 **GPU==CPU**、
   与 `allow_tf32` 无关），kernel 路径 **$\sim10^{-4}\!\sim\!10^{-3}$**——**不比 cuSOLVER 更准**（差 4–5 个
@@ -763,7 +789,7 @@ staging）。计时 `fold/(bf16+b3)`：`K=64` 0.88–0.92（净赢）、`K=128` 
 它是**多波 grid + 每 SM 2 CTA 争用 L1TEX 共享载入通道**时的 **arbitration 冲突记账**效应（指令数/理想 wavefronts/
 占用率/字节均逐位可加，残差只在 replay 项），算术、字节中性，≤2.5%，与取舍无关。
 
-**§117（P7-113）关闭 `docs/05` §7.4 / §116.2 要点 3 的最后一条 `待验证`**——fp32 分块前向「GPU 比 CPU
+**§117（P7-113）关闭 `docs/05` §9 / §116.2 要点 3 的最后一条 `待验证`**——fp32 分块前向「GPU 比 CPU
 差 $\sim3\times10^{-4}$」的成因**不是** cuSOLVER，而是**本 NGC 容器默认 `torch.backends.cuda.matmul.allow_tf32=True`**
 （env `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1`）；分块前向的 fp32 `@` 在 GPU 上全走 tf32
 （$\varepsilon_{tf32}\!\approx\!4.9\times10^{-4}$）。`harness/check_fwd_gpu_cpu.py`（`.out.txt`）三行判死：
@@ -784,10 +810,10 @@ bf16 kernel vs fp64）。**(B)** 同一批 `src/` 参考、同 case 只切 `allo
 **1.01e-3 → 1.03e-6**（$\times976$），ON 全落 $\varepsilon_{tf32}\!\approx\!4.9\!\times\!10^{-4}$、OFF 全落
 fp32 ulp，fp64 控制 $\sim10^{-16}$。**(C)** `check_bwd_chunked.py` 顶部加显式 `allow_tf32=False` 并重跑，
 artifact 的 fp32 `worst` 由 $\sim10^{-3}$ 读回 $\sim10^{-6}$、forward $\sim10^{-7}$，fp64/bf16 两行逐位不变；
-`docs/05` §7.4 表拆成 ieee / tf32 默认 / bf16 三行。**命名规范（新增）**：此后正文凡列「fp32 (GPU)」必须
+`docs/05` §9 表拆成 ieee / tf32 默认 / bf16 三行。**命名规范（新增）**：此后正文凡列「fp32 (GPU)」必须
 标 ieee 还是 tf32 默认（本容器默认 ≠ PyTorch 上游默认）。对部署与算法结论无后果。
 
-- **（`docs/04` §9，P4-6）把 FlashKDA 自带的 *kernel-逐位* torch 参考作为第三个 oracle**：此前前向数值
+- **（`docs/04` §7，P4-6）把 FlashKDA 自带的 *kernel-逐位* torch 参考作为第三个 oracle**：此前前向数值
   只用「fp64 逐 token golden」与「FLA」两方，均独立于 kernel；FlashKDA 仓库自带 `tests/torch_ref.py`
   **故意逐位复刻 kernel**（warp-shuffle 树 L2 范数 + FMA、`tanh.approx` sigmoid、FTZ `exp2`、8×8 前代 +
   16×16 bf16-HMMA 求逆），其自身测试断言 `torch.equal(out_kernel, out_ref)`。新增
@@ -798,10 +824,10 @@ artifact 的 fp32 `worst` 由 $\sim10^{-3}$ 读回 $\sim10^{-6}$、forward $\sim
   量化、非我们的累加。**Part C**：把参考 chunk 循环在 fp64 重抄一遍、与 `kda_chunked_fwd` 跑同一 fp64
   操作数，`o`/`S^T` **逐位相同（`max_abs=0`）** ⟹ P1-2 分块公式获迄今最强独立确认；「精确解 vs bf16 参考」
   总误差 `o max_rel` 4.4e-3~1.1e-2 与 Part B 同带。**副产物**：`docs/03` §18.5 的「未逐位复现 kernel 累加序」
-  有了现成对照物（引用 `docs/04` §9）。不改变任何部署结论。
+  有了现成对照物（引用 `docs/04` §7）。不改变任何部署结论。
 
-- **（`docs/04` §10，P4-7）varlen × kernel-逐位 oracle 的逐位三角**：§7 把 packed 锚到的是「另一个 kernel
-  运行」、§9 只用等长 batched。本轮让 **packed kernel** 直接对 `tests/torch_ref.py` 的 **`cu_seqlens` 分支**
+- **（`docs/04` §10，P4-7）varlen × kernel-逐位 oracle 的逐位三角**：§8 把 packed 锚到的是「另一个 kernel
+  运行」、§7 只用等长 batched。本轮让 **packed kernel** 直接对 `tests/torch_ref.py` 的 **`cu_seqlens` 分支**
   （`torch_ref.py:141-142/178/185-193/202-206/241`，此前从未被本专题用到）比：7 组 `lens`（含 $L{=}1<$CHUNK、
   非整除 $T$、$g{=}0/4$；distinct 逐序列 `h0`）`o`/`final_state` **`torch.equal`（`max_abs=0`）**；再比
   `torch_ref(cu_seqlens)` vs `torch_ref` 逐序列（`B=1` 无 `cu_seqlens`）**全部 `max_abs=0`** ⟹

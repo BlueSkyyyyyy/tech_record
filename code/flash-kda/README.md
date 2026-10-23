@@ -16,6 +16,7 @@
 flash-kda/
   ROADMAP.md                 # 任务/进度/下一步（活文档，autopilot 每轮先读）
   docs/                      # 分析文档（内联到博客）
+  docs/appendix/             # 长日志附录（不内联：逐轮实验原始记录，供对账）
   harness/                   # 探测参考实现、dump/对拍/基准
   src/                       # 我们自己的参考实现（PyTorch 数学 + 可选 CUDA）
   scripts/                   # lab / autopilot
