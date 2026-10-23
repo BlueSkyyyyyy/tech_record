@@ -31,7 +31,7 @@ categories: ["算子开发"]
 
 ## 1. MoE 的第二个 GEMM 长什么样
 
-DeepSeek-V4-Pro 的配置（`/ssd/models/DeepSeek-V4-Pro/config.json`）：
+DeepSeek-V4-Pro 的配置（`~/models/DeepSeek-V4-Pro/config.json`）：
 
 ```json
 "hidden_size": 7168, "moe_intermediate_size": 3072,

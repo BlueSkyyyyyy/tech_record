@@ -43,7 +43,7 @@ $$M^\* \approx \frac{295}{3.77} \approx 78$$
 
 ## 2. 实验设计
 
-真实 shape 取自 `/ssd/models/qwen3-8B/config.json`：
+真实 shape 取自 `~/models/qwen3-8B/config.json`：
 
 | 项 | 值 | 来源 |
 |---|---|---|

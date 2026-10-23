@@ -43,7 +43,7 @@ categories: ["算子开发"]
   （2408 GB/s / 76.3% HBM）**1.31×**；IMMA 的价值仍在 `M≥3`。瓶颈仍是
   **latency**：ncu `DRAM 67% / L2 62% / Compute 51%`，没有一级到顶。
 
-shape 全部取自 `/ssd/models/qwen3-8B/config.json`：
+shape 全部取自 `~/models/qwen3-8B/config.json`：
 `hidden_size=5120, intermediate_size=17408, group_size=128`，对称 int4；
 测 `N=17408, K=5120, M=1..16`（decode）。权重 44.6 MB(int4) + scale 2.8 MB。
 

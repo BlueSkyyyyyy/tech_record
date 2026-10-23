@@ -24,7 +24,7 @@ categories: ["算子开发"]
 > smem/寄存器硬阻塞暂缓（见路线图「阻塞」），本篇先发；第 33 篇留待 1-warpgroup/248-reg 布局
 > 或 Blackwell `tcgen05` 再攻。
 
-shape 取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：`hidden=7168`、`moe_intermediate_size=3072`、
+shape 取自 `~/models/DeepSeek-V4-Pro/config.json`：`hidden=7168`、`moe_intermediate_size=3072`、
 `n_routed_experts=384`、`num_experts_per_tok=6`、`e4m3 + ue8m0 + weight_block 128×128`。
 实测 `M=8192/16384`（balanced 与 random 路由）。
 

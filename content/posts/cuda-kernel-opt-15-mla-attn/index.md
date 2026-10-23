@@ -89,7 +89,7 @@ $$
 
 ### 真实模型的参数
 
-从 `/ssd/models/*/config.json` 读到（`DC` = latent 维度、`DR` = 共享 RoPE 维度、`DV` = 吸收后 value 维度）：
+从 `~/models/*/config.json` 读到（`DC` = latent 维度、`DR` = 共享 RoPE 维度、`DV` = 吸收后 value 维度）：
 
 | 模型 | heads | kv_head | DC | DR | qk_nope | v_head_dim | kernel 形态 |
 |---|---|---|---|---|---|---|---|

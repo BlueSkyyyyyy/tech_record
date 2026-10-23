@@ -139,7 +139,7 @@ SW 地址 + 短流水」这个易碎环节从优化空间里拿掉了**。（注
 
 ### 3.3 端到端（DeepSeek-V4-Pro 一步 decode，balanced 路由）
 
-shape 取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：`hidden=7168, moe_intermediate=3072,
+shape 取自 `~/models/DeepSeek-V4-Pro/config.json`：`hidden=7168, moe_intermediate=3072,
 n_routed_experts=384, topk=6, expert_dtype=fp4`；权重是 FP4 e2m1 + E8M0 block-32，384 专家
 共 **13.48 GB**（packed + uint8 scale），roofline = 13.48/3352.3 = **4.020 ms**。
 

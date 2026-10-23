@@ -38,7 +38,7 @@ bf16 再乘？直接用 **int8 的整数张量核（IMMA，`mma.sync.m16n8k32.s3
 
 ## 一、先看墙：bf16 反量化到底贵在哪
 
-shape 仍取自 `/ssd/models/qwen3-8B/config.json`：`hidden=5120,
+shape 仍取自 `~/models/qwen3-8B/config.json`：`hidden=5120,
 intermediate=17408, group_size=128`。默认 `N=17408`（MLP up/gate）、`K=5120`，
 权重 int4 打包成 `[N, K/2]` u8 + `[N, K/128]` fp32 scale，共 **47.3 MB**
 （44.6 MB 权重 + 2.8 MB scale）。激活也按真实部署量化成 **int8（per-128 动态）**。

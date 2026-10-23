@@ -12,7 +12,7 @@ categories: ["算子开发"]
 
 这一章把它做成真的 kernel：**稀疏 MLA 消费端**。给定每个 query 的 top-$k$ 索引，按索引 gather KV、做完 online softmax 的 MLA，并把显存里的 gather 延迟用 `cp.async` 双缓冲藏起来。
 
-先给结论（H100 80GB HBM3，bf16 dense 峰值 989 TFLOPS；真实 shape 取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：`num_attention_heads=128`、`head_dim=512`、`qk_rope_head_dim=64`、`index_topk=1024`，MLA 吸收口径 $d_c{=}512,d_r{=}64,d_v{=}512$）：
+先给结论（H100 80GB HBM3，bf16 dense 峰值 989 TFLOPS；真实 shape 取自 `~/models/DeepSeek-V4-Pro/config.json`：`num_attention_heads=128`、`head_dim=512`、`qk_rope_head_dim=64`、`index_topk=1024`，MLA 吸收口径 $d_c{=}512,d_r{=}64,d_v{=}512$）：
 
 | 量 | 结果 |
 |---|---|

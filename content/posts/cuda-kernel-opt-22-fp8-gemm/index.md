@@ -21,7 +21,7 @@ categories: ["算子开发"]
 | cuBLAS FP8 per-tensor | cuBLASLt | 1381.7 | 69.9% | 100% |
 | cuBLAS BF16（对照） | — | 800.7 | 80.9% | 58.0% |
 
-真实 shape 取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：`hidden_size=7168`、`moe_intermediate_size=3072`、384 routed experts + top-6，量化配置 `{fmt:e4m3, scale_fmt:ue8m0, weight_block_size:[128,128], activation_scheme:dynamic}`。代码在 `code/kernel-opt/22-fp8-gemm/`（`fp8_gemm.cu` = mma.sync 版，`fp8_gemm_wgmma.cu` = wgmma 版，`cublas_fp8_ref.py` 取 cuBLAS 对照，原始输出 `*.out.txt`）。
+真实 shape 取自 `~/models/DeepSeek-V4-Pro/config.json`：`hidden_size=7168`、`moe_intermediate_size=3072`、384 routed experts + top-6，量化配置 `{fmt:e4m3, scale_fmt:ue8m0, weight_block_size:[128,128], activation_scheme:dynamic}`。代码在 `code/kernel-opt/22-fp8-gemm/`（`fp8_gemm.cu` = mma.sync 版，`fp8_gemm_wgmma.cu` = wgmma 版，`cublas_fp8_ref.py` 取 cuBLAS 对照，原始输出 `*.out.txt`）。
 
 前置阅读：[第十三篇]({{< relref "cuda-kernel-opt-13-tensor-core" >}})（`mma.m16n8k16` + `ldmatrix` + padding 消 bank conflict）、[第二十篇]({{< relref "cuda-kernel-opt-20-mla-wgmma-sw128" >}})（SW128 swizzle 描述符）。
 

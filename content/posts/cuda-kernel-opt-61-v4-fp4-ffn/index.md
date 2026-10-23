@@ -22,7 +22,7 @@ categories: ["算子开发"]
 
 一步 decode（`B` 个 token）要真实地跑完整条链路，并且给出**端到端延迟**。本篇做的事：
 
-1. 用 `/ssd/models/DeepSeek-V4-Pro/config.json` 的真实形状（`hidden=7168, moe_inter=3072,
+1. 用 `~/models/DeepSeek-V4-Pro/config.json` 的真实形状（`hidden=7168, moe_inter=3072,
    384 experts, top-6, expert_dtype=fp4`）和 `inference/model.py:596` 的真实语义，
    把 `quant_x → w1/w3 → SwiGLU+per-128 int8 量化 → w2 → 加权反置换` 写成一条 5 段流水；
 2. 全部对拍通过（端到端相对误差 **~1e-7**）；
@@ -42,7 +42,7 @@ categories: ["算子开发"]
 
 ## 一、真实形状与真实语义
 
-### 1.1 形状（`/ssd/models/DeepSeek-V4-Pro/config.json`）
+### 1.1 形状（`~/models/DeepSeek-V4-Pro/config.json`）
 
 | 量 | 值 | 说明 |
 |---|---|---|

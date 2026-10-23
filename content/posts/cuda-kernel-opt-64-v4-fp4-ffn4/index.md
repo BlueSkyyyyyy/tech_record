@@ -32,7 +32,7 @@ ROADMAP 给这轮留的假设是「`MTMAX=4` 的激活 smem 把 occupancy 压住
 
 ## 一、先把「掉到哪」量清楚
 
-shape 仍是 `/ssd/models/DeepSeek-V4-Pro/config.json` 的 routed expert FFN：
+shape 仍是 `~/models/DeepSeek-V4-Pro/config.json` 的 routed expert FFN：
 `hidden=7168`、`moe_inter=3072`、384 experts top-6、`expert_dtype=fp4`
 （真实权重 `w1/w3 [3072,7168]`、`w2 [7168,3072]`，FP4 e2m1 + E8M0 block-32，见
 [56 篇]({{< relref "cuda-kernel-opt-56-v4-fp4-moe" >}})）。权重铺满 384 专家 = **13.48 GB**，

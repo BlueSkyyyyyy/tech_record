@@ -167,7 +167,7 @@ for (int ii = 0; ii < nitems; ++ii) {          // item 外层
 
 环境照旧：H100 SXM、`kernel_lab` 容器、CUDA 13.2、`-gencode=arch=compute_90a,code=sm_90a`。
 所有对比都在**同一进程、同一 warmup（5）+ iters（50）**下做（`bench_ms`），
-shape 取自 `/ssd/models/qwen3-8B/config.json`（`hidden=5120, intermediate=17408,
+shape 取自 `~/models/qwen3-8B/config.json`（`hidden=5120, intermediate=17408,
 group_size=128` 对称 int4）。
 
 ### 表 1：baseline（41 篇 KSPLIT=5） vs 持久化，扫 `M`

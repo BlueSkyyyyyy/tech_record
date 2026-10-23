@@ -35,7 +35,7 @@ categories: ["算子开发"]
   int4、把 `x` 和 scale 预取进 smem，实测 **0.0284 ms / 1566.6 GB/s（49.7% HBM）**，
   比 43 篇的 tensor-core 最好成绩（0.0798 ms）**快 2.81×**。
 
-shape 取自 `/ssd/models/qwen3-8B/config.json`（`hidden=5120, intermediate=17408`，
+shape 取自 `~/models/qwen3-8B/config.json`（`hidden=5120, intermediate=17408`，
 `group=128`，对称 int4），默认测 `M=1, N=17408, K=5120`。
 
 ---

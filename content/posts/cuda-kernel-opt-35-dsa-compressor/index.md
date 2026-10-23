@@ -16,9 +16,9 @@ categories: ["算子开发"]
 key 的算子。
 
 这一篇不猜、不简化：直接读 DeepSeek-V4 官方推理实现
-`/ssd/models/DeepSeek-V4-Pro/inference/model.py`（`class Compressor`，`model.py:279`，`forward`
+`~/models/DeepSeek-V4-Pro/inference/model.py`（`class Compressor`，`model.py:279`，`forward`
 在 `model.py:316`），把 prefill 语义逐行还原，自己写两个 kernel（合并投影 + 融合池化）跑出来，
-并用 `/ssd/models/DeepSeek-V4-Pro/config.json` 的真实 shape 实测。
+并用 `~/models/DeepSeek-V4-Pro/config.json` 的真实 shape 实测。
 
 结论先放这儿：
 
@@ -50,7 +50,7 @@ DSA 能省多少**。这篇只做 attention 主路径的那个 compressor（`hea
 ### 1.2 参考实现的 prefill 语义（逐行还原）
 
 ```python
-# /ssd/models/DeepSeek-V4-Pro/inference/model.py:323-342（start_pos == 0，prefill）
+# ~/models/DeepSeek-V4-Pro/inference/model.py:323-342（start_pos == 0，prefill）
 kv    = self.wkv(x)            # [S, C]，C = coff * head_dim
 score = self.wgate(x)          # [S, C]
 kv    = kv.unflatten(1, (-1, ratio))        # [S/r, r, C]

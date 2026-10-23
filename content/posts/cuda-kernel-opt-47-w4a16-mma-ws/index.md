@@ -34,7 +34,7 @@ always-wgmma 的 1.19× 提到 **1.23×**。
 ## 一、先看墙：这个 kernel 根本不是张量核受限
 
 运行环境同前作：kernel_lab 容器、H100 80GB HBM3（132 SM，HBM 3.35 TB/s，
-bf16 TC 峰值 989 TFLOPS）。shape 仍取自 `/ssd/models/qwen3-8B/config.json`：
+bf16 TC 峰值 989 TFLOPS）。shape 仍取自 `~/models/qwen3-8B/config.json`：
 `hidden=5120, intermediate=17408, group_size=128`，对称 int4
 （权重打包 `[N, K/2]` u8 + `[N, K/128]` fp32 scale）。默认 `N=17408（up/gate）,
 K=5120`，权重 int4 **44.6 MB** + scale **2.8 MB**。

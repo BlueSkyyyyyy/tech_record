@@ -44,7 +44,7 @@ categories: ["算子开发"]
 
 ## 1. 背景：39 篇留下的两堵墙，以及为什么是 wgmma
 
-先把 shape 再钉一次。真实参数取自 `/ssd/models/DeepSeek-V4-Pro/config.json`
+先把 shape 再钉一次。真实参数取自 `~/models/DeepSeek-V4-Pro/config.json`
 （`num_attention_heads=128, head_dim=512, qk_rope_head_dim=64, num_key_value_heads=1`）。
 吸收后所有头共享一份潜 KV：
 

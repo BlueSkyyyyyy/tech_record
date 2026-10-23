@@ -26,7 +26,7 @@ categories: ["算子开发"]
 
 ## 1. 这个 GEMM 为什么"不好做"
 
-真实参数取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：
+真实参数取自 `~/models/DeepSeek-V4-Pro/config.json`：
 
 ```jsonc
 "hidden_size": 7168,            // K = hidden

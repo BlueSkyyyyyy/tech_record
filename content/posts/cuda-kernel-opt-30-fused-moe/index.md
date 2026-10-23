@@ -18,7 +18,7 @@ categories: ["算子开发"]
 - **K2（down）**：A 是 permuted activation，epilogue 把 `w·acc` 直接 **归约回 token 序**（unpermute）。
 
 两版共用**同一份 GEMM 代码**（模板开关 `FUSE`），所以差异只剩被省掉的那几趟显存搬运。shape 取自
-`/ssd/models/DeepSeek-V4-Pro/config.json`：`hidden=7168, moe_intermediate_size=3072,
+`~/models/DeepSeek-V4-Pro/config.json`：`hidden=7168, moe_intermediate_size=3072,
 n_routed_experts=384, num_experts_per_tok=6, scoring_func=sqrtsoftplus, topk_method=noaux_tc`。
 
 结论先行（H100 SXM，bf16，实测）：

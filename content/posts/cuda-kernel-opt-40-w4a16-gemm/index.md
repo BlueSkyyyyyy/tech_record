@@ -21,7 +21,7 @@ categories: ["算子开发"]
 问题在于：**4-bit 权重不能直接喂张量核，必须反量化（dequant）回 bf16**。这篇就把这个「反量化税」
 量化出来：它在什么工作点划算、在我们这个实现里吃掉多少、以及为什么它随 `M` 线性放大。
 
-真实 shape 取自 `/ssd/models/qwen3-8B/config.json`（`hidden_size=5120, intermediate_size=17408`），
+真实 shape 取自 `~/models/qwen3-8B/config.json`（`hidden_size=5120, intermediate_size=17408`），
 即 MLP 的 `up_proj`/`gate_proj`：`M×K @ N×K`，`K=5120, N=17408`，`group_size=128`，`M∈{64,128,256}`。
 
 先把结论摆在这（`M=64` = 64 路并发 decode，H100 实测）：

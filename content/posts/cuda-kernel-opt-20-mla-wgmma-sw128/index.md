@@ -19,7 +19,7 @@ categories: ["算子开发"]
 | `mma+ldmatrix` `f4s`（16 篇） | 行主序 + padding | 170.11 |
 | FlashMLA sm90（sparse prefill, H800） | CUTLASS | ~640 |
 
-真实 shape 取自 `/ssd/models/DeepSeek-V4-Pro/config.json` 的 MLA 吸收口径：$H{=}128$、$d_c{=}512$、$d_r{=}64$、$d_v{=}512$（bf16 dense 峰值 989 TFLOPS @H100）。
+真实 shape 取自 `~/models/DeepSeek-V4-Pro/config.json` 的 MLA 吸收口径：$H{=}128$、$d_c{=}512$、$d_r{=}64$、$d_v{=}512$（bf16 dense 峰值 989 TFLOPS @H100）。
 
 ---
 

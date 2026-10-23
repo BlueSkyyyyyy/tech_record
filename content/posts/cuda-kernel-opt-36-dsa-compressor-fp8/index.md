@@ -38,7 +38,7 @@ categories: ["算子开发"]
 
 ## 一、先把 shape 和基线固定住
 
-shape 与 35 完全一致，取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：`hidden_size=7168`、
+shape 与 35 完全一致，取自 `~/models/DeepSeek-V4-Pro/config.json`：`hidden_size=7168`、
 `head_dim=512`、`qk_rope_head_dim=64`、`compress_ratios ∈ {128, 4, 0}`：
 
 - ratio=128（`coff=1`）：`C=512`，合并权重 `Wm[1024, 7168]`（bf16 14.7 MB），

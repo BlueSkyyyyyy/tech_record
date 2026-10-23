@@ -40,7 +40,7 @@ categories: ["算子开发"]
 
 ## 一、shape 与目标
 
-shape 还是从真实 checkpoint 来（`/ssd/models/DeepSeek-V4-Pro`，layer 0 / expert 0 的 `w1`）：
+shape 还是从真实 checkpoint 来（`~/models/DeepSeek-V4-Pro`，layer 0 / expert 0 的 `w1`）：
 
 | 项 | 值 |
 |---|---|

@@ -22,7 +22,7 @@ KV 分页、要一遍遍重读），但骨子里完全不同：
 **这不是纯访存，而是一个卡在算力/带宽边界上的「平衡」算子**。本文会把这件事从头推一遍，
 然后诚实地回答 ROADMAP 里那个设想：**「KV 换 FP8、字节减半，decode 是不是直接 ≈2×？」**
 
-先给结论（真实 shape 取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：`num_attention_heads=128,
+先给结论（真实 shape 取自 `~/models/DeepSeek-V4-Pro/config.json`：`num_attention_heads=128,
 head_dim=512, qk_rope_head_dim=64, num_key_value_heads=1`；`B=64, L=32768`，KV bf16 = 2.42 GB）：
 
 | 版本 | 手段 | 耗时 | bf16/FP8 KV 带宽 | 算力 | 占 bf16 峰值 |

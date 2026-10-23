@@ -18,7 +18,7 @@ per-tensor FP8 在 32k token 上跑到 **1008 TFLOPS**；[第 22–24 篇]({{< r
 这一篇把两者合起来，回答一个很实际的问题：**当 GEMM 变成「384 个 expert、分组调度」的形态后，
 per-block 缩放还会不会那么贵？** 答案有点反直觉——**更便宜**，而且便宜的机制正好是 24 篇指出的那一条。
 
-shape 全部取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：
+shape 全部取自 `~/models/DeepSeek-V4-Pro/config.json`：
 `hidden=7168, moe_intermediate_size=3072, n_routed_experts=384, num_experts_per_tok=6,
 quantization_config={fmt: e4m3, scale_fmt: ue8m0, weight_block_size: [128,128]}`。
 

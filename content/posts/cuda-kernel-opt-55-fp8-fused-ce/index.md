@@ -16,7 +16,7 @@ categories: ["算子开发"]
 > 同时张量核吞吐上限翻倍。
 
 这一篇就把它做出来。有意思的是，它顺带回答了一个真实的模型问题：DeepSeek-V4 整网的线性层都是
-FP8（`/ssd/models/DeepSeek-V4-Pro/config.json` 的 `quantization_config`：`e4m3 + ue8m0 + weight_block 128×128`），
+FP8（`~/models/DeepSeek-V4-Pro/config.json` 的 `quantization_config`：`e4m3 + ue8m0 + weight_block 128×128`），
 **唯独 lm_head 在 checkpoint 里是 bf16**——因为 logits 直接喂 CE，对精度最敏感
 （`inference/model.py:712` 的注释：「lm_head in the checkpoint is stored in bf16, while the parameter
 here is stored in fp32 for easier computation of logits later」）。所以本篇也是在做一次 what-if：
@@ -39,7 +39,7 @@ FP8 融合 CE 达到 **1184.6 TFLOPS / 59.9% FP8 峰值**，是**同进程 bf16 
 
 ## 一、形状与量化方案
 
-shape 和 54 篇完全一致，取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：
+shape 和 54 篇完全一致，取自 `~/models/DeepSeek-V4-Pro/config.json`：
 `hidden_size=7168`、`vocab_size=129280`，测 $M=2048/8192/32768$。
 
 复用的量化方案（尽量贴 V4 的语义，同时用一个便宜的 host 折算）：

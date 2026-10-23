@@ -37,7 +37,7 @@ categories: ["算子开发"]
 
 ## 1. per-block 缩放的数学，以及它为什么贵
 
-DeepSeek-V4 的量化（`/ssd/models/DeepSeek-V4-Pro/config.json`）：
+DeepSeek-V4 的量化（`~/models/DeepSeek-V4-Pro/config.json`）：
 
 ```json
 "quantization_config": {

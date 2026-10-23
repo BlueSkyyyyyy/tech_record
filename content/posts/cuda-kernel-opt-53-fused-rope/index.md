@@ -24,7 +24,7 @@ RoPE 看着简单——「把 q/k 的相邻两维转个角度」——但真正�
 
 本篇把这条线走完，最后用一个 **uint4 流**版打到 **78.6%**（= 该访问模式 copy 天花板的 **99.5%**），
 对半配对版打到 **82.1%**，相对 PyTorch eager 分别快 **22× / 6.4×**。所有 shape 取自本地模型
-`/ssd/models/{DeepSeek-V4-Pro,Qwen3-8B}/config.json`。
+`~/models/{DeepSeek-V4-Pro,Qwen3-8B}/config.json`。
 
 前置阅读：[第 15/16 篇 MLA]({{< relref "cuda-kernel-opt-16-mla-fused" >}})（RoPE 就是 MLA 里唯一作用在
 位置维的算子）、[第 32 篇 RMSNorm]({{< relref "cuda-kernel-opt-32-fused-norm" >}})（同为纯访存算子）。
@@ -56,7 +56,7 @@ $$
   → 一对相隔 d/2，分别落在两个「半区」
 ```
 
-DeepSeek-V4-Pro 的语义（`/ssd/models/DeepSeek-V4-Pro/inference/model.py`）是：
+DeepSeek-V4-Pro 的语义（`~/models/DeepSeek-V4-Pro/inference/model.py`）是：
 
 ```python
 # precompute_freqs_cis(...)：base=10000，YaRN factor=16, beta_fast=32, beta_slow=1,

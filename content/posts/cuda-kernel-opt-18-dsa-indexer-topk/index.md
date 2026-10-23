@@ -15,7 +15,7 @@ DSA 把 attention 拆成两步：
 1. **lightning indexer**：用少量 index head 给每个 query 对每个历史 key 打一个「索引分」，再取 **top-k**（V4-Pro：$H^I=64$、$d=128$、$k=1024$）；
 2. **稀疏 attention**：只对被选中的 $k$ 个 key 做真正的 MLA。
 
-这篇先啃前一步——**indexer 打分**与**精确 top-k**，因为它们是 DSA 特有的、也最容易成为新瓶颈的两个算子。先给结论（H100 80GB HBM3，bf16 dense 峰值 989 TFLOPS；真实 shape 取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：`index_n_heads=64`、`index_head_dim=128`、`index_topk=1024`）：
+这篇先啃前一步——**indexer 打分**与**精确 top-k**，因为它们是 DSA 特有的、也最容易成为新瓶颈的两个算子。先给结论（H100 80GB HBM3，bf16 dense 峰值 989 TFLOPS；真实 shape 取自 `~/models/DeepSeek-V4-Pro/config.json`：`index_n_heads=64`、`index_head_dim=128`、`index_topk=1024`）：
 
 | 算子 | 实现 | S=16384 耗时 | 算力/带宽 | 峰值占比 |
 |---|---|---|---|---|

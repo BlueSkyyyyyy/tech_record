@@ -32,7 +32,7 @@ categories: ["算子开发"]
 - **转置 scale、单 barrier、wider BN、跨 item 持久化全是小账或负结果**——
   尤其是 43 篇的持久化流水搬到这里**完全无效**，后面会解释为什么。
 
-shape 全部取自 `/ssd/models/qwen3-8B/config.json`：
+shape 全部取自 `~/models/qwen3-8B/config.json`：
 `hidden_size=5120, intermediate_size=17408, group_size=128`，对称 int4；
 默认测 `N=17408, K=5120, M=1..16`（decode）。权重 44.6 MB(int4) + scale 2.8 MB。
 

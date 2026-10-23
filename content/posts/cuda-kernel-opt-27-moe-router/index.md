@@ -12,7 +12,7 @@ categories: ["算子开发"]
 
 **问题**：DeepSeek-V4 / Kimi-K2.6 每个 token 要从 **384 个 routed expert** 里选 **top-6**，权重还要做 `sqrtsoftplus` 打分、加 `e_score_correction_bias`（noaux_tc）、归一化、乘 `routed_scaling_factor`；选完还要把 token 按 expert **置换（permute）**好喂给 grouped GEMM，算完再 **反置换（unpermute）**加权求和。
 
-我按 `/ssd/models/DeepSeek-V4-Pro/config.json` 的真实参数把这七个 kernel 全部手写并实测。结论先行：
+我按 `~/models/DeepSeek-V4-Pro/config.json` 的真实参数把这七个 kernel 全部手写并实测。结论先行：
 
 - **gate GEMM** 我们做到 **204→257 TFLOPS**，但它只是 cuBLAS 的 **27.7%**（`738.2`）——这是这条链唯一明显落后 SOTA 的地方，根因是 `mma.sync` 路径的发射/延迟墙（ncu：`L2 60.7%`、`Compute 35.3%`、`No Eligible 57.6%`、occupancy 20%）。
 - **router top-k + 元数据**（直方图/前缀和/游标 scatter）只要 **0.07 ms@16k**，把直方图融进 top-k 还省 15%。
@@ -34,7 +34,7 @@ categories: ["算子开发"]
 
 ## 0. 算法：DeepSeek-V4 的 noaux_tc routing
 
-参数取自 `/ssd/models/DeepSeek-V4-Pro/config.json`（Kimi-K2.6 同构，只有 `scoring_func`/`topk` 不同）：
+参数取自 `~/models/DeepSeek-V4-Pro/config.json`（Kimi-K2.6 同构，只有 `scoring_func`/`topk` 不同）：
 
 ```jsonc
 "hidden_size": 7168,              // H

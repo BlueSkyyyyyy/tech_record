@@ -53,7 +53,7 @@ $$
 
 > 代码对照：本地 `~/github/muonclip/src/muon_clip_pytorch.py:8` 的 `newton_schulz()`，以及 `~/github/Emerging-Optimizers` 里的 Muon 实现。本仓库代码系数、迭代次数与之一致。
 
-**真实 shape**（读 `/ssd/models/*/config.json`）：
+**真实 shape**（读 `~/models/*/config.json`）：
 
 - **Kimi-K2.6**：`hidden_size=7168`、`intermediate_size=18432`、`moe_intermediate_size=2048`、384 experts、61 层 → Muon 处理的矩阵形如 `[7168,7168]`、`[7168,18432]`、专家 `[7168,2048]`；
 - **DeepSeek-V4-Pro**：`hidden_size=7168`、`moe_intermediate_size=3072`、384 experts；

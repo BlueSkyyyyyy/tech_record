@@ -36,7 +36,7 @@ categories: ["算子开发"]
 
 ## 一、把一个 decode step 的账算清楚
 
-先看 shape（全部取自 `/ssd/models/DeepSeek-V4-Pro/config.json`）：
+先看 shape（全部取自 `~/models/DeepSeek-V4-Pro/config.json`）：
 
 | 参数 | 值 | 含义 |
 |---|---|---|

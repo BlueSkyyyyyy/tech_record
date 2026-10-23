@@ -37,7 +37,7 @@ categories: ["算子开发"]
 
 ## 一、问题：per-block 到底慢在哪
 
-真实 shape 取自 `/ssd/models/DeepSeek-V4-Pro/config.json`：
+真实 shape 取自 `~/models/DeepSeek-V4-Pro/config.json`：
 
 ```
 hidden = 7168, moe_inter = 3072, 384 routed experts, top-6
@@ -154,7 +154,7 @@ template <int N> __device__ void reg_dealloc() { asm volatile("setmaxnreg.dec.sy
 换一个视角。per-block 缩放里，`sb` 是**权重**的（静态），`sa` 是**激活**的（动态）。两者都是
 `ue8m0` 格式——而 `ue8m0` 的含义是「**无符号 8 位指数**」，也就是**纯 2 的幂**。
 
-> 验证：`/ssd/models/DeepSeek-V4-Pro/config.json` → `"scale_fmt": "ue8m0"`。
+> 验证：`~/models/DeepSeek-V4-Pro/config.json` → `"scale_fmt": "ue8m0"`。
 
 于是有一个精确的恒等式。设量化是 $q_a = \mathrm{round_{e4m3}}(A / sa)$，则
 

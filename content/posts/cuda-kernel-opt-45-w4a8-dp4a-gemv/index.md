@@ -31,7 +31,7 @@ int8（per-128-group），权重仍是 int4，用 `__dp4a`（一条指令做 4 �
 结论：**M=1 的 GEMV 从 0.0284 ms → 0.0185 ms（1.53×），HBM 从 49.7% → 76.3%**，
 ncu 的瓶颈从 ALU 60% 翻转为 DRAM 67%——**它终于变成了一个纯带宽 kernel**。
 
-shape 取自 `/ssd/models/qwen3-8B/config.json`（`hidden_size=5120`,
+shape 取自 `~/models/qwen3-8B/config.json`（`hidden_size=5120`,
 `intermediate_size=17408`, `group_size=128`，对称 int4），测 `M=1, N=17408, K=5120`。
 
 ---

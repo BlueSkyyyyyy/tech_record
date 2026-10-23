@@ -39,7 +39,7 @@ categories: ["算子开发"]
   [45 篇的 W4A8 GEMV]({{< relref "cuda-kernel-opt-45-w4a8-dp4a-gemv" >}})
   （**2408 GB/s / 76% HBM**）1.35×。**M=1 就该用 GEMV**，IMMA 的价值在 `M≥3`。
 
-shape 全部取自 `/ssd/models/qwen3-8B/config.json`：
+shape 全部取自 `~/models/qwen3-8B/config.json`：
 `hidden_size=5120, intermediate_size=17408, group_size=128`，对称 int4；
 测 `N=17408, K=5120, M=1..16`（decode）。权重 44.6 MB(int4) + scale 2.8 MB。
 

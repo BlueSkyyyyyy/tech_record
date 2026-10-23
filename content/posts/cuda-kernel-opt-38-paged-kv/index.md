@@ -57,7 +57,7 @@ Qwen3-8B 的 `G = Hq/Hkv = 40/8 = 5`。H100 的 bf16 tensor-core ridge 约
 所以只要写对，它一定卡在 HBM，而不是算力。判据很简单：**看 ncu 的 `DRAM Throughput`，
 不是 `Memory Throughput`，更不是 TFLOPS。**
 
-真实参数取自 `/ssd/models/qwen3-8B/config.json`：
+真实参数取自 `~/models/qwen3-8B/config.json`：
 
 ```
 num_attention_heads   (Hq)  = 40
