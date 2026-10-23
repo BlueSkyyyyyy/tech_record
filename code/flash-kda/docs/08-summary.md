@@ -165,8 +165,7 @@ $\bar S_{\text{out}}^{(c-1)}={q^{\text{dec}}}^\top\bar o+E^{\text{tot}}\odot\bar
 `intra`(块内 $A$ 反向) / 反向 `cumsum` + `kda_gate_bwd`(衰减/门控链)，与分块反向**逐式对应**；
 记号映射实测钉死：`Akk`=$P$、`kg`=$k^{\text{rest}}$、`qg`=$q^{\text{dec}}$、`h`=$S_{\text{in}}$。
 
-**目标卡 CUDA 反向设计**：复用 K1 workspace 六字段（$k^{\text{dec}},q^{\text{dec}},k^{\text{rest}},
-E^{\text{tot}},P,M_{qk}$），只缺 `beta`/门 logits → 补轻量 **B0 门控重算**，再落三个 GEMM kernel：
+**目标卡 CUDA 反向设计**：复用 K1 workspace 六字段（$k^{\text{dec}},q^{\text{dec}},k^{\text{rest}},E^{\text{tot}},P,M_{qk}$），只缺 `beta`/门 logits → 补轻量 **B0 门控重算**，再落三个 GEMM kernel：
 **B3 intra**（token 并行，复用 K1 模板）/ **B2 dqkg**（per-tile，吃 B1 的 $\bar S$）/
 **B1 state-adjoint**（head 并行，**直接镜像前向 K2 的八个 Phase**，只是逆序扫）。
 **B1/B2/B3 均已做成最小可运行 Triton kernel**并位级核验：B1 与 FLA `dhu` 逐行同构、实测 **1e-5**

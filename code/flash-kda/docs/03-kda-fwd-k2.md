@@ -716,8 +716,7 @@ S_C=\underbrace{\operatorname{diag}\Bigl(\prod_{i=1}^{C}\alpha_i\Bigr)}_{D_C}\,S
 $$
 
 记块内 log2 前缀和 $g^{\text{cum}}_{t}[k]=\sum_{i\le t}g_i[k]$、整块累计
-$g^{\text{tot}}[k]=\sum_{i=1}^{C}g_i[k]$，则 $\prod_{i=1}^{C}\alpha_i=2^{g^{\text{tot}}}
-=:E^{\text{tot}}$、$\prod_{i=j+1}^{C}\alpha_i=2^{g^{\text{tot}}-g^{\text{cum}}_j}$。
+$g^{\text{tot}}[k]=\sum_{i=1}^{C}g_i[k]$，则 $\prod_{i=1}^{C}\alpha_i=2^{g^{\text{tot}}}=:E^{\text{tot}}$、$\prod_{i=j+1}^{C}\alpha_i=2^{g^{\text{tot}}-g^{\text{cum}}_j}$。
 
 于是 (17.1) 就是 kernel 的那一行：
 

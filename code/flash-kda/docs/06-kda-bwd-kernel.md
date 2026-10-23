@@ -56,8 +56,7 @@ FlashKDA 前向 workspace 的目标卡 CUDA 设计**。
 FLA 的 `chunk_kda` 前向会保存一组中间量给反向用（`fla/ops/kda/chunk.py:103-107`）：
 `q,k,v,g_cumsum,beta,Aqk,Akk,w,u,qg,kg,v_new,h`。
 
-它们与 `05` §7.1 式 (7.1) 的分块符号（$q^{\text{dec}},k^{\text{dec}},k^{\text{inv}},
-k^{\text{rest}},L,M_{qk},P,U,S_{\text{in}}$）一一对应，但**命名不同**。先钉死，后面才读得懂：
+它们与 `05` §7.1 式 (7.1) 的分块符号（$q^{\text{dec}},k^{\text{dec}},k^{\text{inv}},k^{\text{rest}},L,M_{qk},P,U,S_{\text{in}}$）一一对应，但**命名不同**。先钉死，后面才读得懂：
 
 | FLA 张量 | 形状 | `05` §7 符号 | 关系式 | 来源 |
 |---|---|---|---|---|
@@ -843,8 +842,7 @@ $\bar M_{qk}=\bar o\,U^\top$、$\bar U=M_{qk}^\top\bar o$）。
 
 **端到端链条。** 输入构造沿用既有约定：`use_qk_l2norm_in_kernel/use_gate_in_kernel/
 use_beta_sigmoid_in_kernel` 全 `False`，两侧吃**同一份 fp32 操作数**（归一化后 q/k、
-`sigmoid(beta)`、自然对数衰减 `g_fla = g_dec·ln2`），损失 $L=\langle o,\bar o\rangle+
-\langle S_T,\bar S_T\rangle$，**因此 `dht=S_T` 的上游梯度非零**。
+`sigmoid(beta)`、自然对数衰减 `g_fla = g_dec·ln2`），损失 $L=\langle o,\bar o\rangle+\langle S_T,\bar S_T\rangle$，**因此 `dht=S_T` 的上游梯度非零**。
 
 链条为：
 
@@ -1042,8 +1040,7 @@ $P$ 自身量化 `max_rel=2.1e-4`，伴随量 `max_rel=4.9e-4`。
   `dAv` 给输出支路初始伴随、`dhu` 逆序传状态伴随、`wy_dqkg` 算逐块六项梯度、
   `intra` 回传块内 $A$、反向 `cumsum` 加 `kda_gate_bwd` 收尾门控链；记号映射由实测表钉死
   （`Akk`=$P$、`kg`=$k^{\text{rest}}$、`qg`=$q^{\text{dec}}$、`h`=$S_{\text{in}}$）。
-- 目标卡反向的可行方案是**复用 K1 workspace**（六字段已含 $P,M_{qk},k^{\text{dec}},
-  q^{\text{dec}},k^{\text{rest}},E^{\text{tot}}$），只补一个轻量门控重算 B0，
+- 目标卡反向的可行方案是**复用 K1 workspace**（六字段已含 $P,M_{qk},k^{\text{dec}},q^{\text{dec}},k^{\text{rest}},E^{\text{tot}}$），只补一个轻量门控重算 B0，
   再按「B3 intra / B2 dqkg / B1 state-adjoint」三个 GEMM kernel 落地，B1 直接镜像前向 K2。
 - 这条链已经**逐段跑通并端到端核验**：B1↔FLA 1e-5、B2/B3 逐位、B0 到 $10^{-7}$ 且与 K1 的
   $E^{\text{tot}}$ 对到 $10^{-5}$、整链对 autograd 落 tf32 底噪；架到真 workspace 上也只到
