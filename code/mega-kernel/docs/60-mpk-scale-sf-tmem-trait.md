@@ -2,7 +2,7 @@
 
 > 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（与 `docs/06`–`docs/59` 同快照）；
 > CUTLASS 侧走的是 MPK 该快照钉死的 submodule `deps/cutlass`，commit `f3fde583`
-> （`/ssd/mirage_mpk_build/deps/cutlass`，这条 checkout 有完整 submodule；MPK 的
+> （`~/mirage_mpk_build/deps/cutlass`，这条 checkout 有完整 submodule；MPK 的
 > `include/mirage/persistent_kernel/tasks/blackwell/sm100_utils.cuh:20` 等直接
 > `#include <cute/atom/mma_traits_sm100.hpp>`）。
 > `docs/51`/`docs/58` 走 SMEM 软件/TMA 布局、`docs/59` 走 TMEM 列与 UTCCP 重排；本文补上

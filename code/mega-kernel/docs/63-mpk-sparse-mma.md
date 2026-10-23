@@ -2,7 +2,7 @@
 
 > 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（与 `docs/06`–`docs/62` 同快照）；
 > CUTLASS 侧走 MPK 该快照钉死的 submodule `deps/cutlass`，commit `f3fde583`
-> （`/ssd/mirage_mpk_build/deps/cutlass`，这条 checkout 有完整 submodule）。
+> （`~/mirage_mpk_build/deps/cutlass`，这条 checkout 有完整 submodule）。
 > `docs/62`（P148-1）把稀疏 MMA 的**元数据 E** 侧（`tmem_e_frg`）走完了，但只走到「E 的形状 + 低 1 位
 > `id2`」；本文补上 `docs/62` §6 明留的两条尾巴之一（「E 的硬件编码……未追 `tcgen05.mma.sp` 对 E 内容
 > 的解释」的**相邻面**——`tcgen05.mma.sp` 的另一半输入、**A 操作数**），并把稀疏 SMEM 布局原子、

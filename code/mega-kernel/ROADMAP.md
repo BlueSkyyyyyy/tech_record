@@ -4257,7 +4257,7 @@
   `_cute_tie` 未逐行走」（其中 `_cute_tie` 已由 P146-1/`docs/60` §6 补掉）。把
   `linear_fp8_sm100_scheduler.cuh`（199 行）+ `linear_fp8_sm100_epilogue_utils.cuh`（30 行）逐行打开，
   并把「MPK 为什么和 DeepGEMM 不一样」量出来。见 `docs/64-mpk-fp8-scheduler.md`（快照
-  `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，本地 `/ssd/mirage_mpk_build`；DeepGEMM 对照
+  `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，本地 `~/mirage_mpk_build`；DeepGEMM 对照
   `~/github/DeepGEMM` commit `057ca59`；**纯源码走读 + 1 个 host 侧算术探针**，SM100 本机不可执行）。
   三条 headline：**(A)（headline）** MPK 把 DeepGEMM 的「多 SM 摊 tile」调度器改成「**单 CTA 顺序全扫**」
   ——`get_next_block` 的 tile 偏移硬编码 `+0`（`_scheduler.cuh:172`；DeepGEMM `gemm.cuh:186` 是
@@ -4284,7 +4284,7 @@
   P150-1（§12）**明留的尾巴**（原话）「`linear_sm100_mpk.cuh` 调度是否同构未核」。把
   `linear_sm100_mpk.cuh`（737 行，BF16/无 block-scale）逐行打开，见
   `docs/65-mpk-sm100-bf16-linear.md`（快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`，
-  本地 `/ssd/mirage_mpk_build`；CUTLASS `deps/cutlass` `f3fde583`；DeepGEMM 对照 `~/github/DeepGEMM`
+  本地 `~/mirage_mpk_build`；CUTLASS `deps/cutlass` `f3fde583`；DeepGEMM 对照 `~/github/DeepGEMM`
   `057ca59`；**纯源码走读 + 1 个 host 侧结构探测**，SM100 本机不可执行）。三条 headline：
   **(A)（headline）** 这是本专题唯一「**CuTe 高层描述符 + 手写 TMA**」合体的 device 身体——MMA 走
   `make_tiled_mma(SM100_MMA_F16BF16_SS)` → `partition_shape_{A,B,C}` → `UMMA::tile_to_mma_shape` →
@@ -6211,7 +6211,7 @@
   `linear_fp8_sm100_sm100_utils.cuh` 只借用了行号……未逐行」与 `docs/57` §8「committed 描述符位编码
   未逐位展开」两条尾巴：把 `linear_fp8_sm100` 家族的**支撑层三支**（`_utils` 143 行 / `_sm100_utils`
   232 行 / `_tma_utils` 118 行）逐行打开，并在 host 上逐字重放描述符算术。见
-  `docs/68-mpk-fp8-linear-support.md`（快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；CUTLASS
+  `docs/68-mpk-fp8-linear-support.md`（快照 `f9eb70c`，本地 `~/mirage_mpk_build`；CUTLASS
   `f3fde583`；**纯源码走读 + 1 个 host 侧描述符位探针**，SM100 本体本机不可执行）。三条 headline：
   **(A)（headline）** 支撑层是「**完整版 + K-major 子集副本**」——身体 A 用
   `linear_fp8_sm100_sm100_utils.cuh`（`to_umma_layout_type`、MN-major、`float+MN` 强制 BASE32、
@@ -6240,7 +6240,7 @@
   补掉；SM100 共享原语层已由 P143-1/`docs/57` 补掉。
 - 此前：**P153-1 完成（1/1）**。补掉「下一步候选」明留的「`mla_mtp_decode_tp2/4/8_sm100.cuh`
   三兄弟的内部未逐行处」（`docs/34`/P120-1 只给差异摘要），见 `docs/67-mpk-mla-mtp-tp.md`
-  （快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；**纯源码走读、无新实验**）。三条 headline：
+  （快照 `f9eb70c`，本地 `~/mirage_mpk_build`；**纯源码走读、无新实验**）。三条 headline：
   **(A)（headline）** 基版 `mla_mtp_decode_sm100.cuh` 是被运行期 `local_num_heads` 参数化过的「TP1
   父版」（收已分解 `gi/si/bi`）；三兄弟另起文件、硬编码 `NUM_HEADS=64/32/16` 并改收**原始
   `block_x/block_y`** 自己拆包（`gi=block_x/sk`、`si=block_x%sk`）——因 TP 前端把网格从基版 3D
@@ -6268,7 +6268,7 @@
 - 此前：**P152-1 完成（1/1）**。补掉 `docs/65`（P151-1）**§8 明留的尾巴**「未与
   `moe_linear_sm100.cuh`（827 行 BF16 MoE linear）对走」。把 BF16 SM100 **grouped MoE** linear
   device 身体逐行打开，见 `docs/66-mpk-sm100-moe-linear.md`（快照 `f9eb70c`，本地
-  `/ssd/mirage_mpk_build`；CUTLASS `f3fde583`；**纯源码走读 + 1 个 host 侧结构探测**）。三条 headline：
+  `~/mirage_mpk_build`；CUTLASS `f3fde583`；**纯源码走读 + 1 个 host 侧结构探测**）。三条 headline：
   **(A)（headline）** 这一支把「MoE 三件事」全塞进一个 device task，且为此换了数据通路——只保留
   A（权重）走 TMA、把 B（输入激活）改成**逐 token 的 `cp.async` gather**（route 谓词）、输出改成
   **register 直接 scatter** 到 `[batch,topk,N]`；未路由 token 在 SMEM 留旧值、被 MMA 读到又在 scatter
@@ -6284,7 +6284,7 @@
 - 此前：**P151-1 完成（1/1）**。补掉 `docs/32`（P118-1）**§5.4 只给 10 行摘要**的第三支 SM100
   手工线性身体，并兑现 P150-1（§12）明留的尾巴「`linear_sm100_mpk.cuh` 调度是否同构未核」。把
   `linear_sm100_mpk.cuh`（737 行，BF16/无 block-scale）逐行打开，见 `docs/65-mpk-sm100-bf16-linear.md`
-  （快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；CUTLASS `f3fde583`；DeepGEMM 对照 `057ca59`；**纯源码
+  （快照 `f9eb70c`，本地 `~/mirage_mpk_build`；CUTLASS `f3fde583`；DeepGEMM 对照 `057ca59`；**纯源码
   走读 + 1 个 host 侧结构探测**）。三条 headline：**(A)（headline）** 本专题唯一「CuTe 高层描述符 + 手写
   TMA」合体的 device 身体——MMA 走 `make_tiled_mma`/`partition_shape_*`/`UMMA::tile_to_mma_shape`/
   `cute::gemm`，TMA/pipeline 全手写；host 探测证明同一块 SMEM 的两套表示一致（`sA/sB`=`Sw<3,4,3>`、
@@ -6311,7 +6311,7 @@
 - 此前：**P150-1 完成（1/1）**。补掉 `docs/32`（P119-1）§2.3/§7 明留的「`_scheduler`/`_epilogue_utils`/
   `_cute_tie` 未逐行走」（`_cute_tie` 已由 P146-1/`docs/60` 补），把 `linear_fp8_sm100_scheduler.cuh`
   （199 行）+ `linear_fp8_sm100_epilogue_utils.cuh`（30 行）逐行打开，见 `docs/64-mpk-fp8-scheduler.md`
-  （快照 `f9eb70c`，本地 `/ssd/mirage_mpk_build`；DeepGEMM 对照 `057ca59`；**纯源码走读 + 1 个 host 侧
+  （快照 `f9eb70c`，本地 `~/mirage_mpk_build`；DeepGEMM 对照 `057ca59`；**纯源码走读 + 1 个 host 侧
   算术探针**）。三条 headline：**(A)（headline）** MPK 把 DeepGEMM 的多 SM 摊 tile 调度器改成「单 CTA
   顺序全扫」——tile 偏移硬编码 `+0`（`_scheduler.cuh:172` vs DeepGEMM `gemm.cuh:186` 的 `+blockIdx.x`）、
   生产 `kNumSMs=1`（`task_register.cc:4839`）；host 实测 `kNumSMs=1` 覆盖全部 tile，而同一条 HACK 注释

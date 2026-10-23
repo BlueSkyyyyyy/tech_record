@@ -16,7 +16,7 @@
 > 并把其中**纯算术**（`SmemDescriptor` / `make_umma_desc` / `InstrDescriptorBlockScaled` /
 > `get_num_aligned_tmem_cols`）在 host 上**逐字重放、打印真实描述符位模式**。
 >
-> 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `/ssd/mirage_mpk_build`，与
+> 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `~/mirage_mpk_build`，与
 > `docs/06`–`docs/67` 同快照）；CUTLASS 侧走 `deps/cutlass` submodule，commit `f3fde583`。
 > **纯源码走读 + 1 个 host 侧描述符位探针**——SM100（`sm_100f`）在目标卡 H100/sm90 不可执行，
 > 但 `SmemDescriptor`/`InstrDescriptorBlockScaled` 是 union+bitfield（`CUTE_HOST_DEVICE`），
@@ -340,7 +340,7 @@ tensor_map_replace_global_addr_in_smem()    :106-116 tensormap.replace.tile.glob
 
 ## 8. 参考坐标（可核对）
 
-- 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `/ssd/mirage_mpk_build`）。
+- 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `~/mirage_mpk_build`）。
 - **支撑层三支**（`include/mirage/persistent_kernel/tasks/blackwell/`）：
   - `linear_fp8_sm100_utils.cuh`（143 行）：断言宏 `:10-33`、`PatternVisitor :37-47`、
     `ceil_div :49-52`、`constexpr_ceil_div :54-57`、`align :59-62`、`constexpr_align :64-67`、

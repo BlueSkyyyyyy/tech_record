@@ -2,7 +2,7 @@
 
 > 快照与坐标：DeepGEMM = `~/github/DeepGEMM` commit `057ca59`（`Public release 26/09/30`，容器内
 > `~/github/DeepGEMM`）；MPK = `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`
-> （完整 checkout `/ssd/mirage_mpk_build`）；CUTLASS = MPK 的 submodule `deps/cutlass` commit
+> （完整 checkout `~/mirage_mpk_build`）；CUTLASS = MPK 的 submodule `deps/cutlass` commit
 > `f3fde583`（`docs/71` 已用 md5 证明它与 DeepGEMM vendored 副本、其 `third-party/cutlass` 逐字节相同）。
 > 本文补 `docs/72`（P158-1）§7 明留、ROADMAP「下一步候选」点名的**三条「UMMA 原语/描述符对照」未完面**：
 > **(1)** DeepGEMM 自建 `ptx/tcgen05.cuh` 9 struct 里**除 `mxf8f6f4.block_scale` 外**的跨库逐条对照；
@@ -251,7 +251,7 @@ sm100.cuh:109/122`、`tp4:98/111`、`tp8:95/108`，`docs/67` §8 已记）。
 
 ## 9. 参考坐标（可核对）
 
-- 快照：DeepGEMM @ `057ca59`（`~/github/DeepGEMM`）；MPK @ `f9eb70c`（本地 `/ssd/mirage_mpk_build`）；
+- 快照：DeepGEMM @ `057ca59`（`~/github/DeepGEMM`）；MPK @ `f9eb70c`（本地 `~/mirage_mpk_build`）；
   CUTLASS `deps/cutlass` @ `f3fde583`（`docs/71` md5 已证与 DeepGEMM 副本逐字节相同）。
 - **DeepGEMM 自建层**（`deep_gemm/include/deep_gemm/ptx/tcgen05.cuh`，219 行，13 文件 include）：
   头注释 `:11`；9 struct——`F16BF16_SS:12-27`、`F16BF16_2x1SM_SS:29-44`、`MXF8F6F4_SS:46-65`、

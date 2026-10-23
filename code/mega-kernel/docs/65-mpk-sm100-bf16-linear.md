@@ -2,7 +2,7 @@
 
 > 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（与 `docs/06`–`docs/64` 同快照）。
 > CUTLASS 侧走 MPK 该快照钉死的 submodule `deps/cutlass`，commit `f3fde583`
-> （`/ssd/mirage_mpk_build/deps/cutlass`）。
+> （`~/mirage_mpk_build/deps/cutlass`）。
 > `docs/32`（P118-1）在 §5.4 只给这份身体 **10 行摘要**、`docs/33` 走的是它的 FP8 兄弟
 > `fp8_group_gemm_sm100.cuh`、`docs/34` 走的是 FP8 兄弟 `linear_fp8_1d2d_sm100.cuh`。本文把它
 > **逐行打开**，是「SM100 手工线性 task 家族」的第三支（也是唯一 **BF16/无 block-scale** 的一支）。

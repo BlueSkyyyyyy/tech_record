@@ -1,7 +1,7 @@
 # UMMA SMEM 描述符构造的多路并置：DeepGEMM 自建母本 vs MPK 两份派生 vs MPK 手写 `make_desc`
 
 > 快照与坐标：MPK = `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`（完整 checkout
-> `/ssd/mirage_mpk_build`）；CUTLASS = 其 submodule `deps/cutlass` commit `f3fde583`；DeepGEMM =
+> `~/mirage_mpk_build`）；CUTLASS = 其 submodule `deps/cutlass` commit `f3fde583`；DeepGEMM =
 > `~/github/DeepGEMM` commit `057ca59`（`Public release 26/09/30`）。本文补 `docs/72`（P158-1）
 > §7 明留、且 ROADMAP「下一步候选」第一条点名的**「描述符构造并置」**——`docs/69`（P154-1）只走了
 > MPK 侧两份副本、`docs/72` 只覆盖了 `tcgen05.mma` **指令串**层，从无一篇把「**SMEM 描述符怎么算出来**」
@@ -281,7 +281,7 @@ DeepGEMM = MPK 全量 = MPK 子集 = `0x4000404000000048`（`start=72`、`sbo=64
 
 ## 9. 参考坐标（可核对）
 
-- 快照：`mirage-project/mirage` @ `f9eb70c`（本地 `/ssd/mirage_mpk_build`）；`deps/cutlass` @ `f3fde583`；
+- 快照：`mirage-project/mirage` @ `f9eb70c`（本地 `~/mirage_mpk_build`）；`deps/cutlass` @ `f3fde583`；
   DeepGEMM @ `057ca59`（`~/github/DeepGEMM`，容器内 `~/github/DeepGEMM`）。
 - **DeepGEMM 母本**（`deep_gemm/include/deep_gemm/mma/sm100.cuh`，160 行）：`make_smem_desc:14-40`、
   `make_sf_desc:42-49`、`replace_smem_desc_addr:51-55`、`get_atom_base:57-60`、

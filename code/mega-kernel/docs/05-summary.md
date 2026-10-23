@@ -6,6 +6,17 @@
 > 引用 MPK 论文快照 `~/github/ai-infra-book/experiments/ch05/05-08/sources/mpk-v2.txt` 的真实行号；
 > 本机实测均标注目标卡（H100 / sm90）。与 `../mega-moe/` 专题的 MoE 前反向实现细节不重复。
 
+## 30 秒版本
+
+- **动机（三笔账）**：kernel barrier 挡住跨算子流水、每 token 数百次 launch 的固定开销、中间张量
+  HBM 往返。三者同源——以「整个算子」为推进单位、由 host 反复 launch。
+- **定义（五条判据）**：单次 launch、常驻、跨算子融合、设备内协调、SM 级调度（C1–C5），
+  分水岭是 **C4/C5**。
+- **收益锚点**：Qwen3-8B/A100 上 vLLM/SGLang **14.5 ms/token** → MPK **12.5 ms**，硬件下界约
+  **10 ms**；README 对外宣称 **1.2×–6.7×**。
+- **代价**：常驻占住 SM、图必须静态、寄存器按最大 task 预留、设备内调度一旦挂起就没有报错。
+- **什么时候值得**：小模型 + 新卡 + 大量小算子串成的链；大 batch、GEMM-bound 的负载收益有限。
+
 ## 1. 原理一页纸
 
 ### 1.1 要解决什么：kernel-per-operator 的三类系统性损失

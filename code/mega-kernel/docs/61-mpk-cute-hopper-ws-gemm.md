@@ -2,7 +2,7 @@
 
 > 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（与 `docs/06`–`docs/60` 同快照）；
 > CUTLASS 侧走 MPK 钉死的 submodule `deps/cutlass` commit `f3fde583`
-> （`/ssd/mirage_mpk_build/deps/cutlass`，这条 checkout 有完整 submodule）。
+> （`~/mirage_mpk_build/deps/cutlass`，这条 checkout 有完整 submodule）。
 > `docs/07` 只在一行旁注里提过它（`gemm_ws_mpk.cuh` 注册为 `TASK_LINEAR_CUTLASS_HOPPER`）、
 > `docs/30` §5 走的是它的**单测 wrapper**（`tests/runtime_python/cute/hopper/gemm.cu`）、
 > `docs/58` 只借它一行确认「`smem_tma` 被 `cute/hopper/gemm_ws_mpk.cuh` 共用」——

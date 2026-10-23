@@ -9,7 +9,7 @@
 > 「骨架一致、差异集中在定义常量」的**目录级概括**：三兄弟本身（tp2 796 / tp4 787 / tp8 775 行）的
 > **TP 专属主循环与分区语义从未逐行打开**。本文补这一段。
 >
-> 快照 `mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `/ssd/mirage_mpk_build`，与
+> 快照 `mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `~/mirage_mpk_build`，与
 > `docs/06`–`docs/66` 同快照）。**纯源码走读（资料分析），无新实验**——三份身体是 SM100（`sm_100a`）
 > 专属，在目标卡 H100/sm90 不可执行。所有行号为快照静态事实。
 
@@ -308,7 +308,7 @@ K 主序、fp16」这一种布局成立；4 份复制意味着**改一处 swizzl
 
 ## 12. 参考坐标（可核对）
 
-- 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `/ssd/mirage_mpk_build`，与
+- 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `~/mirage_mpk_build`，与
   `docs/06`–`docs/66` 同快照）。
 - **基版（TP1 父版）**：`include/mirage/persistent_kernel/tasks/blackwell/mla_mtp_decode_sm100.cuh`——
   常量 `:36-62`（`NUM_HEADS=128` `:38`、`RD_DV=4`/`RD_TB=512`/`MAX_SK=32` `:54-56`、`MTP_SMEM_SIZE`

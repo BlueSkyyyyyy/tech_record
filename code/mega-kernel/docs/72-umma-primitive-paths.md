@@ -1,8 +1,8 @@
 # UMMA 原语多实现并置审计：DeepGEMM 自建 `ptx::` 层 vs MPK 的几条通路 vs CUTLASS atom
 
 > 快照与坐标：MPK = `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`（有完整 checkout 在
-> `/ssd/mirage_mpk_build`）；CUTLASS = MPK 该快照钉死的 submodule `deps/cutlass` commit `f3fde583`
-> （`/ssd/mirage_mpk_build/deps/cutlass`）；DeepGEMM = `~/github/DeepGEMM` commit `057ca59`
+> `~/mirage_mpk_build`）；CUTLASS = MPK 该快照钉死的 submodule `deps/cutlass` commit `f3fde583`
+> （`~/mirage_mpk_build/deps/cutlass`）；DeepGEMM = `~/github/DeepGEMM` commit `057ca59`
 > （`Public release 26/09/30`），其 vendored CUTLASS 在 `deep_gemm/include/cute`、submodule 在
 > `third-party/cutlass`。本文是 `docs/57`（P143-1，只走 MPK 的 `tasks/blackwell/` 原语层）与
 > ROADMAP「下一步候选」点名的**「DeepGEMM 自建 PTX UMMA 封装层与 MPK/CUTLASS 三条 UMMA 原语通路的

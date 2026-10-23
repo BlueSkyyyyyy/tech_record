@@ -1,6 +1,6 @@
 # MPK SM100 block-scaled FP8 的 SF 段并置走读：dense linear vs grouped MoE
 
-> 快照：`mirage-project/mirage` 分支 `mpk` commit `f9eb70c`（本地 `/ssd/mirage_mpk_build`）。
+> 快照：`mirage-project/mirage` 分支 `mpk` commit `f9eb70c`（本地 `~/mirage_mpk_build`）。
 > 对照 CUTLASS：`deps/cutlass` commit `f3fde583`。对照 DeepGEMM：`~/github/DeepGEMM` commit `057ca59`。
 > 目标卡 H100/sm90 **不可执行 SM100**：本文为**纯源码走读**，另配一个 **host 侧算术探针**
 > （`src/sf_segments_probe.cu`，`harness/sf_segments_probe.{sh,out.txt}`，device 3，未 launch kernel）。

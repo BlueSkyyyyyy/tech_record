@@ -2,7 +2,7 @@
 
 > 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（与 `docs/06`–`docs/61` 同快照）；
 > CUTLASS 侧走的是 MPK 该快照钉死的 submodule `deps/cutlass`，commit `f3fde583`
-> （`/ssd/mirage_mpk_build/deps/cutlass`，这条 checkout 有完整 submodule）。
+> （`~/mirage_mpk_build/deps/cutlass`，这条 checkout 有完整 submodule）。
 > `docs/60`（P146-1）把 `mma_traits_sm100.hpp` 里的**累加器 `tmem_frg`** 与 **block-scaled
 > scale-factor `tmem_sf_frg`** 求出来了；本文补上 `docs/60` §9 与 ROADMAP「下一步候选」都点名的
 > **其余两面**——**稀疏 MMA 的元数据 E**（`tmem_e_frg` / `tmem_e_frg_ws`）与 **weight-stationary 的

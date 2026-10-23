@@ -47,7 +47,7 @@
 
 - 容器 `kernel_lab`（`scripts/lab.sh`），目标卡 **H100 80GB HBM3 / sm90 / 132 SM**。
 - `nvcc` release 13.2（V13.2.78）；`torch 2.12.0a0`；`cmake 3.31.6`；`ninja`；`mpirun`（`/usr/local/mpi`）。
-- 构建根目录（容器内）：`/ssd/mirage_mpk_build`（快照 `f9eb70c` 的拷贝）。
+- 构建根目录（容器内）：`~/mirage_mpk_build`（快照 `f9eb70c` 的拷贝）。
 
 ### 1.2 步骤
 
@@ -89,7 +89,7 @@ successfully.` → `Successfully installed mirage-project-0.2.4`。校验 `pytho
 - 便不依赖任何 HuggingFace 权重：输入用随机张量，与 PyTorch 的 RMSNorm 逐元素比对。
 
 `compile()` 生成的 `test_rank0.cu` 与 `task_graph_rank0.json` 落在 `MIRAGE_HOME`（本机
-`/ssd/mirage_mpk_build/`），nvcc 命令行：
+`~/mirage_mpk_build/`），nvcc 命令行：
 
 ```
 -gencode=arch=compute_90a,code=sm_90a -DMPK_ENABLE_TMA -DMIRAGE_GRACE_HOPPER -DNDEBUG

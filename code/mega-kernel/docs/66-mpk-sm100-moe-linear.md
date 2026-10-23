@@ -1,7 +1,7 @@
 # MPK SM100 BF16 MoE linear device 身体走读：`moe_linear_sm100.cuh`（cp.async gather + register scatter 的 grouped GEMM）
 
 > 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（与 `docs/06`–`docs/65` 同快照）；
-> 本地 `/ssd/mirage_mpk_build`。CUTLASS 侧走快照钉死的 submodule `deps/cutlass`，commit `f3fde583`。
+> 本地 `~/mirage_mpk_build`。CUTLASS 侧走快照钉死的 submodule `deps/cutlass`，commit `f3fde583`。
 >
 > 本文走读 **BF16 SM100 MoE linear** device 身体 `tasks/blackwell/moe_linear_sm100.cuh`（827 行）——
 > `docs/65`（P151-1）逐行打开的是它的 **dense BF16 兄弟** `linear_sm100_mpk.cuh`（737 行），

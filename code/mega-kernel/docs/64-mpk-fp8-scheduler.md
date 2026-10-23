@@ -15,7 +15,7 @@
 > **SM100 手写持久化 task 的「内核内 tile 调度」那一层**——和本专题 P15-1/P22-1/P36-1/P37-1
 > （设备内调度）同轴，但发生在**单个 CTA 内部、对一组静态输出 tile** 上。
 >
-> 快照 `mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `/ssd/mirage_mpk_build`，
+> 快照 `mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `~/mirage_mpk_build`，
 > 与 `docs/06`–`docs/63` 同快照）；DeepGEMM 对照 `~/github/DeepGEMM` commit `057ca59`。
 > **纯源码走读 + 1 个 host 侧算术探针**——SM100（`sm_100f`）在目标卡 H100/sm90 不可执行。
 
@@ -352,7 +352,7 @@ EpilogueHeadSplits: 仅定义处（epilogue_utils.cuh:17），零实例化
 
 ## 11. 参考坐标（可核对）
 
-- 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `/ssd/mirage_mpk_build`）。
+- 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（本地 `~/mirage_mpk_build`）。
 - **主文件**：`include/mirage/persistent_kernel/tasks/blackwell/linear_fp8_sm100_scheduler.cuh`
   （`IndexType :8-12`；`get_num_1d_blocks_per_group :14-34`；`struct Scheduler` 模板 `:38-51`、
   字段 `:53-65`、`get_next_k_group :67-75`、构造 `:77-103`、`get_swizzled_block_idx :105-129`、

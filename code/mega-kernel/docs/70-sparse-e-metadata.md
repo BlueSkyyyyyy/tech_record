@@ -2,7 +2,7 @@
 
 > 快照：`mirage-project/mirage` 分支 `mpk`，commit `f9eb70c`（与 `docs/06`–`docs/69` 同快照）；
 > CUTLASS 侧走 MPK 该快照钉死的 submodule `deps/cutlass`，commit `f3fde583`
-> （`/ssd/mirage_mpk_build/deps/cutlass`）。本文补掉 `docs/62`（P148-1）§6 与 `docs/63`（P149-1）
+> （`~/mirage_mpk_build/deps/cutlass`）。本文补掉 `docs/62`（P148-1）§6 与 `docs/63`（P149-1）
 > §7 **明确留的两条尾巴**：前者只走到 E 的 TMEM trait 形状（`tmem_e_frg`）与「低 1 位 `sparse_id2`」，
 > 后者只走到 A 操作数的**类型/SMEM 布局**（`sparse_elem`/`SpAtom`/`sparse_smem_desc`）。两文都写着
 > 「E 的**硬件**编码（2:4 索引位序、每 atom 的 bit 打包）未展开」「哪些元素被丢弃、E 的索引如何选到
