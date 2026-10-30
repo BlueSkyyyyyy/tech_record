@@ -159,12 +159,15 @@ def max_area(height):
 
 ```cpp
 int maxArea(const std::vector<int> &height) {
-    int lo = 0, hi = static_cast<int>(height.size()) - 1, best = 0;
+    int lo = 0, hi = static_cast<int>(height.size()) - 1;
+    int best = 0;
     while (lo < hi) {
         int h = std::min(height[lo], height[hi]);
         best = std::max(best, h * (hi - lo));
-        if (height[lo] < height[hi]) ++lo;
-        else --hi;
+        if (height[lo] < height[hi])
+            ++lo;
+        else
+            --hi;
     }
     return best;
 }
@@ -229,11 +232,14 @@ std::vector<std::vector<int>> threeSum(std::vector<int> nums) {
         int lo = i + 1, hi = n - 1;
         while (lo < hi) {
             int s = nums[i] + nums[lo] + nums[hi];
-            if (s < 0) ++lo;
-            else if (s > 0) --hi;
-            else {
+            if (s < 0) {
+                ++lo;
+            } else if (s > 0) {
+                --hi;
+            } else {
                 res.push_back({nums[i], nums[lo], nums[hi]});
-                ++lo; --hi;
+                ++lo;
+                --hi;
                 while (lo < hi && nums[lo] == nums[lo - 1]) ++lo;
                 while (lo < hi && nums[hi] == nums[hi + 1]) --hi;
             }

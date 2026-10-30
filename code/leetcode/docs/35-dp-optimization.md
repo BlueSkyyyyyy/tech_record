@@ -15,6 +15,8 @@
 | 前缀和优化区间求和 | 813. 最大平均值和的分组 | 中等 |
 | 哈希表把「找前驱」降到 O(1) | 1218. 最长定差子序列 | 中等 |
 | 二分查找定位「可接的前一个」 | 1235. 规划兼职工作 | 困难 |
+| 二分 + 多一维「场次上限」 | 1751. 最多可以参加的会议数目 II | 困难 |
+| 二分找「交点」优化 min-max 转移 | 887. 鸡蛋掉落 | 困难 |
 | 单调队列优化「窗口最大值」 | 1425. 带限制的子序列和 | 困难 |
 | 单调队列优化「窗口最大值」 | 1696. 跳跃游戏 VI | 中等 |
 | 滚动数组做空间压缩 | 174. 地下城游戏 | 困难 |
@@ -69,18 +71,22 @@ def largest_sum_of_averages(nums, k):
 
 ```cpp
 double largestSumOfAverages(const std::vector<int> &nums, int k) {
-    int n = nums.size();
+    int n = static_cast<int>(nums.size());
     std::vector<double> pre(n + 1, 0.0);
     for (int i = 0; i < n; ++i) pre[i + 1] = pre[i] + nums[i];
+
     std::vector<std::vector<double>> dp(k + 1, std::vector<double>(n + 1, 0.0));
     for (int i = 1; i <= n; ++i) dp[1][i] = pre[i] / i;
-    for (int j = 2; j <= k; ++j)
+    for (int j = 2; j <= k; ++j) {
         for (int i = j; i <= n; ++i) {
             double best = 0.0;
-            for (int m = j - 1; m < i; ++m)
-                best = std::max(best, dp[j - 1][m] + (pre[i] - pre[m]) / (i - m));
+            for (int m = j - 1; m < i; ++m) {
+                double cand = dp[j - 1][m] + (pre[i] - pre[m]) / (i - m);
+                if (cand > best) best = cand;
+            }
             dp[j][i] = best;
         }
+    }
     return dp[k][n];
 }
 ```
@@ -175,17 +181,21 @@ def job_scheduling(start_time, end_time, profit):
 ```cpp
 int jobScheduling(const std::vector<int> &startTime, const std::vector<int> &endTime,
                   const std::vector<int> &profit) {
-    int n = startTime.size();
+    int n = static_cast<int>(startTime.size());
     std::vector<int> idx(n);
     for (int i = 0; i < n; ++i) idx[i] = i;
     std::sort(idx.begin(), idx.end(), [&](int a, int b) { return endTime[a] < endTime[b]; });
+
     std::vector<int> ends(n);
     for (int i = 0; i < n; ++i) ends[i] = endTime[idx[i]];
 
     std::vector<int> dp(n + 1, 0);
     for (int i = 1; i <= n; ++i) {
-        int j = idx[i - 1], s = startTime[j], p = profit[j];
-        int m = std::upper_bound(ends.begin(), ends.begin() + (i - 1), s) - ends.begin();
+        int j = idx[i - 1];
+        int s = startTime[j], p = profit[j];
+        // ends[0..i-2] 中 <= s 的个数 = 可接的最后一个工作下标 + 1
+        int m = static_cast<int>(std::upper_bound(ends.begin(), ends.begin() + (i - 1), s) -
+                                 ends.begin());
         dp[i] = std::max(dp[i - 1], dp[m] + p);
     }
     return dp[n];
@@ -195,6 +205,69 @@ int jobScheduling(const std::vector<int> &startTime, const std::vector<int> &end
 - **复杂度**：时间 O(n log n)（排序 + 每个工作一次二分），空间 O(n)。
 - **易错点**：先排序再二分；二分范围是「前 i-1 个」；开始时刻等于结束时刻不算重叠，用 `bisect_right` / `upper_bound`。
 - **相似题**：435. 无重叠区间、646. 最长数对链（贪心解，见贪心篇）；1751. 最多可以参加的会议数目 II（本题加一维「场次上限」）。
+
+### 1751. 最多可以参加的会议数目 II（困难）
+
+**题目**：`events[i] = [start, end, value]`，同一时间只能参加一个会议（后一个的 `start` 必须严格
+大于前一个的 `end`）。最多参加 `k` 个会议，求能获得的最大价值。
+
+**思路（在 1235 上加一维「选了几个」）**：
+按结束时间排序后，`dp[i][j]` = 只考虑前 `i` 个会议、最多选 `j` 个时的最大价值。对第 `i` 个会议：
+
+- 不选：`dp[i-1][j]`；
+- 选：`dp[p][j-1] + value_i`，其中 `p` 是「结束时间 < start_i」的最后一个会议下标。
+
+`p` 用二分求（结束时间已排序），把朴素 O(n) 的「枚举前驱」压成 O(log n)。状态从两维变成三维的
+「前 i 个 × 选 j 个」，但转移里那次查找还是同一个二分——**加维度不一定要换优化手段**。
+
+**代码**（`src/dp-optimization/maximum_number_of_events_that_can_be_attended_ii.py` / `.cpp`）：
+
+```python
+from bisect import bisect_left
+
+
+def max_value(events, k):
+    events = sorted(events, key=lambda e: e[1])
+    n = len(events)
+    ends = [e[1] for e in events]
+
+    # dp[i][j]：前 i 个会议、最多选 j 个
+    dp = [[0] * (k + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        start, _end, value = events[i - 1]
+        p = bisect_left(ends, start)  # 结束时间 < start 的会议个数
+        for j in range(1, k + 1):
+            dp[i][j] = max(dp[i - 1][j], dp[p][j - 1] + value)
+    return dp[n][k]
+```
+
+```cpp
+int maxValue(std::vector<std::vector<int>> events, int k) {
+    std::sort(events.begin(), events.end(),
+              [](const std::vector<int> &a, const std::vector<int> &b) { return a[1] < b[1]; });
+    int n = static_cast<int>(events.size());
+    std::vector<int> ends(n);
+    for (int i = 0; i < n; ++i) ends[i] = events[i][1];
+
+    std::vector<std::vector<int>> dp(n + 1, std::vector<int>(k + 1, 0));
+    for (int i = 1; i <= n; ++i) {
+        int start = events[i - 1][0];
+        int value = events[i - 1][2];
+        int p = static_cast<int>(std::lower_bound(ends.begin(), ends.end(), start) - ends.begin());
+        for (int j = 1; j <= k; ++j) {
+            dp[i][j] = std::max(dp[i - 1][j], dp[p][j - 1] + value);
+        }
+    }
+    return dp[n][k];
+}
+```
+
+- **复杂度**：排序 O(n log n)，DP O(n · k · log n)，空间 O(n · k)。
+- **易错点**：这里用的是 `bisect_left` / `lower_bound`（严格小于 `start`），与 1235 的
+  `bisect_right`（小于等于）不同——因为本题要求后一个会议的开始**严格大于**前一个的结束；
+  `dp[p][j-1]` 的 `p` 是「会议个数」，恰好也是「前 p 个」的下标，不用再 `+1`。
+- **相似题**：1235（k = 1 的退化版）；300 的「前驱」查找；410. 分割数组的最大值（另一类
+  「加一维 + 二分」的组合）。
 
 ---
 
@@ -239,7 +312,7 @@ def constrained_subset_sum(nums, k):
 
 ```cpp
 int constrainedSubsetSum(const std::vector<int> &nums, int k) {
-    int n = nums.size();
+    int n = static_cast<int>(nums.size());
     std::vector<int> dp(n, 0);
     std::deque<int> dq;
     int best = nums[0];
@@ -288,7 +361,7 @@ def max_result(nums, k):
 
 ```cpp
 int maxResult(const std::vector<int> &nums, int k) {
-    int n = nums.size();
+    int n = static_cast<int>(nums.size());
     std::vector<int> dp(n, 0);
     dp[0] = nums[0];
     std::deque<int> dq;
@@ -304,6 +377,9 @@ int maxResult(const std::vector<int> &nums, int k) {
 ```
 
 - **复杂度**：时间 O(n)，空间 O(n)（可进一步压到 O(k)）。
+- **易错点**：窗口是 `[i-k, i-1]`，所以「踢过期队首」的条件是 `dq[0] < i - k`（等于 `i-k` 仍可用）；
+  这里的 `dp[i]` 必须是「落到 i 的最大得分」，不能用 `max(0, …)` 截断——与 1425 允许重新开始不同，
+  本题每一格都必须踩；`dp[0]` 要单独初始化。
 - **相似题**：1425（上一题）、45. 跳跃游戏 II（贪心 / BFS 另一种思路，见贪心篇）、1186. 删除一次得到子数组最大和（状态机 + 滑窗）。
 
 ---
@@ -364,6 +440,98 @@ def calculate_minimum_hp_1d(dungeon):
 
 ---
 
+## 模式六：二分找「交点」，优化 min-max 转移
+
+**适用信号**：转移形如 `dp[i][j] = 1 + min_x max(f(x), g(x))`，其中 `f` 随 x 单调增、`g` 随 x 单调减。
+这是「最坏情况最小化」的典型形状（鸡蛋掉落、分割数组、猜数字大小 II 的某些变体）。
+
+**核心动作**：`max(递增, 递减)` 是**单峰**的，谷底就在两条线的交点附近。于是不用枚举 x，
+而是二分「当前该往哪边走」：`f(mid) > g(mid)` 说明「选大了」，把右界收；否则左界抬。
+二分过程中遇到的每个候选都拿来更新答案。
+
+### 887. 鸡蛋掉落（困难）
+
+**题目**：`k` 枚鸡蛋、`n` 层楼，存在临界楼层 `f`（≤ f 不碎，> f 碎）。每次选一层扔一枚蛋，
+碎了就不能再用。求**保证**能确定 `f` 的最少实验次数。
+
+**思路（DP + 二分优化转移）**：
+设 `dp[i][j]` = 用 `i` 枚蛋、确定 `j` 层所需的最少次数。枚举第一次扔的楼层 `x`：
+
+- 碎了 → 剩 `i-1` 枚蛋，答案在下面 `x-1` 层：`dp[i-1][x-1]`；
+- 没碎 → 还有 `i` 枚蛋，答案在上面 `j-x` 层：`dp[i][j-x]`。
+
+最坏情况取 max，再对所有 x 取 min：
+
+```
+dp[i][j] = 1 + min_x max(dp[i-1][x-1], dp[i][j-x])
+```
+
+直接枚举 x 是 O(k·n²)。注意第一项关于 x **递增**、第二项关于 x **递减**，`max` 是单峰的，
+二分交点即可把内层降到 O(log n)。边界上 `dp[0][j] = ∞`（没有蛋就确定不了任何楼层），
+否则「只有一枚蛋却从顶层扔」会被错误地算成 1 次。
+
+**代码**（`src/dp-optimization/super_egg_drop.py` / `.cpp`）：
+
+```python
+def super_egg_drop(k, n):
+    dp = [[0] * (n + 1) for _ in range(k + 1)]
+    for floors in range(1, n + 1):
+        dp[0][floors] = float("inf")  # 没有蛋就确定不了任何楼层
+    for eggs in range(1, k + 1):
+        for floors in range(1, n + 1):
+            lo, hi = 1, floors
+            best = float("inf")
+            while lo <= hi:
+                mid = (lo + hi) // 2
+                broken = dp[eggs - 1][mid - 1]
+                intact = dp[eggs][floors - mid]
+                best = min(best, 1 + max(broken, intact))
+                if broken > intact:
+                    hi = mid - 1
+                else:
+                    lo = mid + 1
+            dp[eggs][floors] = best
+    return dp[k][n]
+```
+
+```cpp
+int superEggDrop(int k, int n) {
+    // dp[eggs][floors]：eggs 枚蛋、确定 floors 层需要的最少次数
+    const int INF = 1000000000;
+    std::vector<std::vector<int>> dp(k + 1, std::vector<int>(n + 1, 0));
+    for (int floors = 1; floors <= n; ++floors) dp[0][floors] = INF;
+
+    for (int eggs = 1; eggs <= k; ++eggs) {
+        for (int floors = 1; floors <= n; ++floors) {
+            int lo = 1, hi = floors, best = INF;
+            while (lo <= hi) {
+                int mid = lo + (hi - lo) / 2;
+                int broken = dp[eggs - 1][mid - 1];
+                int intact = dp[eggs][floors - mid];
+                int worst = 1 + std::max(broken, intact);
+                if (worst < best) best = worst;
+                if (broken > intact) {
+                    hi = mid - 1;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            dp[eggs][floors] = best;
+        }
+    }
+    return dp[k][n];
+}
+```
+
+- **复杂度**：时间 O(k · n log n)，空间 O(k · n)。
+- **易错点**：`dp[0][j]` 必须是 `∞`，否则一枚蛋也能「一次搞定」；循环顺序是 `eggs` 外层、
+  `floors` 内层，保证 `dp[eggs][floors-mid]` 已算（同一行、更小的 floors）；二分只用来定位谷底，
+  答案要在二分过程中顺手取 min，不能只取最后一次。
+- **相似题**：410. 分割数组的最大值、1011. 在 D 天内送达包裹（「答案二分 + 可行性判断」，见二分篇）；
+  375. 猜数字大小 II（同样是 min-max 转移，但数据范围小，直接枚举即可）。
+
+---
+
 ## 规律总结
 
 1. **优化前先写朴素 DP**。看清转移里慢在哪一步：求和 → 前缀和；求固定窗口最值 → 单调队列；
@@ -373,12 +541,18 @@ def calculate_minimum_hp_1d(dungeon):
 3. **哈希表适合「按值状态」**：当 DP 只关心「某个值出现过的最优解」时，用字典按值存，
    天然合并重复、O(1) 查询（1218）。若关心的是「一段值域内的最值」，那要上树状数组 / 线段树。
 4. **二分适合「有序 + 找位置」**：不重叠区间类问题先按结束时间排序，再二分找可接的区间（1235），
-   把 O(n²) 的「枚举所有前驱」降成 O(n log n)。
-5. **滚动数组是空间换…不，是「省空间不牺牲时间」**：只要某一行只依赖上一行（或相邻格），
+   把 O(n²) 的「枚举所有前驱」降成 O(n log n)；加一维「最多选 k 个」时，二分照旧（1751），
+   **加维度不等于换优化手段**。
+5. **滚动数组省的是空间，不是时间**：只要某一行只依赖上一行（或相邻格），
    就能把 O(n²) 压到 O(n)。**方向由依赖决定**：依赖左 / 上 → 正序，依赖右 / 下 → 倒序，
    并给越界补哨兵值。
 6. **别过度优化**：如果朴素 DP 已经是 O(n) 或数据范围允许 O(n²)，就不要硬上数据结构——
    优化引入的常数和 bug 风险，常常不值得。先让它对，再让它快。
+7. **min-max 转移看「单峰」**：`1 + min_x max(f(x), g(x))` 里若 f 增、g 减，就可以二分交点，
+   把枚举 x 的 O(n) 降成 O(log n)（887）。这和「答案二分」不是一回事：那里二分的是答案，
+   这里二分的是**转移里的决策变量**。
+8. **优化到最后都是「换个数据结构存中间结果」**：前缀和存区间和、单调队列存窗口最值、
+   哈希表存值 → 最优解、树状数组存值域计数。看到转移里反复求同一个量，先问「它能不能预存」。
 
 > 延伸阅读：DP 的状态定义与基础转移见「动态规划（一）」；单调队列的原型见「队列与双端队列」；
 > 前缀和的更多用法见「前缀和与差分」。

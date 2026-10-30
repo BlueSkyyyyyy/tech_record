@@ -40,6 +40,8 @@ struct TreeNode {
 | 返回「两个方向」的状态 | 1372. 二叉树中的最长交错路径 | 中等 |
 | 返回「覆盖状态机」 | 968. 监控二叉树 | 困难 |
 | 返回「是否 BST + 区间聚合」 | 1373. 二叉搜索子树的最大键值和 | 困难 |
+| 返回「子树极值」，在每个节点处结算 | 1026. 节点与其祖先之间的最大差值 | 中等 |
+| 一般树（孩子数组）+ 拼两条最长的臂 | 2246. 相邻字符不同的最长路径 | 困难 |
 
 > 一句话记住树形 DP：**后序遍历 → 每个节点返回一组状态 → 用自己的值和孩子的状态做转移。
 > 难点永远在「状态到底要几个、分别代表什么」。**
@@ -333,11 +335,15 @@ def min_camera_cover(root):
 ```cpp
 int cameras = 0;
 
+// 0 未覆盖 / 1 已覆盖 / 2 装摄像头
 int dfs(TreeNode *node) {
     if (node == nullptr) return 1;
     int left = dfs(node->left);
     int right = dfs(node->right);
-    if (left == 0 || right == 0) { ++cameras; return 2; }
+    if (left == 0 || right == 0) {
+        ++cameras;
+        return 2;
+    }
     if (left == 2 || right == 2) return 1;
     return 0;
 }
@@ -393,7 +399,14 @@ def max_sum_bst(root):
 ```
 
 ```cpp
-struct Info { bool is_bst; long long mn; long long mx; long long sum; };
+struct Info {
+    bool is_bst;
+    long long mn;
+    long long mx;
+    long long sum;
+};
+
+long long best = 0;
 
 Info dfs(TreeNode *node) {
     if (node == nullptr) return {true, LLONG_MAX, LLONG_MIN, 0};
@@ -407,11 +420,186 @@ Info dfs(TreeNode *node) {
     }
     return {false, 0, 0, 0};
 }
+
+int maxSumBST(TreeNode *root) {
+    best = 0;
+    dfs(root);
+    return static_cast<int>(best);
+}
 ```
 
 - **复杂度**：时间 O(n)，空间 O(h)。
 - **易错点**：边界空节点要用 `+∞ / -∞`（C++ 用 `LLONG_MAX / LLONG_MIN`），否则单节点判断会失败；一旦子树不是 BST，向上只能报 `False`，不能继续用它的聚合值。
 - **相似题**：98. 验证二叉搜索树（判断单个子树是否 BST，是本题的退化版）；333. 最大 BST 子树（求**节点数**最多，把 `sum` 换成 `size` 即可）。
+
+---
+
+## 模式七：返回「子树极值」，在每个节点处结算
+
+**适用信号**：题目问的是「树上任意一对（祖先，后代）」的某种差值 / 距离，而不是某条特定路径。
+这类题不必真的自上而下把祖先传下去——把子树信息自下而上收上来，每个节点天然就是子树里所有
+节点的祖先。
+
+**核心动作**：递归返回子树的 `(最小值, 最大值)`。回到当前节点时，用「当前值」与这两个极值做差，
+就覆盖了「以当前节点为祖先」的所有配对；取全局最大即可。
+
+### 1026. 节点与其祖先之间的最大差值（中等）
+
+**题目**：给定二叉树，对任意一对「祖先 a、后代 b」，求 `|a.val - b.val|` 的最大值。
+
+**思路（后序返回子树极值）**：
+每对祖先—后代都唯一对应「某个节点是另一个节点的祖先」。与其自上而下传祖先，不如自下而上：
+让 `dfs` 返回**当前子树的最小值和最大值**，回到当前节点时，它一定是子树里所有节点的祖先，
+于是
+
+```
+以当前节点为祖先的最大差 = max(|node.val - 子树最小值|, |node.val - 子树最大值|)
+```
+
+每个节点处结算一次，取全局最大。为什么这样不漏：任意一对 `(祖先 u, 后代 v)`，递归回到 `u` 时
+`v` 还在 `u` 的子树里，`u` 的子树极值一定覆盖了 `v.val`，所以这组差一定被算到。
+
+**代码**（`src/tree-dp/maximum_difference_between_node_and_ancestor.py` / `.cpp`）：
+
+```python
+def max_ancestor_diff(root):
+    best = 0
+
+    def dfs(node):
+        nonlocal best
+        if node is None:
+            return (float("inf"), float("-inf"))
+        l_min, l_max = dfs(node.left)
+        r_min, r_max = dfs(node.right)
+        low = min(l_min, r_min, node.val)
+        high = max(l_max, r_max, node.val)
+        best = max(best, abs(node.val - low), abs(node.val - high))
+        return (low, high)
+
+    dfs(root)
+    return best
+```
+
+```cpp
+int best = 0;
+
+std::pair<int, int> dfs(TreeNode *node) {
+    if (node == nullptr) return {INT_MAX, INT_MIN};
+    auto [l_min, l_max] = dfs(node->left);
+    auto [r_min, r_max] = dfs(node->right);
+    int low = std::min({l_min, r_min, node->val});
+    int high = std::max({l_max, r_max, node->val});
+    best = std::max({best, std::abs(node->val - low), std::abs(node->val - high)});
+    return {low, high};
+}
+
+int maxAncestorDiff(TreeNode *root) {
+    best = 0;
+    dfs(root);
+    return best;
+}
+```
+
+- **复杂度**：时间 O(n)，空间 O(h)。
+- **易错点**：空节点要返回 `(+∞, -∞)` 这对「空区间」哨兵，否则会把 0 混进极值；`best` 初值为 0
+  即可（差值非负），但 C++ 里 `best` 是全局变量，**每次调用前要清零**。
+- **相似题**：1373（同样返回聚合信息，只是聚合的是「是否 BST + 区间」）；124 / 543 的「单臂」
+  思路则适合求路径，而不是求任意祖先—后代对。
+
+---
+
+## 模式八：一般树（孩子数组）上拼两条臂
+
+**适用信号**：题目给的不是 `left/right`，而是 `parent` 数组或邻接表；要求的仍是「树上最长路径」。
+二叉树的那套 `左臂 + 右臂` 结论照样成立，只是「两条臂」要改成「最长的两条孩子臂」。
+
+**核心动作**：按 `parent` 建出孩子数组，后序 `dfs`。每个节点在孩子里挑**最长的两条合法臂**，
+用 `top1 + top2 + 1`（节点数）更新全局最优；返回给父节点的只有 `top1 + 1`。
+
+### 2246. 相邻字符不同的最长路径（困难）
+
+**题目**：给定 `parent[i]`（节点 i 的父节点，`parent[0] = -1`）和每个节点的字符 `s[i]`，
+求一条路径，使路径上**相邻节点字符都不同**，返回最长路径的节点数。
+
+**思路（取最长的两条臂）**：
+这是「最长同值路径」在一般树上的版本，区别有两个：
+
+1. 孩子不再只有两个，要遍历孩子数组；
+2. 长度按**节点数**算，单条臂本身也要把起点节点计入。
+
+`dfs` 返回「以当前节点为起点、向下延伸的最长合法单链节点数」：
+
+```
+arm = 1 + max(孩子的 dfs 值，且 s[孩子] != s[当前])
+```
+
+返回之前，把当前节点能接的最长两条臂拼起来，得到 `top1 + top2 + 1` 个节点，用它更新全局最优。
+只能拼两条——路径在当前节点处最多分叉一次；返回给父节点也只能带一条臂。
+
+**代码**（`src/tree-dp/longest_path_with_different_adjacent_characters.py` / `.cpp`）：
+
+```python
+def build_children(parent):
+    children = [[] for _ in range(len(parent))]
+    for node in range(1, len(parent)):
+        children[parent[node]].append(node)
+    return children
+
+
+def longest_path(parent, s):
+    children = build_children(parent)
+    best = 0
+
+    def dfs(node):
+        nonlocal best
+        top1 = top2 = 0
+        for child in children[node]:
+            arm = dfs(child)
+            if s[child] == s[node]:
+                continue
+            if arm > top1:
+                top1, top2 = arm, top1
+            elif arm > top2:
+                top2 = arm
+        best = max(best, top1 + top2 + 1)
+        return top1 + 1
+
+    dfs(0)
+    return best
+```
+
+```cpp
+int longestPath(const std::vector<int> &parent, const std::string &s) {
+    int n = static_cast<int>(parent.size());
+    std::vector<std::vector<int>> children(n);
+    for (int node = 1; node < n; ++node) children[parent[node]].push_back(node);
+
+    int best = 0;
+    std::function<int(int)> dfs = [&](int node) {
+        int top1 = 0, top2 = 0;
+        for (int child : children[node]) {
+            int arm = dfs(child);
+            if (s[child] == s[node]) continue;
+            if (arm > top1) {
+                top2 = top1;
+                top1 = arm;
+            } else if (arm > top2) {
+                top2 = arm;
+            }
+        }
+        best = std::max(best, top1 + top2 + 1);
+        return top1 + 1;
+    };
+    dfs(0);
+    return best;
+}
+```
+
+- **复杂度**：时间 O(n)，空间 O(n)（孩子数组 O(n)，递归栈 O(h)）。
+- **易错点**：`top1`、`top2` 的更新顺序不能写反（先用旧 `top1` 顶替 `top2`）；不合法的手臂（字符相同）
+  要直接跳过，不能参与比较；答案按节点数算，所以是 `top1 + top2 + 1`，返回时是 `top1 + 1`。
+- **相似题**：124. 二叉树中的最大路径和、543. 二叉树的直径、687. 最长同值路径（同一「两臂拼接」
+  骨架，只是载体是二叉树）；1372 把「方向」也放进了状态。
 
 ---
 
@@ -421,7 +609,8 @@ Info dfs(TreeNode *node) {
    返回的「状态」就是本题的 DP 状态，状态定义错了，转移一定写不对。
 2. **状态数量由约束决定**：父子互斥 → 返回「选 / 不选」（337）；资源搬运 → 返回「余额」（979）；
    最长路径 → 返回「单臂」（687）或「双向状态」（1372）；覆盖 / 支配 → 返回「状态机」（968）；
-   整树性质判断 → 返回「判断所需的全套聚合信息」（1373）。
+   整树性质判断 → 返回「判断所需的全套聚合信息」（1373）；求「祖先—后代」的极值 → 返回子树
+   极值（1026）。
 3. **全局最优常在「某个节点处结算」**，而不是根节点。路径类（687、1372）必须每个节点都更新答案，
    因为最高点可能在任意位置。
 4. **返回给父节点的信息要「够用且不过量」**：路径类不能把左右臂之和传上去（父节点接不了两条臂），
@@ -429,6 +618,11 @@ Info dfs(TreeNode *node) {
 5. 空节点的返回值要单独想清楚（`(0,0)` / `+∞,-∞` / 「已覆盖」），它是很多边界 bug 的源头。
 6. 树形 DP 的复杂度几乎都是 **O(n) 时间**：每个节点只算一次。若写成对每个节点再扫一遍子树，
    就退化成 O(n²)，那通常意味着返回值设计得不对。
+7. **「祖先—后代」类问题不必真的往下传信息**。把子树的最小 / 最大值收上来，每个节点都能当一次
+   「祖先」结算答案（1026），比自顶向下带参数更省事。选哪种写法只看一件事：所需信息能不能
+   从子树汇总出来——能，就用后序。
+8. **孩子多于两个时，模式照样成立**。二叉树里的「左臂 + 右臂」换成「最长的两条孩子臂」
+   （2246），核心约束不变：返回给父节点的只能有一条臂，分叉只在当前节点处结算一次。
 
 > 延伸阅读：线性 / 序列 / 背包 / 区间 / 状态机 DP 见「动态规划（一）」；
 > 树的基础遍历与后序返回值见「二叉树」。
