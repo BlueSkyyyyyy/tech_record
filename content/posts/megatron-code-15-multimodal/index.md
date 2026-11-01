@@ -8,128 +8,116 @@ weight: 15
 series: ["megatron-code"]
 ---
 
-这是「Megatron-LM 源码精读」系列的第十五篇。前面 14 篇把语言模型的单模态训练管线（并行拓扑、重计算、优化器、MoE、蒸馏等）讲完了，本篇转向多模态（Vision-Language Model, VLM），聚焦 Megatron 内置的 LLaVA 实现（分析基准 commit `f713506ce`）：**一张图 + 一段文本，如何变成一条统一的 token 序列喂进语言模型**。核心代码在 `megatron/core/models/multimodal/llava_model.py`（1378 行）、`megatron/core/models/vision/`、`megatron/core/tokenizers/vision/`。
+一张图加一段文本，怎么变成一条统一的 token 序列喂进语言模型？变长的图像 embedding 塞进定长文本序列时，position_ids、labels、loss_mask 各自要怎么挪？
+
+一句话结论：**MCore 的 LLaVA 不是新模型，而是「两个现成模型 + 一个投影层 + 一次 scatter」；全部精巧之处集中在 `_preprocess_data` 的那一次索引写回。**
+
+上一篇讲 MoE 的专家并行，本篇换到另一条支线：把视觉编码器当成一个普通子网络接进语言模型。
 
 ---
 
-## 1. 总览：三个组件拼成一个模型
+## 1. 三个组件，靠两个字符串分派
 
-LLaVA 这类 VLM 的经典结构是「视觉编码器 → 投影层 → 语言模型」。Megatron 的 `LLaVAModel`（`llava_model.py:57-521`）正是这个结构，`__init__` 里组装了三块（`llava_model.py:222-403`）：
+结论：**结构是教科书式的「视觉编码器 → 投影层 → 语言模型」，但每个组件具体实例化成什么，由 `language_model_type` 和 `vision_model_type` 两个字符串决定。**
 
-| 组件 | 类 | 来源 |
+| 组件 | 实现 | 分派依据 |
 |---|---|---|
-| 语言模型 | `GPTModel` 或 `HybridModel` | `llava_model.py:244-261` |
-| 视觉编码器 | `CLIPViTModel` / `RADIOViTModel` / HF 模型 | `llava_model.py:289-365` |
-| 投影层 | `MultimodalProjector` | `llava_model.py:381-387` |
+| 语言模型 | `GPTModel` / `HybridModel` | `nemotron5-hybrid`、`nemotron6-moe` 前缀走 Hybrid |
+| 视觉编码器 | `CLIPViTModel` / `RADIOViTModel` / HF 模型 | `vision_model_type` |
+| 投影层 | `MultimodalProjector` | `vision_projection_type` |
 
-还有一块可选的音频分支：`sound_model` + `sound_projection`（`llava_model.py:168-169`），本篇以图像为主、音频在末尾带一句。
+视觉侧的分派很直白（`llava_model.py:278` 起）：`clip`/`siglip`/`internvit` 走 `CLIPViTModel`；`radio`/`radio-g`/`cradio-g` 走 `RADIOViTModel`（三者图像上限、class token 数、embedder bias 各不相同）；`hf://` 前缀直接交给 `build_hf_model`，其余类型抛 `ValueError`。
 
-语言模型根据 `language_model_type` 决定：`nemotron5-hybrid` / `nemotron6-moe` 走 `HybridModel`（`llava_model.py:223-242`），其余走普通的 `GPTModel`（`llava_model.py:244-261`）。视觉编码器根据 `vision_model_type` 分派：`clip/siglip/internvit` 走 `CLIPViTModel`（`llava_model.py:278-300`），`radio*` 走 `RADIOViTModel`（`llava_model.py:301-359`），`hf://` 前缀则透传到 HuggingFace 加载（`llava_model.py:360-365`）。
+语言侧只看前缀：`nemotron5-hybrid` / `nemotron6-moe` 建 `HybridModel`，其余一律 `GPTModel`。
 
-## 2. 视觉编码器：CLIP ViT 的 Megatron 化
+还有一条容易漏掉的约束：开 SP 或 CP 时，语言模型必须用 TE 的 `DotProductAttention`（hybrid 两个类型豁免），CP 还额外要求 TE ≥ 1.10 且 CP 组大小与配置一致（`llava_model.py:189` 附近）。
 
-`CLIPViTModel`（`clip_vit_model.py:26-202`）是标准的 ViT，分三步：
+## 2. 视觉编码器：三个子类型共用一套 ViT
 
-1. **patch 卷积** `conv1`（`clip_vit_model.py:115-122`）：`Conv2d(3, hidden, kernel=patch_dim, stride=patch_dim)` 把图像切成 patch 并升维。
-2. **class token + 位置编码**（`clip_vit_model.py:124-139`，forward 里 `clip_vit_model.py:177-192`）：可选的 `class_token` 拼在序列最前，再加上可学习的 `position_embeddings`。
-3. **Transformer 堆栈** `self.decoder = TransformerBlock(...)`（`clip_vit_model.py:147-154`）：复用了语言模型同一套 layer spec 机制，`pre_process=True, post_process=False`。
+结论：**`CLIPViTModel` 就是标准 ViT，`clip`/`siglip`/`internvit` 的差别只有三处：`ln_pre` 有没有、conv 有没有 bias、有没有 class token。**
 
-forward（`clip_vit_model.py:164-202`）就是 `conv → reshape/permute → 拼 class token → 加位置编码 → LN → Transformer → LN_post`。值得注意的是 `siglip` 子树没有 class token（`clip_vit_model.py:61-63`），`internvit` 用 `conv_bias`。
+结构三段：`conv1` 做 patch 卷积（kernel=stride=patch_dim，`clip_vit_model.py:115`）；可选 class token 拼在序列最前，再加可学习 `position_embeddings`（`:126`）；`self.decoder = TransformerBlock(...)` 复用语言模型那套 layer spec（`:147`）。
 
-ViT 内 seq_len 的计算公式（`clip_vit_model.py:85`）：
+差异在于：`clip` 建 `ln_pre`、conv 无 bias、padding 0；`siglip` 只建 `ln_post`、conv 有 bias、padding `valid`，并且**不支持 class token**（`class_token_len` 必须为 0，`clip_vit_model.py:62` 直接 assert）；`internvit` 有 conv bias、无 `ln_pre`。
 
-```
-seq_length = (img_h/patch_dim) * (img_w/patch_dim) + (class_token_len if add_class_token else 0)
-```
+ViT 内的序列长度就是 `num_patches + class_token_len`（`:85`）。而「一张图占几个 token」由 `get_num_image_embeddings` 单独算，因为还要叠加 `pixel_shuffle`（每 4 个 patch 并成 1 个 token，通道 ×4）和 tile tag（依 tokenizer 加 5 或 6 个位置）。结果存进 `self.img_seq_len`（`llava_model.py:405`），后面铺 embedding 全靠它。
 
-## 3. 投影层：把视觉维度对齐到语言维度
+## 3. 投影层：两种类型，且必须挂在语言模型的 TP 组上
 
-`MultimodalProjector`（`multimodal_projector.py:15-91`）就是把 vision encoder 的 `hidden_size` 映射到 language model 的 `hidden_size`。支持两种类型（`multimodal_projector.py:47-65`）：
+结论：**投影层只做维度对齐，但它的并行组必须和语言模型一致，否则 hidden 维对不上。**
 
-- `mlp`：一个完整 `MLP`（含激活）
-- `affine`：单个 `linear_fc1` 线性层
+两种类型（`multimodal_projector.py:47` 起）：`mlp` 建一个完整 `MLP`（带激活）；`affine` 只建一个 `linear_fc1`（`skip_bias_add=True`，bias 在 forward 里加回去）。
 
-投影层的关键约束是**走 TP**——`tp_group=self.pg_collection.tp`（`llava_model.py:386`），因为语言模型是 TP 切分权重，投影输出的并行度要与之对齐。forward 里对输出做 `make_viewless_tensor`（`multimodal_projector.py:87-89`）是为了配合 pipeline schedule 的 `deallocate_output_tensor`。
+TP 组直接取 `self.pg_collection.tp`（`llava_model.py:386`）：编码器、投影层、语言模型共用同一套 process group，而不是各建各的——因为投影层的下游就是语言模型的 embedding 接口。输出还刻意过了一次 `make_viewless_tensor`，代码注释写明原因：encoder 产出 view 张量时，pipeline schedule 的 `deallocate_output_tensor` 会报错。
 
-## 4. 核心：`_preprocess_data` —— 把图像 token 拼进文本序列
+## 4. 核心：`_preprocess_data` 的一次 scatter
 
-这是 LLaVA 实现最精妙的部分（`llava_model.py:494-759`）。docstring 用一个小例子说清了输入输出约定（`llava_model.py:518-523`）：
+结论：**图像 token 在文本里只占「一格」负 index 占位，前向时被展开成 `img_seq_len` 个 embedding；所有位置/label/mask 的调整都是为了这次展开。**
+
+docstring 给的例子就是完整契约（`llava_model.py:518`）：
 
 ```
-input_ids = [0, 1, -200, 2, 3]     # -200 是 <image> token 占位
-labels    = [1, -200, 2, 3, 4]
--- 处理后 --
-final_embeddings = [0, 1, image_embeddings, 2, 3]   # image_embeddings 长 img_seq_len
-final_labels     = [1, -100, 2, 3, 4]               # 图像位置 label 用 -100 忽略
-final_loss_mask  = [1, 0, 0, 1, 1]                  # 图像位置不参与 loss
+input_ids = [0, 1, -200, 2, 3]     labels = [1, -200, 2, 3, 4]
+-->
+final_embeddings = [0, 1, image_embeddings, 2, 3]   # 长度 img_seq_len
+final_labels     = [1, -100, 2, 3, 4]
+final_loss_mask  = [1, 0, 0, 1, 1]
 ```
 
-`IMAGE_TOKEN = "<image>"`，默认 `DEFAULT_IMAGE_TOKEN_INDEX = -200`（`llava_model.py:47-53`）。一个关键概念是 `image_token_index` 只是**占位符**：文本被 tokenize 后，`<image>` 位置用一个负数 index 标记，forward 时把它替换成真正的 `img_seq_len` 个视觉 embedding。
+`-100` 出现在 label 的第 1 格而不是第 2 格，因为 labels 是 input_ids **左移一位**的结果：第 2 格是图像 token，预测它的那一格是第 1 格，所以被抹掉。`final_loss_mask` 里连图像的前一格（文本 token）也是 0——不让文本去预测首个图像 token。
 
-处理流程（`_preprocess_data` 内部）：
+位置重排靠一次 cumsum：图像占位在累加里的步长是 `num_image_tiles * img_seq_len`，文本 token 的步长是 1，前缀和减 1 就是新位置。
 
-1. 找出 `input_ids == image_token_index` 的位置（`llava_model.py:575`）。
-2. 按 `num_image_tiles` 统计每样本的图像块数，算出拼图后的 `seq_len`（`llava_model.py:579-595`）。
-3. 用 `cumsum` 生成新的 `position_ids`，把文本 token 的位置往后挪 `img_seq_len` 格（`llava_model.py:600-607`）。
-4. 构造 `images_mask`，标出哪些位置放图像 embedding（`llava_model.py:624-637`）。
-5. 组装 `final_embedding`（pre_process 时）：先填文本 embedding，再把 `image_embeddings` 按 `images_mask` 铺进去（`llava_model.py:640-695`）。
-6. 组装 `final_labels`/`final_loss_mask`（post_process 时）：图像位置置 `-100`/`0`（`llava_model.py:697-737`）。
+$$
+\text{pos} = \mathrm{cumsum}(\text{step}) - 1
+$$
 
-一个细节：label 是**左移一位**的（`llava_model.py:610-622, 716-719`），且图像 token 前紧邻的文本 token 不预测首个图像 token，所以 loss mask 要被清掉（`llava_model.py:724-737`）。
+拿到 `pos` 后先 `final_embedding[b, text_position_ids] = language_embeddings[b, non_image_indices]` 写文本，再用 `images_mask` 布尔索引写图像（`llava_model.py:665`）。
 
-### 4.1 流水线并行下的分工
+这里藏着一个坑：图像 embedding 的写入顺序是 `image_embeddings.permute(1, 0, 2).reshape(-1, h)`，即按 `[tile, tile 内 token]` 行优先展开；它必须与 `images_mask` 中 True 的行优先顺序严格一致，否则 tile 会错位。
 
-`_preprocess_data` 对 pipeline 很敏感（`llava_model.py:528-556`）：
+`num_image_tiles` 也在这里消费：先按每个样本的图像 token 数把 tile 数组切段求和，再算 `seq_lens = tiles * img_seq_len - num_images + text_seq_len`（`:587`）。
 
-- 首个 chunk（`pre_process=True`）：只更新 embedding
-- 中间 chunk（都 False）：什么都不做
-- 末个 chunk（`post_process=True`）：只更新 label/loss mask
+### 4.1 pipeline 下只做一半
 
-所以「替换图像 token」只在**第一个 stage** 发生，后面的 stage 拿到的是已经拼好的 embedding 序列。
+三段分工写得很明确：首段 `pre_process=True` 只更新 embedding；中间段两个 flag 都是 False，直接返回 `None`；末段 `post_process=True` 只更新 labels/loss_mask。所以「替换图像 token」只在第一个 stage 发生。
 
-### 4.2 序列/上下文并行的再切分
+### 4.2 SP/CP 再切分：shard_factor 有三种组合
 
-`_process_embedding_token_parallel`（`llava_model.py:761-904`）在 SP/CP 开启时，把拼好的 `[s,b,h]` 序列按 `tp_size`（SP）或 `cp_size*2`（CP）切成 shard，先 pad 到可整除（`llava_model.py:802-853`），再 `scatter_to_sequence_parallel_region`（`llava_model.py:899-902`）。这里的坑是：**文本 + 视觉 token 混合后的总长不天然对齐 shard_factor**，所以要手动 pad（`llava_model.py:804-849`）。
+结论：**混合序列长度不天然整除，必须先 pad 再切；CP 有两套完全不同的分发路径。**
 
-## 5. `forward` 主流程：一条龙
+`shard_factor` 分三种：CP+SP 为 `tp*cp*2`，只 CP 为 `cp*2`，只 SP 为 `tp`（`llava_model.py:793` 起）。整除不了就补零，labels 补 `-100`、loss_mask 补 0。
 
-`forward`（`llava_model.py:942-1290`）串起了全部：
+CP 下：SBHD 布局走通用的 `get_batch_on_this_cp_rank`（zigzag）；THD 布局走 TE 的 `thd_get_partitioned_indices` 取索引再 `index_select`，这条要求 TE ≥ 1.10。
 
-1. **视觉编码**（`llava_model.py:1012-1192`）：`vision_model(images)` 得 `[num_tiles, img_seq_len, h_vision]`。若开 `pixel_shuffle` 则先做像素重排（`llava_model.py:1119-1128, 1152-1168`，实现见 `pixel_shuffle` 函数 `llava_model.py:1342-1378`，源自 InternVL，把 patch 数降到 1/4、维度 ×4）。
-2. **投影**（`llava_model.py:1176-1178`）：`vision_projection(image_embeddings)` → `[img_seq_len, num_tiles, h_language]`。
-3. **tile tagging**（可选，`llava_model.py:906-940`）：给每个 tile 前拼 `<tile_N>` 标签 token（NVLM 的做法）。
-4. **文本编码**（`llava_model.py:1233-1246`）：`language_model.embedding(input_ids_text)`，其中 image token index 先被替换成 0（`llava_model.py:1236`）。
-5. **拼接**（`llava_model.py:1256-1270`）：调 `_preprocess_data` 把图像 embedding 插进文本序列。
-6. **SP/CP 切分**（`llava_model.py:1272-1277`）：必要时分发到各 rank。
-7. **语言模型前向**（`llava_model.py:1279-1288`）：`language_model(decoder_input=combined_embeddings, labels=new_labels, ...)`，拿 logits 或 loss。
+两个顺序细节容易被忽略：CP 分发要求序列在 **dim=1**，所以 `_preprocess_data` 末尾只在 `cp_size == 1` 时把结果转成 `[s, b, h]`；SP 的 `scatter_to_sequence_parallel_region` 又是在 CP 切完之后沿 dim 0 再切一刀。
 
-> 注意视觉分支和文本分支的并行切分是**分开**的：视觉模型走自己的 `pg_collection`（通常只在第一个 PP stage 存在，`add_encoder` 控制，见 docstring `llava_model.py:80-83`），文本模型走语言模型的并行配置。两者通过投影层衔接。
+## 5. forward 的流水线
 
-## 6. 图像 token 数量：`get_num_image_embeddings`
+1. 视觉编码 + 可选 `pixel_shuffle`（`llava_model.py:1012` 起，`pixel_shuffle` 函数在 `:1342`）。
+2. 投影：`vision_projection(image_embeddings)`，输出 `[img_seq_len, num_tiles, h_language]`。
+3. 可选 tile tagging：给每个 tile 前拼 `<tile_N>` 标签（NVLM 做法，`:906`），当前实现断言只支持单图。
+4. 文本 embedding：先把 image token index 换成 0 再 embed（`:1236`），避免负 index 进词表。
+5. `_preprocess_data` 拼接 → SP/CP 切分 → `language_model(decoder_input=...)`；注意 `position_ids=None`，位置已经隐含在拼接后的顺序里。
 
-`get_num_image_embeddings`（`clip_vit_model.py:205-260`）回答了「一张图占几个 token」：
+## 6. 词表侧：`<image>` → -200 不在 tokenizer 里
 
-```
-num_patches = (img_h/patch_dim) * (img_w/patch_dim)
-per_tile = num_patches + (class_token_len if keep_class_token else 0)
-若 pixel_shuffle: per_tile *= 0.25
-若 tile_tags: per_tile += (5 或 6，依 tokenizer 而定)
-```
+这是一个常见误解。`MegatronMultimodalTokenizer` 只是 HuggingFace tokenizer 的包装，`convert_tokens_to_ids` 直接透传（`multimodal_tokenizer.py:309`），不会产生负数 id；它的真正职责是 prompt 格式化——`_apply_image_tag`（`:190`）把 `<image>` 包成 `<img><image></img>`，前后两个 tag 是词表里的普通 token，占位的只有 `<image>` 一格。
 
-它在 `LLaVAModel.__init__` 里被调用，结果存进 `self.img_seq_len`（`llava_model.py:405-416`），后续 `_preprocess_data` 用它来铺图像 embedding。
+`<image>` → `-200` 只发生在 `MegatronNullMultimodalTokenizer`（预分词数据路径）：它的 `convert_tokens_to_ids` 把 `<image>` 换成 `image_token_id`，默认值才是 `-200`。
 
-## 7. 数据/词表侧：`<image>` 特殊 token
+模型侧并不关心 id 怎么来的，它只认构造函数传进来的 `image_token_index`（默认 `-200`）；换数据管线时这个值要跟着改。
 
-多模态不只是在模型层，词表层也要处理。`megatron/core/tokenizers/vision/` 下的 `MegatronMultimodalTokenizer`（`libraries/multimodal_tokenizer.py:55`）是核心：
+## 7. 小结
 
-- 维护 `<image>` / `<video>` / `<so_embedding>` 等特殊 token（对应 `llava_model.py:51-53`）。
-- `tokenize`（`multimodal_tokenizer.py:205`）里 `_apply_image_tag`（`:190`）把对话里的图像标记替换成 image token。
-- `convert_tokens_to_ids`（`:309`）把 `<image>` 映射到那个负数 index（`-200`），正是 `LLaVAModel` 里 `image_token_index` 的来源。
+- **结构三层不变**：视觉编码器 + 投影层 + 语言模型，两个字符串决定实例化哪个类。
+- **ViT 差异只有三处**：`ln_pre`、conv bias、class token；`siglip` 强制无 class token。
+- **投影层挂语言模型的 TP 组**，输出过 `make_viewless_tensor` 以适配 pipeline 的激活释放。
+- **`_preprocess_data` 的契约**：负 index 占位、cumsum 重排位置、label 左移后抹掉预测图像的那一格、图像前一格 loss_mask 置 0。
+- **SP/CP 前必须 pad**，且 CP 要求序列在 dim=1，因此转置只在 `cp_size == 1` 时做。
 
-## 8. 小结
+---
 
-Megatron 的多模态实现没有发明新机制，而是**把 VLM 拆成「视觉编码器」和「语言模型」两个子网络，复用同一套 Transformer layer spec / 并行拓扑 / pipeline 基础设施**，再用一个投影层把它们缝起来。精华集中在 `_preprocess_data`——它用「负 index 占位 + 位置重排」的方式，把变长的图像 embedding 干净地嵌进定长的文本序列，同时正确维护了 label 左移和 loss mask。
+**版本提示（2026-10）**：上游大幅重构了多模态——新增通用 `vit_model.py`（`ViTModel`/`QwenVLViTModel`/`KimiViTModel`，运行时不依赖 HF）与 `encoder_registry.py`（按 `vision_model_type` 集中管理 patch_dim、图像尺寸、归一化与整套 TransformerConfig），`llava_model.py` 接近重写（2100+ 行）；SP/CP 逻辑抽到 `multimodal/context_parallel.py`，并把 CP 接进了 MIMO（#7758）。「编码器 + 投影层 + LM」的结构未变。
 
-下一篇是本系列的收尾篇，讲 **Context Parallel（上下文并行）细节**：序列被切成多段分给不同 rank 后，attention 怎么跨段通信（all-gather K/V 还是 ring）、`context_parallel` 的 schedule 与前几篇的 TP/SP/PP 如何组装，也就是《[Context Parallel 细节]({{< relref "megatron-code-16-context-parallel" >}})》。
-
-（本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`；涉及文件：`megatron/core/models/multimodal/llava_model.py`、`megatron/core/models/vision/clip_vit_model.py`、`megatron/core/models/vision/multimodal_projector.py`、`megatron/core/tokenizers/vision/libraries/multimodal_tokenizer.py`。）
+**行号基线**：commit f713506ce（2026-08-31）。上游 dev 已前进到 2026-10-29（+1208 commits），行号会漂移，定位请以符号名为准。

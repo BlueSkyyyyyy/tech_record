@@ -8,111 +8,136 @@ weight: 12
 series: ["megatron-code"]
 ---
 
-上一篇[《优化器》]({{< relref "megatron-code-11-optimizer" >}})收束在「下一步看 fused 算子」。本篇就进入 MCore 的 `megatron/core/fusions/` 目录——一窝把多个 PyTorch 原语合并成单个 CUDA kernel 的算子，包括 `fused_layer_norm.py`、`fused_softmax.py`、`fused_cross_entropy.py`、`fused_bias_gelu.py` 等。
+上一篇[《优化器》]({{< relref "megatron-code-11-optimizer" >}})收束在「下一步看 fused 算子」。本篇回答一个问题：`megatron/core/fusions/` 里那些「fused」，到底把什么和什么融在了一起，又在什么条件下会悄悄退回未融合路径。
 
-它们共享同一个动机和同一套工程范式，本篇不逐个展开，只抓三点：
-
-1. **为什么要把算子写进 CUDA**——GPU 的瓶颈在哪，fuse 到底省了什么；
-2. **一个典型例子**：`FusedLayerNorm` 的两档 kernel 与「固定 shape 白名单」；
-3. **优雅降级范式**：`FusedScaleMaskSoftmax` 的「能 fuse 就 fuse、不能就退回 torch」，以及 fused cross entropy 的 TP 协同。
+**一句话结论**：这个目录里的「融合」至少有四个来源——预编译 CUDA 扩展、Triton kernel、`@jit_fuser` 编译的逐点算子、只把通信合并掉的 cross entropy；共同点只有一个接口范式：用 `torch.autograd.Function` 接进计算图，不满足条件就退回。
 
 ---
 
-## 1. 问题背景：为什么不是「写 PyTorch 让编译器帮你并」
+## 1. 问题：融合省的是带宽，不是算力
 
-直觉上「把 layer norm、softmax 写成几个 PyTorch 调用」最省事。但 attention 里 `scale → mask → softmax` 是三个分离的 kernel，产量再高也要在中间 tensor 上做一次完整的写 + 读。而 transformer 的这些逐元素/归一化算子，**瓶颈几乎都在 memory bandwidth，不在算力**——数据每多一次 global memory 往返就多一次浪费。
+attention 里的 `scale → mask → softmax` 是三个独立 kernel，中间 tensor 每次都要写回 global memory 再读出来。这类逐元素/归一化算子算力密度极低，**瓶颈在 memory bandwidth**，多一次往返就多一次纯浪费。
 
-fuse 的价值就是这两点：
+所以 fuse 只买两样东西：少启动两次 kernel；让中间结果留在寄存器或共享内存里。它不会让 FLOPs 变少——若某环节本来是 compute-bound，融合收益会迅速趋零。
 
-- **省 launch 开销**：一次 kernel 取代三次 kernel 的启动与调度；
-- **省访存往返**：中间结果（缩放后的 logits、减均值后的残差）不再写回 global memory，直接在寄存器/共享内存里流转。
+代价是灵活性和自动求导。MCore 的补偿方式是：kernel 外面套一层 `torch.autograd.Function`，把「能不能用」写成一个显式判断，判断失败就走未融合路径。
 
-但一旦写死一个 CUDA kernel，就丢掉了 PyTorch 的灵活性和自动求导，于是 MCore 的 fused 算子几乎都遵循同一条铁律：**用 `torch.autograd.Function` 把 CUDA kernel 接进自动求导，并保留「不满足约束就降级到纯 torch」的后路。** 本章核心就是拆这条铁律的三处落地。
+## 2. 机制：四类「fused」，同一个降级范式
 
----
+### 2.1 先分清你在读哪一种 fused
 
-## 2. 现象：`FusedLayerNorm` 的「两档 + 白名单」
+同名目录下的实现手段差别很大，混着读必然读错：
 
-`FusedLayerNorm`（`megatron/core/fusions/fused_layer_norm.py:30-169`）把「减均值、除标准差、乘 gamma 加 beta」压成一个 kernel。看它的 forward（`fused_layer_norm.py:131-168`）：
+| 类别 | 代表 | 融合手段 |
+| --- | --- | --- |
+| 预编译 CUDA 扩展 | `fused_softmax.py`、`fused_layer_norm.py` | `*_cuda` / apex extension |
+| Triton kernel | `fused_mrope.py`、`fused_mhc_kernels.py` | `@triton.jit`，运行时编译 |
+| 编译器融合 | `fused_bias_swiglu.py`、`fused_bias_gelu.py` | `@jit_fuser`（默认 `torch.compile`） |
+| 通信合并 | `fused_cross_entropy.py` | 两次 all-reduce 合成一次 |
+
+一个判据是看 `import` 写在哪：CUDA 扩展的 `import xxx_cuda` 全在函数体内，只有真被调用时才 ImportError。
+
+`@jit_fuser`（`megatron/core/jit.py`）默认就是 `torch.compile`，torch < 2.2 才用 `torch.jit.script`，也能被 `disable_jit_fuser()` 降成空装饰器。所以「加了 autograd.Function」不等于「有 CUDA kernel」——swiglu 那层包 Function 是为了 fp8 存储、CPU offload 和重算，不是为了 kernel。
+
+### 2.2 降级谓词不一定叫 `is_kernel_available`
+
+softmax 用一个返回布尔值的 `is_kernel_available`；`fused_mrope.py` 换了个写法，用 `get_fused_mrope_unavailable_reason`（`fused_mrope.py:149`）返回「为什么不能用」的字符串：没装 Triton、dtype 与算力不匹配、张量不在 CUDA 上，都能给出具体原因。
+
+形式不同，作用一样：把「硬件/依赖/形状不满足」这类信息集中在一处，调用点只做一次判断。
+
+## 3. 代码落点：三个符号
+
+### 3.1 `FusedLayerNorm`：24 个值的白名单
+
+`FusedLayerNorm`（`fused_layer_norm.py:30`）有两档 kernel。persistent 档（apex `FastLayerNormFN`）只支持一份写死的列表，共 24 个值（`fused_layer_norm.py:73-98`）：
+
+1024 / 1536 / 2048 / 2304 / 3072 / 3840 / 4096 / 5120 / 6144 / 8192 / 10240 / 12288 / 12800 / 15360 / 16384 / 18432 / 20480 / 24576 / 25600 / 30720 / 32768 / 40960 / 49152 / 65536
+
+它不是「1024 到 65536 的 2 的幂」，中间混着 1536、2304、3840、12800 这类非 2 幂值。
+
+判定顺序：构造参数 `persist_layer_norm` 先被 `self.config.persist_layer_norm` 覆盖，然后才检查「hidden_size 在不在列表里、apex 的 persistent 模块能不能 import」，任一不满足就置 False（`fused_layer_norm.py:99-101`）。
+
+没有 apex 不是降级，是构造期报错：
 
 ```python
-# megatron/core/fusions/fused_layer_norm.py:135-149（节选）
-if self.persist_layer_norm:
-    output = FastLayerNormFN.apply(input, weight, self.bias, self.eps, ...)
-    output = make_viewless_tensor(inp=output, requires_grad=input.requires_grad, keep_graph=True)
-else:
-    return FusedLayerNormAffineFunction.apply(input, weight, self.bias, self.hidden_size, self.eps, ...)
+if not persist_layer_norm and not HAVE_FUSED_LAYER_NORM:
+    raise ValueError(f'Apex must be installed to use FusedLayerNorm.')
 ```
 
-两个关键观察：
+（`fused_layer_norm.py:103-105`）两档都依赖 apex：不在白名单只退到 apex 的普通 fused layer norm，**没有纯 PyTorch 分支**（源码里还留着 `# TODO: Add pytorch only layer norm`）。
 
-1. **两档 kernel**：`persist_layer_norm`（apex 的 `FastLayerNormFN`，persistent kernel，常驻复用）和普通 `FusedLayerNormAffineFunction`（apex 的 fused layer norm）。persistent kernel 更快，但只支持一组固定的 `hidden_size`（`fused_layer_norm.py:73-98` 那个白名单：1024/2048/.../65536），不在列表里或没装 apex 就退回非 persistent 档（`fused_layer_norm.py:100-101`）。
-2. **viewless tensor 的坑**（`fused_layer_norm.py:143-149`）：`FastLayerNormFN` 返回的 tensor 带 `_base` 字段（是个 view），会触发 `schedule.py` 里 `deallocate_output_tensor()` 的报错，所以用 `make_viewless_tensor` 把它「洗白」成非 view。
+### 3.2 `FusedScaleMaskSoftmax`：一个布尔函数决定走不走 CUDA
 
-还有 `zero_centered_gamma`（`fused_layer_norm.py:133`）：`weight = self.weight + 1 if zero_centered_gamma else self.weight`，把 gamma 存成「围绕 0 的偏移」以改善数值稳定性。这些都是「为了快/稳，代价是接口变得挑剔」的具体例证。
+`forward` 只有一行判断（`fused_softmax.py:233-236`）：`is_kernel_available(mask, *input.size()) and softmax_offset is None`。所以「代码里有融合路径」不等于「跑的是融合 kernel」。
 
----
-
-## 3. 根因：`FusedScaleMaskSoftmax` 的「条件融合」
-
-softmax 更有代表性，因为它是「scale + mask + softmax」三个操作，且 mask 有 causal / pad 之分。核心在 `FusedScaleMaskSoftmax`（`megatron/core/fusions/fused_softmax.py:179-297`）的 `forward`：
+第一层是六个开关（`fused_softmax.py:253-260`，注释为笔者所加）：
 
 ```python
-# megatron/core/fusions/fused_softmax.py:233-236
-if self.is_kernel_available(mask, *input.size()) and softmax_offset is None:
-    return self.forward_fused_softmax(input, mask)
-else:
-    return self.forward_torch_softmax(input, mask, softmax_offset)
-```
-
-**这是整个 fused 算子模块最值得背下来的一段**：「先问 kernel 支不支持，支持走融合，不支持退回 torch」。`is_kernel_available`（`fused_softmax.py:238-270`）列的约束非常具体——这也是「写死 kernel」的代价的直观体现：
-
-```python
-# megatron/core/fusions/fused_softmax.py:253-259（节选）
 self.scaled_masked_softmax_fusion   # 用户开了融合
-and self.input_in_float16           # 输入必须是 fp16/bf16
-and 16 < sk <= 4096                 # key 长度 16~4096
-and sq % 4 == 0                     # sq 是 4 的倍数
-and sk % 4 == 0                     # sk 是 4 的倍数
-and attn_batches % 4 == 0           # (b*np) 是 4 的倍数
+and self.input_in_float16           # fp16 或 bf16
+and 16 < sk <= 4096                 # sk 严格大于 16
+and sq % 4 == 0 and sk % 4 == 0
+and attn_batches % 4 == 0           # b * np
 ```
 
-任何一条不满足（例如序列长度不是 4 的倍数、超长上下文 sk>4096、或者用了自定义 `softmax_offset`），就整段退回 `forward_torch_softmax`（`fused_softmax.py:299`），用 `torch.nn.functional.softmax` 老老实实算。真正的融合 kernel 藏在几个 `torch.autograd.Function` 子类里：
+`16 < sk` 是严格不等号（注释里的 `16 ~ 2048` 已过时）。第二层容易漏：还要拿 CUDA 侧算出的 `batch_per_block` 做整除检查，causal 看 `attn_batches % batch_per_block`，非 causal 看 `sq % batch_per_block`，都过才返回 True（`fused_softmax.py:261-269`）。
 
-- `ScaledUpperTriangMaskedSoftmax`（`fused_softmax.py:11-57`）：causal 自注意力的「scale + 上三角 mask + softmax」，forward 里 `import scaled_upper_triang_masked_softmax_cuda` 调手写 CUDA（`fused_softmax.py:31-34`），backward 同样调 CUDA（`fused_softmax.py:50-55`）；
-- `ScaledMaskedSoftmax`（`fused_softmax.py:60`）：带显式 mask 的版本；
-- `ScaledSoftmax`（`fused_softmax.py:108`）：纯缩放 softmax。
+三个 Function 对应三种 mask 语义：`ScaledUpperTriangMaskedSoftmax`（`fused_softmax.py:11`）是 causal，自己在 kernel 里生成上三角 mask，因此要求 `sq == sk`，并把 4D 输入 `view` 成 3D 再进 kernel；`ScaledMaskedSoftmax`（`:60`）吃显式 additive mask；`ScaledSoftmax`（`:108`）无 mask。
 
-**注意三者的共性**：都是 `torch.autograd.Function`，forward 里 `import xxx_cuda` 调手写 kernel，同时把结果 `save_for_backward` 存起来给 backward 复用——这样手写 CUDA 就无缝接进了自动求导图，上层调用方无感知。
+三者 forward 都只 `save_for_backward(softmax_results, scale_t)`，backward 也只把 softmax 结果和 scale 喂回 CUDA。这不是偷懒：softmax 的 Jacobian 完全由输出决定，
 
----
+$$
+\frac{\partial L}{\partial x} = y \odot \left( \frac{\partial L}{\partial y} - \left\langle \frac{\partial L}{\partial y}, y \right\rangle \mathbf{1} \right)
+$$
 
-## 4. 解法：fused cross entropy 里的 TP 协同
+因而既不需要保存原始 logits，也不需要重算 mask。
 
-最后一类值得讲的是 `fused_cross_entropy.py` 的 `_VocabParallelCrossEntropy`（`megatron/core/fusions/fused_cross_entropy.py:87`）。它融合的是「logits 求 softmax + 取 target 位置的 -log」这个 cross entropy，但加了一个分布式维度——vocab 被 TP 切分，每个 rank 只有一部分 logits：
+### 3.3 `fused_vocab_parallel_cross_entropy`：融合的是通信
 
-```python
-# megatron/core/fusions/fused_cross_entropy.py:110-124（节选，docstring）
-# In the fused case, tensors are batches to invoke a single
-# kernel ...
-def backward(ctx, grad_output):
-    ...
-```
+这里最容易混的是两个同名类。`megatron/core/tensor_parallel/cross_entropy.py` 的 `_VocabParallelCrossEntropy` 是通用版，带 `label_smoothing`，做**两次** SUM all-reduce（predicted logits 和 sum_exp 各一次）。
 
-`fused_vocab_parallel_cross_entropy`（`fused_cross_entropy.py:136`）这个入口，把「每个 TP rank 各自算局部 softmax 的 max/sum（`calculate_logits_max`，`fused_cross_entropy.py:13`）→ all-reduce 出全局 max/sum → 各自算局部 loss → all-reduce 累加」这一串，用几个小函数（`calculate_predicted_logits` / `calculate_cross_entropy_loss` / `calculate_gradients`，`fused_cross_entropy.py:26-85`）拆开。它说明 fused 不只是「单卡算得快」，还包括**把 TP 通信（all-reduce）编排进融合流程，减少中间越界张量的物化**。
+`fusions/fused_cross_entropy.py` 的版本没有 label smoothing，真正的改动是把两者 `torch.cat` 成一条再 all-reduce 一次（`fused_cross_entropy.py:42`、`:112-114`），外加把逐点部分挂上 `@jit_fuser`。
 
-这一节不必深究每个函数行号，重点是补全图景：`megatron/core/fusions/` 里剩余那些 `fused_bias_gelu.py`、`fused_bias_swiglu.py`、`fused_bias_dropout.py`、`fused_rotary`、`fused_mrope`、`fused_mla_yarn_rope_apply`，走的全是同一条路——`autograd.Function` + 手写 CUDA + 条件降级。
+`fused_vocab_parallel_cross_entropy`（`fused_cross_entropy.py:136`）只是 `_VocabParallelCrossEntropy.apply` 的薄封装——两者不是并列的两种写法，而是「通用版」和「融合版」。
 
----
+通信顺序：先对局部 `logits_max` 做 MAX all-reduce 得全局 max，再对 `[predicted_logits, sum_exp_logits]` 做一次 SUM all-reduce，最后本地算
+
+$$
+L = \log \sum_j e^{x_j - m} - (x_t - m)
+$$
+
+`m` 是跨 TP 的全局 max，所以各 rank 的局部求和能安全地先减后加；loss 不需要再 all-reduce 一次，因为分母已经是全局和。
+
+## 4. 工程细节与坑
+
+**view 必须洗掉。** persistent 档返回的是 view（带 `_base` 字段），会触发 `schedule.py` 里 `deallocate_output_tensor()` 的断言，所以要 `make_viewless_tensor` 洗一遍（`fused_layer_norm.py:143-149`）。
+
+**gamma 可以存成偏移。** `zero_centered_gamma` 时 forward 用 `weight + 1`，参数初始化改成全零（`fused_layer_norm.py:124-133`）：把 gamma 存成围绕 0 的偏移，改善数值稳定性。
+
+**apex 版本差异靠反射兜。** 两档都用 `inspect.getfullargspec` 探测 apex 是否支持 `memory_efficient` 参数，是跨版本兼容的土办法。
+
+**fallback 不是一句 `F.softmax`。** `forward_torch_softmax`（`fused_softmax.py:299`）里有三个分支。有 `window_size` 就生成滑窗 causal mask；causal 且 `mask is None` 且 `sq > 1` 才现造默认 causal mask，`sq == 1` 故意保留 `mask=None`（decode / KV cache 路径）。
+
+第三支是 `softmax_offset`：传了它就走 `SoftmaxOne`（attention sink 的 off-by-one softmax），这条路径永不融合。
+
+**两条会直接报错的前置断言。** `forward` 断言输入是 4 维；构造函数断言 `self.scale is None or softmax_in_fp32`（`fused_softmax.py:217`），即只要带了 scale，softmax 就必须在 fp32 下算。
+
+**CE 默认关闭，而且梯度 dtype 写死。** `cross_entropy_loss_fusion` 默认 False；打开后还要 `cross_entropy_fusion_impl == 'native'`（默认值）才落到这个文件，`'te'` 走 TE，`'linear'` 把 CE 融进输出层 GEMM。baseline 的 `calculate_gradients` 还把梯度硬转 `torch.bfloat16`（`fused_cross_entropy.py:82`）。
 
 ## 5. 小结
 
-- **fuse 省 bandwidth 和 launch，不省计算**：逐元素/归一化算子是 memory-bound，融合是为了少读写 global memory、少启动 kernel。
-- **铁律是 `torch.autograd.Function` + 条件降级**：手写 CUDA 接进自动求导，`is_kernel_available` 一条条对约束，不满足就 `forward_torch_softmax` 退回纯 torch（`fused_softmax.py:233-270`）。
-- **`FusedLayerNorm` 两档 kernel**：persistent（固定 hidden_size 白名单）+ 非 persistent（apex fallback），外加 `zero_centered_gamma` 和 `make_viewless_tensor` 洗 view 的坑（`fused_layer_norm.py:100-149`）。
-- **mask 三态对应三个 autograd 函数**：`ScaledUpperTriangMaskedSoftmax`（causal）/ `ScaledMaskedSoftmax`（pad）/ `ScaledSoftmax`（无 mask）（`fused_softmax.py:11-108`）。
-- **fused 也管 TP 编排**：`fused_vocab_parallel_cross_entropy` 把「TP 局部 softmax + all-reduce」融合进 CE 计算，减少稠密中间量（`fused_cross_entropy.py:13-136`）。
+- 融合的收益上限由 memory-bound 程度决定；它省带宽和 launch，不省 FLOPs。
+- 手写 kernel 分三条路线：预编译 CUDA 扩展（softmax）、apex（layer norm）、Triton（mrope 等）；其余多是 `@jit_fuser` 编译的逐点算子。
+- `FusedLayerNorm` 的 persistent 白名单是 24 个具体值；不在名单只退到非 persistent 档，两档都要求装 apex。
+- `is_kernel_available` 除六个开关还有一层 `batch_per_block` 整除检查；`softmax_offset` 一出现必定 fallback。
+- `fused_cross_entropy` 的价值是把两次 TP all-reduce 合成一次，且默认关闭。
 
-下一篇讲 **强化学习**：MCore 里 RLHF/GRPO 的 rollout、reward 模型打分、和策略/价值更新，怎么和「训练框架 + 数据并行」这套既有基础设施拼起来，也就是《[强化学习]({{< relref "megatron-code-13-rl" >}})》。
+下一篇讲 **强化学习**：rollout 采样、GRPO 的组内归一化，怎么和既有训练循环拼起来，也就是《[强化学习]({{< relref "megatron-code-13-rl" >}})》。
 
-（本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/core/fusions/fused_layer_norm.py`、`megatron/core/fusions/fused_softmax.py`、`megatron/core/fusions/fused_cross_entropy.py`。）
+---
+
+**版本提示（2026-10）**：dev 给 `is_kernel_available` 补了一条 `self.window_size is None`（apex kernel 不支持滑窗），并把 CE 的 `jit_fuser` 拆成 gather / exp / scale 三段、去掉写死的 bf16 转换。
+
+`fusions/` 新增 `fused_gated_norm.py`、`fused_row_copy.py`、`fused_mtp_prefix.py`、`fused_mtp_tv.py`、`fused_moe_residual_add.py`。「autograd.Function + 条件降级」的范式未变。
+
+**行号基线**：commit f713506ce（2026-08-31）。上游 dev 已前进到 2026-10-29（+1208 commits），行号会漂移，定位请以符号名为准。

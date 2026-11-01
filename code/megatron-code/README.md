@@ -1,9 +1,10 @@
 # Megatron-LM 源码精读专题
 
-对应博客系列「Megatron-LM 源码精读」（`content/posts/megatron-code-01` ~ `megatron-code-16`）。
+对应博客系列「Megatron-LM 源码精读」（`content/posts/megatron-code-01` ~ `megatron-code-26`）。其中 01–16 为源码精读主线，17–23 为补充篇，24–25 为估算方法篇，26 为上游更新速览。
 
 - 参考仓库：`~/Megatron-LM`
 - 分析基准 commit：`f713506cea2e7705dd2ebb00c5c58a046ff974fe`（2026-08-31，`26.04-alpha.rc1-814-gf713506ce`）
+- 更新篇（26）对照的上游 commit：`c4220af3a62e851585afdac6f5aa7496163afdaf`（2026-10-29，`dev`）
 - 文章中源码引用格式：`文件路径:行号`，必要时附 GitHub 永久链接：
   `https://github.com/NVIDIA/Megatron-LM/blob/f713506cea2e7705dd2ebb00c5c58a046ff974fe/<path>#L<n>`
 
@@ -20,6 +21,10 @@
   - `14-moe.md` —— MoE（第 14 篇）
   - `15-multimodal.md` —— 多模态（第 15 篇）
   - `16-cp-details.md` —— Context Parallel 细节（第 16 篇）
+
+第 17–26 篇没有独立的 analysis-notes：这几篇直接以源码、上游 `docs/` 与 git diff 为依据写作，行号仍在基准 commit 上核对。
+
+第 17–26 篇没有独立的 analysis-notes：这几篇直接以源码、上游 `docs/` 与 git diff 为依据写作，行号仍在基准 commit 上核对。
 
 ## 注意
 

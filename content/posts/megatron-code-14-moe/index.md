@@ -8,127 +8,125 @@ weight: 14
 series: ["megatron-code"]
 ---
 
-上一篇[《强化学习》]({{< relref "megatron-code-13-rl" >}})讲了 RL 后训练。本篇回到模型结构本身，精读 MoE（Mixture-of-Experts）的实现——`megatron/core/transformer/moe/` 目录，核心是 `moe_layer.py`（MoELayer，901 行）、`router.py`（路由，1061 行）、`experts.py`（专家实现）、`moe_utils.py`（aux loss）。
+上一篇[《强化学习》]({{< relref "megatron-code-13-rl" >}})讲了 RL 后训练。本篇回到模型结构本身：`megatron/core/transformer/moe/` 里，MoE 靠什么支撑「稀疏激活」——路由、搬运 token、均衡负载、专家计算，各自落在哪个符号上。
 
-MoE 一句话：每个 token 只走少数几个专家，用「稀疏激活」换「更大参数总量」。它给训练框架带来的三个新难题正是本篇主线：
-
-1. **token 怎么路由**：每个 token 选哪几个专家、权重多少；
-2. **跨设备怎么搬运 token**：专家分散在不同 rank，token 要先 all-to-all 发过去、算完再 all-to-all 回来；
-3. **怎么防止专家饿死/撑死**：负载不均衡时怎么办（aux loss + capacity/dropless）。
+**一句话结论**：MoE 的复杂度几乎不在 GEMM，而在「搬运 + 排序」；默认配置下连 all-to-all 都不用（all-gather + reduce-scatter），aux loss 也默认根本不开。
 
 ---
 
-## 1. 问题背景：稀疏激活 vs 密集硬件
+## 1. 问题：稀疏激活撞上密集硬件
 
-密集 transformer 里，每个 token 都要过完整的 FFN；MoE 把 FFN 换成 E 个专家，每个 token 只进 top-k 个（k 通常 1~8，E 通常 8~256），其余专家对这个 token 是「关着」的。好处是总参数量能放大 E 倍而单 token 计算量几乎不变；代价是：
+密集 transformer 里每个 token 过完整 FFN；MoE 把它换成 E 个专家，每个 token 只进 top-k 个（`moe_router_topk` 默认 2）。总参数量能放大到 E 倍，单 token 计算量基本不变。
 
-- 路由本身引入了「软性」的稀疏性，需要额外机制保证专家负载均衡（否则路由可能把 token 全塞给少数专家）；
-- token 的分布是动态的、数据依赖的，**每一层、每个 step 都不一样**，这跟前一篇 checkpoint 篇里「静态切分」截然不同。
+代价是两件新麻烦：路由是数据依赖的，**每层、每步的 token 分布都不一样**，需要额外机制防止专家饿死或撑死；token 又散落在不同 rank 的专家上，需要跨设备搬运。
 
-所以 MoE 的代码骨架是四段式流水线 + 一套路由/均衡机制。
+所以代码骨架是「四段流水线 + 一套路由/均衡机制」。
 
----
+## 2. 机制：四段流水线，但通信与均衡各有前提
 
-## 2. 现象：MoELayer 的「route → dispatch → compute → combine」四段
+### 2.1 docstring 四步与真实方法名
 
-`MoELayer.forward` 的 docstring 直接点明四步（`megatron/core/transformer/moe/moe_layer.py:676-681`）：
+`MoELayer.forward` 的 docstring 直接给了四步（`moe_layer.py:678-682`）：
 
 ```python
-# megatron/core/transformer/moe/moe_layer.py:678-681（docstring）
 # 1. Routing & Preprocessing: Route tokens to the assigned experts and prepare for dispatch.
 # 2. Dispatch: Tokens are sent to the expert devices using communication collectives.
 # 3. Expert Computation: Experts process the dispatched tokens.
-# 4. Combine: Expert outputs are sent back to their original devices.
+# 4. Combine: The outputs from the experts are combined and returned.
 ```
 
-对应的方法分别是 `route`/`preprocess`（`moe_layer.py:451-467`）、`dispatch`（`moe_layer.py:520-529`）、`routed_experts_compute`（`moe_layer.py:593`）、`combine`（`moe_layer.py:627-634`）+ `postprocess`（`moe_layer.py:636`）。关键看 dispatch 和 combine 两段是怎么依赖通信的：
+对应的方法：`route`（`moe_layer.py:451`）、`preprocess`（`:469`）、`dispatch`（`:520`）、`routed_experts_compute`（`:593`）、`combine`（`:627`）、`postprocess`（`:636`）。第四步被拆成两个方法，共享专家的相加就在 `postprocess` 里。
+
+还有一处顺序容易看漏：`forward` 里最先调用的是 `shared_experts_compute`（`:532`），然后才 `route`。共享专家不看路由结果，所以可以提前算，和后面的路由、通信在时间上重叠。
+
+### 2.2 dispatch 与 combine 只是转发，默认不是 all-to-all
+
+两段方法体都只有一行（`moe_layer.py:527-529`、`633`）：`return self.token_dispatcher.token_dispatch(...)`，combine 同理。
+
+真正的搬运在 dispatcher 里，它有六个钩子：`dispatch_preprocess` / `token_dispatch` / `dispatch_postprocess` / `combine_preprocess` / `token_combine` / `combine_postprocess`。**只有 `token_dispatch` 和 `token_combine` 含通信**，另外四个是单卡内的 reshape 与 permute。
+
+`moe_token_dispatcher_type` 默认是 `allgather`（`transformer_config.py:965`，可选 `allgather` / `alltoall` / `flex`）。默认路径做的是：在 TP×EP 域上 all-gather 全部 token 和 routing_map，每个 rank 只算自己的本地专家，combine 阶段用 reduce-scatter 把结果还回原 rank。
+
+所以「MoE 必然 all-to-all」是个常见误解。all-gather 换来了实现简单、对 dropless 友好，代价是通信量随 EP 增长；要按 token 精确发送，才需要 `alltoall` 或 `flex`。
+
+## 3. 代码落点：`TopKRouter` 与 `switch_load_balancing_loss_func`
+
+### 3.1 logits / scores / probs / routing_map
+
+`TopKRouter` 的 docstring 把命名约定交代得很清楚（`router.py:159-170`，下面意译）：
 
 ```python
-# megatron/core/transformer/moe/moe_layer.py:520-529
-def dispatch(self, hidden_states, probs):
-    if self.config.overlap_dispatch_backward_with_experts_wgrad:
-        hidden_states = _RegisterDelayedWgradForExperts.apply(self, hidden_states)
-    return self.token_dispatcher.token_dispatch(hidden_states, probs)
-
-# megatron/core/transformer/moe/moe_layer.py:627-634
-def combine(self, output):
-    output = self.token_dispatcher.token_combine(output)
-    return output
+# logits:       router gating 网络的原始输出
+# scores:       score function 之后的分数，用来选专家、算 aux loss
+# probs:        top-k 权重，用来加权专家输出
+# routing_map:  token 到 expert 的布尔掩码
 ```
 
-注意 `dispatch` 和 `combine` 都**只是把活转发给 `token_dispatcher`**（`moe_layer.py:529`、`633`）。这个 dispatcher（`token_dispatcher.py`）才是真正做 all-to-all 的地方：dispatch 阶段把每个 token 连同它的路由概率一起 all-to-all 到「它选中专家所在的 rank」，combine 阶段再把专家输出 all-to-all 回原始 token 位置。**「路由是算的、通信是 dispatcher 做的、专家计算是 batched GEMM」三者彻底解耦**——这是 MoE 代码最值得记住的分工。
+`score_function` 有三个分支：`softmax`、`sigmoid`、`sqrtsoftplus`（`moe_utils.py:817-835`）。选择与归一化的实现在 `topk_routing_with_score_function`（`moe_utils.py:696`）。
+
+### 3.2 归一化规则与 expert_bias
+
+规则比想象中细，三种情况要分开记：
+
+- `softmax` + `moe_router_pre_softmax=False`（默认）：先对原始 logits 取 top-k，再对选中的 k 个值做 softmax → 权重在 k 内和为 1；
+- `softmax` + `pre_softmax=True`：先对全部 E 个专家 softmax，再取 top-k → 选中权重之和小于 1，不重新归一；
+- `sigmoid` / `sqrtsoftplus`：`topk > 1` 时用选中分数之和重新归一（分母加 `1e-20`），`topk == 1` 直接取原始分数。
+
+所以「sigmoid 的路由权重不归一」只在 topk=1 时成立。另外 `moe_router_topk_scaling_factor` 是在归一化之后无条件乘上去的（配置注释说它只在 pre-softmax 下有效，代码里并没有这个检查）。
+
+`expert_bias` 的位置值得记：它只加在「用来选专家」的分数上，之后再用 `gather` 取回不带 bias 的分数当权重（`moe_utils.py:830-835`）。也就是说 bias 只影响谁被选中，不改权重。
+
+这条路径叫 aux-loss-free 均衡：`moe_router_enable_expert_bias` 默认关闭，开启时强制 score_function 是 `sigmoid` 或 `sqrtsoftplus`（`transformer_config.py:2953-2960`），偏置按全局 batch 内各专家分到的 token 数增减。
+
+### 3.3 aux loss 的 f、P 与跨 rank 聚合
+
+公式在 docstring 里（`moe_utils.py:74-82`），实现在同一函数的末尾（`moe_utils.py:154-157`）。记 k 为 topk、m(x,i) 为路由掩码、s(x,i) 为 aux loss 用的稠密分数：
+
+$$
+f_i = \frac{1}{T k} \sum_{x} m(x, i)
+$$
+
+$$
+P_i = \frac{1}{T} \sum_{x} s(x, i)
+$$
+
+$$
+L_{\text{aux}} = \alpha E \sum_{i=1}^{E} f_i P_i
+$$
+
+`f_i` 是专家 i 实际吃到的 token 比例，`P_i` 是被期望分到的概率。均衡时两者一致、内积最小；某个专家被「饿」（`f_i` 低但 `P_i` 高）时乘积抬高损失，反推路由走向均衡。
+
+两个容易讲错的点：`P_i` 用的是**稠密分数**，对全部 E 归一化（`compute_routing_scores_for_aux_loss`，`moe_utils.py:866`），不是 top-k 之后那个稀疏的 `probs`；跨 rank 时 `f_i` 是 all-reduce 后的**全局**计数，`P_i` 只在本地算，每个 rank 贡献「全局 f × 本地 P_j」，梯度累加后正好等于全局公式（docstring `moe_utils.py:84-97` 有推导）。
+
+所以别把 `probs` 也 all-reduce 一遍：`P_i` 的跨 rank 求和本来就由「各 rank 的 loss 相加」完成，提前聚合等于重复计算。
+
+## 4. 工程细节与坑
+
+**专家是「对本地专家做 grouped GEMM」，不是拼成一个大 GEMM。** `TEGroupedMLP`（`experts.py:173`）拿到的是 `num_local_experts`，等于 `num_moe_experts // ep_size`（`moe_layer.py:190`），并把 `tokens_per_expert` 一起传给 TE 的 `GroupedLinear`。
+
+准确的语义是：每个本地专家保留自己的权重矩阵，grouped GEMM 把「M 各不相同的一组 GEMM」合成一次 launch。说成「把 E 个专家权重拼成一个大矩阵、做一次大 GEMM」是错的——那算出的是稠密乘积，数学上根本不是 MoE。
+
+**路由概率乘在激活上，不是乘在专家输出上。** `permuted_probs` 在 `bias_act_func` 里就乘到 fc1 输出上（`experts.py:874`）；因为 fc2 是线性的，先乘后乘等价，于是 combine 阶段只剩求和。`moe_apply_probs_on_input` 走另一条路（概率乘在输入上），且要求 `moe_router_topk == 1`。
+
+**共享专家的输出在 `postprocess` 相加。** `output = output + shared_expert_output`（`moe_layer.py:649`）。开 `moe_shared_expert_overlap` 时，共享专家在旁路 stream 上与 dispatch 通信重叠，收尾仍在 `postprocess`。
+
+**aux loss 默认不加。** `moe_aux_loss_coeff` 默认 `0.0`（`transformer_config.py:949`），要显式给系数（注释建议从 `1e-2` 起）。它的挂载方式也别忽略：`MoEAuxLossAutoScaler`（`moe_utils.py:270`）forward 原样返回输入，backward 才注入 aux loss 的梯度——这样 aux loss 不占用 logits 的前向计算图，只在反向多一项。
+
+## 5. 小结
+
+- **四段流水线**：route(+preprocess) → dispatch → routed_experts_compute → combine(+postprocess)，docstring 在 `moe_layer.py:678-682`。
+- **通信被 dispatcher 收走**：`dispatch` / `combine` 只是转发，六个钩子里只有两个含通信。
+- **默认不是 all-to-all**：`allgather` dispatcher 在 TP×EP 上 all-gather + reduce-scatter。
+- **四个名字**：logits / scores / probs / routing_map；sigmoid 在 topk>1 时仍会归一，`expert_bias` 只影响选择。
+- **aux loss 默认关闭**：`f_i` 全局、`P_i` 本地且用稠密分数，梯度靠 `MoEAuxLossAutoScaler` 注入。
+- **专家是本地 grouped GEMM**：每个专家独立权重，概率乘在激活上，共享专家输出在 `postprocess` 相加。
+
+下一篇讲 **多模态（LLaVA）实现**：视觉编码器怎么把图像 patch 变成 token、图文怎么拼进同一序列，也就是《[多模态（LLaVA）实现]({{< relref "megatron-code-15-multimodal" >}})》。
 
 ---
 
-## 3. 根因一：TopKRouter 的「scores / probs / routing_map」三级概念
+**版本提示（2026-10）**：dev 新增 megakernel/MOK 后端，用 `config.moe_megakernel_backend="mok"` 整体替换 dispatch + 专家计算 + combine。
 
-路由的核心是 `TopKRouter`（`router.py:157`），docstring 把 workflow 和命名约定交代得很清楚（`router.py:158-171`）：
+另新增 MoonEP 式虚拟专家复制（`megatron/core/transformer/moe/virtual_expert_load_balancer.py`，docstring 自述算法取自 MoonEP，开关 `config.moe_virtual_expert_load_balance`）。四段式骨架与四个命名约定未变。
 
-```python
-# megatron/core/transformer/moe/router.py:158-170（docstring）
-# (1) Calculate the logits by the router gating network.
-# (2) Calculate the routing probabilities and map for top-k selection with score function.
-# (3) [Optional] Apply token dropping to top-k expert selection.
-# (4) [Optional] Apply the auxiliary load balancing loss.
-
-# 命名约定：
-#   logits:       gating 网络输出的原始 logits
-#   scores:       score function 之后的分数（用于选专家、算 aux loss）
-#   probs:        topk 权重（用于组合专家输出）
-#   routing_map:  token 与 expert 之间的掩码映射
-```
-
-**这段命名约定是理解全文件的钥匙**。`scores` 和 `probs` 的区别很微妙：`score_function` 决定「用什么激活函数把 logits 变成可比较的分」（`router.py:738-741`）：
-
-```python
-# megatron/core/transformer/moe/router.py:738-741（节选）
-if self.score_function == "softmax":
-    scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
-elif self.score_function == "sigmoid":
-    scores = torch.sigmoid(logits.float()).type_as(logits)
-```
-
-- **softmax**：各专家分数和为 1，top-k 选完后权重是「归一化后的软权重」（Switch 风格）；
-- **sigmoid**：各专家独立打分，top-k 权重不再强行归一（DeepSeek 风格，配合 expert bias）。
-
-选完 top-k 得到 `routing_map`（硬掩码：token 命中某专家的位置为 1 其余为 0），再据此把 `scores` 里非选中的位置清零、按需归一化，才是最终用来加权专家输出的 `probs`。
-
----
-
-## 4. 根因二：aux loss 就是「专家负载 × 专家概率」的内积
-
-负载均衡靠辅助损失，实现在 `switch_load_balancing_loss_func`（`moe_utils.py:58-152`）。docstring 把公式写全了（`moe_utils.py:74-82`）：
-
-```python
-# megatron/core/transformer/moe/moe_utils.py:74-82（docstring）
-# loss = E * Σ_{i=1}^{E} (f_i * P_i)
-#   f_i = 1/(T*topk) * Σ_{x∈B} routing_map(x, i)   # 派给专家 i 的 token 比例
-#   P_i = 1/T * Σ_{x∈B} probs(x, i)                  # 专家 i 的平均路由概率
-#   E = 专家数，T = batch 内 token 总数
-```
-
-直觉：`f_i` 是「专家 i 实际吃到的 token 占比」（由硬路由决定），`P_i` 是「专家 i 被期望分配的概率」（由软概率决定）。若负载均衡，两者应一致；`f_i * P_i` 求和会最小。当某些专家被「饿」（`f_i` 低但路由倾向它 `P_i` 高）时，乘积拉高损失，反向传播会把路由往均衡方向推。
-
-Leaky 细节都在 docstring 的分布式部分（`moe_utils.py:84-97`）：序列/上下文并行下每个 rank 只算本地子 batch 的 `P_ij`，再跨 rank 聚合。这是「aux loss 的正确性依赖于多 rank 协作」的一个具体体现。
-
----
-
-## 5. 解法：专家 = 一次大 GEMM（batched expert）
-
-最后补「专家到底怎么算」这一环。`experts.py` 里 `TEGroupedMLP`（`experts.py:173`）把 E 个专家的 FFN 拼成一次大矩阵乘：不再逐个专家调 `Linear`，而是把 E 个专家的权重矩阵堆叠、把分给同一 rank 的所有 token 的隐状态拼接，做**一个 batched GEMM**（实际通过 TE 的 grouped gemm）。这正是「稀疏激活」落到硬件上的关键：虽然 token 稀疏地散在 E 个专家里，但同一 rank 上「被分到专家 i 的那批 token」可以一起算，GPU 的矩阵乘单元依然满载。
-
-与之配套的还有 `shared_experts.py` / `shared_experts_compute`（`moe_layer.py:532-557`）：DeepSeek 风格里，除了 top-k 路由专家，还有「所有 token 都过的共享专家」，共享专家的输出在 `postprocess` 里直接加到路由输出上（`moe_layer.py:648-649` 的 `output = output + shared_expert_output`）。
-
----
-
-## 6. 小结
-
-- **四段流水线**：route → dispatch(all-to-all) → expert compute → combine(all-to-all)，`moe_layer.py:676-681` 是总纲。
-- **dispatcher 解耦通信**：`dispatch`/`combine` 只是转发给 `token_dispatcher`，真正的 all-to-all 在其中（`moe_layer.py:520-529`、`627-634`）。
-- **三级概念 logits/scores/probs/routing_map**：score_function 选 softmax 还是 sigmoid，决定了 top-k 权重是否归一（`router.py:158-171`、`738-741`）。
-- **aux loss = E·Σ(fᵢ·Pᵢ)**：专家实际负载 × 期望概率的内积，跨 rank 聚合（`moe_utils.py:58-97`）。
-- **专家 = batched GEMM + shared experts**：`TEGroupedMLP` 把 E 个专家拼成一次大矩阵乘（`experts.py:173`），shared expert 输出后加（`moe_layer.py:648-649`）。
-
-下一篇讲 **多模态（LLaVA）实现**：视觉编码器如何把图像 patch 变成 token、image token 和文本 token 怎么拼进同一个序列、以及多模态的数据/训练循环和纯文本有哪些不同，也就是《[多模态（LLaVA）实现]({{< relref "megatron-code-15-multimodal" >}})》。
-
-（本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/core/transformer/moe/moe_layer.py`、`megatron/core/transformer/moe/router.py`、`megatron/core/transformer/moe/experts.py`、`megatron/core/transformer/moe/moe_utils.py`。）
+**行号基线**：commit f713506ce（2026-08-31）。上游 dev 已前进到 2026-10-29（+1208 commits），行号会漂移，定位请以符号名为准。

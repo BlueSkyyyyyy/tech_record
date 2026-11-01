@@ -8,149 +8,129 @@ weight: 5
 series: ["megatron-code"]
 ---
 
-上一篇[《激活重计算》]({{< relref "megatron-code-04-recompute" >}})讲到 `CheckpointFunction.backward` 重放前向时必须复现相同的 dropout mask，反复调用的 `_get_all_rng_states` / `_fork_rng` 都来自 `megatron/core/tensor_parallel/random.py`。本篇把这个文件里**种子与 RNG 状态管理**的部分完整讲清：为什么并行训练里「种子」不是一个数而是一组状态、TP 组内为什么需要不同的种子、`CudaRNGStatesTracker` 怎么用 fork 机制让每个并行域拿到自己的独立随机流。
+并行训练里的「随机种子」为什么不是一个数，而是一张表？
 
----
+结论：**同一个 seed 在不同并行维度上的要求正好相反——DP 副本要同一组随机数，TP 组内要各不相同的。**
 
-## 1. 问题背景：并行训练里的「随机」比单卡复杂得多
+`CudaRNGStatesTracker` 就是把这两套相反要求做成「命名态 + fork」的一张表。
 
-单卡训练时，`torch.manual_seed(seed)` 一个数就搞定。但到了模型并行 + 数据并行，同一个问题被拆成了八块：
+上一篇[激活重计算]({{< relref "megatron-code-04-recompute" >}})里 `CheckpointFunction.backward` 反复调用的 `_get_all_rng_states` / `_fork_rng` 都出自 `megatron/core/tensor_parallel/random.py`。本篇只讲这个文件里的种子与状态管理。
 
-1. **数据并行（DP）副本之间要一致**：同一个 batch 在不同的 DP rank 上，前向/反向里 dropout 这些随机算子的 mask 必须一致，否则梯度聚合时对不上。
-2. **张量并行（TP）组内要不同**：TP 把一层劈到多张卡上，各 rank 若是同样的 dropout mask，会破坏统计独立性（相当于每张卡拿同一份噪声，「扩容」失去了意义）。
-3. **重计算要回退**：上一篇讲的激活重计算，重放前向时 RNG 必须精确回到「前向那一刻」。
-4. **MoE 的专家层又是一种切法**：expert 并行的独立随机流也要单独管。
-5. **CUDA graph 捕获**时 host 侧读 RNG 状态是 capture-unsafe 的，需要专门处理。
+## 1. 问题：一份 seed 要同时满足四个相反的要求
 
-Megatron 的答案是**一个全局的 `CudaRNGStatesTracker` + 一组命名好的状态槽**，用「命名 + fork」代替「一个全局 seed」。本节先看核心数据结构。
+- **DP 副本要一致**：同一 pipeline stage 的参数是复制关系，初值必须相同，否则 all-reduce 的是几套不同模型的梯度。
+- **TP 组内要不同**：同一张权重被切成 tp 块，各 rank 只初始化自己那块；同一个 seed 会让每块生成同一组数。
+- **重算要能回退**：上一篇的重放必须精确回到前向那一刻的随机状态。
+- **CUDA graph 捕获时**，host 侧读 RNG 状态不是 capture-safe 的。
+
+单卡一个 `torch.manual_seed` 解决不了这四条。Megatron 的答案是「一组命名状态槽 + fork」，而不是「一个全局 seed」。
 
 ## 2. `CudaRNGStatesTracker`：一张「名字 → 状态」的表
 
-`random.py:216-333` 定义了这个类。它内部就三样东西（`random.py:242-256` 的 `reset` 方法）：
+类在 `random.py:216-333`，内部只有三个字段（`reset`，`random.py:242-256`）。
 
-- `states_`：dict，`name -> cuda rng state`，保存各个并行域当前的状态；
-- `seeds_`：set，纯记账用，防止同一个 seed 被 `add` 两次（`random.py:252`）；
-- `_current_state_name`：当前 generator 正在用哪个名字，默认 `"default-rng"`，且这个默认态**不**塞进 `states_`（`random.py:254-256`）。
+`states_` 是 `name -> cuda rng state`；`seeds_` 纯记账，防止同一个 seed 被 add 两次；`_current_state_name` 记录 generator 当前用的是哪股流，默认 `"default-rng"` 且不入表。
 
-### 2.1 `add(name, seed)`：从 seed 造出一个命名态
+### 2.1 `add`：从 seed 造出一个命名态
 
-`random.py:272-295`：
+两种实现殊途同归，都是「造出 seed 对应的状态并存进表」（`random.py:272-295`）：
 
 ```python
-def add(self, name, seed):
-    self._is_initialized = True
-    if seed in self.seeds_:
-        raise Exception('seed {} already exists'.format(seed))
-    self.seeds_.add(seed)
-    if name in self.states_:
-        raise Exception('cuda rng state {} already exists'.format(name))
-    if self.use_cudagraphable_rng:
-        new_state = _get_cuda_rng_state(clone=True, graph_safe=True)
-        new_state.manual_seed(seed)
-        self.states_[name] = new_state
-    else:
-        orig_rng_state = torch.cuda.get_rng_state()
-        torch.cuda.manual_seed(seed)
-        self.states_[name] = torch.cuda.get_rng_state()
-        _set_cuda_rng_state(orig_rng_state)
+if self.use_cudagraphable_rng:
+    new_state = _get_cuda_rng_state(clone=True, graph_safe=True)
+    new_state.manual_seed(seed)
+    self.states_[name] = new_state
+else:
+    orig_rng_state = torch.cuda.get_rng_state()
+    torch.cuda.manual_seed(seed)
+    self.states_[name] = torch.cuda.get_rng_state()
+    _set_cuda_rng_state(orig_rng_state)
 ```
 
-两种写法殊途同归：**把 GPU generator 临时设成 `seed`、读出它的状态、存进 `states_[name]`、再把 generator 恢复原状**。区别只在是否走 graph-safe 路径（`clone_state` vs `get_rng_state`）。
+区别只在 graph-safe 路径克隆一个 generator 出来单独播种，**完全不碰当前 generator**；普通路径则要「临时改、读完、改回」。
 
-### 2.2 `fork(name)`：在一个命名态里做操作、退出即还原
+### 2.2 `fork`：进入切流，退出时把状态存回去
 
-这是整篇最核心的一个 contextmanager（`random.py:297-333`）：
+这是全篇最核心的 contextmanager（`random.py:297-333`）。进入时先把当前状态写回它所属的命名态（default 除外），再切到 `states_[name]`；退出时把 `states_[name]` 更新成最新值，然后还原进入前的状态。
 
-```python
-orig_cuda_rng_state = _get_cuda_rng_state(graph_safe=self.use_cudagraphable_rng)
-orig_state_name = self._current_state_name
-if orig_state_name != "default-rng":
-    self.states_[orig_state_name] = orig_cuda_rng_state
-_set_cuda_rng_state(self.states_[name], graph_safe=self.use_cudagraphable_rng)
-self._current_state_name = name
-cpu_rng_state = torch.get_rng_state()
-try:
-    yield
-finally:
-    ...
-    self.states_[name] = _get_cuda_rng_state(graph_safe=self.use_cudagraphable_rng)
-    _set_cuda_rng_state(orig_cuda_rng_state, graph_safe=self.use_cudagraphable_rng)
-    self._current_state_name = orig_state_name
-```
+所以每个命名态都是一条**有记忆的流**：多次 `fork` 之间连续推进，而不是每次从种子重画。这正是 dropout 在多层之间不重复、同时重放又能精确复现的原因。
 
-语义是：**进入时把 generator 切到 `states_[name]`，退出时（1）把这个命名态的最新状态存回 `states_[name]`、（2）把 generator 还原成进入前的状态**。这样每次 `with tracker.fork("model-parallel-rng")` 都是一个「有记忆、可续跑」的随机流。
+`finally` 里还有两道防御：CPU RNG 被改动会告警（`random.py:319-320`）；`_current_state_name` 与 `name` 对不上直接抛异常，防止嵌套 fork 错配。
 
-注意 `finally` 里还检查了 CPU RNG 是否被改（`random.py:319-320`），以及 `_current_state_name` 是否还等于 `name`（防止嵌套 fork 错配），防御性很足。
+## 3. 三个命名态与种子算式
 
-## 3. 三个命名态是种子管理的骨架
-
-`model_parallel_cuda_manual_seed`（`random.py:433-484`）是把 seed 拆成各并行域种子的入口，docstring（`random.py:449-458`）已经把三种状态的含义写得很清楚：
-
-- **default state（data-parallel）**：DP 副本间相同、不同 DP 组之间不同——dropout 在非 TP 区域用它；
-- **tensor-model-parallel state**：TP 组内不同、DP 组之间相同——dropout 在 TP 区域用它；
-- **expert-parallel seed**：MoE 专家层专用，在 expert-tensor/expert-model 并行的 GPU 间不同。
-
-拆分的算式很直白（`random.py:466-484`）：
+入口是 `model_parallel_cuda_manual_seed`（`random.py:433-484`），算式只有四行：
 
 ```python
-offset = seed + 2718                          # 2718 随便取的，任何正数都行
+offset = seed + 2718                       # 2718 只是随手取的正数
 tensor_model_parallel_seed = offset + tp_rank
-data_parallel_seed = seed                     # DP 直接用原始 seed
-torch.cuda.manual_seed(data_parallel_seed)
-_CUDA_RNG_STATE_TRACKER.add(_DATA_PARALLEL_RNG_TRACKER_NAME, data_parallel_seed)
-_CUDA_RNG_STATE_TRACKER.add(_MODEL_PARALLEL_RNG_TRACKER_NAME, tensor_model_parallel_seed)
+data_parallel_seed = seed
 expert_parallel_seed = seed + 1024 + 100 * ep_rank + etp_rank
-_CUDA_RNG_STATE_TRACKER.add(_EXPERT_PARALLEL_RNG_TRACKER_NAME, expert_parallel_seed)
 ```
 
-核心思想：**TP 的 seed 要带上 `tp_rank` 才能让组内各 rank 不同；DP 共用同一个 seed 才能保证副本一致**；expert 并行则同时带上 `ep_rank` 和 `etp_rank`。
+随后 `torch.cuda.manual_seed(data_parallel_seed)`，再依次 `add` 三个态：data-parallel、model-parallel、expert-parallel（`random.py:477-484`）。
 
-## 4. `initialize_rng_tracker`：Megatron tracker 还是 TE tracker？
+`manual_seed` 在 `add` 之前，所以 generator 的 live 状态停在 DP 态——块外不在任何 `fork` 里的随机算子，吃的就是它。
 
-`random.py:341-408` 里 `initialize_rng_tracker` 决定用哪套实现：
+开头还有一句 `_CUDA_RNG_STATE_TRACKER.reset()`，把 `seeds_` 清空；否则 `add` 会因为「seed 已存在」抛异常。也正因如此，重复调用这个函数是幂等的。
 
-- 若装了 TE 且 `use_te_rng_tracker=True`（且 TE >= 1.5.0），用 `TECudaRNGStatesTracker`，它天然 cudagraphable、支持 FP8（`random.py:362-368`）；
-- 否则用 Megatron 自己的 `CudaRNGStatesTracker`，可传 `use_cudagraphable_rng`（`random.py:369-374`）；
-- 若 `inference_rng_tracker=True`，则包一层 `InferenceCudaRNGStatesTracker`，把 `add`/`set_states`/`fork` 全部变成空操作（`random.py:376-393`）——推理根本用不到这些 RNG fork，直接 no-op 提速。
+### 3.1 为什么 DP 必须相同、TP 必须不同
 
-`get_cuda_rng_tracker`（`random.py:401-408`）就是「惰性初始化 + 返回全局单例」的封装，`initialize_rng_tracker` 里用 `_CUDA_RNG_STATE_TRACKER_INITIALIZED` 全局标志避免重复初始化（`random.py:351-358`）。
+权重初始化是最硬的证据。`_initialize_affine_weight_gpu` 在 `get_cuda_rng_tracker().fork()` 里对本 rank 的那块权重跑 init（`layers.py:151-155`）：
 
-## 5. `_get_all_rng_states` / `_set_all_rng_states`：快照与回退
+- DP 副本是同一份参数的复制，种子必须一致，否则副本从不同初值出发，聚合出来的东西没有意义；
+- TP 分片是同一张矩阵的不同块，种子若相同、形状又相同，每块会生成**同一组数**，整张矩阵退化成 tp 份周期重复。
 
-上一篇引用的这对函数在 `random.py:499-594`，这里补上它们相对朴素实现的精髓——**graph-safe 与普通模式的对称处理**。
+dropout 同理：TP 区域里 mask 是按 head 或按 seq 切开的，共用状态会让 mask 以分片长度为周期重复，噪声在分片间完全相关，等于把有效噪声自由度除以 tp。
 
-`_get_all_rng_states`（`random.py:499-543`）返回一个四元组 `(cpu_rng_state, cuda_rng_state, cuda_rng_state_tracker, kind)`，其中 `kind` 是关键：在 graph-safe 且**不在 CUDA graph 捕获中**时，用 `clone_state()` clone 出状态**内容**的副本（`kind="cloned"`）；否则直接拿 generator **句柄**（`kind="live"`）。
+反过来，**复制张量**的随机量必须各 rank 相同——`RandomSTEShared` 要一个全 rank 一致的随机 bias，就显式 fork 到 DP 态（`moe_utils.py:1305-1306`）。
 
-为什么要分两种？docstring（`random.py:500-529`）讲得很透：graph-safe 的 `get_states` 返回的是**共享同一底层 generator 句柄**，之后 generator 又前进了，`live` 句柄回退等于 no-op；而捕获期间 host 侧读状态 capture-unsafe，又只能保留句柄语义。所以用一个显式的 `cloned`/`live` 标签，把「快照」和「恢复」严格绑在同一类语义上，避免跨 capture 边界时悄悄失效。
+代码里 fork 的位置正好对着这条判据：不开 SP 时 block 内不 fork，留在 DP 态；开了 SP 才把整个 block forward 包进 `fork()`（`transformer_block.py:928-932`），因为激活已沿 seq 切开。
 
-对应的 `_set_all_rng_states`（`random.py:546-594`）里，`cloned` 分支是把内容 `set_state` 回 live generator（并检查名字集合没变），`live` 分支则是整表替换。
+attention dropout 则在无 SP 时单独 fork 到 MP 态、有 SP 时直接调用（`dot_product_attention.py:235-239`）。
 
-## 6. 串起来：`_fork_rng` 与 checkpoint 的关系
+### 3.2 真正的 seed 在进 tracker 之前已经被改过
 
-`_fork_rng`（`random.py:597-606`）就是 `_get_all_rng_states` + `_set_all_rng_states` 包成的 contextmanager：
+训练入口先做一次派生（`initialize.py:424-429`）：`seed = seed_ + 100 * pp_rank`，只有开 `--data-parallel-random-init` 才再加 `10 * dp_rank`。
 
-```python
-current_states = _get_all_rng_states()
-try:
-    yield
-finally:
-    _set_all_rng_states(*current_states)
-```
+所以「DP 副本种子相同」不是 tracker 给的，是入口根本没给 DP 偏移；PP stage 之间反而天然不同，因为它们算的是不同的层。
 
-上一篇的 `CheckpointFunction.backward` 就是用它包住「重放前向」这一段（`random.py:695-702`），保证重放里的 dropout 复现 forward 的 mask，退出后又把训练 RNG 恢复到重放前的状态——**这样重计算既不影响后续层的随机流，又能得到正确的梯度**。
+docstring 那句「default 态在同一组模型并行 GPU 上相同、在不同模型并行组上不同」，说的就是这个 pp 偏移。
 
-对比一下，`fork`（第 2.2 节）和 `_fork_rng`（本节）是两个层次：`fork` 是在**命名态之间切换**（TP ↔ DP ↔ expert），`_fork_rng` 是**整张状态表的快照/回退**（跨一个重放区段）。一个管「我用哪股随机流」，一个管「我能不能回到这之前」。
+## 4. `initialize_rng_tracker`：Megatron 版、TE 版，和推理的 no-op
+
+三条分支（`random.py:341-408`）：装了 TE 且 `use_te_rng_tracker=True` 时用 `TECudaRNGStatesTracker`，但先卡版本，`is_te_min_version("1.5.0")` 不满足直接 `RuntimeError`。
+
+没装 TE 则**静默回退**到自带实现，不报错；自带实现可以带 `use_cudagraphable_rng`。
+
+`inference_rng_tracker=True` 时再套一个匿名子类，把 `add` / `set_states` 改成 `pass`、`fork` 返回 `nullcontext()`（`random.py:376-393`）——推理用不到这些状态，直接省掉开销。
+
+## 5. `_get_all_rng_states`：为什么要分 `cloned` 和 `live`
+
+graph-safe tracker 的 `get_states` 返回的是**共享底层 generator 的句柄**，等重放时 generator 早已前进，拿句柄恢复等于 no-op；而捕获期间 host 侧读状态又不安全，只能保留句柄。
+
+于是快照带一个显式标签（`random.py:499-543`）：graph-safe 且不在捕获中时 `kind="cloned"`，逐项 `clone_state()` 拷内容；否则 `kind="live"` 直接拿句柄。
+
+恢复端按标签走两条路（`random.py:546-594`）：`cloned` 就地 `set_state` 写回 live generator，并校验名字集合没变；`live` 则整表替换。
+
+恢复时不靠 `is_current_stream_capturing()` 反推类型，因为快照和恢复可能落在捕获边界两侧。
+
+## 6. `fork` 与 `_fork_rng` 是两个层次
+
+`fork` 在命名态之间切换，管「我用哪股流」；`_fork_rng`（`random.py:597-606`）是整表快照 + 退出还原，管「能不能回到这之前」，`CheckpointFunction.backward` 就用它把重放整段包住。
 
 ## 7. 小结
 
-- **并行训练里种子不是单个数，而是一组命名态**：`CudaRNGStatesTracker` 用 `states_`/`seeds_`/`_current_state_name` 管理「名字 → 状态」的映射。
-- **TP 种子带 `tp_rank`、DP 共用 seed、expert 兼顾 `ep_rank`/`etp_rank`**，这是 `model_parallel_cuda_manual_seed`（`random.py:466-484`）一行算式决定的。
-- **`fork(name)` 在命名态间切换并在退出时还原**，给每个并行域一条有记忆、可续跑的独立随机流（`random.py:297-333`）。
-- **`_get_all_rng_states`/`_set_all_rng_states` 用 `cloned`/`live` 双通道**处理 graph-safe 与普通模式，保证重计算的 RNG 回退在 CUDA graph 下也不翻车。
-- **两套 tracker 可选**：TE 的 cudagraphable 版本 vs Megatron 自带实现，由 `initialize_rng_tracker` 按 `use_te_rng_tracker` 分流。
+- 种子是一张表：`states_` / `seeds_` / `_current_state_name` 三个字段撑起全部语义。
+- 算式只有四行：`offset = seed + 2718`、`tp = offset + tp_rank`、`dp = seed`、`ep = seed + 1024 + 100*ep_rank + etp_rank`。
+- TP 组内不同是为了让同一权重的各分片、同一激活的各切片画出不同的随机数；DP 相同是因为它们是复制关系。
+- `fork` 退出时把最新状态存回命名态，所以每条流有记忆；`_fork_rng` 才是整表回退。
+- `_get_all_rng_states` 用 `cloned`/`live` 双通道，保证重算回退在 CUDA graph 下不失效。
 
-## 8. 下一篇预告
+下一篇：[与 Transformer Engine 的关系]({{< relref "megatron-code-06-transformer-engine" >}})接上 `TECudaRNGStatesTracker` 与 `te_checkpoint`。
 
-下一篇《与 Transformer Engine 的关系》把本文埋下的伏笔——`te_checkpoint`、`TECudaRNGStatesTracker`、FP8 元数据管理——展开：Megatron 的 transformer 层里哪些模块走 TE、`transformer_engine` 扩展包怎么桥接两边、FP8 的训练路径是怎么接管前向/反向的。
+---
 
-（本文所有行号基于 commit `f713506cea2e7705dd2ebb00c5c58a046ff974fe`，对应文件 `megatron/core/tensor_parallel/random.py`。）
+**版本提示（2026-10）**：上游新增了 GTP 的两个权重初始化 tracker：`gtp_remat` 按 `tensor_model_parallel_seed + 65536 * (1 + gtp_remat_rank)` 取值、`egtp_remat` 按 `expert_parallel_seed + 32768 + 65536 * (1 + egtp_remat_rank)`，且只在对应 `gtp_remat_world_size > 1` 时注册。这样做是因为 GTP_remat 各分片必须初始化为不同值，而其余三个种子的语义要保持不变。非 GTP 运行的 tracker 集合与基线完全一致，本篇结论不受影响。
+
+**行号基线**：commit f713506ce（2026-08-31）。上游 dev 已到 2026-10-29，行号会漂移，定位请以符号名为准。
