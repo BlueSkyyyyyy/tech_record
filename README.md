@@ -10,6 +10,7 @@ AI 训练系统工程的学习笔记博客 + 配套代码仓库。
 | Series | 主题 |
 |---|---|
 | Megatron-LM 实战 | 分布式训练框架配置、源码分析、踩坑记录 |
+| 通算并行 | 通信与计算 overlap：流水线、DP/TP/EP、kernel 与推理侧 |
 | Kernel / 算子 | Triton、Liger-Kernel 等算子源码阅读与性能分析 |
 | 优化器 | Muon / MuonClip 等新兴优化器原理与实现 |
 | 量化与推理 | 量化方案细节、推理部署 |
@@ -23,6 +24,26 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 ```
 
 ## 文章索引
+
+### 通算并行研读（专题，12 篇）
+
+从流水线气泡、DP bucket、TP 融合讲到 MoE all-to-all、persistent kernel 与推理侧 overlap。
+每篇配论文数字、源码行号和可运行的 CPU 模型；专题首页含四种动作（切/错/融/让）、三条约束与阅读路线：
+[通算并行研读（专题）](content/posts/comm-overlap-00-index/index.md)。
+
+1. [先算清三笔账：关键路径、暴露通信与 overlap tax](content/posts/comm-overlap-01-performance-model/index.md)
+2. [流水线气泡消灭史：GPipe → 1F1B → Zero Bubble](content/posts/comm-overlap-02-pipeline/index.md)
+3. [DualPipe：双向流水如何把 bubble 压到 (PP/2-1)](content/posts/comm-overlap-03-dualpipe/index.md)
+4. [数据并行：bucket、hook 与 reduce-scatter 的时差](content/posts/comm-overlap-04-data-parallel/index.md)
+5. [张量并行：从 all-reduce 到 AG+GEMM 融合](content/posts/comm-overlap-05-tensor-parallel/index.md)
+6. [MoE 专家并行：dispatch、expert、combine 的三段式](content/posts/comm-overlap-06-moe/index.md)
+7. [Kernel 与 SM：persistent kernel、warp specialization 与分区](content/posts/comm-overlap-07-kernel-sm/index.md)
+8. [编译与自动调度：从 Syncopate 到 Lagom](content/posts/comm-overlap-08-compiler/index.md)
+9. [推理侧：decode 的通算并行与它的阈值](content/posts/comm-overlap-09-inference/index.md)
+10. [实测手册：用 nsys/ncu 把 overlap 账算出来](content/posts/comm-overlap-10-measurement/index.md)
+11. [总结：2026 年的地图与五个开放问题](content/posts/comm-overlap-11-summary/index.md)
+
+配套代码：[code/comm-overlap/](code/comm-overlap/README.md)（7 个纯 CPU 模型，每个都能 `--test` 自测）
 
 ### Flash Attention 精读系列（7 篇）
 
