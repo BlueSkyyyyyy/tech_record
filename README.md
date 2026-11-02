@@ -25,6 +25,48 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 
 ## 文章索引
 
+### LLM 模型结构变迁（专题，9 篇）
+
+从 GQA 到 MLA 到 CSA2、从线性混合到 896 专家、从残差加宽到条件记忆，沿「序列 / 宽度 / 深度 / 位置」四个方向
+梳理 2023-2026 的结构演化。每篇配论文数字、config 行号与源码行号；专题首页含三根轴、七次搬家与阅读路线：
+[LLM 模型结构变迁（导读）](content/posts/llm-arch-00-index/index.md)。
+
+1. [导读：2026 年的结构地图——三个方向与七次搬家](content/posts/llm-arch-00-index/index.md)
+2. [先把账本立起来：参数、算力、KV 三张预算表](content/posts/llm-arch-01-budget/index.md)
+3. [注意力四代：从 GQA 到 MLA 到稀疏压缩](content/posts/llm-arch-02-attention/index.md)
+4. [线性注意力与 3:1 混合：把 KV 变成状态](content/posts/llm-arch-03-linear/index.md)
+5. [MoE 十年：从 8 专家到 896 专家](content/posts/llm-arch-04-moe/index.md)
+6. [残差流的加宽：HC、mHC 与 AttnRes](content/posts/llm-arch-05-residual/index.md)
+7. [位置的退场：RoPE、部分 RoPE 与 NoPE](content/posts/llm-arch-06-position/index.md)
+8. [条件记忆：Engram、MTP 与 DSpark](content/posts/llm-arch-07-memory/index.md)
+9. [五个收敛、三个分叉与三个赌注](content/posts/llm-arch-08-trends/index.md)
+
+配套代码：[code/llm-arch-evolution/](code/llm-arch-evolution/README.md)（纯标准库预算计算器，`python budget.py --test` 对拍 9 个模型）
+
+### VLA 精读（专题，13 篇）
+
+从动作表示、动作头、数据与本体、推理延迟四条线拆解 Vision-Language-Action：RT-2/Octo/OpenVLA 的 token 账、
+π0/π0.5 的 block-causal mask 与 state 字符串、GR00T 的双系统与本体条件化、OXE 的归一化陷阱、
+RTC 的 chunk 拼接，以及 2026 年的 RL 后训练与 latent 世界模型。每篇配论文页码、源码行号和可运行 CPU 演示；
+专题首页含三条硬约束、四个设计轴与三条阅读路线：
+[VLA 精读（导读）](content/posts/vla-00-index/index.md)。
+
+1. [导读：让模型输出动作，究竟难在哪](content/posts/vla-00-index/index.md)
+2. [动作表示：256 个 bin 的天花板](content/posts/vla-01-action-space/index.md)
+3. [架构：从 RT-2 到 π0 的 token 账](content/posts/vla-02-architecture/index.md)
+4. [动作头：diffusion 与 flow matching](content/posts/vla-03-action-head/index.md)
+5. [π0：两个 Gemma、一条 mask，和 73 毫秒的账](content/posts/vla-04-pi0/index.md)
+6. [π0.5：把 state 写成字符串，和「知识绝缘」的真相](content/posts/vla-05-pi05/index.md)
+7. [GR00T N1/N1.7：双系统与「每个本体一套 MLP」](content/posts/vla-06-groot/index.md)
+8. [数据：OXE 的 1M 轨迹为什么不够](content/posts/vla-07-data/index.md)
+9. [推理系统：chunk、延迟预算与 RTC](content/posts/vla-08-serving/index.md)
+10. [LeRobot 代码走读：π0/π0.5 的 PyTorch 版](content/posts/vla-09-lerobot-code/index.md)
+11. [OpenVLA 代码走读：binning 与 OFT 的并行解码](content/posts/vla-10-openvla-code/index.md)
+12. [评测：LIBERO 的 AUC 不是成功率](content/posts/vla-11-evaluation/index.md)
+13. [2026 地图：RL、世界模型与饱和的榜单](content/posts/vla-12-2026-map/index.md)
+
+配套代码：[code/vla/](code/vla/README.md)（7 个纯 CPU 脚本：分箱、mask、flow、归一化、chunk 延迟、RTC、置信区间，每个都有 `--test`）
+
 ### 通算并行研读（专题，12 篇）
 
 从流水线气泡、DP bucket、TP 融合讲到 MoE all-to-all、persistent kernel 与推理侧 overlap。

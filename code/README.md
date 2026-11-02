@@ -11,6 +11,8 @@
 | [Megatron-LM 源码精读系列](../content/posts/megatron-code-01-structure/) | [megatron-code/](megatron-code/README.md) | 源码分析笔记（analysis-notes/），基于 commit f713506ce |
 | [H100 上 TE 算子的性能与 Roofline 对比](../content/posts/te-perf-roofline/) | [te-perf/](te-perf/) | `bench_te.py`：TE 原生 kernel（rmsnorm / bwd / bwd_add / fused_attn）微基准 + launch overhead |
 | [CUDA 算子调优系列](../content/posts/cuda-kernel-opt-01-overview/) | [kernel-opt/](kernel-opt/README.md) | CUDA 手写算子系列：公共头 `cuda_utils.cuh` + 容器/编译/`ncu` 脚本 + 每篇实验（vector add、计时陷阱…） |
+| [LLM 模型结构变迁（专题）](../content/posts/llm-arch-00-index/) | [llm-arch-evolution/](llm-arch-evolution/README.md) | `budget.py`：参数量 / FLOPs / KV 三维预算计算器，纯标准库，`--test` 对拍 9 个已发布模型（误差 ≤1.3%） |
+| [VLA 精读（专题）](../content/posts/vla-00-index/) | [vla/](vla/README.md) | 7 个纯 CPU 演示：256 bin 量化与 DCT、block-causal mask、flow vs L2、q01/q99 归一化、chunk 延迟、RTC 权重、Wilson 区间，全部带 `--test` |
 | [LeetCode 题解精讲](../content/posts/leetcode-00-index/) | [leetcode/](leetcode/README.md) | 分类刷题题解 + Python/C++ 自测代码，统一入口 `scripts/run_all.py`，长期自驱 |
 | [KDA 前反向算子实现解析](../content/posts/flash-kda-00-index/) | [flash-kda/](flash-kda/README.md) | 以 FlashKDA 为参考拆解 Kimi Delta Attention 前向/反向算子，长期自驱 |
 | [DeepSeek Mega MoE 前反向算子实现解析](../content/posts/mega-moe-00-index/) | [mega-moe/](mega-moe/README.md) | 以 DeepGEMM/DeepEP 为参考分析 Mega MoE 前向与 MoE 反向，长期自驱 |
