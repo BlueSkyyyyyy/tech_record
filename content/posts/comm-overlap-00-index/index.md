@@ -127,6 +127,7 @@ $\eta=100\%$ 表示通信全被藏住；$\eta<0$ 表示 overlap 反而比串行�
 9. [推理侧：decode 的通算并行与它的阈值]({{< relref "comm-overlap-09-inference" >}})
 10. [实测手册：用 nsys/ncu 把 overlap 账算出来]({{< relref "comm-overlap-10-measurement" >}})
 11. [总结：2026 年的通算并行地图与五个开放问题]({{< relref "comm-overlap-11-summary" >}})
+12. [补遗：UniEP 与 2026 下半年的 MoE overlap 新论文]({{< relref "comm-overlap-12-latest" >}})
 
 ## 配套代码
 

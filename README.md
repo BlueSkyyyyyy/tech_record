@@ -67,7 +67,7 @@ RTC 的 chunk 拼接，以及 2026 年的 RL 后训练与 latent 世界模型。
 
 配套代码：[code/vla/](code/vla/README.md)（7 个纯 CPU 脚本：分箱、mask、flow、归一化、chunk 延迟、RTC、置信区间，每个都有 `--test`）
 
-### 通算并行研读（专题，12 篇）
+### 通算并行研读（专题，12 篇 + 补遗）
 
 从流水线气泡、DP bucket、TP 融合讲到 MoE all-to-all、persistent kernel 与推理侧 overlap。
 每篇配论文数字、源码行号和可运行的 CPU 模型；专题首页含四种动作（切/错/融/让）、三条约束与阅读路线：
@@ -84,6 +84,7 @@ RTC 的 chunk 拼接，以及 2026 年的 RL 后训练与 latent 世界模型。
 9. [推理侧：decode 的通算并行与它的阈值](content/posts/comm-overlap-09-inference/index.md)
 10. [实测手册：用 nsys/ncu 把 overlap 账算出来](content/posts/comm-overlap-10-measurement/index.md)
 11. [总结：2026 年的地图与五个开放问题](content/posts/comm-overlap-11-summary/index.md)
+12. [补遗：UniEP 与 2026 下半年的 MoE overlap 新论文](content/posts/comm-overlap-12-latest/index.md)
 
 配套代码：[code/comm-overlap/](code/comm-overlap/README.md)（7 个纯 CPU 模型，每个都能 `--test` 自测）
 

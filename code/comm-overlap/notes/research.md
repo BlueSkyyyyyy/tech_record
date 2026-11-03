@@ -195,6 +195,7 @@ dispatch → expert GEMM → combine。三段流水，通信通道与计算通�
 | 09 | `comm-overlap-09-inference` | 推理侧：decode 的通算并行 | NanoFlow、FlashComm、TokenWeave、T-CCL |
 | 10 | `comm-overlap-10-measurement` | 实测手册：nsys/ncu、指标、反模式 | Characterizing、`overlap_audit.py` |
 | 11 | `comm-overlap-11-summary` | 总结：2026 地图与开放问题 | 全部 |
+| 12 | `comm-overlap-12-latest` | 2026-11 补遗：UniEP、MegaFlux、Entwine、mKernel 等 | arXiv 2604.19241 等；见文末补遗表 |
 
 ## 6. 写作口径
 
@@ -203,3 +204,36 @@ dispatch → expert GEMM → combine。三段流水，通信通道与计算通�
 - 模拟器输出标注"模型，不是实测"。
 - 负结果照写：Flux H800 decode 无加速、TokenWeave <1K 变慢、Lagom AutoCCL 0.87×、
   Tile-level cCTA=2 更慢、Characterizing overlap 让计算慢 18.9%。
+
+---
+
+## 2026-11 补遗：UniEP 与最新论文（arXiv 扫描）
+
+> 触发：正文漏掉 2026-04 的 UniEP。2026-11-03 用四组 arXiv 查询按提交时间倒序扫到 117 条 2025-10 后候选，人工筛 15 篇。
+
+### 重点
+
+| 系统 | arXiv | 硬件/口径 | 关键数字 | 代码 |
+|---|---|---|---|---|
+| UniEP | 2604.19241 | 2×Hopper 8 卡集群（200/400 GB/s/dir） | 1.03–1.38× over SOTA；kernel 1.30–1.57× vs Comet；128 GPU 127→138 B tokens/day（1.09×）；bitwise | 论文称在 `ByteDance-Seed/Triton-distributed`，main 未见独立目录 |
+| MegaFlux | 2610.00671 | 8×B200，147 配置/方向 | fwd 1.45×、bwd 1.28×，峰值 2.14/2.64；vLLM 1.13–1.26× | 未见公开 |
+| Entwine | 2609.11562 | TP LLM workload | 1.232× geo（最高 1.433×）vs cuBLAS+NCCL；+3.1–9.8% vs SOTA | 论文称发表后开源 |
+| mKernel | 2609.13585 | 2×16 H200 | GEMM+AR 1.72×；Ring Attention 1.88× | `uccl-project/mKernel` |
+| Mixture-of-Kittens | 2609.36070 | NVL72 / 512 GPU | 最高 2.37×；生产 1.41× | `cursor/mixture-of-kittens` |
+| NCCL EP | 2603.13606 | H100 多节点 | `ncclEpDispatch/Combine`；LL 1–128 token，HT 4096+ | 并入 NCCL 生态 |
+| ThunderEP | 2609.40093 | RTX 4090/5090 PCIe | dispatch 2.00×、combine 1.53×、e2e 1.66× | 未见公开 |
+| FarSkip-Collective | 2511.11505 | DeepSeek-V3 / Llama4 Scout | prefill overlap 97.3%；TTFT 32.6%；训练 A2A 88.9% | 未确认 |
+| HyperParallel-MoE | 2605.23764 | Ascend A3 | Dispatch-to-Combine 1.58× | gitcode mindspore |
+| Piper | 2605.05049 | HPC | MFU 2–3.5× vs X-MoE；A2A 带宽 1.2–9× | 未见公开 |
+| HybridEP | 2510.19470 | 跨 DC | 受限带宽最高 5.6×；1k DC 1.45× | 未见公开 |
+| FlowMoE | 2510.00207 | MoE 训练 | 时间 −13–57%、能耗 −10–39% | 未见公开 |
+| Resource-aware overlap | 2606.09200 | A40/A100/H100/MI250X | 最多 −25.5% 时间 | 未见公开 |
+| ParallelKittens | 2511.13940 | Hopper/Blackwell | DP/TP 2.33×、SP 4.08×、EP 1.22× | 未确认 |
+| Iris | 2511.12500 | Triton | GEMM+AllScatter 1.79× | 未确认 |
+
+### 对正文的修正
+
+1. 语义约束增加“逐位可复现”（deterministic/bitwise），不只是梯度正确。
+2. 单 CUDA stream + persistent kernel + 动态 SM 角色也能做 token/tile 级 overlap。
+3. 自动调参从加分项变成必选项；但搜索成本本身是工程负担。
+4. 硬件分叉：scale-up（NVL72）、scale-out（IB）、PCIe 消费卡、Ascend 各有最优解。

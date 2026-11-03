@@ -207,7 +207,7 @@ Characterizing 的测量很刺眼：
 
 ## 5. 回看这个系列
 
-十二篇文章，其实只讲了一个故事：
+十二篇文章（含导读），再加一篇 2026-11 的补遗，其实只讲了一个故事：
 
 > **通信和计算争的是同一套资源。overlap 的本质，是在依赖允许的范围内，把资源从"等待"重新分配给"干活"；而每一次重新分配，都有代价。**
 
@@ -220,7 +220,8 @@ Characterizing 的测量很刺眼：
 - 第 8 篇：编译器/自动调优（Syncopate/Lagom）；
 - 第 9 篇：推理的阈值（NanoFlow/TokenWeave/FlashComm）；
 - 第 10 篇：测量（nsys/ncu/overlap_audit）；
-- 第 11 篇：地图与开放问题。
+- 第 11 篇：地图与开放问题；
+- 补遗：UniEP、MegaFlux、Entwine、mKernel 等 2026 下半年工作。
 
 如果只记一句话，我希望是：
 
@@ -233,6 +234,12 @@ Characterizing 的测量很刺眼：
 - 五个开放问题：何时不 overlap、静态 vs 动态、跨节点、可移植性、功耗。
 - 2026 年的前沿：不是"能不能 overlap"，而是"在正确的粒度上、用正确的资源、对正确的 shape 做 overlap"。
 - 负结果和正结果一起看，才能判断一个方案是不是真收益。
+
+> **2026-11 补遗**：正文的 MoE 地图漏掉了 2026-04 的 UniEP，以及 2026 下半年的 MegaFlux、Entwine、mKernel、Mixture-of-Kittens、NCCL EP 等。UniEP 把“逐位可复现”做成 overlap 的硬约束，并用 persistent worker + 动态角色 + deterministic token mapping 拿到 1.03×–1.38×；这修正了“单 stream 不能做细粒度 overlap”和“overlap 只改性能、不改语义”两个默认假设。详见[补遗篇]({{< relref "comm-overlap-12-latest" >}})。
+
+---
+
+**系列导航**：[十：实测手册]({{< relref "comm-overlap-10-measurement" >}}) · [补遗：UniEP 与新论文]({{< relref "comm-overlap-12-latest" >}})
 
 > 配套代码：`code/comm-overlap/`（7 个 CPU 模型 + 自测）
 > 系列索引：[通算并行研读（专题）]({{< relref "comm-overlap-00-index" >}})
