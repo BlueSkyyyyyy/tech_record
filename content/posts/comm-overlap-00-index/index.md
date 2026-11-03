@@ -12,7 +12,7 @@ categories: ["训练框架"]
 
 听起来像一句废话——把通信提前发、把 wait 推后，不就完了？真做起来，你会发现每一条 overlap 路径上都站着三个不肯让路的东西：**数据依赖、SM/带宽争用、语义正确性**。过去三年的论文，本质上是在这三个约束之间找新的空隙。
 
-本系列从流水线气泡讲到 MoE 的 all-to-all，从 Megatron 的 bucket hook 讲到 Flux 的 tile 级融合，再到 2025–2026 年把通信压到 1–2 个 SM 的 T-CCL、把整个 MoE 层塞进一个 persistent kernel 的 Weave。**每一篇都有论文数字、源码行号和可运行的 CPU 模型**；没有 GPU 也能把账算清楚。
+本系列从流水线气泡讲到 MoE 的 all-to-all，从 Megatron 的 bucket hook 讲到 Flux 的 tile 级融合，再到 2025–2026 年把通信压到 1–2 个 SM 的 T-CCL、把整个 MoE 层塞进一个 persistent kernel 的 Weave。**每一篇都有论文数字、源码行号和可运行的 CPU 模型**；没有 GPU 也能把账算清楚。2026-11 又补了 4 篇：总览雷达 + UniEP / MegaFlux / Entwine·mKernel 三篇深读，专门处理“最新论文”和“逐位可复现”这两个缺口。
 
 ## 先记住一个画面
 
@@ -127,7 +127,10 @@ $\eta=100\%$ 表示通信全被藏住；$\eta<0$ 表示 overlap 反而比串行�
 9. [推理侧：decode 的通算并行与它的阈值]({{< relref "comm-overlap-09-inference" >}})
 10. [实测手册：用 nsys/ncu 把 overlap 账算出来]({{< relref "comm-overlap-10-measurement" >}})
 11. [总结：2026 年的通算并行地图与五个开放问题]({{< relref "comm-overlap-11-summary" >}})
-12. [补遗：UniEP 与 2026 下半年的 MoE overlap 新论文]({{< relref "comm-overlap-12-latest" >}})
+12. [补遗·总览：2026 最新论文雷达与阅读路线]({{< relref "comm-overlap-12-latest" >}})
+13. [补遗一：UniEP 深读——persistent worker 与确定性 token mapping]({{< relref "comm-overlap-13-uniep" >}})
+14. [补遗二：MegaFlux 深读——routing skew 与专家复制]({{< relref "comm-overlap-14-megaflux" >}})
+15. [补遗三：Entwine、mKernel 与 2026 生态]({{< relref "comm-overlap-15-tile-ecosystem" >}})
 
 ## 配套代码
 

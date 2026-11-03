@@ -386,7 +386,7 @@ $c=4$ 时通信效率是 $4/16=25\%$，有效带宽 100 GB/s；16 个 chunk 下�
 - **Comet 对齐 token/tile 粒度**（shared tensor 切分 + CTA 特化），**Weave 把整层融成一个 megakernel 并动态选 $(c,K)$**，**Lancet 把重叠扩到整图**，**DisagMoE 把 A/F 拆开**，**INC-MoE 把 A2A 卸进交换机**——收益依次变大，适用条件依次变窄。
 - 本地模型显示：在这组参数下 `comm_sms=4` 最优、chunk 越多越好；真实系统有 launch/同步/GEMM 效率开销，最优的 $K$ 会明显变小，$c$ 也要用真实带宽/算力曲线重扫。**模型用来建立直觉，数字以论文和实测为准。**
 
-SM 怎么分、persistent kernel 怎么写、warp specialization 怎么摆，是下一层的问题。 [2026-11 补遗]({{< relref "comm-overlap-12-latest" >}}) 补上了 UniEP：它用 persistent worker + 动态角色 + deterministic token mapping，把“逐位可复现”做成 overlap 的硬约束。[第七篇]({{< relref "comm-overlap-07-kernel-sm" >}}) 会把 Comet 和 Weave 的 CTA 分区拆到 kernel 级；如果你更关心推理侧的阈值，可以直接跳到[第九篇]({{< relref "comm-overlap-09-inference" >}})；整张地图和五个开放问题在[第十一篇]({{< relref "comm-overlap-11-summary" >}}) 收尾。TP 侧把 all-gather 融进 GEMM 的做法，可以和这里的 dispatch+GEMM0 对照着看：[第五篇]({{< relref "comm-overlap-05-tensor-parallel" >}})。
+SM 怎么分、persistent kernel 怎么写、warp specialization 怎么摆，是下一层的问题。 [2026-11 补遗]({{< relref "comm-overlap-13-uniep" >}}) 补上了 UniEP：它用 persistent worker + 动态角色 + deterministic token mapping，把“逐位可复现”做成 overlap 的硬约束。[第七篇]({{< relref "comm-overlap-07-kernel-sm" >}}) 会把 Comet 和 Weave 的 CTA 分区拆到 kernel 级；如果你更关心推理侧的阈值，可以直接跳到[第九篇]({{< relref "comm-overlap-09-inference" >}})；整张地图和五个开放问题在[第十一篇]({{< relref "comm-overlap-11-summary" >}}) 收尾。TP 侧把 all-gather 融进 GEMM 的做法，可以和这里的 dispatch+GEMM0 对照着看：[第五篇]({{< relref "comm-overlap-05-tensor-parallel" >}})。
 
 ---
 

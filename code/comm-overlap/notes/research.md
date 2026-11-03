@@ -195,7 +195,10 @@ dispatch → expert GEMM → combine。三段流水，通信通道与计算通�
 | 09 | `comm-overlap-09-inference` | 推理侧：decode 的通算并行 | NanoFlow、FlashComm、TokenWeave、T-CCL |
 | 10 | `comm-overlap-10-measurement` | 实测手册：nsys/ncu、指标、反模式 | Characterizing、`overlap_audit.py` |
 | 11 | `comm-overlap-11-summary` | 总结：2026 地图与开放问题 | 全部 |
-| 12 | `comm-overlap-12-latest` | 2026-11 补遗：UniEP、MegaFlux、Entwine、mKernel 等 | arXiv 2604.19241 等；见文末补遗表 |
+| 12 | `comm-overlap-12-latest` | 2026-11 补遗总览：最新论文雷达 | 文末补遗表 |
+| 13 | `comm-overlap-13-uniep` | UniEP 深读：persistent worker + 确定性 mapping | arXiv 2604.19241 |
+| 14 | `comm-overlap-14-megaflux` | MegaFlux 深读：routing skew + 专家复制 | arXiv 2610.00671 |
+| 15 | `comm-overlap-15-tile-ecosystem` | Entwine/mKernel 与 2026 生态 | arXiv 2609.11562、2609.13585 等 |
 
 ## 6. 写作口径
 

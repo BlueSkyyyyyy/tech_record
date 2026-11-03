@@ -18,6 +18,9 @@
 | `decode_overlap.py` | 推理 token 切分的收益阈值：小 batch 为什么越切越慢 | 九 |
 | `overlap_audit.py` | 从 trace CSV 算 overlap ratio / exposed / per-stream busy | 十 |
 
+> 2026-11 补遗（总览 + UniEP/MegaFlux/Entwine·mKernel 三篇深读）是论文拆解，不新增模型；
+> 现有 7 个模型仍适用，补遗里引用的实测数字都标了硬件/配置。
+
 ## 快速开始
 
 ```bash
