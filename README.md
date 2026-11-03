@@ -14,6 +14,7 @@ AI 训练系统工程的学习笔记博客 + 配套代码仓库。
 | Kernel / 算子 | Triton、Liger-Kernel 等算子源码阅读与性能分析 |
 | 优化器 | Muon / MuonClip 等新兴优化器原理与实现 |
 | 量化与推理 | 量化方案细节、推理部署 |
+| 扩散模型 | DDPM、SDE、DiT、flow matching、少步与视频生成 |
 
 ## 仓库结构
 
@@ -66,6 +67,30 @@ RTC 的 chunk 拼接，以及 2026 年的 RL 后训练与 latent 世界模型。
 13. [2026 地图：RL、世界模型与饱和的榜单](content/posts/vla-12-2026-map/index.md)
 
 配套代码：[code/vla/](code/vla/README.md)（7 个纯 CPU 脚本：分箱、mask、flow、归一化、chunk 延迟、RTC、置信区间，每个都有 `--test`）
+
+### 扩散模型精读（专题，13 篇）
+
+从「一条从噪声到数据的概率路径」出发，串起 DDPM 的变分下界、score SDE 的连续时间视角、DDIM/DPM-Solver 的少步采样、
+classifier guidance 与 CFG、LDM 的 latent 压缩、DiT/MMDiT 的架构、flow matching 的直线路径、LCM/DMD 的蒸馏、
+视频扩散的时空 token，以及训练/推理/评测的工程账。每篇配论文数字、公式和可运行 CPU 演示；
+专题首页含五次搬家、四个设计轴与三条阅读路线：
+[扩散模型精读（导读）](content/posts/diffusion-00-index/index.md)。
+
+1. [导读：从去噪到传输，一条主线](content/posts/diffusion-00-index/index.md)
+2. [DDPM：一千步去噪的账](content/posts/diffusion-01-ddpm/index.md)
+3. [分数与 SDE：DDPM、SDE、ODE 是同一件事](content/posts/diffusion-02-score-sde/index.md)
+4. [快速采样：DDIM、DPM-Solver 与 10 步的极限](content/posts/diffusion-03-fast-sampling/index.md)
+5. [引导：从 classifier guidance 到 CFG](content/posts/diffusion-04-guidance/index.md)
+6. [Latent Diffusion：把像素换成 latent](content/posts/diffusion-05-latent-diffusion/index.md)
+7. [DiT 与 MMDiT：Transformer 接管去噪网络](content/posts/diffusion-06-dit/index.md)
+8. [Flow Matching 与 Rectified Flow：把路径拉直](content/posts/diffusion-07-flow-matching/index.md)
+9. [少步生成：一致性模型、LCM 与 DMD](content/posts/diffusion-08-few-step/index.md)
+10. [视频扩散：时空 token 与 3D VAE](content/posts/diffusion-09-video/index.md)
+11. [训练工程：EMA、CFG dropout 与显存账本](content/posts/diffusion-10-training/index.md)
+12. [推理系统：步数、CFG 双 batch 与缓存](content/posts/diffusion-11-inference/index.md)
+13. [评测与 2026 地图：FID 的坑与四个分叉](content/posts/diffusion-12-eval-2026/index.md)
+
+配套代码：[code/diffusion/](code/diffusion/README.md)（8 个纯 CPU 脚本：噪声日程、DDPM、采样器、CFG、latent/DiT/视频预算、FM 对比、蒸馏、FID 偏差，每个都有 `--test`）
 
 ### 通算并行研读（专题，12 篇 + 补遗 4 篇）
 

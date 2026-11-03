@@ -15,7 +15,7 @@ enableEmoji = true
   ShowCodeCopyButtons = true
   ShowToc = true
   description = "AI 训练系统 / 算子 / 优化器的学习笔记与代码"
-  seriesOrder = ["flash-attention", "fa-bwd", "megatron-code", "comm-overlap", "te-perf", "llm-arch", "vla", "leetcode", "随笔"]
+  seriesOrder = ["flash-attention", "fa-bwd", "megatron-code", "comm-overlap", "te-perf", "llm-arch", "vla", "diffusion", "leetcode", "随笔"]
 
 [params.seriesTitles]
   "flash-attention" = "Flash Attention"
@@ -25,6 +25,7 @@ enableEmoji = true
   "te-perf" = "Transformer Engine 性能"
   "llm-arch" = "LLM 模型结构变迁"
   "vla" = "VLA 精读"
+  "diffusion" = "扩散模型精读"
   "leetcode" = "LeetCode 题解精讲"
   "随笔" = "随笔"
 
