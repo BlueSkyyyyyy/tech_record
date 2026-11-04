@@ -14,11 +14,11 @@ for f in *.py; do echo "== $f"; python3 "$f" --test || exit 1; done
 | `mcp_rpc.py` | 第 3 篇 | JSON-RPC 2.0 的 MCP 生命周期：`initialize`、`notifications/initialized`、`tools/list`、`tools/call`、`ping`；子进程 server |
 | `token_budget.py` | 第 4 篇 | 原始/中间/字段三种截断策略下的证据保留率与 JSON 合法性；720 次合成 trace |
 | `apply_patch.py` | 第 5 篇 | Codex 风格 `*** Begin Patch` 语法、四段模糊定位、多文件非原子失败 |
-| `passk.py` | 第 7 篇 | 无偏 `pass@k`、`pass^k`、Wilson 区间、grader bug 对观测值的影响 |
-| `gui_ground.py` | 第 8 篇 | 0–1000 归一化坐标、截图缩放误差、点击命中率与 IoU |
-| `multiagent_cost.py` | 第 9 篇 | 单 agent / 多 agent / chat 三种 token 账；按 worker 数、输入长度改参数 |
-| `grpo.py` | 第 10 篇 | 组内优势、token 级 vs 序列级比率、GRPO/GSPO clip |
-| `taint.py` | 第 11 篇 | 逐动作授权 vs 全局 taint 检查；private 数据进外部 sink 的反例 |
+| `passk.py` | 第 8 篇 | 无偏 `pass@k`、`pass^k`、Wilson 区间、grader bug 对观测值的影响 |
+| `gui_ground.py` | 第 9 篇 | 0–1000 归一化坐标、截图缩放误差、点击命中率与 IoU |
+| `multiagent_cost.py` | 第 10 篇 | 单 agent / 多 agent / chat 三种 token 账；按 worker 数、输入长度改参数 |
+| `grpo.py` | 第 11 篇 | 组内优势、token 级 vs 序列级比率、GRPO/GSPO clip |
+| `taint.py` | 第 12 篇 | 逐动作授权 vs 全局 taint 检查；private 数据进外部 sink 的反例 |
 
 ## 几个可以自己改的参数
 

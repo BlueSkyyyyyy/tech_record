@@ -2,13 +2,13 @@
 title: "Agentic RL：环境、reward 与 GSPO"
 date: 2026-11-04T11:00:00+08:00
 draft: false
-weight: 10
+weight: 11
 series: ["agent"]
 tags: ["AI Agent", "系列", "Agentic RL", "GSPO", "GRPO", "verl", "SWE-RL", "Kimi K2"]
 categories: ["强化学习"]
 ---
 
-前八篇讲的是"怎么用好一个模型"。这一篇讲"怎么把 agent 能力训进模型"。
+前九篇讲的是"怎么用好一个模型"。这一篇讲"怎么把 agent 能力训进模型"。
 
 Agentic RL 和 RLHF 看起来都是"采样 → 打分 → 更新"，但难度不在一个量级：
 

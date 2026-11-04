@@ -193,4 +193,4 @@ python3 loop_sim.py --test           # 看四个断言
 - 复杂度守恒：harness 代码、prompt 约定、模型能力，三者此消彼长。选型时先问"这个复杂度应该由谁维护"。
 - benchmark 数字对环境细节极其敏感：`bash -lc` vs `bash -c` 就能改变 SWE-bench 结果。
 
-下一篇离开 harness，进入评测：SWE-bench、Terminal-Bench、$\tau$-bench 到底在测什么，pass@k 和 pass^k 为什么会在 k=10 时讲出相反的故事，以及"仪器错误"如何让 leaderboard 失真。
+下一篇看第四个象限：OpenHands。它不做一个更强的 CLI，而是把「会话」做成可持久化、可恢复、可 fork 的第一类对象——事件日志、500 步熔断、资源锁，以及一个把 environment 反馈压平成 user 消息的投影口子。

@@ -115,7 +115,7 @@ Anthropic 的 long-running harness 实验里，最有效的几个产物是：
 
 主 agent 只拿计划，子 agent 各自有完整 context，最后只回传 1K–2K token 的摘要。
 
-Anthropic 的数字：子 agent 可能探索"数万 token"，但只返回"**通常 1,000–2,000 token**"。这是上下文隔离，不是并行加速——第 9 篇会展开。
+Anthropic 的数字：子 agent 可能探索"数万 token"，但只返回"**通常 1,000–2,000 token**"。这是上下文隔离，不是并行加速——第 10 篇会展开。
 
 ## 5. 压缩 vs 重置：一个被低估的区别
 

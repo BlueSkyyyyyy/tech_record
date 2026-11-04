@@ -12,7 +12,7 @@ categories: ["LLM算法"]
 
 2026 年，agent 已经不再是一个"提示词技巧"。它是一条完整的流水线：模型在循环里调用工具，harness 负责攒上下文、执行工具、挡住危险操作，环境提供文件系统、浏览器、终端和测试。任何一段出问题，最终都表现为"模型不行"。
 
-这个专题把这条流水线拆开，按 12 篇的篇幅讲清楚三件事：
+这个专题把这条流水线拆开，按 13 篇的篇幅讲清楚三件事：
 
 - **loop 怎么闭合**：一条消息如何变成工具调用，工具结果如何回到模型，循环什么时候停。
 - **context 怎么流动**：窗口、压缩、重置、记忆、缓存，以及信息在哪一步被丢掉。
@@ -80,7 +80,7 @@ Anthropic 的实测：普通 agent 的 token 消耗约为 chat 的 **4 倍**，�
 
 Agent 的评测不能只看一次成功率。$\tau$-bench 在 2024 年就提出了 **pass^k**：同样的任务跑 k 次，每一次都成功的概率。一个每次 75% 成功率的 agent，跑 3 次全对的概率是 $0.75^3 \approx 42\%$，跑 10 次是 **5.6%**。
 
-这就是为什么"demo 很惊艳"和"能上线"之间隔着一整个可靠性工程。第 7 篇会讲，2026 年的一篇论文甚至发现：公开 leaderboard 上 13 个百分点的差距，来源不是模型，而是 grader 没有给一半的 episode 打分。
+这就是为什么"demo 很惊艳"和"能上线"之间隔着一整个可靠性工程。第 8 篇会讲，2026 年的一篇论文甚至发现：公开 leaderboard 上 13 个百分点的差距，来源不是模型，而是 grader 没有给一半的 episode 打分。
 
 ## 三个问题
 
@@ -94,18 +94,19 @@ Agent 的评测不能只看一次成功率。$\tau$-bench 在 2024 年就提出�
 
 | # | 篇目 | 一句话 |
 |---|---|---|
-| 1 | [导读：模型、Harness 与环境的三体问题]({{< relref "agent-00-index" >}}) | 三个部件、四本账、十二篇的路线图 |
+| 1 | [导读：模型、Harness 与环境的三体问题]({{< relref "agent-00-index" >}}) | 三个部件、四本账、十三篇的路线图 |
 | 2 | [Agent Loop 解剖]({{< relref "agent-01-loop" >}}) | 从 ReAct 到 tool calling，循环的复杂度在终止条件而不在 `while` |
 | 3 | [工具层：schema、MCP 与 Code Mode]({{< relref "agent-02-tools" >}}) | 工具接口是一份上下文压缩契约 |
 | 4 | [Context Engineering]({{< relref "agent-03-context" >}}) | 预算、压缩、重置与信息衰减 |
 | 5 | [Harness 解剖（一）：Codex CLI]({{< relref "agent-04-codex" >}}) | 三层循环、无 max turns、沙箱与 apply_patch |
 | 6 | [Harness 解剖（二）：Gemini CLI 与 mini-swe-agent]({{< relref "agent-05-gemini-mini" >}}) | 近 70 万行与 190 行，复杂度守恒 |
-| 7 | [评测：SWE-bench、Terminal-Bench 与 Harness 混淆]({{< relref "agent-06-eval" >}}) | pass@k、pass^k，以及仪器错误 |
-| 8 | [Computer-use 与浏览器 Agent]({{< relref "agent-07-cua" >}}) | 动作空间、grounding 与恢复 |
-| 9 | [多智能体：context 隔离、handoff 与 token 倍率]({{< relref "agent-08-multiagent" >}}) | 多 agent 是上下文隔离术，不是并行术 |
-| 10 | [Agentic RL：环境、reward 与 GSPO]({{< relref "agent-09-rl" >}}) | 环境工程是瓶颈，verifier 质量就是 reward 质量 |
-| 11 | [记忆与安全：从 MemGPT 到 CaMeL]({{< relref "agent-10-memory-security" >}}) | 安全边界必须在模型外面 |
-| 12 | [2026 论文地图与十个开放问题]({{< relref "agent-11-trends" >}}) | 从哪里继续读，以及还没解决什么 |
+| 7 | [Harness 解剖（三）：OpenHands 的事件溯源与可恢复会话]({{< relref "agent-06-openhands" >}}) | 事件日志、500 步熔断、资源锁与投影 |
+| 8 | [评测：SWE-bench、Terminal-Bench 与 Harness 混淆]({{< relref "agent-06-eval" >}}) | pass@k、pass^k，以及仪器错误 |
+| 9 | [Computer-use 与浏览器 Agent]({{< relref "agent-07-cua" >}}) | 动作空间、grounding 与恢复 |
+| 10 | [多智能体：context 隔离、handoff 与 token 倍率]({{< relref "agent-08-multiagent" >}}) | 多 agent 是上下文隔离术，不是并行术 |
+| 11 | [Agentic RL：环境、reward 与 GSPO]({{< relref "agent-09-rl" >}}) | 环境工程是瓶颈，verifier 质量就是 reward 质量 |
+| 12 | [记忆与安全：从 MemGPT 到 CaMeL]({{< relref "agent-10-memory-security" >}}) | 安全边界必须在模型外面 |
+| 13 | [2026 论文地图与十个开放问题]({{< relref "agent-11-trends" >}}) | 从哪里继续读，以及还没解决什么 |
 
 ## 代码与版本
 
@@ -117,16 +118,18 @@ Agent 的评测不能只看一次成功率。$\tau$-bench 在 2024 年就提出�
 | `mcp_rpc.py` | 第 3 篇 | JSON-RPC 2.0 的 MCP 握手、tools/list、tools/call |
 | `token_budget.py` | 第 4 篇 | 三种截断策略下的证据保留率与 JSON 合法性 |
 | `apply_patch.py` | 第 5 篇 | Codex 风格补丁语法、四段模糊定位、非原子失败 |
-| `passk.py` | 第 7 篇 | pass@k / pass^k / Wilson 区间 / grader bug |
-| `multiagent_cost.py` | 第 9 篇 | 单 agent、多 agent、chat 三种 token 账 |
-| `grpo.py` | 第 10 篇 | GRPO 的 token 比率 vs GSPO 的序列比率 |
-| `taint.py` | 第 11 篇 | 逐动作授权 vs 全局 taint 检查 |
+| `passk.py` | 第 8 篇 | pass@k / pass^k / Wilson 区间 / grader bug |
+| `gui_ground.py` | 第 9 篇 | 0–1000 归一化坐标、缩放误差、点击命中率与 IoU |
+| `multiagent_cost.py` | 第 10 篇 | 单 agent、多 agent、chat 三种 token 账 |
+| `grpo.py` | 第 11 篇 | GRPO 的 token 比率 vs GSPO 的序列比率 |
+| `taint.py` | 第 12 篇 | 逐动作授权 vs 全局 taint 检查 |
 
-源码引用固定在三个 checkout 上（行号以这些版本为准）：
+源码引用固定在四个 checkout 上（行号以这些版本为准）：
 
 - OpenAI Codex CLI，`openai/codex@f2b94ef8b52196f127d162c6db71e390b9bb265c`（2026-11-04）
 - Google Gemini CLI，`google-gemini/gemini-cli@89e9d25d67e7dc7cb0deb84ad2c3474b7a392d31`（2026-11-03）
 - mini-swe-agent，`SWE-agent/mini-swe-agent@04d809ceab9df28f9adaed044884180159172930`（2026-09-03）
+- OpenHands SDK，`OpenHands/software-agent-sdk@2f2cd2bf7f19ca3bbf9f0c4a95c60f48094302a1`（2026-11-04，v1.59.0）
 
 论文和博客的日期都标在正文里。这个领域半年就换一批术语，读的时候请把日期一起看。
 
@@ -150,6 +153,7 @@ Agent 的评测不能只看一次成功率。$\tau$-bench 在 2024 年就提出�
 - OpenAI Codex CLI：<https://github.com/openai/codex>
 - Google Gemini CLI：<https://github.com/google-gemini/gemini-cli>
 - mini-swe-agent：<https://github.com/SWE-agent/mini-swe-agent>
+- OpenHands SDK：<https://github.com/OpenHands/software-agent-sdk>
 - MCP 规范 2025-06-18：<https://modelcontextprotocol.io/specification/2025-06-18>
 
 Benchmark：
@@ -159,10 +163,14 @@ Benchmark：
 
 关键论文：
 
+- *OpenHands: An Open Platform for AI Software Developers as Generalist Agents*：<https://arxiv.org/abs/2407.16741>
+- *SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering*：<https://arxiv.org/abs/2405.15793>
 - *Context Is a Pipeline, Not a Window*：<https://arxiv.org/abs/2610.36114>
 - *Silent Instrument Errors Reorder Agent Leaderboards*：<https://arxiv.org/abs/2611.04399>
 - *Compaction Laundering*：<https://arxiv.org/abs/2610.29869>
 - *On Randomness in Agentic Evals*：<https://arxiv.org/abs/2602.07150>
+- Agent 提前放弃的测量：<https://arxiv.org/abs/2606.29718>
+- Terminal-Bench 任务审计：<https://arxiv.org/abs/2609.26826>
 - *Local Allow, Global Deny*：<https://arxiv.org/abs/2610.27620>
 - *Is Complex Agentic Memory Always Needed?*：<https://arxiv.org/abs/2610.30755>
 - *Defeating Prompt Injections by Design*（CaMeL）：<https://arxiv.org/abs/2503.18813>

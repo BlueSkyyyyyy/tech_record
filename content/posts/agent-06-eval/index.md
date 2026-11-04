@@ -2,7 +2,7 @@
 title: "评测：SWE-bench、Terminal-Bench 与 Harness 混淆"
 date: 2026-11-04T11:00:00+08:00
 draft: false
-weight: 7
+weight: 8
 series: ["agent"]
 tags: ["AI Agent", "系列", "评测", "SWE-bench", "Terminal-Bench", "pass@k", "Leaderboard"]
 categories: ["LLM算法"]
@@ -62,7 +62,7 @@ $\tau^2$-bench（arXiv 2506.07982）加了"双控制"：不只是 agent 能调�
 | **GAIA** | 466 个问题 | 需要推理 + 多模态 + 浏览 + 工具的综合问答 | 人类 92%，GPT-4+插件 15% |
 | **BrowseComp** | 1,266 个问题 | 持久浏览、找难以发现的信息 | 答案短、可自动验证 |
 
-这些数字现在看已经过时（2026 年的 GUI agent 在 OSWorld 上到 47.5，见第 8 篇），但它们的**设计意图**没过时：OSWorld 测"操作电脑"，WebArena 测"操作网站"，GAIA 测"综合助理"，BrowseComp 测"持久搜索"。
+这些数字现在看已经过时（2026 年的 GUI agent 在 OSWorld 上到 47.5，见第 9 篇），但它们的**设计意图**没过时：OSWorld 测"操作电脑"，WebArena 测"操作网站"，GAIA 测"综合助理"，BrowseComp 测"持久搜索"。
 
 ### 2.5 AgentBench：8 个环境的多维评测
 

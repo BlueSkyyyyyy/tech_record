@@ -2,7 +2,7 @@
 title: "记忆与安全：从 MemGPT 到 CaMeL"
 date: 2026-11-04T11:00:00+08:00
 draft: false
-weight: 11
+weight: 12
 series: ["agent"]
 tags: ["AI Agent", "系列", "Memory", "Prompt Injection", "CaMeL", "Sandbox", "安全"]
 categories: ["LLM算法"]

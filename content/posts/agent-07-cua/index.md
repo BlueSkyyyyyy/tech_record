@@ -2,7 +2,7 @@
 title: "Computer-use 与浏览器 Agent：动作空间、grounding 与恢复"
 date: 2026-11-04T11:00:00+08:00
 draft: false
-weight: 8
+weight: 9
 series: ["agent"]
 tags: ["AI Agent", "系列", "Computer Use", "GUI Agent", "Browser Agent", "OSWorld", "Grounding"]
 categories: ["多模态算子"]
@@ -156,7 +156,7 @@ Gemini CLI 的 browser agent 做了三件事（`agents/browser/browserAgentDefin
 2. **允许列表**：不是"禁止恶意域名"，而是"只允许已知域名"。
 3. **数据流**：页面内容可以读，但不能直接驱动外部动作（发邮件、转账、提交表单）。
 
-第 11 篇会展开讲 prompt injection 和 CaMeL；这里先记住一句话：**浏览器 agent 的安全边界不在模型，而在 harness 的数据流控制**。
+第 12 篇会展开讲 prompt injection 和 CaMeL；这里先记住一句话：**浏览器 agent 的安全边界不在模型，而在 harness 的数据流控制**。
 
 ## 7. 评测：执行式，不是相似度
 
