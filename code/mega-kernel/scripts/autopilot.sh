@@ -2,6 +2,7 @@
 # mega-kernel 专题的无人值守自驱循环。用法：
 #   scripts/autopilot.sh {start|status|stop|run}
 # 环境变量：MAX_ROUNDS(默认200) SLEEP_BETWEEN(30) TIMEOUT_PER_ROUND(5400)
+#           VLLM_HOST=<host:port>（必填）本地 vLLM 的 OpenAI 兼容端点；内网地址不入库
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # code/mega-kernel
@@ -65,8 +66,11 @@ run_loop() {
   if [ -f "$LOCK" ] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
     echo "[autopilot] another loop holds lock; exit"; exit 0; fi
   echo $$ > "$LOCK"; trap 'rm -f "$LOCK"' EXIT
-  export NO_PROXY="192.168.36.3,localhost,127.0.0.1" no_proxy="192.168.36.3,localhost,127.0.0.1"
-  export OPENAI_BASE_URL="http://192.168.36.3:8005/v1" OPENAI_API_KEY="EMPTY"
+  # 本地 vLLM（OpenAI 兼容）端点由环境变量给出；仓库里不写内网 IP
+  : "${VLLM_HOST:?请先 export VLLM_HOST=<host:port>（本地 vLLM 的 OpenAI 兼容端点）}"
+  local vllm_net="${VLLM_HOST%%:*}"
+  export NO_PROXY="${vllm_net},localhost,127.0.0.1" no_proxy="${vllm_net},localhost,127.0.0.1"
+  export OPENAI_BASE_URL="http://${VLLM_HOST}/v1" OPENAI_API_KEY="EMPTY"
   unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY
   cd "$REPO" || exit 1
   local fail=0

@@ -12,6 +12,7 @@
 #   MAX_ROUNDS=40        最多跑多少轮（每轮=一篇文章增量）
 #   SLEEP_BETWEEN=30     每轮之间休息秒数
 #   TIMEOUT_PER_ROUND=5400  单轮超时（秒），防止卡死
+#   VLLM_HOST=<host:port>   必填，本地 vLLM 的 OpenAI 兼容端点；内网地址不入库
 set -uo pipefail
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"   # code/kernel-opt
@@ -80,10 +81,12 @@ run_loop() {
   echo $$ > "$LOCK"
   trap 'rm -f "$LOCK"' EXIT
 
-  # 本地 vLLM 不走代理；git / 外网仍走 socks 代理
-  export NO_PROXY="192.168.36.3,localhost,127.0.0.1"
-  export no_proxy="192.168.36.3,localhost,127.0.0.1"
-  export OPENAI_BASE_URL="http://192.168.36.3:8005/v1"
+  # 本地 vLLM 不走代理；git / 外网仍走 socks 代理。端点由环境变量给出；仓库里不写内网 IP
+  : "${VLLM_HOST:?请先 export VLLM_HOST=<host:port>（本地 vLLM 的 OpenAI 兼容端点）}"
+  local vllm_net="${VLLM_HOST%%:*}"
+  export NO_PROXY="${vllm_net},localhost,127.0.0.1"
+  export no_proxy="${vllm_net},localhost,127.0.0.1"
+  export OPENAI_BASE_URL="http://${VLLM_HOST}/v1"
   export OPENAI_API_KEY="EMPTY"
   export http_proxy="socks5://127.0.0.1:12345"
   export https_proxy="socks5://127.0.0.1:12345"
