@@ -4,8 +4,14 @@
 > - [`results_kda_kimi_k3.md`](results_kda_kimi_k3.md) — Kimi K3 的 **KDA** 层（FLA `chunk_kda`
 >   Triton/TileLang vs FlashKDA）性能与数据类型支持，脚本 `bench_kda_kimi_k3.py`；
 > - [`results_kda_precision.md`](results_kda_precision.md) — FlashKDA vs FLA Triton 的 **KDA 精度比对**
->   （vs fp64 golden），脚本 `check_kda_precision.py`。
-> TE 无 KDA 算子，故 KDA 单独测；本文件仍是 TE 算子的口径。
+>   （vs fp64 golden），脚本 `check_kda_precision.py`；
+> - [`results_mla_kimi_k3.md`](results_mla_kimi_k3.md) — **Kimi-K3 的 MLA（96 头 / qk=192 / v=128）**
+>   用 TE fused_attn 测前向 + 反向（含正确性校验），脚本 `bench_mla_kimi_k3.py`；
+> - [`results_attnres_kimi_k3.md`](results_attnres_kimi_k3.md) — **Kimi-K3 的 AttnRes（注意力残差）**
+>   FLA `fused_attnres` 的 fwd/bwd、按 K3 的 L=2…9 schedule 聚合的每迭代开销，以及 FLA 优化手段拆解，
+>   脚本 `bench_attnres_kimi_k3.py`。
+> TE 无 KDA 算子，故 KDA 单独测；K3 的 MLA 是 TE 能直接测的，单独成文以便与 K2.6 对照；
+> 本文件仍是 TE 算子的主口径。
 
 测试 `transformer_engine`（TE）三个算子的性能，用于与 H100 roofline 对比：
 
@@ -16,7 +22,8 @@
 
 ## 运行方式
 
-本机 GPU 正在跑推理，**请勿在推理期间运行**。等 GPU 空闲后，进入容器执行：
+本机 GPU 可能正在跑推理/训练，**请先确认目标卡空闲（`nvidia-smi` 显示 0 MiB、0% util）**，
+并用 `CUDA_VISIBLE_DEVICES=<idle_id>` 固定到空闲卡，勿在推理期间运行。进入容器执行：
 
 ```bash
 # 1. 进入容器 kimi26_train
@@ -56,6 +63,8 @@ python bench_te.py --attn-only --warmup 10 --repeat 100 --csv attn.csv
    (4,1024,32,128) (8,1024,32,128) (4,8192,16,128)`，
   以及生产模型形状（batch=1, seq=4096）：
   - `(1,4096,64,192,128)` — Kimi-K2.6 MLA（qk=nope128+rope64=192，v=128，64 头）；
+  - `(1,4096,96,192,128)` — Kimi-K3 MLA（同几何，96 头，NoPE；前向+反向见
+    [`results_mla_kimi_k3.md`](results_mla_kimi_k3.md)，脚本 `bench_mla_kimi_k3.py`）；
   - `(1,4096,64,128,128)` — dsv4 DSA indexer（64 头，head_dim=128）；
   - `(1,4096,32,128,128)` — dsv4.1 DSA indexer（32 头，head_dim=128）；
   - `(1,4096,40,128,128,8)` — Qwen3-8B（GQA：q=40，kv=8，head_dim=128）；
@@ -72,7 +81,7 @@ python bench_te.py --attn-only --warmup 10 --repeat 100 --csv attn.csv
   head_dim` 推导（qwen3-30B-A3B 与 235B-A22B 的 config 从 ModelScope 单独下载，仅取
   `config.json` 小文件）。
 
-### 关于 TE 的 MLA 与 DeepSeek-V4-Pro 的注意力
+### 关于 TE 的 MLA：Kimi-K3 与 DeepSeek-V4-Pro
 
 TE fused_attn 的 **MLA** 指 `head_dim_qk != head_dim_v`（Kimi-K2.6 `(1,4096,64,192,128)`、
 DeepSeek-V3 即此类），要求 `qkv_layout` 为 `bshd_bshd_bshd` 这类 `hd_hd_hd` 分组。本机上
@@ -84,6 +93,25 @@ DeepSeek-V3 即此类），要求 `qkv_layout` 为 `bshd_bshd_bshd` 这类 `hd_h
 - **训练 fwd+bwd（`is_training=True`）**：受 bwd kernel 限制，`head_dim_qk==head_dim_v`
   最大 256；`qk!=v` 只在 `qk<=192`、`v<=128` 附近可用（`192/128`、`128/128`、`192/192`
   通过，`256/128`、`64/512` 失败）。`qk=512/v=512` 训练时返回 `No_Backend`。
+
+#### Kimi-K3 的 MLA（96 头，单独脚本 `bench_mla_kimi_k3.py`）
+
+Kimi-K3 的 MLA 与 K2.6 同几何、只是头数从 64 加到 **96**，且改为 **NoPE**（`rotary_emb=None`，
+64 维 rope 槽位保留但不旋转）。训练时 `kv_b_proj` 把 latent 上投影成**每头**的 k(128)+v(128)，
+所以进入 fused-attn 的 shape 是 `(b, s, 96, 192, 128)`，TE 走 `F16_arbitrary_seqlen`，
+**训练 fwd 和 bwd 都支持**（96 头本身不构成限制，限制仍是 bwd 的 `head_dim<=256`）。
+实测（H100 空闲卡、b=1、bf16、CUPTI device time）：
+
+| s | fwd (µs) | bwd (µs) | 备注 |
+|--:|--:|--:|---|
+| 4096 | 878 | 3177 | fwd ~1174、bwd ~649 TFLOPS（S² 等效，真实约 ×0.5） |
+| 16384 | 14181 | 45043 | fwd/bwd 吞吐在 s≥2k 后基本饱和 |
+
+与 K2.6（64 头 @4096：fwd 599 µs / bwd 2162 µs）相比，时间随头数**线性**（1.46×/1.47×）、
+单位 FLOP 吞吐持平。另外：TE 原生支持 `qk!=v`，**无需像 HF FA2 那样把 v 从 128 padding 到
+192**（省 20% PV FLOPs）；而 **FP8 训练**在 `qk=192/v=128` 上返回 `No_Backend`（FP8 推理
+fwd 可用）。完整数据、正确性校验（cos≈0.999997）与口径见
+[`results_mla_kimi_k3.md`](results_mla_kimi_k3.md)。
 
 DeepSeek-V4-Pro 有**两类**注意力：
 

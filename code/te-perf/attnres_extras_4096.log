@@ -1,0 +1,23 @@
+fla 0.6.0 @ ~/proj/flash-linear-attention/fla/__init__.py
+torch 2.12.0a0+0291f960b6.nv26.04.48445190 | NVIDIA H100 80GB HBM3 | cap (9, 0) | FLA_ATTNRES_GLUON=None
+================================================================================================
+Extras @ K3 shape T=4096, D=7168, L=9, bf16
+================================================================================================
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/nn/functional.py:2958: UserWarning: Mismatch dtype between input and weight: input dtype = c10::BFloat16, weight dtype = float, Cannot dispatch to fused implementation. (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/native/layer_norm.cpp:344.)
+  return torch.rms_norm(input, normalized_shape, weight, eps)
+[norm fusion] fused(onorm)      :     237 us
+[norm fusion] fused + rms_norm(bf16 w):     282 us (+45 us = the pass that fusion removes, 2606 GB/s)
+[norm fusion] fused + rms_norm  :     711 us (+474 us = 248 GB/s for an extra 0.12 GB pass) | attnres_fwd_kernel=226us void at::native::elementwise_kernel<128, 2, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1}>(int, at::native::gpu_kernel_impl_nocast<at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > >(at::TensorIteratorBase&, at::native::BinaryFunctor<float, float, float, at::native::binary_internal::MulFunctor<float> > const&)::{lambda(int)#1})=199us
+
+ ckpt  bwd_dev_us  bwd_GB/s  peak_MB
+    0         767      2067      840
+    1         775      2729      784
+ckpt=0 saves the pre-norm mixed residual; ckpt=1 (Megatron default) recomputes it,
+trading one extra L*(N*D) read for N*D of activation memory.
+
+  L  L2   fwd_us   bwd_us                               note
+  8   8      201      694                     same L2 bucket
+  9  16      234      773 crosses to L2=16 bucket (recompile)
+

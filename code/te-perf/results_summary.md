@@ -1,11 +1,12 @@
 # TE 算子性能测试结果汇总
 
-> `kernel耗时` 为 **CUPTI 实测的纯 device kernel 执行时间**（µs）：由 `torch.profiler` 统计一次调用所 launch 的全部 kernel（含 device memset）的 device 时长之和，对 repeat 次调用取平均，**不含 launch / 主机派发开销**。设备均为 NVIDIA H100。原始数据见 `te_perf.csv` / `perf.log`（含纯 device 时间与由此计算的 GB/s、TFLOPS）。
+> `kernel耗时` 为 **CUPTI 实测的纯 device kernel 执行时间**（µs）：由 `torch.profiler` 统计一次调用所 launch 的全部 kernel（含 device memset）的 device 时长之和，对 repeat 次调用取平均，**不含 launch / 主机派发开销**。设备均为 NVIDIA H100。原始数据见 `te_perf.csv` / `perf.log`（含纯 device 时间与由此计算的 GB/s、TFLOPS）；Kimi-K3 MLA 行来自 `mla_kimi_k3.csv` / `mla_kimi_k3.log`（脚本 `bench_mla_kimi_k3.py`，详见 `results_mla_kimi_k3.md`）。
 >
 > 注意：小 shape 反复调用时数据可能常驻 L2（H100 约 50MB），此时按 HBM 峰值折算的 `%BW` 会偏高、甚至超过 100%，属正常现象，不代表超过 HBM 带宽；判断 HBM 效率请看工作集大于 L2 的大 shape。
 
 > **生产模型融合注意力形状**（batch=1, seq=4096）：
 > - `(1, 4096, 64, 192, 128)` — Kimi-K2.6 MLA（qk=nope128+rope64=192，v=128，64 头）
+> - `(1, 4096, 96, 192, 128)` — **Kimi-K3 MLA**（同几何、96 头、**NoPE**；TE 训练 fwd+bwd 均可测，见 [`results_mla_kimi_k3.md`](results_mla_kimi_k3.md)）
 > - `(1, 4096, 64, 128, 128)` — dsv4 DSA indexer（64 头，head_dim=128）
 > - `(1, 4096, 32, 128, 128)` — dsv4.1 DSA indexer（32 头，head_dim=128）
 > - `(1, 4096, 40, 128, 128, 8)` — Qwen3-8B GQA（q=40，kv=8）
@@ -238,6 +239,18 @@
 | fused_attn_fwd | torch.float16 | (4, 8192, 16, 128) | H100 | 1939.5 |
 | fused_attn_fwd | torch.bfloat16 | (1, 4096, 64, 192, 128) | H100 | 599.3 |
 | fused_attn_fwd | torch.float16 | (1, 4096, 64, 192, 128) | H100 | 609.6 |
+| fused_attn_fwd | torch.bfloat16 | (1, 1024, 96, 192, 128) | H100 | 86.5 |
+| fused_attn_fwd | torch.float16 | (1, 1024, 96, 192, 128) | H100 | 87.0 |
+| fused_attn_fwd | torch.bfloat16 | (1, 2048, 96, 192, 128) | H100 | 252.4 |
+| fused_attn_fwd | torch.float16 | (1, 2048, 96, 192, 128) | H100 | 256.4 |
+| fused_attn_fwd | torch.bfloat16 | (1, 4096, 96, 192, 128) | H100 | 878.0 |
+| fused_attn_fwd | torch.float16 | (1, 4096, 96, 192, 128) | H100 | 896.7 |
+| fused_attn_fwd | torch.bfloat16 | (1, 8192, 96, 192, 128) | H100 | 3490.0 |
+| fused_attn_fwd | torch.float16 | (1, 8192, 96, 192, 128) | H100 | 3713.9 |
+| fused_attn_fwd | torch.bfloat16 | (1, 16384, 96, 192, 128) | H100 | 14181.2 |
+| fused_attn_fwd | torch.float16 | (1, 16384, 96, 192, 128) | H100 | 14560.6 |
+| fused_attn_fwd | torch.bfloat16 | (2, 4096, 96, 192, 128) | H100 | 1862.7 |
+| fused_attn_fwd | torch.float16 | (2, 4096, 96, 192, 128) | H100 | 1895.5 |
 | fused_attn_fwd | torch.bfloat16 | (1, 4096, 64, 128, 128) | H100 | 472.4 |
 | fused_attn_fwd | torch.float16 | (1, 4096, 64, 128, 128) | H100 | 494.4 |
 | fused_attn_fwd | torch.bfloat16 | (1, 4096, 32, 128, 128) | H100 | 254.7 |
@@ -285,6 +298,18 @@
 | fused_attn_bwd | torch.float16 | (4, 8192, 16, 128) | H100 | 5820.8 |
 | fused_attn_bwd | torch.bfloat16 | (1, 4096, 64, 192, 128) | H100 | 2161.7 |
 | fused_attn_bwd | torch.float16 | (1, 4096, 64, 192, 128) | H100 | 2212.5 |
+| fused_attn_bwd | torch.bfloat16 | (1, 1024, 96, 192, 128) | H100 | 364.0 |
+| fused_attn_bwd | torch.float16 | (1, 1024, 96, 192, 128) | H100 | 355.8 |
+| fused_attn_bwd | torch.bfloat16 | (1, 2048, 96, 192, 128) | H100 | 945.6 |
+| fused_attn_bwd | torch.float16 | (1, 2048, 96, 192, 128) | H100 | 957.7 |
+| fused_attn_bwd | torch.bfloat16 | (1, 4096, 96, 192, 128) | H100 | 3177.2 |
+| fused_attn_bwd | torch.float16 | (1, 4096, 96, 192, 128) | H100 | 3291.2 |
+| fused_attn_bwd | torch.bfloat16 | (1, 8192, 96, 192, 128) | H100 | 11520.7 |
+| fused_attn_bwd | torch.float16 | (1, 8192, 96, 192, 128) | H100 | 12205.4 |
+| fused_attn_bwd | torch.bfloat16 | (1, 16384, 96, 192, 128) | H100 | 45043.4 |
+| fused_attn_bwd | torch.float16 | (1, 16384, 96, 192, 128) | H100 | 46287.0 |
+| fused_attn_bwd | torch.bfloat16 | (2, 4096, 96, 192, 128) | H100 | 6482.9 |
+| fused_attn_bwd | torch.float16 | (2, 4096, 96, 192, 128) | H100 | 6544.3 |
 | fused_attn_bwd | torch.bfloat16 | (1, 4096, 64, 128, 128) | H100 | 1562.0 |
 | fused_attn_bwd | torch.float16 | (1, 4096, 64, 128, 128) | H100 | 1566.8 |
 | fused_attn_bwd | torch.bfloat16 | (1, 4096, 32, 128, 128) | H100 | 784.4 |
@@ -314,3 +339,39 @@
 | fused_attn_fwd_infer | torch.float16 | (1, 512, 4, 512) | H100 | 35.1 |
 | fused_attn_fwd_infer | torch.bfloat16 | (1, 1024, 2, 512) | H100 | 68.4 |
 | fused_attn_fwd_infer | torch.float16 | (1, 1024, 2, 512) | H100 | 67.8 |
+
+## Kimi-K3 MLA 专项（96 头 / qk=192 / v=128，TE fused_attn fwd + bwd）
+
+> 完整数据、正确性校验与口径见 [`results_mla_kimi_k3.md`](results_mla_kimi_k3.md)，脚本
+> [`bench_mla_kimi_k3.py`](bench_mla_kimi_k3.py)，原始 CSV / stdout 为 `mla_kimi_k3.csv` /
+> `mla_kimi_k3.log`。计时与主表同一套 CUPTI device time（warmup=10、repeat=50、b=1、
+> causal / no_bias / dropout=0、训练态 `is_training=True`、反向独立计时）。
+
+Kimi-K3 的 MLA 与 K2.6 同几何、头数 64 → 96，并改为 **NoPE**（`rotary_emb=None`，64 维 rope
+槽位保留但不旋转）：训练时 `kv_b_proj` 上投影成每头 `k(128) + v(128)`，进入 fused-attn 的
+shape 是 `(b, s, 96, 192, 128)`。TE 走 `F16_arbitrary_seqlen`，**训练 fwd + bwd 均支持**
+（96 头本身不构成限制，限制仍是 bwd 的 `head_dim<=256`）；与 torch fp32 参考对比，
+fwd / dq / dk / dv 的 cos 均 ≈ **0.999997**。FP8 训练在 `192/128` 上返回 `No_Backend`
+（FP8 推理 fwd 可用）；TE 原生支持 `qk!=v`，**不需要像 HF FA2 那样把 v 从 128 padding 到 192**。
+
+| s | fwd bf16(µs) | fwd fp16(µs) | bwd bf16(µs) | bwd fp16(µs) | bwd/fwd | fwd TFLOPS(S²) | bwd TFLOPS(S²) |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 1024 | 86.5 | 87.0 | 364.0 | 355.8 | 4.21× | 745 | 354 |
+| 2048 | 252.4 | 256.4 | 945.6 | 957.7 | 3.75× | 1021 | 545 |
+| 4096 | 878.0 | 896.7 | 3177.2 | 3291.2 | 3.62× | 1174 | 649 |
+| 8192 | 3490.0 | 3713.9 | 11520.7 | 12205.4 | 3.30× | 1181 | 716 |
+| 16384 | 14181.2 | 14560.6 | 45043.4 | 46287.0 | 3.18× | 1163 | 732 |
+| 2×4096 | 1862.7 | 1895.5 | 6482.9 | 6544.3 | 3.48× | 1107 | 636 |
+
+注：
+
+- **bwd 独立计时**：只计 `fused_attn_bwd`（吃 fwd 的 `aux_ctx`，kernel 内重算 S），不含前向；
+  「单层训练一步」≈ fwd + bwd。
+- **TFLOPS 是完整 S² 口径**：causal kernel 实际只算约一半 tile，真实 tensor-core 利用率 ≈ 表值 ×0.5。
+- **折算到 K3 的 24 个 MLA 层**（4k / bf16）：fwd 0.878 ms → **21.07 ms**，bwd 3.177 ms →
+  **76.25 ms**，合计 **97.32 ms/step**；仅核心注意力，不含 q_a/q_b、kv_a/kv_b、o_proj、
+  输出 gate 等投影 GEMM，也不含 69 个 KDA 层。
+- **与 K2.6 对照**（4k / bf16）：64 头 fwd 599.3 µs / bwd 2161.7 µs → 96 头为 **1.46× / 1.47×**
+  （头数 1.5×），单位 FLOP 吞吐持平（±2%）。
+- **关键结论**：fwd 在 s≥2k 饱和（~1180 S²-TFLOPS，真实 ~59% TC）；bwd 只有 fwd 等效吞吐的
+  48–63%（4k 真实 ~33%），是训练侧主要瓶颈；s=1024 时 bwd/fwd 达 4.21×（固定开销占比高）。
