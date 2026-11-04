@@ -173,6 +173,16 @@ $$
 h_l = \sum_{i=0}^{l-1}\alpha_{i\to l}\,v_i.
 $$
 
+**记号澄清：$v_i$ 不是 $h_i$。** $v_i=f_i(h_i)$ 是第 $i$ 个 sublayer 的**输出**，$h_i$ 是它的**输入**（上一层聚合出来的结果）；只有 $i=0$ 时 $v_0=h_1$ 恰好是 embedding（它还没经过任何 sublayer）。若记累积流 $R_i=v_0+\dots+v_i$（$R_0=h_1$），则 $v_i=R_i-R_{i-1}$——AttnRes 是在**增量**上做 softmax，不是在累积状态上。两者不等价：把 $h_l=\sum_i\alpha_iv_i$ 改写成 $R_i$ 的组合会得到
+
+$$
+h_l=\sum_{i=0}^{l-2}(\alpha_i-\alpha_{i+1})\,R_i+\alpha_{l-1}R_{l-1},
+$$
+
+系数可以为负；而直接对 $R_i$ 做 softmax，$h_l$ 就变成「不同长度前缀」的加权平均了。还有一个更硬的理由：$h_i$ 本身只含到 $f_{i-1}$，拿 $h_i$ 当 value 会把最近一层 $f_{l-1}$ 的输出直接漏掉。
+
+Block 版同理：$b_n=R_{\text{end}_n}-R_{\text{end}_{n-1}}$，是这一块的**增量**；K3 的 $V$ 就是「embedding + 每个已完成 block 的增量 + 当前 block 的 partial」。
+
 三个设计点：
 
 - **pseudo-query $w_l$ 是每层一个可学习向量，不依赖输入**。这样同一 block 内所有层的 query 可以**并行**算（不用等前一层输出），这是后面 two-phase 策略的前提。消融显示：改成输入相关（从 hidden state 投影）能再降 0.006（1.731 vs 1.737），但要多一个 $d\times d$ 投影、且 decode 时变成串行访存，所以默认不用。
