@@ -8,7 +8,7 @@ tags: ["AI Agent", "系列", "OpenHands", "Harness", "Event Sourcing", "SDK", "�
 categories: ["训练框架"]
 ---
 
-前两篇看了两个 CLI：Codex 是本地优先的 Rust 运行时，Gemini CLI 是把循环放在 core 外面的 TypeScript 平台，mini-swe-agent 则用 190 行证明循环本身可以极简。
+前两篇看了三个 harness：Codex 是本地优先的 Rust 运行时，Gemini CLI 是把循环放在 core 外面的 TypeScript 平台，mini-swe-agent 则用 190 行证明循环本身可以极简。
 
 这一篇看第四个象限：**OpenHands**。它不是从 CLI 长出来的，而是从"一个可以被托管、被恢复、被多个客户端同时观察的 agent 会话"长出来的。源码固定在 `OpenHands/software-agent-sdk@2f2cd2bf7f19ca3bbf9f0c4a95c60f48094302a1`（2026-11-04），版本 `1.59.0`；行号以这个 checkout 为准。
 
@@ -143,7 +143,7 @@ if pending_actions:
 - 写文件要幂等，或者用内容哈希/版本号防重；
 - 发邮件、提交 PR、转账这类外部副作用，必须带幂等键，或者在工具内部先写"已执行"标记再执行。
 
-事件溯源把崩溃窗口**暴露**出来了，但没有替你消除它。Codex 和 Gemini 也有同样的窗口，只是它们没有把 pending 状态持久化得这么明显。
+事件溯源把崩溃窗口**暴露**出来了，但没有替你消除它。任何 harness 都有同样的窗口；OpenHands 只是把 pending 状态显式写进了事件日志。
 
 ## 6. 循环：500 步、美元预算、stop hook
 
@@ -183,7 +183,7 @@ OpenHands 把终止拆成了三层：
 | 策略 | stop hook 可以拒绝 `FINISHED` | 外部策略 |
 | 硬边界 | 500 step、美元预算 | harness |
 
-stop hook 的实现很直接（`:2052-2088`）：agent 说完成了，hook 返回的 `should_stop` 为 `False`（拒绝停止），就构造一条 `MessageEvent(source="environment", role="user")` 的反馈消息，把状态改回 `RUNNING`，继续跑。
+stop hook 的实现很直接（`:2052-2088`）：agent 说完成了，hook 返回的 `should_stop` 为 `False`（拒绝停止），就构造一条 `MessageEvent(source="environment", llm_message=Message(role="user", ...))` 的反馈消息，把状态改回 `RUNNING`，继续跑。
 
 这条消息是 OpenHands 一个很实用的模式：**"完成"不是模型单方面宣布的，是可以被外部驳回的**。但它也埋下了第 9 节要讲的隐患：environment 的反馈在投影里就是一条普通 user 消息。
 
@@ -222,7 +222,7 @@ OpenHands 默认开 stuck detection（`state.py:119`），核心在 `conversatio
 - `browser`（CLI 模式下默认关闭）
 - 可选的 `task`（subagent 工具集，默认关闭）
 
-加上内置的 `finish`、`think`。这比 Codex 的 57 个 handler 小得多，比 mini 的单个 bash 大一点。它把"子 agent"和"浏览器"都做成了显式开关，而不是默认能力。
+加上默认内置的 `finish`；`think` 则要显式加进 `include_default_tools` 才会出现。这比 Codex 的 57 个 handler 小得多，比 mini 的单个 bash 大一点。它把"子 agent"和"浏览器"都做成了显式开关，而不是默认能力。
 
 ### 8.1 并发默认是 1
 
