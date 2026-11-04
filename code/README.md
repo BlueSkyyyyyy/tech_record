@@ -19,3 +19,5 @@
 | [DeepSeek Mega MoE 前反向算子实现解析](../content/posts/mega-moe-00-index/) | [mega-moe/](mega-moe/README.md) | 以 DeepGEMM/DeepEP 为参考分析 Mega MoE 前向与 MoE 反向，长期自驱 |
 | [MegaKernel 资料与实现分析](../content/posts/mega-kernel-00-index/) | [mega-kernel/](mega-kernel/README.md) | MPK 论文 + DeepGEMM mega 家族等 MegaKernel 范式分析，长期自驱 |
 | [Mirage / MPK 项目分析](../content/posts/mirage-00-index/) | [mirage/](mirage/README.md) | 上手路径：两条产品线、compile() 端到端、运行时、H100 构建与实跑记录 |
+| [vLLM 研读（专题）](../content/posts/vllm-00-index/) | [vllm/](vllm/README.md) | 4 个纯 CPU 脚本：KV 预算、块分配、前缀缓存、调度装箱，每个都能 `--test` |
+| [SGLang 研读（专题）](../content/posts/sglang-00-index/) | [sglang/](sglang/README.md) | 纯 CPU 脚本：树 vs 块对拍、显存预算、调度装箱、overlap 时间线、跳词收益，每个都能 `--test` |

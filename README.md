@@ -15,6 +15,7 @@ AI 训练系统工程的学习笔记博客 + 配套代码仓库。
 | 优化器 | Muon / MuonClip 等新兴优化器原理与实现 |
 | 量化与推理 | 量化方案细节、推理部署 |
 | 扩散模型 | DDPM、SDE、DiT、flow matching、少步与视频生成 |
+| vLLM 研读 | 推理引擎架构：PagedAttention、前缀缓存、调度、执行、分布式与调优 |
 
 ## 仓库结构
 
@@ -91,6 +92,53 @@ classifier guidance 与 CFG、LDM 的 latent 压缩、DiT/MMDiT 的架构、flow
 13. [评测与 2026 地图：FID 的坑与四个分叉](content/posts/diffusion-12-eval-2026/index.md)
 
 配套代码：[code/diffusion/](code/diffusion/README.md)（8 个纯 CPU 脚本：噪声日程、DDPM、采样器、CFG、latent/DiT/视频预算、FM 对比、蒸馏、FID 偏差，每个都有 `--test`）
+
+### vLLM 研读（专题，13 篇）
+
+以 main @ c7a7607（v0.33.0 之后）的源码为基线，按「请求进来 → KV 分块 → 前缀复用 → 调度 → 执行 → 采样 → 投机 → 分布式 → KV 传输 → 调优」的顺序拆开一个推理引擎。
+每篇从一个「账本」切入：显存、token 预算、通信量、延迟，配真实 `file:line` 与可运行的纯 CPU 模拟：
+[vLLM 研读（专题）：推理引擎的四个账本](content/posts/vllm-00-index/index.md)。
+
+1. [导读：推理引擎的四个账本](content/posts/vllm-00-index/index.md)
+2. [请求的一生：从 HTTP JSON 到 token](content/posts/vllm-01-request-lifecycle/index.md)
+3. [PagedAttention：块、块表与 KV 显存账本](content/posts/vllm-02-paged-attention/index.md)
+4. [前缀缓存：一条哈希链省下多少 prefill](content/posts/vllm-03-prefix-caching/index.md)
+5. [调度器：token budget、chunked prefill 与抢占](content/posts/vllm-04-scheduler/index.md)
+6. [执行侧：InputBatch、attention metadata 与 CUDA Graph](content/posts/vllm-05-execution/index.md)
+7. [Attention 后端：FlashAttention、FlashInfer 与 MLA 怎么选](content/posts/vllm-06-attention-backends/index.md)
+8. [torch.compile：切分、融合与编译预算](content/posts/vllm-07-torch-compile/index.md)
+9. [采样：logits 处理、logprobs 与结构化输出](content/posts/vllm-08-sampling/index.md)
+10. [投机解码：n-gram、EAGLE 与拒绝采样](content/posts/vllm-09-spec-decode/index.md)
+11. [分布式：TP/PP/DP/EP 与 Executor 的进程账](content/posts/vllm-10-distributed/index.md)
+12. [KV 传输：connector、P/D 分离与 offload](content/posts/vllm-11-kv-transfer/index.md)
+13. [量化、显存与调优：把模型塞进去并跑满](content/posts/vllm-12-quantization-tuning/index.md)
+
+配套代码：[code/vllm/](code/vllm/README.md)（4 个纯 CPU 脚本：KV 预算、块分配、前缀缓存、调度模拟，每个都有 `--test`）
+
+### SGLang 研读（专题，13 篇）
+
+以 main @ 1ef3335（2026-11-03）的源码为基线，从「前缀树」这条主线拆开 SGLang：RadixAttention 的基数树、
+KV 池与 slot 分配、PrefillAdder 的三重预算、两级 overlap（批间流水 + 批内 TBO）、extend/decode 两套
+attention metadata、结构化输出、EAGLE 草稿树、DSL 与 prefix-aware router、PD 分离与 HiCache、EPLB，
+最后一篇把它和 vLLM 放在同一负载下逐维度对照（含两者的参数映射表与选型决策树）：
+[SGLang 研读（专题）：把前缀树当调度器用](content/posts/sglang-00-index/index.md)。
+
+1. [导读：把前缀树当调度器用](content/posts/sglang-00-index/index.md)
+2. [进程与请求的一生](content/posts/sglang-01-architecture/index.md)
+3. [RadixAttention：用基数树做前缀缓存](content/posts/sglang-02-radix-attention/index.md)
+4. [KV 池、slot 分配器与显存账本](content/posts/sglang-03-memory-pool/index.md)
+5. [调度器：PrefillAdder、chunked prefill 与 retract decode](content/posts/sglang-04-scheduler/index.md)
+6. [两级 overlap：批间流水、批内 TBO 与 CUDA Graph](content/posts/sglang-05-overlap/index.md)
+7. [Attention 后端：extend 与 decode 两条路径](content/posts/sglang-06-attention-backends/index.md)
+8. [结构化输出：压缩 FSM、跳词解码与 grammar 缓存](content/posts/sglang-07-constrained/index.md)
+9. [投机解码：EAGLE 草稿树、draft-extend 与验证](content/posts/sglang-08-speculative/index.md)
+10. [前端 DSL、Router 与 cache-aware 负载均衡](content/posts/sglang-09-frontend/index.md)
+11. [PD 分离与 HiCache 三级缓存](content/posts/sglang-10-pd-disagg/index.md)
+12. [TP/EP/DP-attention 与 EPLB](content/posts/sglang-11-distributed/index.md)
+13. [总对比：同一道题，两种解法（vs vLLM）](content/posts/sglang-12-vs-vllm/index.md)
+
+配套代码：[code/sglang/](code/sglang/README.md)（纯 CPU 脚本：树 vs 块对拍、显存预算、调度装箱、
+overlap 时间线、跳词收益，每个都有 `--test`）
 
 ### 通算并行研读（专题，12 篇 + 补遗 4 篇）
 
