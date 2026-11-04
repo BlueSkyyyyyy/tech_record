@@ -16,6 +16,7 @@ AI 训练系统工程的学习笔记博客 + 配套代码仓库。
 | 量化与推理 | 量化方案细节、推理部署 |
 | 扩散模型 | DDPM、SDE、DiT、flow matching、少步与视频生成 |
 | vLLM 研读 | 推理引擎架构：PagedAttention、前缀缓存、调度、执行、分布式与调优 |
+| AI Agent 系统工程 | loop、工具/MCP、context、Codex/Gemini harness、评测、CUA、多 agent、agentic RL、安全 |
 
 ## 仓库结构
 
@@ -92,7 +93,7 @@ classifier guidance 与 CFG、LDM 的 latent 压缩、DiT/MMDiT 的架构、flow
 12. [推理系统：步数、CFG 双 batch 与缓存](content/posts/diffusion-11-inference/index.md)
 13. [评测与 2026 地图：FID 的坑与四个分叉](content/posts/diffusion-12-eval-2026/index.md)
 
-配套代码：[code/diffusion/](code/diffusion/README.md)（8 个纯 CPU 脚本：噪声日程、DDPM、采样器、CFG、latent/DiT/视频预算、FM 对比、蒸馏、FID 偏差，每个都有 `--test`）
+配套代码：[code/diffusion/](code/diffusion/README.md)（9 个纯 CPU 脚本：噪声日程、DDPM、采样器、CFG、latent/DiT/视频预算、FM 对比、蒸馏、FID 偏差，每个都有 `--test`）
 
 ### vLLM 研读（专题，13 篇）
 
@@ -140,6 +141,29 @@ attention metadata、结构化输出、EAGLE 草稿树、DSL 与 prefix-aware ro
 
 配套代码：[code/sglang/](code/sglang/README.md)（纯 CPU 脚本：树 vs 块对拍、显存预算、调度装箱、
 overlap 时间线、跳词收益，每个都有 `--test`）
+
+### AI Agent 系统工程（专题，12 篇）
+
+从「模型 + harness + 环境」三个部件出发，拆开 agent 的 loop、工具/MCP、context 流水线、
+Codex/Gemini/mini-swe-agent 三套 harness、评测指标、computer-use、多 agent 账本、agentic RL 与安全边界。
+每篇配论文数字、源码行号和可运行 CPU 演示；专题首页含四本账、阅读地图与版本基线：
+[AI Agent 系统工程（导读）](content/posts/agent-00-index/index.md)。
+
+1. [导读：模型、Harness 与环境的三体问题](content/posts/agent-00-index/index.md)
+2. [Agent Loop 解剖：一条消息如何变成一次工具调用](content/posts/agent-01-loop/index.md)
+3. [工具层：schema、MCP 与 Code Mode](content/posts/agent-02-tools/index.md)
+4. [Context Engineering：预算、压缩与信息衰减](content/posts/agent-03-context/index.md)
+5. [Harness 解剖（一）：Codex CLI 的三层循环、沙箱与 apply_patch](content/posts/agent-04-codex/index.md)
+6. [Harness 解剖（二）：Gemini CLI 的近 70 万行与 mini-swe-agent 的 190 行](content/posts/agent-05-gemini-mini/index.md)
+7. [评测：SWE-bench、Terminal-Bench 与 Harness 混淆](content/posts/agent-06-eval/index.md)
+8. [Computer-use 与浏览器 Agent：动作空间、grounding 与恢复](content/posts/agent-07-cua/index.md)
+9. [多智能体：context 隔离、handoff 与 token 倍率](content/posts/agent-08-multiagent/index.md)
+10. [Agentic RL：环境、reward 与 GSPO](content/posts/agent-09-rl/index.md)
+11. [记忆与安全：从 MemGPT 到 CaMeL](content/posts/agent-10-memory-security/index.md)
+12. [2026 论文地图与十个开放问题](content/posts/agent-11-trends/index.md)
+
+配套代码：[code/agent/](code/agent/README.md)（9 个纯 CPU 脚本：循环模拟、MCP 握手、token 截断、
+apply_patch、pass@k、多 agent 成本、GRPO/GSPO、taint 检查，每个都有 `--test`）
 
 ### 通算并行研读（专题，12 篇 + 补遗 4 篇）
 

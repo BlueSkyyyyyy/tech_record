@@ -21,3 +21,4 @@
 | [Mirage / MPK 项目分析](../content/posts/mirage-00-index/) | [mirage/](mirage/README.md) | 上手路径：两条产品线、compile() 端到端、运行时、H100 构建与实跑记录 |
 | [vLLM 研读（专题）](../content/posts/vllm-00-index/) | [vllm/](vllm/README.md) | 4 个纯 CPU 脚本：KV 预算、块分配、前缀缓存、调度装箱，每个都能 `--test` |
 | [SGLang 研读（专题）](../content/posts/sglang-00-index/) | [sglang/](sglang/README.md) | 纯 CPU 脚本：树 vs 块对拍、显存预算、调度装箱、overlap 时间线、跳词收益，每个都能 `--test` |
+| [AI Agent 系统工程（专题）](../content/posts/agent-00-index/) | [agent/](agent/README.md) | 9 个纯 CPU 脚本：循环模拟、MCP JSON-RPC、token 预算/截断、apply_patch、pass@k/pass^k、多 agent 成本、GRPO/GSPO、taint 检查，每个都能 `--test` |
