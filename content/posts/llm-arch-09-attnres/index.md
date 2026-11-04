@@ -365,6 +365,12 @@ K3 的结构（`config.json` + 技术报告）：
 
 L 的分布：$L=2..8$ 各 24 次，$L=9$ 共 18 次。
 
+> **$L$ 不是「最近若干层」，而是阶梯式单调增长。** 设 sublayer 编号 $l=1..186$、$S=24$、$k=\lfloor(l-1)/24\rfloor$（已完成的 block 数）：
+> 块首（$l\equiv1\bmod 24$）是 $L=k+1$（embedding + 已完成 block，没有额外 partial），其余是 $L=k+2$（多一个当前 block 的 partial）；$l=1$ 退化成单 source 恒等，输出头 $L=9$。
+> 于是 24 个 sublayer 为一块：第 1 块除块首（恒等）外都是 $L=2$，之后每过一块 $+1$；到第 8 块（只剩 18 个 sublayer）块首是 $L=8$、其余是 $L=9$。
+> 这和滑动窗口正相反：**所有历史 block 始终可见**，只是块内 24 个 sublayer 被压成了一个和；SWA 则只看最近 $W$ 层、丢掉远处（消融 1.764 vs 1.746）。
+> 作为对照，Full AttnRes 的 $L$ 确实是逐个 sublayer 递增的 $1,2,\dots,186$（不是 93——每个 transformer 层有 attn/MLP 两个 sublayer）；它的问题不是算不动，而是 $T=4096$ 时要存 $186\times4096\times7168\times2\ \text{B}\approx10.9$ GB/rank、PP 每层都要传。
+
 ### 9.2 代码长什么样
 
 HF 的 `modeling_kimi_linear.py` 里，每个 sublayer 前调用一次 `_apply_attn_res`：
