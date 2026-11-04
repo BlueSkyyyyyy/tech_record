@@ -35,7 +35,7 @@
 #   --mode sweep     the performance grid: T x L x backend, fwd / bwd / fwd+bwd,
 #                    wall (CUDA events) AND pure device time (CUPTI, launch excluded).
 #   --mode schedule  aggregates the measured per-L cost over K3's real 93-layer schedule
-#                    (185 AttnRes calls per iteration) -> per-iteration overhead.
+#                    (186 AttnRes calls per iteration) -> per-iteration overhead.
 #   --mode extras    output-RMSNorm fusion, checkpoint_level 0 vs 1, L2 compile bucket.
 #   --mode all       check + sweep + schedule + extras (default).
 #
@@ -179,7 +179,11 @@ def k3_sublayer_schedule(num_layers: int = 93, block_layers: int = 12):
     ``modeling_kimi_linear._forward_attn_residual`` appends the running partial sum to
     ``block_residual`` when ``layer_idx % block_size == 0``; every aggregation then sees
     ``#appended_blocks + 1`` sources (the +1 is the live partial sum). The attention
-    aggregation of a block-start layer runs before the append and is skipped for layer 0.
+    aggregation of a block-start layer runs before the append and is skipped for layer 0
+    (Megatron ``AttentionResidual._aggregate`` short-circuits the one-source case as an
+    identity). The final output head (``_apply_output_attn_res`` /
+    ``final_attn_res``) aggregates all blocks plus the trailing partial, so it is one
+    extra call with the largest L.
     """
     out = []
     blocks = 0
@@ -192,6 +196,8 @@ def k3_sublayer_schedule(num_layers: int = 93, block_layers: int = 12):
         else:
             out.append((i, "attn", blocks + 1))
             out.append((i, "mlp", blocks + 1))
+    # final output aggregation before the last RMSNorm
+    out.append((num_layers, "out", blocks + 1))
     return out
 
 

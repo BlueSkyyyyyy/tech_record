@@ -5,14 +5,14 @@
 > - Kimi-K3 已经把 PreNorm 的 `h = h + sublayer(h)` 换成了**注意力残差 AttnRes**：每个
 >   sublayer 的输入是所有 depth source（已完成 block 的残差和 + 当前 block 的 partial sum）
 >   的 softmax 加权和。K3 的 `attn_res_block_size=12`（层）意味着一个 sublayer 要看
->   **L = 2…9** 个 source，93 层共 **185 次** AttnRes 调用/迭代。
+>   **L = 2…9** 个 source，93 层共 **186 次** AttnRes 调用/迭代（185 次在层内 + 1 次输出头）。
 > - 所以这是**纯带宽算子**：`fused_attnres` 在 K3 形状（D=7168、bf16、T=4096）单次
 >   **fwd 237 µs / bwd 770 µs（CUPTI）**，合计约 **1.0 ms**；fwd ≈ 2.5 TB/s、bwd ≈ 2.7 TB/s
 >   （H100 峰值 3.35 TB/s，利用率 74–82%）。
-> - 按实测逐 L 聚合 K3 的 185 次调用，**T=4096 一个训练迭代的 AttnRes 开销约 129 ms**
->   （单次 fwd 237 / bwd 770 µs 是 L=9 的值，**单次约 0.1–1 ms**；129 ms 是 185 次串行之和，
->   fwd 28.6 + bwd 99.9），搬运 **342 GB**；对比本目录先前实测的 KDA（527 ms）+ MLA（97 ms），
->   相当于在注意力主干之上再多 **~21%**。相对普通 PreNorm 残差（32.8 GB）是 **~10.4×** 的残差流量。
+> - 按实测逐 L 聚合 K3 的 186 次调用，**T=4096 一个训练迭代的 AttnRes 开销约 130 ms**
+>   （单次 fwd 237 / bwd 770 µs 是 L=9 的值，**单次约 0.1–1 ms**；130 ms 是 186 次串行之和，
+>   fwd 28.8 + bwd 101.0），搬运 **344.6 GB**；对比本目录先前实测的 KDA（527 ms）+ MLA（97 ms），
+>   相当于在注意力主干之上再多 **~21%**。相对普通 PreNorm 残差（32.8 GB）是 **~10.5×** 的残差流量。
 > - FLA 的 Triton 实现把「逐 source 的 RMSNorm/打分、softmax、加权求和、输出 RMSNorm」
 >   全塞进**一个 kernel**，反向拆成两个**无 atomic** 的 kernel；对比 FLA 自带 naive
 >   PyTorch 实现（同为 T=4096/L=9），fwd 快 **9.0×**、bwd 快 **7.7×**，峰值显存从 4.1 GB 降到 0.78 GB。
@@ -61,10 +61,62 @@ L 的分布（脚本 `k3_sublayer_schedule()` 复刻 `modeling_kimi_linear._forw
 
 | L | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
 |--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 调用次数 | 24 | 24 | 24 | 24 | 24 | 24 | 24 | **17** |
+| 调用次数 | 24 | 24 | 24 | 24 | 24 | 24 | 24 | **18** |
 
-合计 **185** 次（93 层 × 2 − 第 0 层 attention 前的 1 次，那时还没有任何 block）。
-注意 L=1 从不出现：第一次聚合就已经是「embedding block + attention 输出」两个 source。
+合计 **186** 次 = 93 层 × 2 − 1（第 0 层 attention 前没有 block，且单 source 的聚合被
+`_aggregate` 短路成恒等）+ 1（最终输出头 `_apply_output_attn_res` / `final_attn_res`，L=9）。
+注意 L=1 从不真正下发给 kernel：第一次聚合就已经是「embedding + attention 输出」两个 source。
+
+### 1.1 精确形式（与 HF `modeling_kimi_linear._apply_attn_res` / Megatron `AttentionResidual` 逐行对应）
+
+记号：`l` 是 sublayer 下标，`V_j ∈ R^{N×D}` 是第 j 个 depth source，`q_l, w_l ∈ R^D` 是该 sublayer
+的 pseudo-query 与 key-norm 权重（`l` 省略）：
+
+```
+源列表   V = [b_0, b_1, …, b_{k-1}, partial]        # k 个已完成 block + 当前 partial
+         b_0 = embedding
+         b_i = Σ_{l ∈ block i} y_l                  # 块内各 sublayer 输出之和（不是累积流）
+         partial = Σ_{l ∈ 当前 block, 已执行} y_l
+
+打分     r_j = sqrt( (1/D) Σ_d V_{j,d}^2 + ε )       # RMS，无均值、无 bias
+         s_j = Σ_d w_d q_d V_{j,d} / r_j = <w ⊙ q, V_j / r_j>
+         α   = softmax_j(s)                          # 沿 depth 维，j = 0…k
+
+聚合     h_in = Σ_j α_j V_j                          # 凸组合（不是求和）
+
+sublayer y_l  = F_l( RMSNorm_{γ_l}(h_in) )            # γ_l 是下一层的 prenorm 权重；
+                                                     # 开了 norm fusion 时这一步在 AttnRes kernel 里完成
+
+输出头   h_out = Σ_j α'_j V'_j,  V' = [b_0…b_7, 最后一个 block 的 partial]   # L=9，再过最终 RMSNorm
+```
+
+关键点：
+
+- **`b_i` 是块内输出之和，不是累积残差流**。HF 里 `prefix_sum` 在 block 边界被置 `None`，
+  之后只累加本 block 的 `attn_out / mlp_out`；到下一个边界才把它 append 成 `b_i`。所以
+  `V` 里装的是「embedding + 各 block 的净贡献 + 当前 partial」，聚合是 softmax 加权平均。
+- **只有 `w ⊙ q` 进入 logits**：`s_j = (w⊙q)·V_j/r_j`。`w` 和 `q` 的分解在数学上是冗余的
+  （任意 `δw = w⊙ε, δq = −q⊙ε` 都不改变输出），FLA kernel 也确实是先把 `q`、`rms_weight`
+  逐元素乘起来再用。
+- **初始化**：`q = 0`、`w = 1`（Megatron `pseudo_query` zero-init，`key_norm_weight` ones）。
+  `q=0 ⇒ s≡0 ⇒ α` 均匀，等于对 depth 做平均；因为 `h_in` 紧接着就被 RMSNorm，均匀权重的
+  `1/(k+1)` 缩放会被 norm 消掉，所以起点接近 PreNorm。零初始化同时是论文要求的训练稳定性条件。
+- **常数**：K3 `ε = rms_norm_eps = 1e-5`，`scale = 1.0`（FLA 的 `scale` 只乘 logits），
+  聚合全程 fp32，输出 cast 回 bf16。
+
+反向（FLA 两段式 kernel 对应的解析式，`g = ∂L/∂h_in`）：
+
+```
+dp_j = α_j · g·(V_j − h_in)                    # softmax 的 Jacobian 投影
+t_j  = (w⊙q) − s_j · V_j / D
+dV_j = α_j · g + dp_j · t_j / r_j              # 每个 source 一份
+dq   = Σ_j dp_j · (w ⊙ V_j / r_j)
+dw   = Σ_j dp_j · (q ⊙ V_j / r_j)              # dq/dw 只有 [D]，沿 N 归约
+```
+
+其中 `t_j` 来自 RMSNorm 的 Jacobian（`∂s_j/∂V_j = t_j / r_j`）；`dq/dw` 的 `Σ_j` 在 batch 上
+还要再过一遍 `N`，这正是 Triton 反向需要 fp32 `dqw` scratch、而 Gluon 用 32-token 分组把它
+缩小 32× 的原因。
 
 ## 2. 测试口径
 
@@ -158,7 +210,7 @@ T=1024 时 fwd 只有 2.58 TB/s（太小，填充/尾部效应），T≥8192 稳
   每 program 两个 token × 8192 个 fp32 累加器，寄存器压力过大（推测溢出到 local memory）。
 - 独立进程重复测 3 次，L=9 的 bwd 稳定在 **2.84 ms（±1 µs）**；但另一次「连续压测之后」的
   sweep 在同一 shape 测到 6.0 ms。这类几毫秒的长 kernel 对 GPU 频率/占用很敏感，Gluon 的
-  绝对数必须在**空闲卡、独立进程**里取。H100 上仍不建议用它跑 K3 —— 17/185 次调用正好是 L=9。
+  绝对数必须在**空闲卡、独立进程**里取。H100 上仍不建议用它跑 K3 —— 18/186 次调用正好是 L=9。
 
 **naive（FLA 自带 PyTorch 参考实现）作为「不融合」基线**，T=4096/L=9（wall ms）：
 
@@ -192,13 +244,13 @@ naive 这一侧统一用 wall：它是几十个 eager kernel 的拼装，CUPTI �
 
 | T | fwd ms | bwd ms | 合计 ms | 流量 GB | 带宽 roofline ms | 效率 |
 |--:|--:|--:|--:|--:|--:|--:|
-| 1024 | 7.14 | 26.20 | **33.4** | 85.5 | 25.5 | 76.5% |
-| 4096 | 28.65 | 99.91 | **128.6** | 341.9 | 102.1 | 79.4% |
-| 8192 | 54.99 | 197.28 | **252.3** | 683.8 | 204.1 | 80.9% |
-| 16384 | 107.19 | 390.90 | **498.1** | 1367.6 | 408.2 | 82.0% |
+| 1024 | 7.20 | 26.36 | **33.6** | 86.2 | 25.7 | 76.5% |
+| 4096 | 28.79 | 100.96 | **129.8** | 344.6 | 102.9 | 79.4% |
+| 8192 | 55.40 | 199.26 | **254.7** | 689.2 | 205.7 | 80.9% |
+| 16384 | 108.07 | 394.01 | **502.1** | 1378.4 | 411.5 | 82.0% |
 
 量级别搞混：**单次 AttnRes 是 0.1–1 ms**（L=2 约 0.39 ms、L=9 约 1.0 ms），
-上表的 33–498 ms 是 185 次调用在 K3 里**串行累加**的结果（每一次都要等上一层 sublayer 的输出）。
+上表的 34–502 ms 是 186 次调用在 K3 里**串行累加**的结果（每一次都要等上一层 sublayer 的输出）。
 
 放到 K3 的每迭代账单里（T=4096，单卡口径）：
 
@@ -206,10 +258,10 @@ naive 这一侧统一用 wall：它是几十个 eager kernel 的拼装，CUPTI �
 |---|--:|---|
 | KDA × 69 层（fwd+bwd） | 527 ms | 本目录 `results_kda_kimi_k3.md`（1.586+6.058 ms/层） |
 | MLA × 24 层（fwd+bwd） | 97 ms | 本目录 `results_mla_kimi_k3.md`（0.878+3.177 ms/层） |
-| **AttnRes × 185 次** | **129 ms** | 本文 |
+| **AttnRes × 186 次** | **130 ms** | 本文 |
 | 普通 PreNorm 残差（参照） | ~9.8 ms（roofline） | 186 × 3 × N·D·2 B = 32.8 GB |
 
-也就是说 AttnRes 在注意力主干之上再增加 **~21%**，相对普通残差则是 **~10.4×** 的流量。
+也就是说 AttnRes 在注意力主干之上再增加 **~21%**，相对普通残差则是 **~10.5×** 的流量。
 block size=12 是 K3 在「残差表达力」和「每层多看几个 source」之间的折中：block 越小 L 越大，
 流量近似线性涨。
 
@@ -267,8 +319,8 @@ AttnRes 的输出紧接着就是下一个 sublayer 的 prenorm。FLA 的 `output
 让 kernel 直接输出**归一化后的结果**，把这次 `[N,D]` 读+写彻底省掉。Megatron 的
 `attn_res_norm_fusion` 就是走这条路（`AttentionResidual._aggregate` 里
 `output_rms_weight=output_norm_weight`）。实测每次调用省 **45 µs**（bf16 norm 权重，
-2.6 TB/s）到 **474 µs**（torch 在 fp32 权重下退化成非融合路径），185 次调用即
-**8.3–88 ms/迭代** —— 是本文里性价比最高的一个开关。
+2.6 TB/s）到 **474 µs**（torch 在 fp32 权重下退化成非融合路径），186 次调用即
+**8.4–88 ms/迭代** —— 是本文里性价比最高的一个开关。
 
 ### 5.5 autotune 与「按 L 分档」
 
@@ -324,10 +376,10 @@ AttnRes 的输出紧接着就是下一个 sublayer 的 prenorm。FLA 的 `output
    可以学 Gluon 做 token 分组聚合（32 token 一组），把 `[N,D]` 降到 `[N/32,D]`；
    K3 有 24 次 L=2、24 次 L=3 的调用，收益集中在这里。
 3. **L=9 的 Gluon 路径**：放开 `BT=1` 或允许 `BD` 分块，避免 `BT=2` 的寄存器爆炸；
-   否则 K3 的 17 次 L=9 调用会把 Gluon 的整体收益吃掉。
+   否则 K3 的 18 次 L=9 调用会把 Gluon 的整体收益吃掉。
 4. **block size 与流量的权衡**：block=12 层（24 sublayer）给出平均 L≈5.4；若改大到 24 层，
    L 减半、流量近似减半，但表达力下降 —— 这是模型侧的取舍，kernel 侧只能把常数做小。
-5. **host 侧**：185 次调用/迭代，每次都要 `reshape/contiguous` L 个张量、建地址表、走 autograd
+5. **host 侧**：186 次调用/迭代，每次都要 `reshape/contiguous` L 个张量、建地址表、走 autograd
    Function 和 dispatch。wall 与 CUPTI 的差（T=4096/L=9：fwd 370 vs 237 µs）里有一部分是这笔
    host 税；训练时能与计算重叠，但小 T 下不可忽略。
 
