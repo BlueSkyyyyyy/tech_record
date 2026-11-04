@@ -150,11 +150,13 @@ $$
 - **RMSNorm(k)**：防止输出幅度大的层垄断权重（这是深度方向的「温度归一化」）；
 - **$i=0$ 是 embedding**：保证原始 token 信息永远在候选集里。
 
-全量版本的算术是 $O(L^2 d)$（93 层、$d=7168$，每 token 约 62 GFLOP），**能算，但存不下**：要保留所有层的输出，显存 $O(Ld)$，PP 下还要跨 stage 通信。
+全量版本的算术是 $O(L^2 d)$（186 个 sublayer、$d=7168$，每 token 约 0.5 GFLOP——**FLOPs 可以忽略，存不下才是问题**）：要保留所有层的输出，显存 $O(Ld)$，PP 下还要跨 stage 通信。
 
 所以 K3 用 **Block AttnRes**：把 93 层分成 8 块、每块 12 层，块内输出先求和成一个代表，块间才做完整注意力。显存和通信从 $O(Ld)$ 降到 $O(Nd)$（$N=8$），并用 online softmax 把「块间并行结果」和「块内顺序部分和」合并。
 
 论文的实测：$N \approx 8$ 就能恢复大部分收益；K3 的配置是 8 块 × 12 层，加上 embedding 共 9 个 block。
+
+> 完整推导、K3 的调度与实测见第九篇：[残差连接与 AttnRes]({{< relref "llm-arch-09-attnres" >}})。
 
 **AttnRes 和 mHC 是两种哲学**：mHC 约束混合矩阵（保均值、谱范数 ≤1），AttnRes 让权重自由学（但用 softmax 归一化保证凸组合）。前者是「结构约束」，后者是「学习出来的约束」。谁更好还没定论——但都说明一件事：**残差不是「恒等」就够，它需要被设计**。
 
@@ -188,5 +190,8 @@ $$
 3. [注意力四代]({{< relref "llm-arch-02-attention" >}})
 4. [线性注意力与 3:1 混合]({{< relref "llm-arch-03-linear" >}})
 5. [MoE 十年]({{< relref "llm-arch-04-moe" >}})
-6. 本篇：残差流的加宽
-7. [位置的退场：RoPE、部分 RoPE 与 NoPE]({{< relref "llm-arch-06-position" >}})
+6. 本篇：残差流的加宽：HC 与 mHC
+7. [位置的退场]({{< relref "llm-arch-06-position" >}})
+8. [条件记忆]({{< relref "llm-arch-07-memory" >}})
+9. [五个收敛、三个分叉与三个赌注]({{< relref "llm-arch-08-trends" >}})
+10. [残差连接与 AttnRes]({{< relref "llm-arch-09-attnres" >}})

@@ -42,6 +42,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 7. [位置的退场：RoPE、部分 RoPE 与 NoPE](content/posts/llm-arch-06-position/index.md)
 8. [条件记忆：Engram、MTP 与 DSpark](content/posts/llm-arch-07-memory/index.md)
 9. [五个收敛、三个分叉与三个赌注](content/posts/llm-arch-08-trends/index.md)
+10. [残差连接的第二次生命：从 ResNet 到 AttnRes 与 Kimi-K3](content/posts/llm-arch-09-attnres/index.md)
 
 配套代码：[code/llm-arch-evolution/](code/llm-arch-evolution/README.md)（纯标准库预算计算器，`python budget.py --test` 对拍 9 个模型）
 

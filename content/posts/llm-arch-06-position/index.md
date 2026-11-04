@@ -190,6 +190,8 @@ K3 报告的原话："Kimi K3 uses no explicit positional embedding (NoPE), and 
 3. [注意力四代]({{< relref "llm-arch-02-attention" >}})
 4. [线性注意力与 3:1 混合]({{< relref "llm-arch-03-linear" >}})
 5. [MoE 十年]({{< relref "llm-arch-04-moe" >}})
-6. [残差流的加宽]({{< relref "llm-arch-05-residual" >}})
+6. [残差流的加宽：HC 与 mHC]({{< relref "llm-arch-05-residual" >}})
 7. 本篇：位置的退场
-8. [条件记忆：Engram、MTP 与 DSpark]({{< relref "llm-arch-07-memory" >}})
+8. [条件记忆]({{< relref "llm-arch-07-memory" >}})
+9. [五个收敛、三个分叉与三个赌注]({{< relref "llm-arch-08-trends" >}})
+10. [残差连接与 AttnRes]({{< relref "llm-arch-09-attnres" >}})

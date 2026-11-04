@@ -193,6 +193,8 @@ DSpark 的增益来源不是「更长的块」，而是两个细节：**Markov h
 3. [注意力四代]({{< relref "llm-arch-02-attention" >}})
 4. [线性注意力与 3:1 混合]({{< relref "llm-arch-03-linear" >}})
 5. [MoE 十年]({{< relref "llm-arch-04-moe" >}})
-6. [残差流的加宽]({{< relref "llm-arch-05-residual" >}})
-7. 本篇：条件记忆
-8. [趋势总结：五个收敛、三个分叉与三个赌注]({{< relref "llm-arch-08-trends" >}})
+6. [残差流的加宽：HC 与 mHC]({{< relref "llm-arch-05-residual" >}})
+7. [位置的退场]({{< relref "llm-arch-06-position" >}})
+8. 本篇：条件记忆
+9. [五个收敛、三个分叉与三个赌注]({{< relref "llm-arch-08-trends" >}})
+10. [残差连接与 AttnRes]({{< relref "llm-arch-09-attnres" >}})

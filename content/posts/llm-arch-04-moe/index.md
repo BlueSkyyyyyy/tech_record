@@ -222,4 +222,8 @@ MoE 这十年的账，可以压成一句话：**用通信和显存，换「参�
 3. [注意力四代]({{< relref "llm-arch-02-attention" >}})
 4. [线性注意力与 3:1 混合]({{< relref "llm-arch-03-linear" >}})
 5. 本篇：MoE 十年
-6. [残差流的加宽：HC、mHC 与 AttnRes]({{< relref "llm-arch-05-residual" >}})
+6. [残差流的加宽：HC 与 mHC]({{< relref "llm-arch-05-residual" >}})
+7. [位置的退场]({{< relref "llm-arch-06-position" >}})
+8. [条件记忆]({{< relref "llm-arch-07-memory" >}})
+9. [五个收敛、三个分叉与三个赌注]({{< relref "llm-arch-08-trends" >}})
+10. [残差连接与 AttnRes]({{< relref "llm-arch-09-attnres" >}})

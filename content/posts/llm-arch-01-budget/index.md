@@ -190,6 +190,13 @@ V4.1 的 890 B/token 值得单独说一句，因为它能**逐字节复算**出�
 
 **系列导航**：
 
-1. [导读：结构不是越新越好，是预算搬家]({{< relref "llm-arch-00-index" >}})
+1. [导读：2026 年的结构地图]({{< relref "llm-arch-00-index" >}})
 2. 本篇：先把账本立起来
-3. [注意力四代：从 GQA 到 MLA 到稀疏压缩]({{< relref "llm-arch-02-attention" >}})
+3. [注意力四代]({{< relref "llm-arch-02-attention" >}})
+4. [线性注意力与 3:1 混合]({{< relref "llm-arch-03-linear" >}})
+5. [MoE 十年]({{< relref "llm-arch-04-moe" >}})
+6. [残差流的加宽：HC 与 mHC]({{< relref "llm-arch-05-residual" >}})
+7. [位置的退场]({{< relref "llm-arch-06-position" >}})
+8. [条件记忆]({{< relref "llm-arch-07-memory" >}})
+9. [五个收敛、三个分叉与三个赌注]({{< relref "llm-arch-08-trends" >}})
+10. [残差连接与 AttnRes]({{< relref "llm-arch-09-attnres" >}})
