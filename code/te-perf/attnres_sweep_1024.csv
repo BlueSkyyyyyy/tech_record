@@ -1,0 +1,9 @@
+backend,dtype,T,D,L,onorm,ckpt,fwd_dev,fwd_wall,fwd_gbps,bwd_dev,bwd_wall,bwd_gbps,step_dev,step_wall,peak_mb,fwd_kernels,bwd_kernels,error
+triton,bfloat16,1024,7168,2,1,1,0.021429,0.156965,2056.133166,0.087836,0.273256,2506.962826,0.112324,0.495178,98.101562,attnres_fwd_kernel=21us,attnres_bwd_kernel_dv=60us attnres_bwd_kernel_dqdw=28us,
+triton,bfloat16,1024,7168,3,1,1,0.028741,0.159558,2044.077304,0.110418,0.287610,2393.101768,0.141900,0.521178,112.109375,attnres_fwd_kernel=29us,attnres_bwd_kernel_dv=83us attnres_bwd_kernel_dqdw=28us,
+triton,bfloat16,1024,7168,4,1,1,0.030624,0.160155,2398.019338,0.117537,0.313205,2622.845096,0.150794,0.553070,126.117188,attnres_fwd_kernel=31us,attnres_bwd_kernel_dv=90us attnres_bwd_kernel_dqdw=28us,
+triton,bfloat16,1024,7168,5,1,1,0.038575,0.177613,2284.548750,0.140157,0.319950,2513.760704,0.181119,0.567352,140.125000,attnres_fwd_kernel=39us,attnres_bwd_kernel_dv=112us attnres_bwd_kernel_dqdw=28us,
+triton,bfloat16,1024,7168,6,1,1,0.040282,0.171725,2552.367353,0.147181,0.336325,2693.019643,0.189628,0.601616,154.132812,attnres_fwd_kernel=40us,attnres_bwd_kernel_dv=119us attnres_bwd_kernel_dqdw=28us,
+triton,bfloat16,1024,7168,7,1,1,0.047863,0.184554,2454.982163,0.168911,0.355394,2607.299281,0.219610,0.616392,168.140625,attnres_fwd_kernel=48us,attnres_bwd_kernel_dv=141us attnres_bwd_kernel_dqdw=28us,
+triton,bfloat16,1024,7168,8,1,1,0.049651,0.185275,2662.371539,0.180332,0.364827,2686.395383,0.232168,0.628936,182.148438,attnres_fwd_kernel=50us,attnres_bwd_kernel_dv=152us attnres_bwd_kernel_dqdw=29us,
+triton,bfloat16,1024,7168,9,1,1,0.056994,0.198491,2577.097734,0.199599,0.398336,2647.714230,0.257782,0.669901,196.156250,attnres_fwd_kernel=57us,attnres_bwd_kernel_dv=171us attnres_bwd_kernel_dqdw=29us,
