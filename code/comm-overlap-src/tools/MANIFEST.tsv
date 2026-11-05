@@ -1,0 +1,14 @@
+# repo	upstream_relpath	dest_relpath
+# 每条：上游仓库标记（见 verify_annotations.py 的 REPO_DIRS）、上游相对路径、本目录副本路径
+triton-distributed	FlashComm/python/flash_comm/ep_overlap/kernels/cutedsl_dispatch_group_gemm.py	uniep/kernels/cutedsl_dispatch_group_gemm.py
+triton-distributed	FlashComm/python/flash_comm/ep_overlap/kernels/cutedsl_group_gemm_combine.py	uniep/kernels/cutedsl_group_gemm_combine.py
+triton-distributed	FlashComm/python/flash_comm/ep_overlap/kernels/m_contig_group_tile_scheduler.py	uniep/kernels/m_contig_group_tile_scheduler.py
+triton-distributed	FlashComm/python/flash_comm/ep_overlap/kernels/cutedsl_topk_reduce.py	uniep/kernels/cutedsl_topk_reduce.py
+triton-distributed	FlashComm/python/flash_comm/ep_overlap/_ops/dispatch_group_gemm.py	uniep/_ops/dispatch_group_gemm.py
+triton-distributed	FlashComm/python/flash_comm/ep_overlap/_ops/group_gemm_combine.py	uniep/_ops/group_gemm_combine.py
+triton-distributed	FlashComm/python/flash_comm/ep_overlap/_ops/topk_reduce.py	uniep/_ops/topk_reduce.py
+flux	src/all_gather/sm90_all_gather_gemm_tile_scheduler.hpp	flux/src/sm90_all_gather_gemm_tile_scheduler.hpp
+flux	src/all_gather/sm90_all_gather_gemm_tma_warpspecialized_cooperative.hpp	flux/src/sm90_all_gather_gemm_tma_warpspecialized_cooperative.hpp
+flux	include/flux/cuda/system_barrier.hpp	flux/include/system_barrier.hpp
+flux	src/reduce_scatter/epilogue_evt_nvshmem.hpp	flux/src/epilogue_evt_nvshmem.hpp
+flux	src/reduce_scatter/reduce_scatter_barrier_struct.hpp	flux/src/reduce_scatter_barrier_struct.hpp
