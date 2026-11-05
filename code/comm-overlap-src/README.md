@@ -10,6 +10,9 @@
 - 没有实测：本机没有 SM100 / 多卡 NVLink，UniEP 是 Blackwell(sm100)+Hopper(sm90)、Flux 是 Hopper(sm90) 代码，
   这里只做源码精读。论文数字见文章正文。
 
+> 站上可读版：[通算并行源码精读](https://blueskyyyyyy.github.io/tech_record/posts/comm-overlap-src/)
+> （六篇正文 + 每篇页尾折叠的带注释源码；本目录仍是唯一的事实来源，站上内容在构建时从这里读取）
+
 ## 目录
 
 ```

@@ -1,0 +1,39 @@
+{{- /*
+  内联渲染 code/comm-overlap-src/docs/*.md，并把仓库内的相对链接改写成
+  「站点内链接」（content/posts）或「GitHub 链接」（code/ 下的源码）——
+  因为被内联的 markdown 是相对 code/comm-overlap-src/docs/ 写的相对路径，
+  直接 markdownify 会按页面 URL 解析，全部 404。
+
+  用法：{{< ov_doc "code/comm-overlap-src/docs/01-uniep-dispatch-gemm.md" >}}
+
+  注意：被内联的 markdown 里不要再写 {{< >}} 短代码（readFile + markdownify 不会二次处理）。
+*/ -}}
+{{- $p := .Get 0 -}}
+{{- $raw := readFile $p -}}
+{{- if hasPrefix $raw "# " -}}
+  {{- $raw = delimit (after 1 (split $raw "\n")) "\n" -}}
+{{- end -}}
+{{- $base := site.BaseURL -}}
+{{- $gh := "https://github.com/BlueSkyyyyyy/tech_record/blob/main/code/comm-overlap-src/" -}}
+{{- $ghtree := "https://github.com/BlueSkyyyyyy/tech_record/tree/main/code/" -}}
+{{- $raw = replace $raw "](../uniep/" (printf "](%suniep/" $gh) -}}
+{{- $raw = replace $raw "](../flux/" (printf "](%sflux/" $gh) -}}
+{{- $raw = replace $raw "](../tools/" (printf "](%stools/" $gh) -}}
+{{- $raw = replace $raw "](../../comm-overlap/" (printf "](%s" $ghtree) -}}
+{{- $raw = replace $raw "](../../../content/posts/" (printf "](%sposts/" $base) -}}
+{{- /* 上面两条 content/posts 链接的目标是 xxx/index.md，落到站点上要去掉 index.md */ -}}
+{{- $raw = replace $raw "index.md)" ")" -}}
+{{- /* docs 之间互相引用的 `](01-xxx.md)` 也要换成站点页面（它们都是 /posts/ 下的兄弟页） */ -}}
+{{- $docpages := dict
+  "00-overview.md" "../comm-overlap-src/"
+  "01-uniep-dispatch-gemm.md" "../comm-overlap-src-01-dispatch-gemm/"
+  "02-uniep-gemm-combine.md" "../comm-overlap-src-02-gemm-combine/"
+  "03-uniep-determinism.md" "../comm-overlap-src-03-determinism/"
+  "04-flux-ag-gemm.md" "../comm-overlap-src-04-flux-ag-gemm/"
+  "05-flux-gemm-rs.md" "../comm-overlap-src-05-flux-gemm-rs/"
+  "06-compare.md" "../comm-overlap-src-06-compare/"
+-}}
+{{- range $k, $v := $docpages -}}
+  {{- $raw = replace $raw (printf "](%s)" $k) (printf "](%s)" $v) -}}
+{{- end -}}
+{{- $raw | markdownify -}}

@@ -1,0 +1,31 @@
+{{- /*
+  把仓库里的源码文件（带中文注释的副本）内联成高亮代码块，外面套一层 <details> 折叠，
+  并给出「在 GitHub 打开」的链接（带行号锚点）。
+
+  用法：{{< ov_src "code/comm-overlap-src/uniep/kernels/cutedsl_dispatch_group_gemm.py" >}}
+        {{< ov_src "code/comm-overlap-src/flux/include/system_barrier.hpp" "cpp" >}}   ← 可显式指定语言
+
+  语言按扩展名猜：.py→python，.hpp/.h/.cc→cpp，.sh→bash，其余→text。
+  行号用 inline 而不是 table：文件动辄上千行，table 会把 HTML 撑大两三倍。
+*/ -}}
+{{- $p := .Get 0 -}}
+{{- $ext := path.Ext $p -}}
+{{- $lang := "text" -}}
+{{- if eq $ext ".py" -}}
+  {{- $lang = "python" -}}
+{{- else if or (eq $ext ".hpp") (eq $ext ".h") (eq $ext ".cc") (eq $ext ".cu") -}}
+  {{- $lang = "cpp" -}}
+{{- else if eq $ext ".sh" -}}
+  {{- $lang = "bash" -}}
+{{- end -}}
+{{- with .Get 1 -}}
+  {{- $lang = . -}}
+{{- end -}}
+{{- $code := readFile $p -}}
+{{- $lines := len (split $code "\n") -}}
+{{- $gh := printf "https://github.com/BlueSkyyyyyy/tech_record/blob/main/%s" $p -}}
+<p class="src-meta">📄 <code>{{ $p }}</code>（{{ $lines }} 行） · <a href="{{ $gh }}" target="_blank" rel="noopener">在 GitHub 打开</a></p>
+<details class="src-details">
+<summary>展开源码（含中文注释，行号与 docs 里的行号表一致）</summary>
+{{ transform.Highlight $code $lang "linenos=inline,lineNoStart=1" }}
+</details>

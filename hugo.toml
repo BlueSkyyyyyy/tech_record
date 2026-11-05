@@ -15,13 +15,14 @@ enableEmoji = true
   ShowCodeCopyButtons = true
   ShowToc = true
   description = "AI 训练系统 / 算子 / 优化器的学习笔记与代码"
-  seriesOrder = ["flash-attention", "fa-bwd", "megatron-code", "comm-overlap", "te-perf", "llm-arch", "vla", "diffusion", "vllm", "sglang", "agent", "leetcode", "随笔"]
+  seriesOrder = ["flash-attention", "fa-bwd", "megatron-code", "comm-overlap", "comm-overlap-src", "te-perf", "llm-arch", "vla", "diffusion", "vllm", "sglang", "agent", "leetcode", "随笔"]
 
 [params.seriesTitles]
   "flash-attention" = "Flash Attention"
   "fa-bwd" = "FlashAttention 反向工程"
   "megatron-code" = "Megatron-LM 源码精读"
   "comm-overlap" = "通算并行研读"
+  "comm-overlap-src" = "通算并行源码精读"
   "te-perf" = "Transformer Engine 性能"
   "llm-arch" = "LLM 模型结构变迁"
   "vla" = "VLA 精读"
