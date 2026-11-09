@@ -35,7 +35,7 @@
    subtitle: "<一句话看点>"
    date: <date>          # 裸日期，见坑
    draft: false
-   weight: <上一篇 + 1>
+   weight: <2 或把旧篇各 +1 后的 2>
    series: ["ai-daily"]
    tags: ["AI 日报", "系列", "论文速览", ...]
    categories: ["LLM算法"]
@@ -57,15 +57,15 @@
 - [ ] 论文数与当天 daily 实际条数一致（脚本输出里核对）
 - [ ] 每篇 bullet 里的数字都能在摘要里找到出处
 - [ ] `hugo` 构建无 ERROR，`public/posts/ai-daily-<date>/index.html` 存在
-- [ ] 系列页 `/series/ai-daily/` 能看到新篇，且顺序正确（weight 递增）
+- [ ] 系列页 `/series/ai-daily/` 能看到新篇，且顺序正确（导读在最前，日报按日期倒序）
 - [ ] 两处索引已更新
 
 ## 已知坑
 
 - **日期语义**：Hugo 对 `date: 2026-11-09T21:00:00+08:00` 的处理与本机 `date` 不一致（实测按 UTC 墙钟比较），21:00 的任务在 21:00 前后构建会被判成「未来」而**静默不输出**。**一律写裸日期** `date: <daily 日期>`，它 ≤ 今天，永远安全。
-- **`weight` 必须递增**：系列内排序是 `weight` + slug 数字前缀；新篇 weight = 当前最大 + 1，否则会插到中间。
+- **`weight` 按日期倒序**：系列页与「上一篇/下一篇」都按 weight 升序，而导读页写的是「最新在上」，所以**新的一天反而要更小的 weight**：导读恒为 1，日报按 daily 日期倒序依次 2、3、4…（加一天时把比它旧的所有篇 weight 各 +1）。不要用「现有最大 + 1」，那会让新篇排到最后。
 - **同一天不要重复跑同一个日期**：先看 `content/posts/ai-daily-<date>/` 是否已存在，存在则只增量修订，不要新建第二篇。
 - **upvotes 会变**：文中注明「截至抓取时间」，同一篇隔天重抓数字会不同，不要为此改旧文。
 - **不要把 brief 直接贴进正文**：brief 是素材，正文必须重写、必须有观点。
 - **`**加粗**` 不要以「」（）收尾**：正文走 `doc_include`（`readFile|markdownify`），这类加粗会退化成字面星号（见 `agent_guide.md` 坑 #8）。写完 grep 一下 `\*\*「` 和 `\*\*（`，或构建后确认页面里没有裸 `**`。
-- **frontmatter 的 `weight`**：`ai-daily-00-index` 是 1，之后按期递增（2、3、4…）；不要用日期当 weight。
+- **frontmatter 的 `weight`**：导读恒为 1，日报按日期倒序 2、3、4…；不要用日期本身当 weight（日期大小和阅读顺序相反）。

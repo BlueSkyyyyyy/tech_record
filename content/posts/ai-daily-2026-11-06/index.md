@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-06：32 篇 HF Daily Papers — 决策模型、潜空�
 subtitle: "决策模型把 CoT 换成一次前向、agent 之间开始传 KV cache、多轮编辑只在去噪轨迹尾部修"
 date: 2026-11-06
 draft: false
-weight: 2
+weight: 3
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "agent", "VLA", "扩散模型", "线性注意力", "评测"]
 categories: ["LLM算法"]

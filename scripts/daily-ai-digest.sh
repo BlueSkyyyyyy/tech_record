@@ -63,7 +63,7 @@ TASK="$(cat <<EOF
 
 关键约束（违反会导致返工）：
 1. 数据已经抓好了：${HOME}/tmp/ai-daily/${TARGET_DATE}.json 与 .md。不要重复联网抓；直接读 brief。
-2. 正文写 code/ai-daily/docs/${TARGET_DATE}.md，文章壳写 content/posts/ai-daily-${TARGET_DATE}/index.md（frontmatter 的 date 写裸日期 ${TARGET_DATE}，weight = 现有最大 weight + 1）。
+2. 正文写 code/ai-daily/docs/${TARGET_DATE}.md，文章壳写 content/posts/ai-daily-${TARGET_DATE}/index.md（frontmatter 的 date 写裸日期 ${TARGET_DATE}，weight 按「日期倒序」：导读恒 1，日报最新一天是 2，把比今天旧的所有篇 weight 各 +1）。
 3. 论文摘要必须自己重写并保留具体数字，禁止直接粘贴 brief 或 ai_summary；分组内按 upvotes 降序；Top 10 表放最前；结尾写「今天的三个观察」。
 4. 同步更新两处索引：content/posts/ai-daily-00-index/index.md 的「文章索引」（最新在上）、根 README.md 的「AI 日报」小节。
 5. 构建验证：/tmp/hugo_bin/hugo --gc --minify，确认 public/posts/ai-daily-${TARGET_DATE}/ 存在、无 ERROR。

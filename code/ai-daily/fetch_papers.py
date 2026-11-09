@@ -31,6 +31,8 @@ from pathlib import Path
 UA = "Mozilla/5.0 (X11; Linux x86_64) ai-daily/1.0"
 MIRROR_API = "https://hf-mirror.com/api/daily_papers?date={date}"
 OFFICIAL_API = "https://huggingface.co/api/daily_papers?date={date}"
+OFFICIAL_LATEST_API = "https://huggingface.co/api/daily_papers?limit=100"
+MIRROR_LATEST_API = "https://hf-mirror.com/api/daily_papers?limit=100"
 MIRROR_PAGE = "https://hf-mirror.com/papers/date/{date}"
 OFFICIAL_PAGE = "https://huggingface.co/papers/date/{date}"
 
@@ -42,30 +44,56 @@ def fetch(url: str, timeout: int = 40) -> bytes:
         return resp.read()
 
 
+def _daily_date(entry: dict) -> str:
+    """条目「登上 daily」的日期（YYYY-MM-DD）；缺字段返回空串。"""
+    p = entry.get("paper") or entry
+    return (p.get("submittedOnDailyAt") or "")[:10]
+
+
 def try_sources(date: str, timeout: int = 40) -> tuple[list, str]:
-    """依次尝试四个来源，返回 (paper 列表, 来源说明)。"""
+    """依次尝试各来源，返回 (paper 列表, 来源说明)。
+
+    注意：`/api/daily_papers?date=` 有已知 bug——某天的批次刚开始收录时，按日期
+    过滤会返回 0，而不带 date 的接口（返回最新条目，按 daily 日倒序）里已经有
+    当天的论文。所以「按日期拿不到」时再退到「拿最新一批 + 本地按日期过滤」。
+    """
     errors = []
     for url in (OFFICIAL_API, MIRROR_API):
         try:
-            raw = fetch(url.format(date=date), timeout)
-            data = json.loads(raw)
-            if isinstance(data, list):
+            data = json.loads(fetch(url.format(date=date), timeout))
+            if isinstance(data, list) and data:
                 return data, url.format(date=date)
-            errors.append(f"{url}: 返回不是 list（{type(data).__name__}）")
+            errors.append(f"{url}: 按日期过滤结果为空（上游 date 过滤滞后）")
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as exc:
             errors.append(f"{url}: {exc}")
 
+    # 兜底 1：最新一批（不带 date），本地过滤
+    for url in (OFFICIAL_LATEST_API, MIRROR_LATEST_API):
+        try:
+            data = json.loads(fetch(url, timeout))
+            if not isinstance(data, list):
+                errors.append(f"{url}: 返回不是 list")
+                continue
+            picked = [e for e in data if _daily_date(e) == date]
+            if picked:
+                return picked, url + f" (本地按 {date} 过滤)"
+            newest = sorted({_daily_date(e) for e in data if _daily_date(e)}, reverse=True)[:3]
+            errors.append(f"{url}: 最新条目里没有 {date}（最新是 {newest}）")
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as exc:
+            errors.append(f"{url}: {exc}")
+
+    # 兜底 2：解析日期页
     for url in (OFFICIAL_PAGE, MIRROR_PAGE):
         try:
             page = fetch(url.format(date=date), timeout).decode("utf-8", "replace")
             data = parse_svelte_page(page)
             if data:
                 return data, url.format(date=date) + " (page)"
-            errors.append(f"{url}: 页面里没找到 data-props JSON")
+            errors.append(f"{url}: 页面里没有 data-props JSON")
         except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as exc:
             errors.append(f"{url}: {exc}")
 
-    raise RuntimeError("所有数据源都失败：\n  " + "\n  ".join(errors))
+    raise RuntimeError("所有数据源都失败或为空：\n  " + "\n  ".join(errors))
 
 
 # --------------------------------------------------------------------------- 解析
