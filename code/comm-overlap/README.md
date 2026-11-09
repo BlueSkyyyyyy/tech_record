@@ -11,7 +11,7 @@
 | 文件 | 作用 | 对应文章 |
 |---|---|---|
 | `overlap_model.py` | 统一性能账本：PP / DP / TP / MoE 的解析式；`Ledger` 同时给 exposed、overlap efficiency、bubble rate | 一 |
-| `schedule_sim.py` | 流水线调度模拟器：GPipe / 1F1B / ZB-H2；拓扑式 list scheduling + ASCII Gantt | 二 |
+| `schedule_sim.py` | 流水线调度模拟器：GPipe / 1F1B / 1F1B-split / ZB-H1 / ZB-H2；`--iters` 跨步稳态、`--barrier` 单步口径、ASCII Gantt | 一、二 |
 | `bucket_sim.py` | DP 梯度 bucket：尾延迟 vs launch 开销；单通道闭式 + 多通道 | 四 |
 | `moe_overlap.py` | MoE 三段流水：dispatch / expert GEMM / combine；扫描通信 SM 数与 chunk 数 | 六 |
 | `sm_split_model.py` | 通信/计算 SM 分区：带宽饱和 + wave 量化 | 七 |
@@ -42,9 +42,18 @@ for f in *.py; do echo "== $f =="; python3 "$f" --test || exit 1; done
 ## 几个可以直接看的输出
 
 ```bash
-# 1F1B vs ZB-H2 的 Gantt
-python3 schedule_sim.py --schedule 1f1b --stages 4 --microbatches 8 --gantt
-python3 schedule_sim.py --schedule zbh2 --stages 4 --microbatches 8
+# 四种排法在同一组参数下的气泡（p=4, m=8, F=B=W=1）
+python3 schedule_sim.py --stages 4 --microbatches 8 --schedule 1f1b        # 33, 气泡 27.3%
+python3 schedule_sim.py --stages 4 --microbatches 8 --schedule 1f1b-split  # 30, 气泡 20.0%
+python3 schedule_sim.py --stages 4 --microbatches 8 --schedule zbh1        # 27, 气泡 11.1%
+python3 schedule_sim.py --stages 4 --microbatches 8 --schedule zbh2 --iters 6  # 24.5/步, 2.0%
+
+# ZB-H2 的零气泡只在跨步成立：加 --barrier 就退回单步下界
+python3 schedule_sim.py --schedule zbh2 --iters 6            # per_step=73.17
+python3 schedule_sim.py --schedule zbh2 --iters 6 --barrier  # per_step=79.00
+
+# 看 Gantt
+python3 schedule_sim.py --schedule zbh1 --stages 4 --microbatches 8 --gantt
 
 # DP bucket 的凹陷
 python3 bucket_sim.py --sweep --launch 2
@@ -67,7 +76,10 @@ python3 overlap_audit.py --demo
 - **单位**：`overlap_model.py` / `schedule_sim.py` / `bucket_sim.py` 用无量纲时间；
   `moe_overlap.py` / `sm_split_model.py` / `decode_overlap.py` 用微秒（`us`）。
 - **流水线**：F/B/W 是固定时长；同一 stage 串行；跨 stage 依赖用拓扑式 list scheduling。
-  `zbh2` 是简化版（W 填 B 的空隙），不是论文的自动调度 ZB-2p。
+  五种排法的区别只有两件事：**warm-up 做几个 F**（决定在飞数）和 **wgrad 允许积压几个**（决定 W 排在哪）。
+  `zbh1` / `zbh2` 是按论文 Table 2 的形状手写的静态表，不是论文的自动调度（ZB-1p / ZB-2p）；
+  等时假设下气泡分别落在 $(p-1)(T_F+T_B-T_W)$ 与 $(p-1)(T_F+T_B-2T_W)$，
+  但后者只有在**跨 step 稳态**（`--iters > 1` 且不加 `--barrier`）才能达到。
 - **DP bucket**：桶按反向顺序就绪；通信通道 FIFO；`launch` 是每桶固定开销。
 - **MoE**：一个通信通道 + 一个计算通道；dispatch/combine 共享通信通道；
   计算时间按 SM 数线性 scaling，不含真实 GEMM 的 tile 效率。
@@ -96,7 +108,7 @@ python3 overlap_audit.py --demo
 | 文章 | 用到的文件 | 关键结论 |
 |---|---|---|
 | 一：性能账本 | `overlap_model.py`、`schedule_sim.py`、`bucket_sim.py` | $T=C+E+B$；overlap tax；$\max(C,M)$ 上界 |
-| 二：流水线 | `schedule_sim.py` | 1F1B $p=8,m=24$ 气泡 22.58%；ZB-H2 简化版 16.28% |
+| 二：流水线 | `schedule_sim.py` | $p=8,m=24$：1F1B 22.58% → 拆开 W 紧跟 16.28% → ZB-H1 8.86% → ZB-H2 跨步 1.59% |
 | 四：DP | `bucket_sim.py` | 桶太大尾延迟、太小 launch 反噬；最优在 $t\approx c$ |
 | 六：MoE | `moe_overlap.py` | 通信 SM 太少/太多都慢；chunk 不是越多越好（真实系统有 overhead） |
 | 七：Kernel/SM | `sm_split_model.py` | 带宽饱和后多给 SM 只偷计算；wave 量化造成阶梯 |
