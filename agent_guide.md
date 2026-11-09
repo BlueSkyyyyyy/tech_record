@@ -32,7 +32,8 @@ static/katex/                   # 自托管 KaTeX，勿删
    **内网地址/端口也不要入库**：本地 vLLM 等内网端点一律走环境变量（`VLLM_HOST=<host:port>`），
    脚本里只写占位（曾把内网 `IP:端口` 硬编码进 6 个 `autopilot.sh`，公开了两个多月）。
 6. **博客内联渲染 `code/` 下的文档**：`layouts/shortcodes/fa_include.html` 用 `readFile` + `markdownify` 把 `code/.../docs/*.md` 实时渲染进文章，docs 更新后博客自动同步、无需复制。注意：**`{{< relref >}}` 必须写在 markdown 链接里**（`[文字]({{< relref "slug" >}})`），裸用只会把 URL 当纯文本输出；且 `readFile`/`markdownify` 内容里的 `{{< >}}` 不会被二次处理。
-5. **frontmatter 的裸 `date: YYYY-MM-DD` 会被解析成当天 00:00 UTC**（= 北京时间 08:00）。如果在**北京时间 08:00 之前**构建/部署，这个日期就落在「未来」，Hugo 会**静默跳过该页**（不打 ERROR，`hugo list all` 也能看到它，但 `public/` 里没有、线上 404）。凌晨发文章要写带时区的时间，例如 `date: 2026-09-22T01:00:00+08:00`。排查方法：`ls public/posts/<slug>/` 是否存在。
+5. **frontmatter 的裸 `date: YYYY-MM-DD` 会被解析成当天 00:00 UTC**（= 北京时间 08:00）。如果在**北京时间 08:00 之前**构建/部署，这个日期就落在「未来」，Hugo 会**静默跳过该页**（不打 ERROR，`hugo list all` 也能看到它，但 `public/` 里没有、线上 404）。排查方法：`ls public/posts/<slug>/` 是否存在。
+   **更坑的是带时区的时间**：实测本机 Hugo 0.140 比较未来页时按「本地墙钟 + 把 offset 当 0」处理——`date: 2026-11-09T14:00:00+08:00` 在本地 14:24 构建**会**被判成未来（多算了 8 小时）。所以**不要用「今天 14:30」这类时间戳**；定时在晚上发的文章一律写**裸日期** `date: <发布日或更早的日期>`（≤ 今天零点 UTC，永远安全），需要精确顺序就用 `weight`。实在要当天未来时间构建，加 `--buildFuture` 并确认线上发布时已过点。
 
 6. **禁止在仓库文件里写宿主绝对路径**（`/home/<user>`、`/ssd/home/<user>`）——公开仓库会泄露本机用户名。
    写法：`.py` 用 `os.path.expanduser("~/...")`，`.sh` 用 `${HOME}/...`，文档/注释/`.cu` 用 `~/...`；
@@ -40,6 +41,9 @@ static/katex/                   # 自托管 KaTeX，勿删
 
 7. **文章页「上一篇/下一篇」只能在系列内导航**：由项目级 `layouts/partials/post_nav_links.html` 覆盖 PaperMod 原版，取同 `series` 的文章（`layouts/partials/series_ordered_pages.html`，按 `weight` + slug 数字前缀排序）取相邻页；`layouts/series/list.html` 用同一 partial，保证专题页与文章页顺序一致。
    **不要改回**原版的 `site.RegularPages` + 默认排序：每篇的 `weight` 是**系列内序号**（mega-moe 1–195、leetcode 1–36 …），全站排序会把 12 个系列交错——2026-10 曾因此让 850 个导航链接里 608 个跳到别的系列。新增文章保持 `weight` 与 slug 数字前缀一致即可（`weight` 有重复也不要紧，数字前缀会兜底）。
+
+8. **`doc_include` 内联的 Markdown 走的是 `readFile | markdownify`，与主渲染器不同**：被内联的 `docs/*.md` 里 `**…**` 若以 CJK 标点收尾（`**「甲」**`、`**（甲）**`、`**甲。**`）会被 CommonMark 的 flanking 规则判成「非强调」，页面上原样显示星号（主文章正文不受影响，只有 include 的内容会中招）。
+   **修法**：让 `**` 包住的那段**以文字字符开头和结尾**——把括号/引号挪到外面（`「潜空间」：**它正在吃掉「文本交接」的位置**。`），或把相邻词吞进来（`**Locality / Complementarity / Nonstationarity** 三个性质`）。**不要**用 `<strong>` 硬顶：仓库没开 `markup.goldmark.renderer.unsafe`，裸 HTML 会被丢掉；开 `unsafe` 又会把 docs 里的 C++ 模板 `sizeof_bits<T>` 当标签吃掉（实测会伤到 mega-kernel-64）。
 
 ## 内容组织惯例
 
@@ -68,4 +72,5 @@ static/katex/                   # 自托管 KaTeX，勿删
 | [leetcode](agent_skills/leetcode.md) | 推进「LeetCode 题解精讲」专题（分类题解 + Python/C++ 代码，长期自驱） |
 | [flash-kda](agent_skills/flash-kda.md) | 推进「KDA 前向/反向算子实现解析」专题（以 FlashKDA 为参考，长期自驱） |
 | [mega-moe](agent_skills/mega-moe.md) | 推进「DeepSeek Mega MoE 前向/反向算子解析」专题（DeepGEMM/DeepEP，长期自驱） |
+| [ai-daily](agent_skills/ai-daily.md) | 推进「AI 日报」专题（每天 21:00 抓 HF Daily Papers 写速览，长期自驱） |
 | [mega-kernel](agent_skills/mega-kernel.md) | 推进「MegaKernel 资料与实现分析」专题（MPK 论文 + DeepGEMM mega 家族，长期自驱） |

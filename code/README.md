@@ -23,3 +23,4 @@
 | [vLLM 研读（专题）](../content/posts/vllm-00-index/) | [vllm/](vllm/README.md) | 4 个纯 CPU 脚本：KV 预算、块分配、前缀缓存、调度装箱，每个都能 `--test` |
 | [SGLang 研读（专题）](../content/posts/sglang-00-index/) | [sglang/](sglang/README.md) | 纯 CPU 脚本：树 vs 块对拍、显存预算、调度装箱、overlap 时间线、跳词收益，每个都能 `--test` |
 | [AI Agent 系统工程（专题）](../content/posts/agent-00-index/) | [agent/](agent/README.md) | 9 个纯 CPU 脚本：循环模拟、MCP JSON-RPC、token 预算/截断、apply_patch、pass@k/pass^k、坐标 grounding、多 agent 成本、GRPO/GSPO、taint 检查，每个都能 `--test` |
+| [AI 日报（专题）](../content/posts/ai-daily-00-index/) | [ai-daily/](ai-daily/README.md) | `fetch_papers.py`：抓 HF Daily Papers 某一天（API → 镜像 → 页面 JSON 三级兜底），输出 JSON + 人读 brief，`--test` 离线自测 |

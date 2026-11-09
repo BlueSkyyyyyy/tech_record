@@ -9,6 +9,7 @@ AI 训练系统工程的学习笔记博客 + 配套代码仓库。
 
 | Series | 主题 |
 |---|---|
+| AI 日报 | 每天 21:00 抓 Hugging Face Daily Papers，按主题分组的中文速览（保留数字、点明取舍） |
 | Megatron-LM 实战 | 分布式训练框架配置、源码分析、踩坑记录 |
 | 通算并行 | 通信与计算 overlap：流水线、DP/TP/EP、kernel 与推理侧 |
 | Kernel / 算子 | Triton、Liger-Kernel 等算子源码阅读与性能分析 |
@@ -27,6 +28,16 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 ```
 
 ## 文章索引
+
+### AI 日报（专题，长期更新，最新在上）
+
+每天 21:00 抓 [HF Daily Papers](https://huggingface.co/papers) 当天全部论文，按主题分组写速览：Top 10 表 + 每篇「问题 / 方法 / 数字 / 为什么值得看」+ 三个观察。
+导读与索引：[AI 日报（导读）](content/posts/ai-daily-00-index/index.md)。
+
+1. [2026-11-06 · 32 篇：决策模型、潜空间通信与「评测的可靠性」](content/posts/ai-daily-2026-11-06/index.md)
+2. [2026-11-05 · 39 篇：回合级信用、机器人数据与推理的「物理账」](content/posts/ai-daily-2026-11-05/index.md)
+
+配套代码：[code/ai-daily/](code/ai-daily/README.md)（`fetch_papers.py`：HF API + 镜像 + 页面内嵌 JSON 三级兜底，`--test` 离线自测）
 
 ### LLM 模型结构变迁（专题，9 篇）
 
