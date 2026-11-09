@@ -2,7 +2,7 @@
 title: "通算并行研读（补遗三）：Entwine、mKernel 与 2026 生态——tile 级 overlap 的下一站"
 date: 2026-11-03
 draft: false
-weight: 16
+weight: 15
 series: ["comm-overlap"]
 tags: ["通算并行", "系列", "Entwine", "mKernel", "tile", "NCCL EP", "Mixture-of-Kittens", "异构硬件"]
 categories: ["训练框架"]
@@ -17,6 +17,8 @@ categories: ["训练框架"]
 
 ## 1. Entwine：让 tile 的产出节奏可预测
 
+这一节回答一个问题：tile 早算完，为什么通信不一定能早开始。
+
 ### 1.1 问题：tile 早完成，不等于通信能早开始
 
 Entwine（[2609.11562](https://arxiv.org/abs/2609.11562)）研究的是 GEMM–ReduceScatter（TP 里的 row-parallel GEMM + RS）。现代 GEMM kernel 把输出切成 tile，block 独立调度；一个 tile 算完，理论上就可以发给需要的 rank。但有两个 mismatch：
@@ -28,6 +30,8 @@ Entwine（[2609.11562](https://arxiv.org/abs/2609.11562)）研究的是 GEMM–R
 
 ### 1.2 设计：交错生产 + 独立 tile 通信 + 共享 SM 池
 
+Entwine 的设计可以拆成三件事：生产节奏、通信粒度、SM 配额。
+
 **（1）交错生产。**
 
 Entwine 不按 partition 连续遍历，而是按逻辑 block 顺序轮转输出 partition。对 $W$ 个等宽、block 对齐的 partition，producer block 的逻辑位置 $p$ 映射到：
@@ -38,7 +42,7 @@ $$
 
 其中 $d$ 是目标 rank，$\ell$ 是 partition 内 block 索引。所有 rank 用同一映射，保证同一个 tile 的贡献在对应逻辑位置。这样每个 producer 的本地保留 tile 被均匀地插在“需要远程传输”的 tile 之间，通信数据以更平稳的节奏产出。
 
-代价是**数据 reuse 可能下降**：连续访问同一 partition 对 cache 更友好，交错会打散局部性。Entwine 明确把这一点算进 end-to-end，而不是只看 GEMM 吞吐。
+代价是**数据 reuse（复用）可能下降**：连续访问同一 partition 对 cache 更友好，交错会打散局部性。Entwine 明确把这一点算进 end-to-end，而不是只看 GEMM 吞吐。
 
 **（2）独立 tile 通信。**
 
@@ -50,7 +54,7 @@ $$
 
 Entwine 让一个 compute kernel 和一个 communication kernel 并发执行，不按 tile 逐个 launch。block 退休后，释放的 SM 资源可以被任一 kernel 的 pending work 使用。
 
-它用一个 **communication budget** 限制“同时允许的通信 block 数”：
+它用一个 **communication budget（同时允许跑几个通信 block）** 限制“同时允许的通信 block 数”：
 
 - budget 太小：通信尾巴长，暴露多；
 - budget 太大：通信抢 SM/带宽，GEMM 变慢；
@@ -70,6 +74,8 @@ Entwine 和第五篇的 Flux/TileLink 是一条线：**tile 级 overlap 的瓶�
 
 ## 2. mKernel：把 tile 级融合推到多机
 
+这一节把同样的 tile 级思路推到多机。
+
 ### 2.1 问题：单 NVLink domain 的假设失效
 
 mKernel（[2609.13585](https://arxiv.org/abs/2609.13585)）指出：现有 fused kernel 大多局限在单 NVLink domain；跨节点时，RDMA 的延迟和带宽变成新约束。它给了一个简单的 fused kernel 时间模型：
@@ -87,7 +93,7 @@ $$
 
 论文列了 C1–C5，值得记：
 
-1. **C1 节点内/间带宽不对称**：节点内 NVLink 快一个数量级，应该先做本地聚合/复制，减少重复跨节点传输；在 rail-optimized 拓扑里，优先和同 local index 的 rail peer 交换。
+1. **C1 节点内/间带宽不对称**：节点内 NVLink 快一个数量级，应该先做本地聚合/复制，减少重复跨节点传输；在 rail-optimized（按 rail 对齐）拓扑里，优先和同 local index 的 rail peer 交换。
 2. **C2 传输粒度不对称**：节点内是 memory semantics（peer memory load/store），跨节点是 message semantics（RDMA request）；要把细粒度本地 tile 聚成网络 chunk，摊销 per-message 成本，同时尽早暴露 ready work。
 3. **C3 传输顺序语义不同**：IB reliable connection 保序，EFA SRD 不保序；arrival flag 必须在 payload 之后可见，不能假设所有平台一样。
 4. **C4 跨设备同步**：网络完成和 GPU 内存可见性有开销；persistent kernel 需要 readiness check + memory ordering，不能每次传输后全局同步。
@@ -119,7 +125,7 @@ Compute → GPU buffer + ready flag
 - **host proxy 批量提交**命令，摊销 doorbell 成本；
 - **rail peer**：跨节点优先同 local index，减少网络跳数；
 - **自适应 SM 分区**：controller 根据 progress counter 调通信 block 数，而不是 launch 时定死；
-- 一个反直觉观察：**GPUDirect Async（IBGDA）相对 host-assisted GPU-initiated communication 没有明显额外收益**。这和“GPU 发起一定更快”的直觉相反，说明瓶颈在别处（消息粒度、flag、SM 争用）。
+- 一个反直觉观察：**GPUDirect Async（IBGDA，GPU 直接发起 RDMA）相对 host-assisted GPU-initiated communication 没有明显额外收益**。这和“GPU 发起一定更快”的直觉相反，说明瓶颈在别处（消息粒度、flag、SM 争用）。
 
 ### 2.4 结果与边界
 
@@ -133,9 +139,11 @@ Compute → GPU buffer + ready flag
 
 ## 3. 生态雷达：scale-up、标准 API 与异构硬件
 
+这一节把其余工作放进同一张生态图。
+
 ### 3.1 Mixture-of-Kittens：NVL72 上的“单 kernel 全融合”
 
-MoK（[2609.36070](https://arxiv.org/abs/2609.36070)）的目标是 NVL72 这种 **scale-up 域**：72 个 GPU 通过 NVLink 交换机连成一个单跳大带宽域。它的观察是：现有 MoE 训练系统很多是按 scale-out 网络设计的，在 NVL72 上“经常比 PyTorch+NCCL 还慢”。
+MoK（[2609.36070](https://arxiv.org/abs/2609.36070)）的目标是 NVL72 这种 **scale-up 域（NVLink 连成的一个大节点）**：72 个 GPU 通过 NVLink 交换机连成一个单跳大带宽域。它的观察是：现有 MoE 训练系统很多是按 scale-out 网络设计的，在 NVL72 上“经常比 PyTorch+NCCL 还慢”。
 
 MoK 的做法：
 
@@ -185,7 +193,7 @@ FarSkip-Collective（[2511.11505](https://arxiv.org/abs/2511.11505)）走了一�
 ### 3.5 异构硬件：Ascend、HPC、跨 DC
 
 - **HyperParallel-MoE**（[2605.23764](https://arxiv.org/abs/2605.23764)）：Ascend NPU 的 AIC/AIV 异构 tile 调度，Dispatch-to-Combine 延迟最高 **1.58×**；代码在 gitcode。
-- **Piper**（[2605.05049](https://arxiv.org/abs/2605.05049)）：HPC 上的 MoE 资源建模 + pipeline hybrid parallelism；MFU 比 X-MoE 高 **2–3.5×**，all-to-all 带宽 **1.2–9×**。
+- **Piper**（[2605.05049](https://arxiv.org/abs/2605.05049)）：HPC 上的 MoE 资源建模 + pipeline hybrid parallelism；MFU（模型 FLOPs 利用率）比 X-MoE 高 **2–3.5×**，all-to-all 带宽 **1.2–9×**。
 - **HybridEP**（[2510.19470](https://arxiv.org/abs/2510.19470)）：跨数据中心 EP，低带宽下不硬 overlap，而是动态改专家放置/传输比例；受限带宽最高 **5.6×**。
 - **FlowMoE**（[2510.00207](https://arxiv.org/abs/2510.00207)）：把 MHA、gating、expert、A2A、all-reduce 放进统一 pipeline；训练时间 **−13%–−57%**，能耗 **−10%–−39%**。
 - **Resource-aware overlap**（[2606.09200](https://arxiv.org/abs/2606.09200)）：不改库/kernel，只调 occupancy 和通信 stream 优先级；A40/A100/H100/MI250X 上最多 **−25.5%** 时间。
@@ -193,6 +201,8 @@ FarSkip-Collective（[2511.11505](https://arxiv.org/abs/2511.11505)）走了一�
 这些工作的共同信号：**“一套 Hopper NVLink 的最优解”不再通用**。scale-up（NVL72）、scale-out（IB）、PCIe、Ascend、跨 DC，各自需要不同的通信原语、SM 配额和放置策略。
 
 ## 4. 把四条线合起来
+
+读法：下面四行是四个可以组合的旋钮，不是四个竞品；“优化对象”和“主要约束”比“适用场景”更值得看。
 
 | 线 | 代表 | 优化对象 | 主要约束 | 适用场景 |
 |---|---|---|---|---|
@@ -219,4 +229,4 @@ FarSkip-Collective（[2511.11505](https://arxiv.org/abs/2511.11505)）走了一�
 
 ---
 
-**系列导航**：[总览]({{< relref "comm-overlap-12-latest" >}}) · [补遗（二）：MegaFlux]({{< relref "comm-overlap-14-megaflux" >}}) · [专题首页]({{< relref "comm-overlap-00-index" >}})
+**系列导航**：[补遗·导读]({{< relref "comm-overlap-12-latest" >}}) · [补遗（二）：MegaFlux]({{< relref "comm-overlap-14-megaflux" >}}) · [总结：2026 年的地图与五个开放问题]({{< relref "comm-overlap-11-summary" >}})

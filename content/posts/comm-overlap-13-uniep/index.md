@@ -2,7 +2,7 @@
 title: "通算并行研读（补遗一）：UniEP 深读——persistent worker、确定性 token mapping 与 1.03×–1.38×"
 date: 2026-11-03
 draft: false
-weight: 14
+weight: 13
 series: ["comm-overlap"]
 tags: ["通算并行", "系列", "MoE", "UniEP", "Expert Parallelism", "MegaKernel", "确定性"]
 categories: ["训练框架"]
@@ -18,15 +18,19 @@ UniEP（[2604.19241](https://arxiv.org/abs/2604.19241)，ByteDance Seed + 清华
 
 ## 1. 问题：为什么生产框架不敢直接上 overlap
 
+这一节先解释：EP 的优化已经很多，生产框架为什么还是不放心。
+
 UniEP 的引言给了一个很准确的观察：EP 的优化手段已经很多——通信压缩、计算通信 overlap、SM 分区、GroupGEMM 融合——但 Megatron-LM 这类生产框架的采用仍然保守。原因不是“论文不够快”，而是：
 
 1. **不自适应**：ad-hoc kernel 往往为某个 $H_{dim}$、top-k、专家数写死，换一个模型就崩；
 2. **数值不稳定**：为了制造并行窗口切 micro-batch 或乱序到达，结果和串行参考对不上；
 3. **工程复杂**：host 侧多 stream、event、chunk 调度叠在一起，调试和复现都困难。
 
-UniEP 的目标是“既要有 Comet 级/更好的 overlap，又要保持串行执行的数值语义”。它选择的路不是“把 Comet 改得更快”，而是**把 MoE 的两个关键子图各自融成一个 MegaKernel，把调度从 host 下推到 SM**。
+UniEP 的目标是“既要有 Comet 级/更好的 overlap，又要保持串行执行的数值语义”。它选择的路不是“把 Comet 改得更快”，而是**把 MoE 的两个关键子图各自融成一个 MegaKernel（整段常驻 kernel），把调度从 host 下推到 SM**。
 
 ## 2. 结构：两个 MegaKernel，四个角色
+
+这一节拆结构：为什么是两个 MegaKernel，四类角色怎么分工。
 
 ### 2.1 为什么是两个，不是一个大 kernel
 
@@ -47,7 +51,7 @@ MegaKernel 2: GroupGEMM + Combine
 
 ### 2.2 persistent worker：一个 block 占一个 SM
 
-每个 MegaKernel 都是 **persistent threadblock**：
+每个 MegaKernel 都是 **persistent threadblock（常驻线程块）**：
 
 - launch 的 block 数等于物理 SM 数；
 - 一个 block 占住一个 SM 跑完整段，避免 context switch；
@@ -57,10 +61,12 @@ block 在运行时有四种角色：
 
 | 角色 | 做什么 | 关键资源 |
 |---|---|---|
-| **Comm-Worker** | 通过 NVSHMEM 发 token / 发跨 GPU 事务 | NVLink、warp ILP |
+| **Comm-Worker** | 跨 GPU 发 token：论文 Triton 版 push，仓库 CuTeDSL 版 TMA pull | NVLink、warp ILP |
 | **Comp-Worker** | 算 GroupGEMM tile | Tensor Core、HBM |
 | **Relay-Worker** | 盯 token 到达、同 rank 内 multicast | HBM、scoreboard |
 | **Reduce-Worker** | combine 阶段等齐 top-k 贡献再归约 | HBM、归约单元 |
+
+「发 token」在两套实现里方向相反：论文的 Triton 实现用 `putmem_warp` 把 token push 到对端；仓库里的 CuTeDSL 副本走 TMA，从对端的 symmetric buffer 把需要的行 pull 过来。读代码前先确认自己在看哪一套。
 
 角色不是 launch 时写死的。UniEP 在 device 上放一个全局 atomic counter，把任务空间线性化成：
 
@@ -101,6 +107,8 @@ UniEP 把“让”从“层粒度/launch 粒度”推进到了“任务粒度”
 
 ## 3. 确定性：UniEP 的核心贡献
 
+这一节讲核心贡献：确定性从哪来，为什么它不是免费的。
+
 ### 3.1 为什么 token 顺序会影响数值
 
 MoE 的 combine 要把同一个 token 的 top-k 个专家输出加起来：
@@ -136,11 +144,11 @@ $$
 
 这样每个 Comm-Worker 都能独立算出目标地址，不需要原子竞争决定“谁先写”。最后写入顺序由**预计算的映射**决定，而不是由执行时序决定。
 
-论文特别强调 **stable sort**：同一个 token 的多个专家副本、同一个专家内的多个 token，都保持原始顺序。这是 bitwise 的前提。
+论文特别强调 **stable sort（相等元素保持原序）**：同一个 token 的多个专家副本、同一个专家内的多个 token，都保持原始顺序。这是 bitwise 的前提。
 
 ### 3.3 scoreboard：token 级 + tile 级
 
-UniEP 在 global memory 放一个结构化 scoreboard：
+UniEP 在 global memory 放一个结构化 scoreboard（显存里的进度板）：
 
 ```text
 Scoreboard = [ S_token | S_tile ]
@@ -205,7 +213,7 @@ UniEP 把每个阶段的配置抽象成：
 warp 数的权衡很实际：
 
 - Comp-Worker 8 warps 就够喂满 Tensor Core；开 32 warps 会增加功耗密度，触发降频，反而降低 FLOPS；
-- Comm-Worker 是延迟受限的，32 warps 提供更多 ILP，才能压满 NVLink。
+- Comm-Worker 是延迟受限的，32 warps 提供更多 ILP（指令级并行），才能压满 NVLink。
 
 因为 MegaKernel 要求统一 grid 配置，$w$ 必须折中。这就是“为什么需要模型，而不是拍脑袋”。
 
@@ -217,11 +225,13 @@ UniEP 的搜索空间约 $10^5$ 个配置。它没有用实测搜索，而是：
 2. 枚举所有配置，选最小；
 3. Python 版遍历约 **100 秒**，不可接受；
 4. 改成 C++/OpenMP 并行，降到 **~144 ms**；
-5. 用 **4096-token bucket** 做 memoization，只有跨桶才重新查模型。
+5. 用 **4096-token bucket** 做 memoization（缓存查过的结果），只有跨桶才重新查模型。
 
 这套组合让 online autotuning 的摊销成本可以忽略。它也解释了为什么 UniEP 能跨 12 个模型配置：不是每个模型手调，而是模型 + 搜索。
 
 ## 5. 数字：1.03×–1.38× 怎么读
+
+这一节读数字：1.03×–1.38× 是哪个口径下的，别拿 kernel 级数字去对标 e2e。
 
 ### 5.1 实验设置
 
@@ -231,6 +241,8 @@ UniEP 的搜索空间约 $10^5$ 个配置。它没有用实测搜索，而是：
 - 专家数 64–512，top-k 6–10，序列长度 8k/32k/128k。
 
 ### 5.2 分场景数字
+
+读法：先看“对比”列，全部是 vs Comet 的加速比；跨行比之前先看集群和序列长度。
 
 | 场景 | 对比 | 结果 |
 |---|---|---|
@@ -254,15 +266,17 @@ UniEP 的搜索空间约 $10^5$ 个配置。它没有用实测搜索，而是：
 论文摘要的总体口径是 **1.03×–1.38× over state-of-the-art**。从表里能看到：
 
 - **1.03× 是 layer backward 的下限**；
-- kernel 级稳定在 **1.3×–1.6×**；
+- kernel 级多数落在 1.3×–1.6×，两端是 1.07×（Cluster 2 / 32k / Combine）和 1.87×（Cluster 1 / 32k / Combine）；
 - 到 layer/e2e 会被 attention、gating、非 MoE 计算稀释；
 - 所以不要把它当成“平均 1.2×”，更不要拿 kernel 级的 1.57× 去对标 e2e。
 
 ### 5.3 生产训练的意义
 
-128 GPU（16 节点 × 8）、512k 序列，吞吐 127 → 138 B tokens/day，**1.09×**，且 bitwise 可复现。这个数字比 kernel 级的 1.5× 小很多，但它更接近真实训练：MoE 层只占整个 step 的一部分，Amdahl 定律会把收益压下来。论文的论点是“10% 的 MFU 提升在千卡集群上等于数百万美元”，这个账是成立的。
+128 GPU（16 节点 × 8）、512k 序列，吞吐 127 → 138 B tokens/day，**1.09×**，且 bitwise 可复现。这个数字比 kernel 级的 1.5× 小很多，但它更接近真实训练：MoE 层只占整个 step 的一部分，Amdahl 定律（串行部分限制总加速）会把收益压下来。论文的论点是“10% 的 MFU 提升在千卡集群上等于数百万美元”，这个账是成立的。
 
 ## 6. 边界与代价
+
+这一节列边界：哪些场景这套东西会失效，或者要重做。
 
 ### 6.1 实现成本
 
@@ -280,7 +294,7 @@ UniEP 的搜索空间约 $10^5$ 个配置。它没有用实测搜索，而是：
 
 ### 6.4 baseline 限制
 
-Comet 只支持特定 $H_{dim}$ 和 top-k；MoE-2（$H_{dim}=1280$，top-k=6）和 MoE-12（$H_{dim}=2304$，top-k=6）跑不了 Comet。所以部分对比是“UniEP vs Serial”，不是“UniEP vs Comet”。读数字时要注意这一点。
+Comet 只支持特定 $H_{dim}$ 和 top-k。MoE-2（$H_{dim}=1280$，top-k=6）是 top-k=6 不在支持范围；MoE-12（$H_{dim}=2304$，top-k=8）也跑不了——注意 Table 4 里它的 top-k 是 8，不是 6。所以部分对比是“UniEP vs Serial”，不是“UniEP vs Comet”。读数字时要注意这一点。
 
 ### 6.5 确定性的适用边界
 
@@ -295,7 +309,7 @@ UniEP 保证的是“和它自己的无 overlap 串行参考逐位一致”。�
 
 ## 8. 结论
 
-UniEP 最值得记的不是某个百分比，而是它把“可复现”变成了 overlap 的一等约束，并证明这不必然牺牲性能：
+UniEP 最值得记的不是某个百分比，而是它把“可复现”变成了 overlap 的一等约束，并把代价压到个位数百分比：bitwise 版本比非 bitwise 版本多数慢 2%–8%（MoE-10/11 例外），相对 Comet 的端到端加速仍在 1.03×–1.38× 之内。
 
 - **结构**：两个 MegaKernel，persistent worker，四类角色，任务队列动态调度；
 - **语义**：确定性 token mapping + stable sort + 不切 micro-batch，做到 bitwise identical；

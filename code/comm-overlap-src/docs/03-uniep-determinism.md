@@ -148,8 +148,8 @@ store output[token, atom]
 
 | 内容 | 行号 |
 |---|---|
-| `MoETopkReduceBlockPerToken`（一个 CTA 一个 token = 确定性的一半） | 52 |
-| `grid=(num_tokens,1,1)` | 112 |
-| `my_topk[k] = topk_indices[token_idx, k]`（索引缓存进寄存器） | 164–165 |
-| FP32 定序累加循环 | 204 |
-| 累加并转回输出 dtype | 239 |
+| `MoETopkReduceBlockPerToken`（一个 CTA 一个 token = 确定性的一半） | 66 |
+| `grid=(num_tokens,1,1)` | 126 |
+| `my_topk[k] = topk_indices[token_idx, k]`（索引缓存进寄存器） | 179 |
+| FP32 定序累加循环 | 251–253 |
+| 累加并转回输出 dtype | 257 |

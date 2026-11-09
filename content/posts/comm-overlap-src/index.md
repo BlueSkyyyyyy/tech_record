@@ -1,5 +1,5 @@
 ---
-title: "通算并行源码精读：UniEP 与 Flux（12 个带注释副本 + 7 篇笔记）"
+title: "通算并行源码精读：UniEP 与 Flux（12 个带注释副本 + 6 篇精读 + 1 篇导读）"
 date: 2026-11-05
 draft: false
 weight: 20
@@ -16,6 +16,8 @@ categories: ["训练框架"]
 
 规模：**4536 行代码（与上游逐字节一致）+ 2932 行中文注释**。
 
+计数口径：**12 个带注释副本 + 6 篇正文 + 1 篇总览**。
+
 ## 上游在哪
 
 | 仓库 | commit | 说明 |
@@ -27,8 +29,8 @@ categories: ["训练框架"]
 
 | # | 内容 | 源码 |
 |---|---|---|
-| 一 | [UniEP 的 dispatch + FC1 GroupGEMM](../comm-overlap-src-01-dispatch-gemm/) | `cutedsl_dispatch_group_gemm.py`（1314 行） |
-| 二 | [UniEP 的 FC2 GroupGEMM + Combine](../comm-overlap-src-02-gemm-combine/) | `cutedsl_group_gemm_combine.py`（1067 行） |
+| 一 | [UniEP 的 dispatch + FC1 GroupGEMM](../comm-overlap-src-01-dispatch-gemm/) | `cutedsl_dispatch_group_gemm.py`（上游 1314 行 → 副本 1879 行，1222 行代码） |
+| 二 | [UniEP 的 FC2 GroupGEMM + Combine](../comm-overlap-src-02-gemm-combine/) | `cutedsl_group_gemm_combine.py`（上游 1067 行 → 副本 1411 行，972 行代码） |
 | 三 | [UniEP 的确定性从哪来](../comm-overlap-src-03-determinism/) | `m_contig_group_tile_scheduler.py` + `cutedsl_topk_reduce.py` |
 | 四 | [Flux 的 AllGather + GEMM](../comm-overlap-src-04-flux-ag-gemm/) | `sm90_all_gather_gemm_*.hpp` |
 | 五 | [Flux 的 GEMM + ReduceScatter](../comm-overlap-src-05-flux-gemm-rs/) | `system_barrier.hpp` + `epilogue_evt_nvshmem.hpp` |

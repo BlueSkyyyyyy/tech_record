@@ -60,7 +60,7 @@ UniEP 是每个 expert 一个 int32 计数器 + 一个 signal；Flux 是每个 c
 |---|---|---|
 | EP / MoE，通信量不规则、按 expert 分组 | 分区型（UniEP） | 分组本身就是计算单元，signal 可以挂在 expert 上；SM 内角色分工能吃掉小消息的启动开销 |
 | TP，通信规则、数据连续、单次量大 | 融合型（Flux） | 一次 DMA 搬一大段最划算；chunk flag 实现简单、对 GEMM 主体零侵入 |
-| 想要 bitwise 可复现 | 必须显式设计调度 | 只有固定 tile 顺序 + 固定归约顺序才能做到（见 [03](03-uniep-determinism.md)） |
+| 想要 bitwise 可复现 | 必须显式设计调度 | 固定归约顺序即可；tile 执行顺序可以变（M-contiguous 就是例子），但每个输出元素的 k 序必须固定（见 [03](03-uniep-determinism.md)） |
 | 只有单卡/无 NVLink | 都别上 | 两份代码的 overlap 都建立在"通信有独立引擎/独立 SM + 远端可直写"之上 |
 
 ## 5. 两边共有的五个坑

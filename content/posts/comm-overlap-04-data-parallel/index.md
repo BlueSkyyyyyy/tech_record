@@ -28,10 +28,19 @@ bucket 化：参数按反向到达顺序分成若干桶，桶满就发 reduce-sc
 
 ### 1.2 前向的参数 all-gather
 
-用分布式优化器（ZeRO-1/FSDP 风格）时，每张卡只存 $1/DP$ 的参数分片。前向前必须把整桶参数 all-gather 回来。
+先说清楚：**ZeRO-1 不切参数**，所以它没有这一步。三种常被混为一谈的"省显存"方案要分开看：
 
-- 不重叠：每个 microbatch 前硬等一次 all-gather；
-- 重叠：用 forward pre-hook，在当前层计算时提前 gather 下一层。
+| 方案 | 切什么 | 前向要不要 gather 参数 | 粒度 |
+|---|---|---|---|
+| ZeRO-1 | 只切优化器状态（fp32 master、Adam $m/v$） | **不要**（参数全复制） | — |
+| ZeRO-2 | + 梯度切分（reduce-scatter 后不再 gather 梯度） | **不要** | — |
+| ZeRO-3 / FSDP | + 参数切分 | 要 | 每层、每 microbatch，用完即弃 |
+| Megatron 分布式优化器 | fp32 主权重 + 优化器状态；bf16 计算副本仍是**全量** | 要（gather bf16 副本） | **每 iteration、每 bucket 一次** |
+
+最后一行是本篇的主题。Megatron 的做法是把 fp32 master weights 和优化器状态切成 $1/DP$，但前向/反向用的 bf16 参数缓冲区是**全量**的，每个 iteration 由 all-gather 刷新一遍（每个 bucket 一次，不是每个 microbatch 一次，更不是每层一次）。
+
+- 不重叠：`start_param_sync` 必须等 all-gather 完成，第一个 microbatch 之前干等；
+- 重叠：forward pre-hook 按层 wait，同时预取下一个 bucket，于是 gather 藏在当前层的计算里。
 
 ### 1.3 optimizer 的 all-gather
 
@@ -46,9 +55,9 @@ Megatron 的实现可以概括为：**hook 登记 → 计数判满 → dispatch/
 `DistributedDataParallelConfig`（`megatron/core/distributed/distributed_data_parallel_config.py`）：
 
 ```python
-overlap_grad_reduce: bool = False   # :18
-overlap_param_gather: bool = False  # :21
-delay_wgrad_compute: bool = False   # :202
+overlap_grad_reduce: bool = False
+overlap_param_gather: bool = False
+delay_wgrad_compute: bool = False
 ```
 
 对应 CLI：
@@ -56,37 +65,39 @@ delay_wgrad_compute: bool = False   # :202
 - `--overlap-grad-reduce`（`arguments.py:4131`）
 - `--overlap-param-gather`（`arguments.py:4194`）
 - `--overlap-param-gather-with-optimizer-step`（`arguments.py:4200`）
-- 桶大小：新版用 `--ddp-num-buckets` / `--ddp-bucket-size`，对应 `bucket_size` / `num_buckets`（config `:60/:65`）
+- 桶大小：新版用 `--ddp-num-buckets` / `--ddp-bucket-size`，对应 config 里的 `num_buckets` / `bucket_size`
 
-注意 `--overlap-param-gather` 的约束：只支持分布式优化器 / Megatron-FSDP，且必须和 `--overlap-grad-reduce` 一起开（`arguments.py:1082-1085`）。
+注意 `--overlap-param-gather` 的约束（`arguments.py` 里 `_validate_args` 附近）：
+
+- 只支持分布式优化器 / Megatron-FSDP；
+- 必须和 `--overlap-grad-reduce` 一起开。
+
+还有一条容易踩的：`--overlap-param-gather-with-optimizer-step` 额外要求**开启 interleaved pipeline**（`virtual_pipeline_model_parallel_size` 非空）、且**不能用分布式 checkpoint**。这两条不满足时会直接报错，不是静默降级。
 
 ### 2.2 反向 hook
 
 DDP 初始化时给每个参数的 `grad_acc` 注册 post hook：
 
 ```python
-# megatron/core/distributed/distributed_data_parallel.py:436
-def enable_forward_pre_hook(self):
-    ...
-# :468
-def _make_forward_pre_hook(self):
-    ...
-# :500
-def _make_backward_post_hook(self, param):
-    ...
+# megatron/core/distributed/distributed_data_parallel.py
+def enable_forward_pre_hook(self): ...
+def _make_forward_pre_hook(self): ...
+def _make_backward_post_hook(self, param): ...
 ```
+
+> **版本与定位**：本文的行号对应 Megatron-LM `main`（2026 年中）那份树，一律用"函数名 + 行号"双索引——行号只作同版本内的快速跳转，跨版本请以函数名为准。这段代码 2025–2026 被重写过一轮：在本地留存的 `megatron-core 0.16.0rc0` 快照里，这三个函数分别在 `distributed_data_parallel.py:376 / :405 / :441`，而 §2.3 的 per-param 计数**还不存在**——那时判满用的是 `params_with_grad` 集合 + `is_last_microbatch`。
 
 hook 体做三件事：
 
 1. 把 `param.grad` 累进 `param.main_grad`（fp32 主梯度）；
 2. 把 `param.grad` 置 None，省显存；
-3. 调用 `register_grad_ready`（`distributed_data_parallel.py:525`）。
+3. 调用 `register_grad_ready`（实现在 `param_and_grad_buffer.py` 的 `_ParamAndGradBuffer` 里）。
 
 CUDA graph 捕获期间 hook 直接返回，因为 capture 时不能触发真实通信。
 
 ### 2.3 计数判满：为什么不是"参数齐全"
 
-`register_grad_ready`（`param_and_grad_buffer.py:913`）维护一个 per-param 计数：
+`register_grad_ready`（`param_and_grad_buffer.py`）维护一个 per-param 计数：
 
 ```python
 # 简化
@@ -95,7 +106,7 @@ if self.per_param_grad_ready_counts == self.golden_per_param_grad_ready_counts:
     self.start_grad_sync()
 ```
 
-`golden_per_param_grad_ready_counts` 是第一个 batch 结束时录下的"每个参数应该到达几次"（`:307`、`:339`）。
+`golden_per_param_grad_ready_counts` 是第一个 iteration 播下的种子："每个参数在这个 iteration 里应该到达几次"（见 `_ParamAndGradBuffer.reset` 与 `_playback_golden_counts` 一类的逻辑）。
 
 为什么用"次数相等"而不是"参数集合齐全"？因为同一个参数可能在一个 batch 里被前向图经过多次：
 
@@ -105,10 +116,12 @@ if self.per_param_grad_ready_counts == self.golden_per_param_grad_ready_counts:
 
 如果只检查"参数是否出现过"，会在第一次到达时就误判整桶就绪，导致梯度不完整。**这是读这段代码最容易错的地方。**
 
+（老版本正是这么做的：只用 `params_with_grad` 集合，`register_grad_ready` 里 `if len(self.params_with_grad) == len(self.params): start_grad_sync()`。它靠 `is_last_microbatch` 挡住梯度累积的误判，但挡不住"同一 microbatch 内 tied weight 少到一次"的情况——这就是后来换成 per-param 计数的原因。）
+
 ### 2.4 dispatch 与 wait 分离
 
 ```python
-# megatron/core/distributed/param_and_grad_buffer.py:651
+# megatron/core/distributed/param_and_grad_buffer.py
 def start_grad_sync(self, force_all_reduce=False):
     ...
     if self.ddp_config.overlap_grad_reduce:
@@ -117,12 +130,11 @@ def start_grad_sync(self, force_all_reduce=False):
         )
     ...
 
-# :833
 def finish_grad_sync(self, force_all_reduce=False):
-    if self.grad_reduce_finished:   # :856 幂等
+    if self.grad_reduce_finished:      # 幂等
         return
     ...
-    self.grad_reduce_finished = True  # :868/:878
+    self.grad_reduce_finished = True
 ```
 
 - `start_grad_sync` 只发 `async_op=True` 的通信，不 wait；
@@ -131,16 +143,30 @@ def finish_grad_sync(self, force_all_reduce=False):
 
 `previous_grad_reduce_bucket_group` 只在 `reduce_scatter_with_fp32_accumulation` 路径下串联，用来保证前一个 bucket 的 reduce 完成后，后一个 bucket 才能安全复用 buffer。
 
-### 2.5 参数 all-gather 的 hook
+### 2.5 参数 all-gather：谁发、谁等
 
-前向 pre-hook（`:468`）在模块执行前触发 `start_param_sync`（`:562`）：
+这一段最容易读错，因为 `start_param_sync` 和 forward pre-hook 不是同一个环节：
+
+| 环节 | 谁做 | 做什么 |
+|---|---|---|
+| dispatch | `start_param_sync`（`async_op=True`） | 把某个 bucket 的 all-gather **发出去**，不等 |
+| 发起者 | schedule 或 optimizer | interleaved 调度在 `forward_step` 前调用一次（`config.param_sync_func`），`--overlap-param-gather-with-optimizer-step` 时由 optimizer step 发起 |
+| wait | `finish_param_sync`（被 forward pre-hook 调用） | 等当前模块所属 bucket 的 handle；**等完立刻 dispatch 下一个 bucket**（`skip_next_bucket_dispatch` 可关掉） |
+
+所以正确的说法是：**pre-hook 负责"等到我需要的那桶"，等完立刻把下一桶的 gather 推出去**（于是下一桶的传输藏在本层计算里）；而不是"pre-hook 触发 all-gather"。源码里这句写得很直白：
 
 ```python
-def start_param_sync(self, *unused, force_sync=False, force_dispatch=False):
+# param_and_grad_buffer.py::finish_param_sync（docstring 原话）
+# Waits for asynchronous communication call to complete
+# (and dispatches one if one is not already outstanding).
+if self.param_gather_handle is not None:
+    self.param_gather_handle.wait()
     ...
+    if self.next_param_gather_bucket_group is not None and not skip_next_bucket_dispatch:
+        self.next_param_gather_bucket_group.start_param_sync()
 ```
 
-它把当前 bucket 的 all-gather 发出去，但不 wait；真正 wait 在 `finish_param_sync`（`param_and_grad_buffer.py:611`）。`skip_next_bucket_dispatch` 用来避免重复 dispatch。
+这也解释了为什么"每个 microbatch 硬等一次 all-gather"是错的——一个 iteration 里每桶只 gather 一次，后面几个 microbatch 直接命中已完成的 handle。
 
 ### 2.6 delay_wgrad_compute
 
@@ -182,7 +208,7 @@ $$
 最优桶数由"尾延迟 vs launch/带宽"共同决定。真实系统里还要加两个因素：
 
 1. **NCCL 带宽利用率**：桶太小，消息太小，ring/tree 算法打不满带宽；Megatron 的 `pad_buckets_for_high_nccl_busbw`（config `:70`）就是为此；
-2. **reduce-scatter vs all-reduce**：分布式优化器用 reduce-scatter（只传 $1/DP$ 的梯度），通信量比 all-reduce 小，但多一次 all-gather。
+2. **reduce-scatter vs all-reduce**：分布式优化器用 reduce-scatter（梯度段只传 $1/DP$），但多一次参数 all-gather。**净量≈all-reduce**，省的是显存和带宽峰值，不是总字节。
 
 ## 4. reduce-scatter + all-gather：分布式优化器的账
 
@@ -192,7 +218,7 @@ $$
 \text{comm} = 2 \cdot \frac{DP-1}{DP} \cdot G \quad \text{(all-reduce)}
 $$
 
-分布式优化器（ZeRO-1）：
+分布式优化器（Megatron 的实现；注意 ZeRO-1/2 不切参数，没有后面这项 all-gather）：
 
 $$
 \text{comm} = \frac{DP-1}{DP} \cdot G \quad \text{(reduce-scatter)} + \frac{DP-1}{DP} \cdot P \quad \text{(all-gather)}
@@ -234,18 +260,24 @@ Megatron 的 `overlap_param_gather` 就是给 all-gather 做预取：在当前�
 
 ## 6. 一个容易忽略的点：梯度累积
 
-梯度累积（gradient accumulation）下，`register_grad_ready` 的计数是按 microbatch 累加的。`is_last_microbatch` 才触发 reduce，所以：
+梯度累积（gradient accumulation）下，同一份梯度要跨 microbatch 攒够才能发。Megatron 用"计数判满"处理这件事：
 
-- 累积步数越多，桶就绪越晚，但每个桶的通信量不变；
-- 如果最后一个 microbatch 的桶很少，尾延迟会更明显；
-- `num_microbatches` 和桶大小的乘积决定了在途通信量，太大可能打满网络。
+- 每个 microbatch 的反向都会让 `per_param_grad_ready_counts[param]` 加一；
+- `golden_per_param_grad_ready_counts` 记的是"这个 iteration 里每个参数应该到达几次"（含累积倍数）；
+- 两者相等才 dispatch 该桶的 reduce-scatter。
+
+所以重叠窗口是"**最后一个 microbatch 的反向还在算，前面 microbatch 攒好的桶已经在传**"，而不是"全部反向算完再统一发"。三个连带后果：
+
+- 累积步数越多，桶就绪越晚（要等最后一个 microbatch），但每桶的通信量不变；
+- `is_last_microbatch` 管的是 iteration 末尾那次 `finish_grad_sync`（optimizer 前必须等齐），和"桶什么时候 dispatch"是两件事，别混；
+- 一个 iteration 里每个桶都会发一次，所以在途流量上限就是梯度总量——真正要调的是桶数（launch 次数）与桶大小（尾延迟），也就是 §3 那条曲线。
 
 ## 结论
 
 - DP 的三个暴露点：反向梯度 reduce、前向参数 all-gather、optimizer 后的 all-gather。
 - Megatron 的三件套：hook 登记 → per-param 计数判满（处理 tied weights）→ `start_*` 发异步、`finish_*` 才 wait。
 - 桶不是越细越好：$T_{\text{exposed}} = t + (N-1)\max(0,t-c)$，最优在 $t \approx c$ 附近；launch 和 NCCL 小消息效率决定了下界。
-- 分布式优化器把 all-reduce 拆成 reduce-scatter + all-gather，方向不同，重叠策略也不同。
+- 分布式优化器把 all-reduce 拆成 reduce-scatter + all-gather（多出来的那次 gather 只有 Megatron 分布式优化器 / ZeRO-3 / FSDP 才有，ZeRO-1/2 不切参数，没有），方向不同，重叠策略也不同。
 - 先开 `--overlap-grad-reduce`，再开 `--overlap-param-gather`；桶大小从一层参数量的量级开始扫。
 
 下一篇进入张量并行：TP 的 all-reduce 在层内、和 GEMM 紧密耦合，不能像 DP 那样简单挪到 side stream。Flux 的做法是把通信拆到 tile 级、融进 GEMM kernel——这也是"切"和"融"结合得最漂亮的一个案例。

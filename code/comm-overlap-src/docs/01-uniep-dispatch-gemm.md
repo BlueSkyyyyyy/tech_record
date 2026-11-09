@@ -1,6 +1,6 @@
 # （一）UniEP 的 Dispatch + FC1 GroupGEMM：把等待粒度压到一个 expert
 
-对应副本：[`uniep/kernels/cutedsl_dispatch_group_gemm.py`](../uniep/kernels/cutedsl_dispatch_group_gemm.py)（1314 行，Blackwell sm100 版）。
+对应副本：[`uniep/kernels/cutedsl_dispatch_group_gemm.py`](../uniep/kernels/cutedsl_dispatch_group_gemm.py)（上游 1314 行 → 注释副本 1879 行，其中 1222 行代码，Blackwell sm100 版）。
 文中用「搜 `xxx`」定位代码，因为副本里插入的注释会让行号漂移；文末给了一张**以当前副本为准**的行号表（已逐条核对）。
 
 ## 1. 融的是什么
@@ -146,8 +146,7 @@ ring 深一档，GEMM 的 A/B pipeline 就可能少一档；而 A/B 少一档，
   看到这些 `safe_` 前缀不要以为是冗余。
 - **`problem_sizes_m[expert]` 是真实 token 数**，但 A 的行是按 `expert_alignment` 补齐的；
   两者混用会导致行偏移错位（`expert_start += aligned_tokens` 这行就是处理这个）。
-- **`num_recv_tokens + world_size`** 这种「算了不用」的语句没有语义，作用是不让编译器把那次全局 load 优化掉
-  （它读的是别的 rank 写的 recv 计数，属于「先碰一下」的写法）。
+- **`num_recv_tokens + world_size`** 这种「算了不用」的语句没有语义；副本注释的说法是「这次读没有被任何计算使用，可以当上游遗留的占位读」。它读的是别的 rank 写的 recv 计数，不影响每个专家的行区间——行区间由 `problem_sizes_m` 前缀和决定。
 - 这个文件是 **intranode** 版本（对端指针直接 TMA）。跨机看同目录的 `*_inter.py`，走 NCCL GIN，机制不同。
 
 ## 9. 行号表（副本 `uniep/kernels/cutedsl_dispatch_group_gemm.py`，已核对）

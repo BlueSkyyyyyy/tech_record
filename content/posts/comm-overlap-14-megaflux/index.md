@@ -2,7 +2,7 @@
 title: "通算并行研读（补遗二）：MegaFlux 深读——routing skew、专家复制与前后向流水"
 date: 2026-11-03
 draft: false
-weight: 15
+weight: 14
 series: ["comm-overlap"]
 tags: ["通算并行", "系列", "MoE", "MegaFlux", "routing skew", "专家复制", "B200"]
 categories: ["训练框架"]
@@ -17,6 +17,8 @@ UniEP 解决的是“单层内的顺序和调度”，MegaFlux（[2610.00671](ht
 这一篇拆 MegaFlux 的四个部分：怎么量化 skew、怎么规划复制、怎么把复制通信塞进前后向、以及它的收益和边界。
 
 ## 1. 问题：固定放置下，skew 直接变成 straggler
+
+这一节先量化问题：固定放置下，routing skew 会怎样变成 straggler（拖后腿的那张卡）。
 
 MoE 的 expert 通常按固定规则放在 EP rank 上。热 expert 所在的 GPU 会收到更多 token，计算更久；冷 expert 的 GPU 早早算完，等 all-to-all/combine。层延迟由最慢的 GPU 决定，其他 GPU 的算力被浪费。
 
@@ -37,9 +39,11 @@ $$
 
 ## 2. Planner：以 token block 为单位的复制规划
 
+这一节讲 planner：复制谁、复制几份、放在哪。
+
 ### 2.1 为什么按 block，不按 token
 
-如果把一个专家的 token 均分给多个副本，每个副本都可能拿到不满一个 tile 的尾部，产生 partial tile，浪费 Tensor Core。MegaFlux 的做法是：
+如果把一个专家的 token 均分给多个副本，每个副本都可能拿到不满一个 tile 的尾部，产生 partial tile（不满一个 tile 的尾巴），浪费 Tensor Core。MegaFlux 的做法是：
 
 - 把每个专家的 routed rows 切成 **最多 $\beta$ 行**的 token block，$\beta$ 与 megakernel 的 FC1/FC2 tile 的 token 维对齐；
 - 每个专家最多只有一个 partial block，不管复制多少份；
@@ -112,6 +116,8 @@ $$
 
 ## 3. Executor：把复制通信塞进 megakernel
 
+这一节讲 executor：规划好的副本，怎么把权重传输和梯度归约藏进 megakernel。
+
 规划只是“放哪”，执行才是“怎么藏”。MegaFlux 的 executor 有两个关键设计。
 
 ### 3.1 Forward：W1/W2 分离 readiness
@@ -140,9 +146,9 @@ $$
 
 Backward 的依赖更绕：
 
-- DGrad 先消费 $W_2$，再消费 $W_1$；
+- DGrad（对输入的梯度）先消费 $W_2$，再消费 $W_1$；
 - 所以副本权重传输按 $W_2 \to W_1$ 的顺序 readiness；
-- WGrad 需要 token 轴上的 $D_e$ 和 $dZ_e$，MXFP8 下还要做 requantization（RQ）；
+- WGrad（对权重的梯度）需要 token 轴上的 $D_e$ 和 $dZ_e$，MXFP8（一种 FP8 训练格式）下还要做 requantization（RQ）；
 - RQ 被安排在通信空闲区间；
 - 每个 worker 完成自己的 DGrad 后独立转入 WGrad，不需要 device-wide phase barrier。
 
@@ -156,6 +162,8 @@ Backward 的依赖更绕：
 这和第 3.1 节的“分离 readiness”是同一个思想：**把“等全部”拆成“等一个 tile/一个投影”**。
 
 ## 4. 收益：1.45×/1.28× 与 56%–100% 隐藏率
+
+这一节读结果。先给读法：forward/backward 两列分开看，“几何平均”和“峰值”也不是一回事。
 
 实验设置：
 
@@ -182,6 +190,8 @@ Backward 的依赖更绕：
 
 ## 5. 边界：复制不是免费的
 
+这一节列五个前提；不满足的话，上面的 1.45× 不成立。
+
 MegaFlux 的收益有明确前提：
 
 1. **routing 必须够 skew**。如果路由接近均匀，复制带来的额外权重流量和显存占用可能超过收益；论文的 workload 是 P95-skew，不是均匀分布。
@@ -197,7 +207,7 @@ MegaFlux 的收益有明确前提：
 | 优化对象 | 层内 token 顺序、SM 角色、通信/计算 overlap | 跨 GPU 的专家副本放置、token block 分配 |
 | 关键约束 | bitwise 可复现 | replica budget、负载均衡 |
 | 并行载体 | 单 stream persistent kernel + 动态任务队列 | 同 megakernel 内的复制传输/归约流水 |
-| 主要收益 | kernel 1.3×–1.6×，e2e 1.09× | fwd 1.45×、bwd 1.28×（vs 固定放置） |
+| 主要收益 | kernel 1.07×–1.87×，e2e 1.09× | fwd 1.45×、bwd 1.28×（vs 固定放置） |
 | 失败模式 | 跨节点、非 Hopper、shape 太动态 | routing 均匀、副本预算太小、显存不够 |
 
 两者可以叠：UniEP 决定“token 按什么顺序进/出”，MegaFlux 决定“token block 去哪个 GPU 算”。但叠加也有交互：

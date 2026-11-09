@@ -8,13 +8,13 @@ tags: ["通算并行", "系列", "张量并行", "Flux", "T-CCL", "TileLink", "k
 categories: ["训练框架"]
 ---
 
-数据并行的通信在反向末尾，流水线的通信在 stage 边界。这两处的通信都能问一句"能不能挪到旁边去"：gradient bucket 可以异步发出去，策略只是"晚一点再 wait"；PP 的 send/recv 可以塞进另一个 microbatch 的计算窗口，因为它等的是**另一份数据**。
+数据并行的通信在反向末尾，流水线的通信在 stage 边界。这两处的通信都能问一句"能不能挪到旁边去"。gradient bucket 可以异步发出去，策略只是"晚一点再 wait"；PP 的 send/recv 可以塞进另一个 microbatch 的计算窗口，因为它等的是**另一份数据**。
 
 张量并行没有这个空间。
 
-TP 的通信长在层里面：经典形态是 `GeLU` 之后、第二个 GEMM 之前的一次 all-reduce；换成 sequence parallel 之后，它变成两个 GEMM 外侧的一次 AG 和一次 RS。位置挪了，性质没挪——**它仍然在这一层内部，仍然卡在关键路径上**。它不是"算完一批活顺手发出去"，而是下一段计算的输入依赖：输出 $Z$ 的每一个元素都需要这次通信的**全部**元素。层内也没有第二件活可以拿来填，因为下一个算子本身就在等这份数据。
+TP 的通信长在层里面。经典形态是在第二个（row-parallel）GEMM 的输出上做一次 all-reduce；换成 sequence parallel（序列并行，SP）之后，它变成两个 GEMM 外侧的一次 AG 和一次 RS。位置挪了，性质没挪——**它仍然在这一层内部，仍然卡在关键路径上**。它不是"算完一批活顺手发出去"，而是下一段计算的输入依赖：输出 $Z$ 的每一个元素都需要这次通信的**全部**元素。层内也没有第二件活可以拿来填，因为下一个算子本身就在等这份数据。
 
-所以 TP 的 overlap 只有一条路：**把 GEMM 切开，让"算已经到的部分"和"传还没到的部分"同时发生。** 这一篇讲这条路上的四个代表——Flux（融进 kernel）、T-CCL（把 collective 压到 1–6 个 SM）、TileLink（编译器生成）、CommFuse（算法级拆成 P2P）——以及它们各自的负结果。
+所以 TP 的 overlap 只有一条路：**把 GEMM 切开，让"算已经到的部分"和"传还没到的部分"同时发生。** 这一篇讲这条路上的四个代表：Flux（融进 kernel）、T-CCL（把 collective 压到 1–6 个 SM）、TileLink（编译器生成）、CommFuse（算法级拆成 P2P）。每个方案后面都跟着它自己的负结果。
 
 ## 1. TP 的数据流：两个 GEMM、四次通信
 
@@ -31,23 +31,58 @@ $$
 - **第一个 GEMM**：$A = [A_0, \dots, A_{N-1}]$，第 $r$ 张卡算 $Y_r = X A_r$，输出只有列方向上的一段。
 - **第二个 GEMM**：$B = [B_0; \dots; B_{N-1}]$，第 $r$ 张卡算 $Z_r = Y B_r$，这**不是**完整的 $Z$，只是 $N$ 个部分和中的一个。
 
-不做 sequence parallel 时，一个 MLP 块的前向只有一次 all-reduce——row-parallel GEMM 之后把 $N$ 个部分和加起来；反向有两次。配上 sequence parallel（SP）之后，通信被搬到两个 GEMM 的外侧，变成"前面 AG、后面 RS"，反向再对称来一遍，一共四次。这就是大家熟悉的 **AG + GEMM，GEMM + RS**。
+不做 sequence parallel 时，一个 MLP 块的前向只有一次 all-reduce：row-parallel GEMM（第二个 GEMM）之后，把 $N$ 个部分和加起来；反向有两次。配上 sequence parallel 之后，通信被搬到两个 GEMM 的外侧，变成"前面 AG、后面 RS"，反向再对称来一遍，一共四次。这就是大家熟悉的 **AG + GEMM，GEMM + RS**。
 
-AG 补的是"被切掉的那一维"：SP 下切的是序列维，AG 送来一段段 M tile；也有些实现在 K 维上切（上一层按 K 分片），AG 送来的就是 K tile。两种形态都成立，融合的道理相同，区别只在切哪一维。
+AG 补的是"被切掉的那一维"。Megatron SP 切的是序列维，AG 送来一段段 M tile；也有些实现在 K 维上切（上一层按 K 分片），AG 送来的就是 K tile。两种形态都成立，融合的道理相同，区别只在切哪一维。下文主要沿 M 维推导，K 维放在 §1.2 末尾作 remark。
 
 **一次也好、四次也好，通信全都落在层内。** 这就是 TP 和 DP/PP 的结构性差别：DP 的通信等的是"整个反向算完"，PP 的通信等的是"另一个 microbatch"，而 TP 的下一次通信等的是"这一次通信自己"。
 
-attention 的 TP 形态略有不同，但结论一样：QKV 投影按 head 切（column-parallel），output projection 在 head 维上求和（row-parallel）。所以"两次通信都长在层内"不变。区别在于比例——长序列、小 batch 时 attention 的 GEMM 变瘦，通信量却不减，$g/c$ 很容易超过 1；这也是 TP 在 decode 阶段格外难受的原因之一。
+attention 的 TP 形态略有不同，但结论一样：QKV 投影按 head 切（column-parallel），output projection 在 head 维上求和（row-parallel）。所以"两次通信都长在层内"不变。区别在于比例——短序列、小 batch（decode，$M=1$）时 attention 的 GEMM 变瘦，通信量却不减，$g/c$ 很容易超过 1；这也是 TP 在 decode 阶段格外难受的原因之一。
 
 ### 1.2 为什么 AG 可以和 GEMM 融
 
-当 AG 补的是 K 维时，关键在于 **GEMM 的 K 维本身就是一个求和循环**，而 AG 送来的正好是 K 维的切片。
+这一节回答一个问题：AG 还没做完，GEMM 为什么能先算？答案不在通信库，而在 GEMM 自己的数据依赖上。
+
+Megatron SP 的 AG 补的是**序列维（第一维）**：每张卡持有一段 M tile，AG 把别的卡那几段送过来。沿 M 维看，第一个 GEMM 的输出和输入逐行对应（记 $G = X A$）：
 
 $$
-Z = X A = \sum_{j=0}^{N-1} X_j A_j
+G = X A, \qquad G[m,:] = X[m,:] A
 $$
 
-$X_j$ 是第 $j$ 张卡持有的那段 K 切片，$A_j$ 是权重对应的行块。第 $j$ 块到达之前，K 循环里属于它的那几次累加不能做；**其它块完全不受影响**。依赖的粒度从"整张 $X$"变成了"一个 K tile"。
+第 $j$ 段序列一到，各卡就能算出这几行的本地列；GeLU 逐元素，$Y = \mathrm{GeLU}(G)$，第二个 GEMM 的每个输出行也只由 $Y$ 的对应行决定。于是这一段的 $Z$ 部分和可以接着算，算完立刻参与 reduce-scatter。
+
+```text
+      rank 0          rank 1          rank 2
+    ┌────────┐      ┌────────┐      ┌────────┐
+    │  X0..  │      │  X1..  │      │  X2..  │   ← 各持一段 M tile（序列切片）
+    └───┬────┘      └───┬────┘      └───┬────┘
+        │               │               │
+        │   tile 级 all-gather（逐段到）
+        ▼               ▼               ▼
+    ┌──────────────────────────────────────────┐
+    │  G[m] = X[m] * A                         │   ← 每个 M tile 到了，各卡算这几行
+    └──────────────────────────────────────────┘
+        ▲               ▲               ▲
+        │               │               └── t2 到了，算 t2 的输出行
+        │               └────────────────── t1 到了，算 t1 的输出行
+        └────────────────────────────────── t0 在本地，先算
+```
+
+看最后三行箭头：本地那段先算，远端两段谁先到谁先算，三段之间不需要互相等。这不是把通信藏起来，而是把"等整份数据"换成"等下一段数据"。
+
+反过来，第二个 GEMM 的 **输出 tile** 一旦算完，也可以立刻参与 reduce-scatter：这一块的部分和已经不需要再改了。所以 RS 能融进 GEMM 的 epilogue（收尾阶段）——写出的时候直接写到"该去的地方"，顺便把 reduction 做了。
+
+> 一句话：AG 融在"被切的那一维"（M 或 K），RS 融在输出方向。两个方向都可切，所以 TP 的两类通信都有融合点。
+
+**另一种形态：沿 K 维切分时。** 有些实现在 K 维上切（上一层按 K 分片），AG 送来的就是 K tile。这时关键在于 **GEMM 的 K 维本身就是一个求和循环**：
+
+$$
+G = X A = \sum_{j=0}^{N-1} X_j A_j
+$$
+
+$X_j$ 是第 $j$ 张卡持有的那段 K 切片，$A_j$ 是权重对应的行块。第 $j$ 块到达之前，K 循环里属于它的那几次累加不能做；**其它块完全不受影响**。依赖的粒度从"整张 $X$"变成了"一个 K tile"。这不是 Megatron SP 在 MLP 上的形态（它的 AG 补的是 M 维），但融合的道理相同，区别只在切哪一维。
+
+看这张图：每段 K tile 到了就累加，没到就跳过；三段的加法互不阻塞。
 
 ```text
    rank 0        rank 1        rank 2
@@ -57,20 +92,16 @@ $X_j$ 是第 $j$ 张卡持有的那段 K 切片，$A_j$ 是权重对应的行块
       │             │             │
       │   tile 级 all-gather（逐个到）
       ▼             ▼             ▼
-   ┌─────────────────────────────────┐
-   │  Z = X0·A0 + X1·A1 + X2·A2      │   K 循环按 tile 累加
-   └─────────────────────────────────┘
+   ┌──────────────────────────────────┐
+   │  G = X0·A0 + X1·A1 + X2·A2       │   K 循环按 tile 累加
+   └──────────────────────────────────┘
       ▲             ▲             ▲
       │             │             └── t2 到了，累加 t2
       │             └──────────────── t1 到了，累加 t1
       └────────────────────────────── t0 在本地，先算
 ```
 
-如果 AG 补的是序列维，论证换个说法、结论不变：不同的 M tile 对应不同的输出行，输出行之间没有依赖。第 $j$ 段序列一到，就把它那一块输出行算出来，不必等整段序列齐；每个 M tile 的部分和算完也能立刻散出去。**依赖的粒度同样从"一层"降到了"一块"。**
-
-反过来，第二个 GEMM 的 **输出 tile** 一旦算完，就可以立刻参与 reduce-scatter：这一块的部分和已经不需要再改了。所以 RS 可以融进 GEMM 的 epilogue——写出的时候直接写到"该去的地方"，顺便把 reduction 做了。
-
-> 一句话：AG 融在"被切的那一维"（K 或 M），RS 融在输出方向。两个方向都可切，所以 TP 的两类通信都有融合点。
+所以 K 维形态不是另一套机制，而是同一套依赖分析换了一个切分方向：AG 补哪一维，就按哪一维的 tile 推进 GEMM。
 
 ### 1.3 为什么"按设备数切 chunk"只能拿一半
 
@@ -89,22 +120,24 @@ Flux（[2406.06858](https://arxiv.org/abs/2406.06858)）的做法可以概括成
 ### 2.1 机制
 
 - **粒度**：一个 tile 对应一个 thread block（论文脚注说，视 GEMM 实现也可以是 warp 或 thread block cluster）。tile 的划分**与 TP 度解耦**——不必等于设备数，也不必是它的两倍，因此 K 循环和 tile 形状都可以按 GEMM 自己的最优来选。
-- **融合方式**：AG+GEMM 把通信放在 prologue（K tile 到了就往下算），GEMM+RS 把 reduce/scatter 放在 epilogue。wait 逻辑不是另起一个 kernel 等，而是长在 tile 的消费者那一侧——**哪个 tile 等哪个信号，是编译期/模板期就定好的**。
+- **融合方式**：AG+GEMM 把通信放在 prologue（tile 到了就往下算），GEMM+RS 把 reduce/scatter 放在 epilogue。wait 逻辑不是另起一个 kernel 等，而是长在 tile 的消费者那一侧——**哪个 tile 等哪个信号，是编译期/模板期就定好的**。
 - **tile coordinate swizzling**：把 thread block index 到 tile 坐标的映射，和"信号到达顺序"对齐。通信顺序在 host 侧按拓扑选（节点内 NVLink 用从 `local_rank+1` 开始的环，PCIe 也用环），两者一起调，目的是让尽量少的 thread block 卡在等上。论文的消融显示，开了 swizzling 总是更好，且矩阵越大差距越大。
 - **数据搬运**：节点内走 P2P 的直接 load/store，或 `cp.async.bulk` / TMA；跨节点走 NVSHMEM 的 put/get。**没有额外的通信 kernel**。
 - **不静态分 SM**：这一点常被误解。Flux 里没有"拿 $k$ 个 CTA 专门做通信"的概念，整个 grid 跑的是同一份 GEMM，每个 thread block 自己决定这一轮是算还是搬。它用的是"融"和"切"，不是"让"。
 
-这里还有一个观测上的坑：融合之后，nsys 上**看不到独立的通信 kernel** 了。如果拿"有没有 NCCL kernel"来判断 overlap 有没有生效，会得到假阴性——通信退化成了 GEMM kernel 内部的 load/store 和 barrier wait，只能从 SM 活跃度、HBM 流量和 GEMM 自身的有效算力上反推。测量方法在第十篇（实测手册）里展开。
+这里还有一个观测上的坑：融合之后，nsys 上**看不到独立的通信 kernel** 了。如果拿"有没有 NCCL kernel"来判断 overlap 有没有生效，会得到假阴性。通信退化成了 GEMM kernel 内部的 load/store 和 barrier wait，只能从 SM 活跃度、HBM 流量和 GEMM 自身的有效算力上反推。测量方法在第十篇（实测手册）里展开。
 
 ### 2.2 数字（都带硬件条件）
 
 GEMM + collective 的算子级对比，基线是 cuBLAS + NCCL，对手是 TransformerEngine：
 
-| 集群 | 相对 TransformerEngine 的加速 | overlap efficiency |
+| 集群 | 相对 TransformerEngine 的加速 | overlap efficiency（重叠效率） |
 |---|---|---|
 | A100 PCIe（8 卡/节点，PCIe 节点内） | 1.20×–3.25× | 41%–57% |
 | A100 NVLink（8 卡/节点，NVLink 节点内） | 1.01×–1.33× | 36%–**96%** |
 | H800 NVLink（8 卡/节点，NVLink 节点内） | 1.10×–1.51× | 37%–93% |
+
+看第 3 列：同一套融合 kernel，在 PCIe 上 overlap efficiency 只有 41%–57%，到 NVLink 能到 93%–96%。链路越快，融合能藏住的份额越高。
 
 端到端：GPT-3 175B 与 Llama-2 70B，128 GPU（2 路 DP × 8 路 PP × 8 路 TP），对比 Megatron-LM 与 vLLM：
 
@@ -142,7 +175,7 @@ Flux 的思路是"把通信塞进计算 kernel"。T-CCL（[2610.07098](https://a
 ### 3.2 数字
 
 - 相对 NCCL：不限通信资源时最高 **2.4×**；把通信限制到 8 个 CTA（H100）/ 9 个 CTA（GH200）时最高 **3.42×**。后者才是它真正想证明的场景——**资源受限时谁更抗压**。
-- 活跃 SM 数（AllGather，GH200）：
+- 活跃 SM 数（AllGather，GH200）。看 T-CCL 和 NCCL 两列：消息越大，NCCL 吃的 SM 越多，T-CCL 到 6.60 就基本封顶。
 
 | 消息大小 | T-CCL | NCCL | Symmetric NCCL |
 |---|---|---|---|
@@ -160,7 +193,7 @@ Flux 的思路是"把通信塞进计算 kernel"。T-CCL（[2610.07098](https://a
 - **不支持 CUDA Graph**。论文的 vLLM 实验是在 eager 模式下跑的（因为 planning 和 launch 有 host 侧工作），作者也明说上 Graph 之后两边都会受益。
 - **H100 小消息有回归**：相对 NCCL，H100 上 AllReduce 的范围是 0.94×–2.74×、ReduceScatter 是 0.95×–3.42×，最小值都小于 1，且集中在 H100 的小消息。
 - **只做单节点**（intra-node，靠 P2P 访问对端显存），评测规模是 TP=2 / TP=4。
-- **TP=4 的最差形状仍然低于串行基线**：不是 T-CCL 独有的问题，而是小 GEMM 没多少计算可以拿来藏通信，FlashOverlap 的搜索选出来的配置可能还不如老实串行。TP=2 时 T-CCL 变体在全部 24 个形状上都高于基线，NCCL 变体则有一个低于基线的最差 case。
+- **TP=4 的最差形状仍然低于串行基线**：不是 T-CCL 独有的问题，而是小 GEMM 没多少计算可以拿来藏通信。FlashOverlap 的搜索选出来的配置，可能还不如老实串行。TP=2 时 T-CCL 变体在全部 24 个形状上都高于基线，NCCL 变体则有一个低于基线的最差 case。
 
 ## 4. TileLink：让编译器生成融合 kernel
 
@@ -201,9 +234,11 @@ CommFuse 的办法是把 RS / AG 拆成 ring 顺序的 P2P（FuseRS / FuseAG）�
 - **FuseRS**：对本 rank 来说最后要留下的那片输出，安排在最后算——它算完就结束了，**不需要再通信**；
 - **FuseAG**：反过来，本地已有的那片先算，从别人那里收到的后算，这样"等数据"的时间被本地计算盖住。
 
-于是"最后一块"从"必须通信"变成"不必通信"，tail 被结构性地消掉，而不是靠把 chunk 切得更细来摊薄。代价是通信从一次 collective 变成 $N-1$ 步 P2P：同步点变多，每一步都要自己保证顺序正确。论文的立场是：这类同步是点对点的、可控的，不像"拆解 collective 但总通信量上升"的方案那样容易把省下的 tail 又吃回去；而且它不依赖 batch size，不会像按 batch 切那样在小 batch 下退化。
+于是"最后一块"从"必须通信"变成"不必通信"，tail 被结构性地消掉，而不是靠把 chunk 切得更细来摊薄。
 
-效果（论文的 MLP 实验，TP=4）：
+代价是通信从一次 collective 变成 $N-1$ 步 P2P：同步点变多，每一步都要自己保证顺序正确。论文的立场是，这类同步是点对点的、可控的，不像"拆解 collective 但总通信量上升"的方案那样容易把省下的 tail 又吃回去。它还强调这套做法不依赖 batch size，不会像按 batch 切那样在小 batch 下退化。
+
+效果（论文的 MLP 实验，TP=4）。看第二列：通信开销从 43.8 ms 压到 0.1 ms，但端到端只从 122.3 ms 降到 77.1 ms——通信省掉 99.8%，总时间只省 36.9%，因为剩下的大头是计算。
 
 | 方案 | 通信开销 (ms) | 端到端 (ms) |
 |---|---|---|
@@ -220,6 +255,8 @@ CommFuse 的办法是把 RS / AG 拆成 ring 顺序的 P2P（FuseRS / FuseAG）�
 
 ## 6. 四个方案放在一起
 
+先看"粒度"和"资源策略"两列：粒度决定 overlap 能做多细，资源策略决定代价落在哪。
+
 | 系统 | 机制 | 粒度 | 资源策略 | 头条数字 | 主要边界 |
 |---|---|---|---|---|---|
 | **Flux** | 通信 + wait 融进同一个 GEMM kernel，单 kernel | tile（与 TP 度解耦） | 不静态分 SM，靠 tile swizzling 对齐到达顺序 | overlap efficiency 最高 96%（A100 NVLink）；GEMM 级 1.20–3.25×（A100 PCIe） | H800 NVLink 上 decode 无加速；小 m 0.95×–1.03× |
@@ -233,7 +270,7 @@ CommFuse 的办法是把 RS / AG 拆成 ring 顺序的 P2P（FuseRS / FuseAG）�
 
 前向的 TP 只有一条依赖链，反向不是。一个 Linear 的反向有两个 GEMM——dgrad（对输入求导）与 wgrad（对权重求导）——它们共享输入，但彼此不依赖。也就是说，dgrad 在等那次 reduce-scatter 的时候，wgrad 可以先算。
 
-这解释了一个经验观察：**反向的 TP 通信往往比前向好藏。** 不是因为通信变快了，而是因为旁边多了一件活。Megatron 的 `delay_wgrad_compute` 就是把这个窗口显式化的开关（第四篇里提过它的前置条件：只在 TransformerEngine 实现下可用），本质是"把 wgrad 挪到更靠近它的 reduce 的位置"。
+这解释了一个经验观察：**反向的 TP 通信往往比前向好藏。** 不是因为通信变快了，而是因为旁边多了一件活。Megatron 的 `delay_wgrad_compute` 就是把这个窗口显式化的开关。第四篇里提过它的前置条件：只在 TransformerEngine 实现下可用。它的本质是"把 wgrad 挪到更靠近它的 reduce 的位置"。
 
 代价是显存：wgrad 往后挪，输入激活就要活得更久。这个交换很典型——**overlap 的收益从来不是白拿的，要么用显存换，要么用代码复杂度换，要么用计算效率换。**
 
@@ -247,7 +284,7 @@ CommFuse 的办法是把 RS / AG 拆成 ring 顺序的 P2P（FuseRS / FuseAG）�
 4. **形状多、要覆盖 MLP/attention/MoE → 让编译器生成（TileLink 路线）。** 代价是接受比手写低几个点的性能（AG+GEMM 差 5.5%），换来几百行 Python 覆盖全部形态。
 5. **跨节点 + 小 batch → 先别想 overlap。** 通信比计算慢时，第一篇的 $\max(nc, ng)$ 已经把上界钉死了：切得越细，暴露的绝对时间越大。这时候正确的动作是降低 TP 度、改用 PP/EP、或者量化通信。
 
-关于小 batch 跨节点，多说一句。Flux 的 H800 decode 无加速、CommFuse 的长序列切分翻车、T-CCL 在 TP=4 上的最差形状低于串行——这三件事指向同一个原因：**当一块计算本身已经小到藏不住一次通信时，任何 overlap 都是负收益。** 判断标准很朴素：把这一层的通信时间除以计算时间，如果大于 1，先去减通信量。
+关于小 batch 跨节点，多说一句。Flux 的 H800 decode 无加速、CommFuse 的长序列切分翻车、T-CCL 在 TP=4 上的最差形状低于串行。这三件事指向同一个原因：**当一块计算本身已经小到藏不住一次通信时，任何 overlap 都是负收益。** 判断标准很朴素：把这一层的通信时间除以计算时间，如果大于 1，先去减通信量。
 
 ## 9. 用模型把账算一遍
 
@@ -261,7 +298,7 @@ $$
 
 为什么是这两项？$\max(nc, ng)$ 是"谁慢谁决定总时间"——两条流水线并行跑，总长度由长的那条定；$\min(c,g)$ 是流水线的填充/排空：第一块通信必须等，最后一块计算必须等，加起来正好是一块的 $\min$。
 
-取 $c = 1$、$g = 1.5$（通信比计算慢 50%）：
+取 $c = 1$、$g = 1.5$（通信比计算慢 50%）。看第 2 列：$n$ 每翻一倍，$T$ 就多一个 $ng$；$\min(c,g)$ 是固定的填充项，不随 $n$ 变。
 
 | $n$ | $T = \max(nc,ng)+\min(c,g)$ | exposed $= T - nc$ |
 |---|---|---|
@@ -282,8 +319,8 @@ $$
 
 ## 结论
 
-- TP 的通信在层内、在关键路径上，**不能挪到 side stream**；唯一的空间是把 GEMM 按 tile（K 或 M）切开、把输出按 tile 散出，让"算已到的"和"传未到的"并发。
-- AG 能融进 GEMM 的 prologue、RS 能融进 epilogue，是因为 GEMM 的 K 循环本来就是求和、输出 tile 本来就是终值。**这是数学结构给的窗口，不是工程技巧。**
+- TP 的通信在层内、在关键路径上，**不能挪到 side stream**；唯一的空间是把 GEMM 按 tile（M 或 K）切开、把输出按 tile 散出，让"算已到的"和"传未到的"并发。
+- AG 能融进 GEMM 的 prologue、RS 能融进 epilogue，是因为 GEMM 的输入行（M 维）互不依赖、K 维本来就是求和、输出 tile 本来就是终值。**这是数学结构给的窗口，不是工程技巧。**
 - 四条路线的取舍：Flux 用几千行 CUDA 换 tile 级融合（A100 NVLink 上 overlap efficiency 最高 96%，但 H800 上 decode 无加速、小 m 会掉到 0.95×）；T-CCL 用 TMA 把 collective 压到 1–6 个 SM（vs NCCL 最高 2.4×，但只做单节点、无 CUDA Graph）；TileLink 把融合交给编译器（1.17×–20.76×，AG+GEMM 差 Flux 5.5%）；CommFuse 在算法层消 tail（通信开销 43.8 → 0.1 ms，但没写明硬件）。
 - 判断顺序永远是：**先看通信占比 → 再看 $c$ 和 $g$ 谁大 → 最后才选实现路线。** 通信比计算慢时，切分救不了，只能减通信量。
 

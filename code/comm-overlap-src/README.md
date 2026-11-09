@@ -26,7 +26,7 @@ comm-overlap-src/
     04-flux-ag-gemm.md
     05-flux-gemm-rs.md
     06-compare.md            # 对照表 + 「等待粒度」代价模型
-  uniep/                     # 7 个带注释副本（kernels/ 6? 见 docs/00 的文件地图）
+  uniep/                     # 7 个带注释副本（4 个 kernels + 3 个 _ops，见 docs/00 的文件地图）
   flux/                      # 5 个带注释副本
   tools/
     MANIFEST.tsv             # 上游相对路径 → 副本路径

@@ -12,7 +12,7 @@ MoE 层的通信不是"GEMM 中间夹了两段 all-to-all"这么简单。Comet�
 
 这两个数放在一起，指向同一个结论：**如果只把 all-to-all 和 expert GEMM 做重叠，你最多只能藏住"计算那么长"的一段通信；多出来的部分一定暴露。** 而 MoE 的通信偏偏经常比计算长。
 
-这一篇按"三段式"往下拆：先讲清 dispatch → expert GEMM → combine 的依赖和分块，再看 DeepEP 的 API 怎么把 wait 推后，然后依次读 Comet、Weave、Lancet、DisagMoE 和 INC-MoE——它们分别代表层内、整层、整图、模块间、网络内五个不同的重叠层级。最后用 `moe_overlap.py` 把"通信 SM 预算 × chunk 数"这笔账算一遍。
+这一篇按"三段式"往下拆：先讲清 dispatch → expert GEMM → combine 的依赖和分块，再看 DeepEP 的 API 怎么把 wait 推后。然后依次读 Comet、Weave、Lancet、DisagMoE 和 INC-MoE——它们分别代表层内、整层、整图、模块间、网络内五个不同的重叠层级。最后用 `moe_overlap.py` 把"通信 SM 预算 × chunk 数"这笔账算一遍。
 
 ## 1. 为什么 MoE 的通信不是边角料
 
@@ -27,26 +27,26 @@ $M$ 是本卡 token 数，$k$ 是 top-k，$H$ 是 hidden。combine 再把专家�
 三个因素让这件事比公式更糟：
 
 1. **top-k 复制**。$k=2$ 就是两倍流量，$k=8$ 就是八倍。DeepSeek-V3 这类模型每 token 激活 8 个专家，dispatch 的有效字节数远大于"一份 hidden state"。
-2. **routing skew**。专家热度不均，某张卡可能收到远超平均的 token。GEMM 可以按 expert 分组算，但一个 chunk 的完成时间由**最慢的那个专家**决定；为了对齐，系统还要按 capacity factor 补 padding，进一步放大流量和计算。
+2. **routing skew**。专家热度不均，某张卡可能收到远超平均的 token。GEMM 可以按 expert 分组算，但一个 chunk 的完成时间由**最慢的那个专家**决定。为了对齐，系统还要按 capacity factor（把每个专家的 token 补齐到最热专家的数量）补 padding，进一步放大流量和计算。
 3. **combine 在关键路径的末端**。dispatch 没到，expert 一个 token 都算不了；combine 没回，下一层 attention 就没有输入。它不像 DP 的梯度 all-reduce 那样可以挪到 optimizer 前，也不像 TP 的 all-reduce 那样有相邻 GEMM 可以错位。
 
-还有一个常被忽略的对比：**expert GEMM 其实很短**。单卡上每个专家分到的 token 不多，grouped GEMM 的 shape 又碎，算力利用率本来就不高；而 all-to-all 要跨节点走 IB，带宽比 NVLink 低一个数量级。Lancet 的 3.36 倍就是这么来的——**通信比计算长，只藏计算等于没藏**。
+还有一个常被忽略的对比：**expert GEMM 其实很短**。单卡上每个专家分到的 token 不多，grouped GEMM 的 shape 又碎，算力利用率本来就不高。all-to-all 则要跨节点走 IB，带宽比 NVLink 低一个数量级。Lancet 的 3.36 倍就是这么来的——**通信比计算长，只藏计算等于没藏**。
 
-这也解释了后面几篇论文的演化路线：Comet 在层内把 token 和 tile 的粒度对齐；Weave 把整层融成一个 persistent kernel、动态分 SM；Lancet 把重叠范围扩大到整张训练图；DisagMoE 干脆把 attention 和 FFN 拆到两组 GPU 上；INC-MoE 则把 all-to-all 卸到交换机里。**它们解决的是同一个问题的不同层次。**
+这也解释了后面几篇论文的演化路线。Comet 在层内把 token 和 tile 的粒度对齐；Weave 把整层融成一个 persistent kernel、动态分 SM；Lancet 把重叠范围扩大到整张训练图；DisagMoE 干脆把 attention 和 FFN 拆到两组 GPU 上；INC-MoE 则把 all-to-all 卸到交换机里。**它们解决的是同一个问题的不同层次。**
 
 ## 2. 三段式：D → C → B
 
 把一层写成三个算子：
 
 - **D（dispatch）**：按 routing 把 token 发到专家所在 rank，写成 all-to-all；
-- **C（expert compute）**：本地专家做 grouped GEMM（gate/up → SiLU → down），按专家分组；
+- **C（expert compute）**：本地专家做 grouped GEMM（gate/up → SiLU → down），按专家分组。下文把 gate/up 这一层记作 GEMM1（上投影）、down 这一层记作 GEMM2（下投影）。
 - **B（combine）**：把专家输出送回 token 原 rank，做 top-k 加权归约。
 
-在实现上，dispatch 的输出通常按本地专家重新分组，形状是 `[num_local_experts, capacity, H]`；capacity 取该卡最热专家的 token 数，或按 grouped GEMM 的 M 维对齐。这意味着 **padding 的 token 也会占 GEMM 的行**：routing 越偏，padding 越多，计算越慢。DeepEP 的 `expert_alignment` 就是用来对齐这个 M 维的；Comet 则干脆不按固定 capacity 切，而是按实际收到的 token 重排 tile。
+在实现上，dispatch 的输出通常按本地专家重新分组，形状是 `[num_local_experts, capacity, H]`。capacity 取该卡最热专家的 token 数，或按 grouped GEMM 的 M 维对齐。这意味着 **padding 的 token 也会占 GEMM 的行**：routing 越偏，padding 越多，计算越慢。DeepEP 的 `expert_alignment` 就是用来对齐这个 M 维的；Comet 则干脆不按固定 capacity 切，而是按实际收到的 token 重排 tile。
 
 依赖是严格的链：$D_i \to C_i \to B_i$。不分块时，一层就是 $T = d + c + b$，通信完全没有藏身之处。
 
-顺带回答一个常见疑问：**dispatch 和 combine 能不能合成一次 all-to-all？** 不能。dispatch 的输入是 token，combine 的输入是专家 GEMM 的输出，中间隔着整个 expert 计算，数据依赖不允许合并。能合并的是 combine 和"下一段 P2P"——DisagMoE 的 M2N 就是这么做的，把两次搬运压成一次。
+顺带回答一个常见疑问：**dispatch 和 combine 能不能合成一次 all-to-all？** 不能。dispatch 的输入是 token，combine 的输入是专家 GEMM 的输出，中间隔着整个 expert 计算，数据依赖不允许合并。能合并的只有 combine 和"下一段 P2P"——DisagMoE 的 M2N 就是这么做的，把两次搬运压成一次。
 
 分块之后，不同 chunk 之间相互独立，才有流水：
 
@@ -64,13 +64,19 @@ comp      [======C0======][======C1======][======C2======][======C3======]
 4. **头部 $d_0$ 和尾部 $b_3$ 消不掉**。它们分别是一层的启动成本和收尾成本，只能靠更小的 chunk 摊薄，不能靠重叠消除——这就是 [第一篇]({{< relref "comm-overlap-01-performance-model" >}}) 里的 $T_{\text{startup}}$。
 5. **chunk 不是越细越好**。chunk 越小，$d_0$ 和 $b_3$ 的尾巴越短；但每个 chunk 的 GEMM 行数变少，grouped GEMM 的效率下降，launch 和同步次数上升。Weave 实测 $K=8$ 时 GEMM 吞吐比 $K=1$ 低约 **27%**，所以它的最优 $K$ 通常只有 2–4。
 
-在"通信被完全藏住"的理想情况下：
+在"通信被完全藏住"的理想情况下，计算是长边，通信只在头尾各露一段：
 
 $$
-T \approx \max\left(\sum_i c_i,\ \sum_i d_i + \sum_i b_i\right) + d_0 + b_{\text{last}}
+T = \sum_i c_i + d_0 + b_{\text{last}}
 $$
 
-如果 $\sum d + \sum b > \sum c$，通信就是瓶颈，$T \approx \sum d + \sum b + c_0$，再怎么切也降不下去——这和 TP 的结论一样：**分块只能摊薄启动和尾部，不能把"通信比计算慢"这件事变没。**
+通信成瓶颈时，长边换成通信，计算只在头部露一块：
+
+$$
+T = \sum_i d_i + \sum_i b_i + c_0
+$$
+
+理想情形藏住的是中间的 $D_i/B_i$，只露 $d_0$ 和末块 $b_{\text{last}}$；通信瓶颈时藏住的是中间的 $C_i$，只露第一块计算 $c_0$。**分块只能摊薄启动和尾部，不能把"通信比计算慢"这件事变没**——这和 TP 的结论一样。
 
 ## 3. DeepEP：把 wait 推后的 API
 
@@ -143,13 +149,13 @@ MoE 的 all-to-all 不是"网卡自己搬"，它要在 GPU 上跑 copy/notify ke
 
 也就是说，**MoE 的通信没有"零 SM"选项**（至少这一版没有）。`num_sms` 就是你从 GEMM 嘴里抢出来给通信的 SM 数。
 
-`get_theoretical_num_sms`（`ep.py:431`）给了一个解析估计：结果对齐到 4 的倍数、至少 4 个；按流量放大 1.3 倍；如果不开 `prefer_overlap_with_compute`，下限抬到 64；最后封顶在设备 SM 数的一半。这个估计假设 gate 负载均衡，所以真实 skew 大时要手动加。
+`get_theoretical_num_sms`（`ep.py:431`）给了一个解析估计：结果对齐到 4 的倍数、至少 4 个；按流量放大 1.3 倍；如果不开 `prefer_overlap_with_compute`，下限抬到 64；最后封顶在设备 SM 数的一半。它假设 gate 负载均衡，所以真实 skew 大时要手动加。
 
 为什么它是一个**权衡旋钮**：
 
 - 通信带宽随 SM 数增加，但会饱和。DeepEP 的 copy kernel 在 SM 足够多之后，瓶颈回到 NIC/NVLink，再加 SM 没有收益；
 - GEMM 的算力随可用 SM 数**线性下降**。`total_sms - num_sms` 就是计算能用的部分；
-- 所以最优的 $c$ 在"通信边际带宽增益 = GEMM 边际算力损失"的位置。Weave 测量过，单层的最优 $c$ 在不同 GPU 上从 **12 到 36** 不等，DeepEP 固定 20、Comet 按 iteration 选 18，都会错过某些卡的最优值。
+- 所以最优的 $c$ 在"通信边际带宽增益 = GEMM 边际算力损失"的位置。Weave 测量过，单层的最优 $c$ 在不同 GPU 上从 **12 到 36** 不等。Weave 在其配置下观测到 DeepEP 取 20、Comet 取 18（转引）——这两个数都是**通信 CTA** 的预算，和 §4.2 的 $n_c$ 同一口径。DeepEP 的 20 不是写死的常量，而是 `get_theoretical_num_sms` 按解析估计算出来的（§3.3）；Comet 的 18 则是按 iteration 从预编译变体里选的。两者都会错过某些卡的最优值。
 
 `num_qps` 是另一个维度：直连模式下自动取 `min(num_sms, 9)`，混合模式取 `num_sms * 16 + 1`。QP 少了打不满 RDMA，多了会有 doorbell 和缓存开销——但那是跨节点才需要关心的参数，单节点 NVLink 上影响很小。
 
@@ -161,19 +167,19 @@ Comet 要解决的是一个很具体的错位：**通信以 token 为单位，GE
 
 Comet 把 producer 和 consumer 之间的缓冲区叫 **shared tensor**，然后按 consumer 的访问模式决定能沿哪个维度切：
 
-- **layer0（dispatch → GEMM0）**：shared tensor 形状是 $(M \times topk, N)$，consumer 是 GEMM。token 之间沿 $M$ 维独立，所以沿 **token 维**切；切完按来源 rank 排序，让本地 token 的 tile 先算，远程 token 的传输同时进行。
-- **layer1（GEMM1 → combine）**：consumer 里有一次 top-k 归约，沿 $M$ 维把 token 加在一起，所以 $M$ 维不能切；只能沿 **$N$（hidden）维**切。于是 Comet 把 GroupGEMM 改成**按列执行**：前 $T_N$ 列一算完，combine 就可以开始，而不必等所有专家算完。
+- **layer0（dispatch → GEMM1，上投影）**：shared tensor 形状是 $(M \times topk, N)$，consumer 是 GEMM。token 之间沿 $M$ 维独立，所以沿 **token 维**切；切完按来源 rank 排序，让本地 token 的 tile 先算，远程 token 的传输同时进行。
+- **layer1（GEMM2，下投影 → combine）**：consumer 里有一次 top-k 归约，沿 $M$ 维把 token 加在一起，所以 $M$ 维不能切；只能沿 **$N$（hidden）维**切。于是 Comet 把 GroupGEMM 改成**按列执行**：前 $T_N$ 列一算完，combine 就可以开始，而不必等所有专家算完。
 
 这就是"重排算子内执行顺序"的含义：不是简单地流水线化两个算子，而是**改变算子内部的 tile 顺序**，让下游能更早启动。
 
 ### 4.2 一个融合 kernel + CTA 特化
 
-切完之后，Comet 把通信和计算放进**融合 kernel**，并用 **thread block specialization** 隔离两类工作：
+切完之后，Comet 把通信和计算放进**融合 kernel**，并用 **thread block specialization** 隔离两类工作（layer0 里通信是 producer、GEMM 是 consumer；layer1 反过来）：
 
 - producer CTA：负责通信，读/写 shared tensor、发 NVSHMEM 请求；
 - consumer CTA：跑 CUTLASS 的 GEMM，warp 内部分工不变（producer warp 用 TMA 搬数据，consumer warp 发 MMA）。
 
-整层按两段 pipeline 各一个 fused kernel（dispatch+GEMM0、GEMM1+combine），每个 SM 放一个 CTA，**总 CTA 数等于 Hopper 的 132 个 SM**。然后在 kernel 内按当前 shape 自适应地分 $n_p$ 个通信 CTA 和 $n_c$ 个计算 CTA：TP=8、$M$ 从 4096 涨到 16384 时，最优 $n_c$ 从 18 变到 26；TP 从 8 降到 4 时，$n_c$ 又从 26 变到 46。
+整层按两段 pipeline 各一个 fused kernel（dispatch+GEMM1、GEMM2+combine），每个 SM 放一个 CTA，**总 CTA 数等于 Hopper 的 SM 数（132）**。以 layer1 的 kernel 为例。它在 kernel 内按当前 shape 自适应地分 $n_c$ 个通信 CTA 和 $n_p$ 个计算 CTA：TP=8、$M$ 从 4096 涨到 16384 时，最优 $n_c$ 从 18 变到 26；TP 从 8 降到 4（$M=16384$）时每卡通信量变大，$n_c$ 又从 26 涨到 46。
 
 效果（论文口径）：
 
@@ -195,7 +201,7 @@ Weave（[2609.21483](https://arxiv.org/abs/2609.21483)）的出发点是 Comet �
 
 ### 5.1 一个 kernel 装下五个算子
 
-Weave 把 **dispatch、GEMM0、SiLU、GEMM1、combine** 全部融进一个 persistent megakernel，grid 大小就是 SM 数（H100 上 132）。每个 block 在启动时按 `blockIdx.x` 决定角色：前 $c$ 个是 comm SM，后面的是 comp SM。
+Weave 把 **dispatch、GEMM1、SiLU、GEMM2、combine** 全部融进一个 persistent megakernel，grid 大小就是 SM 数（H100 上 132）。每个 block 在启动时按 `blockIdx.x` 决定角色：前 $c$ 个是 comm SM，后面的是 comp SM。
 
 关键在于**调度时机**：routing 一结束，这一层的通信量和计算量就完全确定了。Weave 在 megakernel 的 prologue 里跑一个轻量 cost model，联合选择：
 
@@ -207,7 +213,7 @@ Weave 把 **dispatch、GEMM0、SiLU、GEMM1、combine** 全部融进一个 persi
 
 时间调度做两件事：
 
-1. **chunk pipeline**：把 GEMM0、SiLU、GEMM1、combine 切成 $K$ 块（dispatch 不切），让 chunk $i$ 的 combine 落在 chunk $i+1$ 的 GEMM 中间。这样通信窗口从层的两头扩展到整个计算段。
+1. **chunk pipeline**：把 GEMM1、SiLU、GEMM2、combine 切成 $K$ 块（dispatch 不切），让 chunk $i$ 的 combine 落在 chunk $i+1$ 的 GEMM 中间。这样通信窗口从层的两头扩展到整个计算段。
 2. **bubble stealing**：dispatch 结束后、chunked combine 开始前，comm SM 还有一段空闲；让它们去偷 GEMM tile，把空闲算力换成有效吞吐。偷 tile 的位置是**连续**的一段，而不是散落在每个 chunk 之间——否则角色切换会把 GEMM 和 combine 反复打断。
 
 最后一个 chunk 的 combine 让**所有 SM** 参与，消掉尾部。
@@ -265,7 +271,7 @@ DisagMoE 用一个 compute-communication roofline 同时决定：
 - A 组和 F 组各多少 GPU；
 - NIC 带宽怎么在两组之间分。
 
-因为 attention 的算术强度随序列长度增长（$O(s^2)$），FFN 和通信是线性的（$O(s)$），所以最优比例随 $s$ 变。16K 序列下最优是 **A:F = 16:10**，比同构的 16:16 快 **1.56×**；4K 下则接近 16:16。
+因为 attention 的算术强度随序列长度增长（$O(s^2)$），FFN 和通信是线性的（$O(s)$），所以最优比例随 $s$ 变。16K 序列下最优是 **A:F = 16:10**，比 baseline 快 **1.56×**、比同构的 16:16 快 **1.29×**（16:10 是 26 卡，16:16 是 32 卡）；4K 下则接近 16:16。
 
 ### 7.3 数字与边界
 
@@ -274,7 +280,7 @@ DisagMoE 用一个 compute-communication roofline 同时决定：
 - 非重叠通信：比 Tutel 少 **88%**、比 Comet 少 **75%**、比 DualPipe 少 **45%**；
 - 128×H800（16 节点 × 8），序列 4K–32K，EP=16；all-to-all 占比从单节点 **22%** 涨到 8 节点 **78%**。
 
-边界：**静态分配**——A:F 比例和 NIC 划分是按已知的序列长度、batch、EP 选好的，workload 一变就要重新规划；warmup/cool-down 的气泡仍然存在，约为基线的 **1/4**（AF-Pipe 的公式里 $(PP-1)$ 项还在）。它适合"形状稳定的大规模预训练"，不适合请求长度剧烈波动的 serving。
+边界：**静态分配**——A:F 比例和 NIC 划分是按已知的序列长度、batch、EP 选好的，workload 一变就要重新规划。warmup/cool-down 的气泡仍然存在，约为基线的 **1/4**（AF-Pipe 的公式里 $(PP-1)$ 项还在）。它适合"形状稳定的大规模预训练"，不适合请求长度剧烈波动的 serving。
 
 ## 8. INC-MoE：把 all-to-all 卸进交换机
 
@@ -285,7 +291,7 @@ INC-MoE（[2610.36339](https://arxiv.org/abs/2610.36339)）针对的是**推理 
 
 妙处在于**方向**：AG 主要吃接收方向，RS 主要吃发送方向，两者同时跑就能把全双工链路吃满。带宽受限时间从 ring 的 $\frac{2(N-1)}{N}\cdot\frac{S}{BW}$ 降到 $\frac{S}{BW}$，提升为 $\frac{N-2}{2(N-1)}$——$N=4$ 时 33.3%，$N=8$ 时 42.9%，$N=2$ 时**为零**。
 
-kernel 侧是一个 persistent kernel，把 token 切成 band，三类 CTA 各司其职：gather block 发 AG、compute block 跑 expert FFN、reduce block 发 RS 并做本地归约。稳态下 band $j+1$ 的 AG、band $j$ 的 FFN、band $j-1$ 的 RS 同时在飞；drain 阶段 gather block 还会去帮 reduce（tail assistance）。
+kernel 侧是一个 persistent kernel（常驻 kernel），把 token 切成 band，三类 CTA 各司其职：gather block 发 AG、compute block 跑 expert FFN、reduce block 发 RS 并做本地归约。稳态下 band $j+1$ 的 AG、band $j$ 的 FFN、band $j-1$ 的 RS 同时在飞；drain 阶段 gather block 还会去帮 reduce（tail assistance）。
 
 数字（OLMoE-1B-7B prefill，4-way DP attention + 4-way EP，4 节点模拟）：
 
@@ -296,6 +302,8 @@ kernel 侧是一个 persistent kernel，把 token 切成 band，三类 CTA 各�
 边界：$N=2$ 没有收益；只有理论上界的 82–86%；**交换机是拿一块 accelerator 模拟的**，真实硬件上小消息的固定开销会小很多，但也还没在真交换机上验证。它是 inference-only 的方案，训练侧不能直接套。
 
 ## 9. `moe_overlap.py`：把 SM 预算和 chunk 数一起扫
+
+这一节回答：通信 SM 预算和 chunk 数应该怎么一起扫，扫出来的最优为什么在 4 附近。
 
 `code/comm-overlap/moe_overlap.py` 是一个纯 CPU 的解析模型。它把一层 MoE 建成两台"机器"：
 
@@ -318,6 +326,8 @@ comm_sms C=1      C=2      C=4      C=8      C=16
       48  3407.4  3323.5  3281.6  3260.6  3250.1
       64  4169.7  4085.8  4043.8  4022.9  4012.4
 ```
+
+看表的方式：行是通信 SM 数，列是 chunk 数 $C$。每一行都是 $C$ 越大越快；而 $C$ 越大，最优的通信 SM 数越往左移——$C=16$ 时落在 $c=4$。
 
 ### 9.1 为什么最优在 `comm_sms=4` 附近
 
@@ -351,6 +361,8 @@ $c=4$ 时通信效率是 $4/16=25\%$，有效带宽 100 GB/s；16 个 chunk 下�
 
 ## 10. 六个方案放在一起
 
+看"粒度"和"关键手法"两列：粒度决定 overlap 的细度，关键手法决定要不要改 kernel。
+
 | 系统 | 并行/场景 | 粒度 | 关键手法 | 公开数字 | 主要代价 |
 |---|---|---|---|---|---|
 | **DeepEP** | 训练/推理，EP | chunk + kernel | GPU-initiated A2A；`num_sms`/`num_qps` 可配；`EventOverlap` | 工业基线；SM 可配 | 必须占 SM；chunk 与 wait 要手工排 |
@@ -374,7 +386,7 @@ $c=4$ 时通信效率是 $4/16=25\%$，有效带宽 100 GB/s；16 个 chunk 下�
 
 几个容易踩的坑：
 
-- **只报 overlap ratio**。Weave 的 47.1% 和 Comet 的 14.3% 口径不同（前者把整个 MoE 窗口算进去），跨论文比较要先对齐定义；真正的指标还是 exposed time 和端到端。
+- **只报 overlap ratio**。Weave 的 47.1% 和 Comet 的 14.3% 由 Weave 在同一 MoE forward 窗口、同一指标下测得，这两个数可以直接比；换成别的论文的 ratio，仍然要先对齐定义。真正的指标还是 exposed time 和端到端。
 - **忽略 routing skew**。模型里 `--skew 1.0` 是均衡假设；真实训练里热点专家会让某个 chunk 明显慢于平均，overlap 的收益会被吃掉。
 - **忽略 combine 的 tail**。分块能把 tail 降到 $b/K$，但降不到 0；最后一个 chunk 的 combine 永远在关键路径上。
 
@@ -386,7 +398,7 @@ $c=4$ 时通信效率是 $4/16=25\%$，有效带宽 100 GB/s；16 个 chunk 下�
 - **Comet 对齐 token/tile 粒度**（shared tensor 切分 + CTA 特化），**Weave 把整层融成一个 megakernel 并动态选 $(c,K)$**，**Lancet 把重叠扩到整图**，**DisagMoE 把 A/F 拆开**，**INC-MoE 把 A2A 卸进交换机**——收益依次变大，适用条件依次变窄。
 - 本地模型显示：在这组参数下 `comm_sms=4` 最优、chunk 越多越好；真实系统有 launch/同步/GEMM 效率开销，最优的 $K$ 会明显变小，$c$ 也要用真实带宽/算力曲线重扫。**模型用来建立直觉，数字以论文和实测为准。**
 
-SM 怎么分、persistent kernel 怎么写、warp specialization 怎么摆，是下一层的问题。 [2026-11 补遗]({{< relref "comm-overlap-13-uniep" >}}) 补上了 UniEP：它用 persistent worker + 动态角色 + deterministic token mapping，把“逐位可复现”做成 overlap 的硬约束。[第七篇]({{< relref "comm-overlap-07-kernel-sm" >}}) 会把 Comet 和 Weave 的 CTA 分区拆到 kernel 级；如果你更关心推理侧的阈值，可以直接跳到[第九篇]({{< relref "comm-overlap-09-inference" >}})；整张地图和五个开放问题在[第十一篇]({{< relref "comm-overlap-11-summary" >}}) 收尾。TP 侧把 all-gather 融进 GEMM 的做法，可以和这里的 dispatch+GEMM0 对照着看：[第五篇]({{< relref "comm-overlap-05-tensor-parallel" >}})。
+SM 怎么分、persistent kernel 怎么写、warp specialization 怎么摆，是下一层的问题。 [2026-11 补遗]({{< relref "comm-overlap-13-uniep" >}}) 补上了 UniEP：它用 persistent worker + 动态角色 + deterministic token mapping，把“逐位可复现”做成 overlap 的硬约束。[第七篇]({{< relref "comm-overlap-07-kernel-sm" >}}) 会把 Comet 和 Weave 的 CTA 分区拆到 kernel 级。如果你更关心推理侧的阈值，可以直接跳到[第九篇]({{< relref "comm-overlap-09-inference" >}})；整张地图和五个开放问题在[总结篇]({{< relref "comm-overlap-11-summary" >}}) 收尾。TP 侧把 all-gather 融进 GEMM 的做法，可以和这里的 dispatch+GEMM1 对照着看：[第五篇]({{< relref "comm-overlap-05-tensor-parallel" >}})。
 
 ---
 

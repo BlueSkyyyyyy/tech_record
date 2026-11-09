@@ -1,6 +1,6 @@
 # （二）UniEP 的 FC2 GroupGEMM + Combine：在 epilogue 里把结果推出去
 
-对应副本：[`uniep/kernels/cutedsl_group_gemm_combine.py`](../uniep/kernels/cutedsl_group_gemm_combine.py)（1067 行）。
+对应副本：[`uniep/kernels/cutedsl_group_gemm_combine.py`](../uniep/kernels/cutedsl_group_gemm_combine.py)（上游 1067 行 → 注释副本 1411 行，其中 972 行代码）。
 前半篇（dispatch + FC1）见 [01](01-uniep-dispatch-gemm.md)。
 
 ## 1. 为什么 combine 不能照抄 dispatch 的写法

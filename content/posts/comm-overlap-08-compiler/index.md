@@ -35,9 +35,9 @@ categories: ["训练框架"]
 - backend 换掉，需要的 SM 数变了：TMA 要 16 个左右的 SM 才跑到 300+ GB/s，copy engine 则完全不占 SM；
 - tile 顺序换掉，chunk 的"就绪时刻"变了，同一个 chunk size 的最优值也跟着变。
 
-**这就是手调失灵的根本原因：不是参数多，而是参数之间不独立。** 贪心地一个一个调，会停在某个局部点；而这个点可能比最优差一倍以上——Syncopate 的消融里，仅仅换 tile 顺序就能造成 **>2×** 的差异；Lagom 的测量里，NC=16 与 NC=32 的通信时间几乎一样，计算时间却差 **30.2%**。
+**这就是手调失灵的根本原因：不是参数多，而是参数之间不独立。** 贪心地一个一个调，会停在某个局部点，而这个点可能比最优差一倍以上。Syncopate 的消融里，仅仅换 tile 顺序就能造成 **>2×** 的差异；Lagom 的测量里，NC=16 与 NC=32 的通信时间几乎一样，计算时间却差 **30.2%**。
 
-给个数量级。把上面五个维度各取几档：split 取 6 档、tile order 4 种、backend 5 种、SM 配额 6 档、流优先级 2 种，一共 **1440 个候选**。每个候选要编译加跑一遍；按每次 30 秒算，一个算子就是 12 小时。**穷举不可行，于是"怎么剪枝"变成了核心问题**——这也正是四篇论文的分野。
+给个数量级。把上面五个维度各取几档：split 取 6 档、tile order 4 种、backend 5 种、SM 配额 6 档、流优先级 2 种，一共 **1440 个候选**。每个候选要编译加跑一遍。按每次 30 秒算，一个算子就是 12 小时。**穷举不可行，于是"怎么剪枝"变成了核心问题**——这也正是四篇论文的分野。
 
 ## 2. Syncopate：把 chunk 变成编译器的第一等公民
 
@@ -59,7 +59,7 @@ chunk 级 overlap（Syncopate）：
 ```
 
 1. 每个 kernel 边界都要一次全设备同步，还要多一次 launch；
-2. 小 kernel 的 tile 数少，最后一个 wave 装不满，SM 利用率下降（wave quantization）；
+2. 小 kernel 的 tile 数少，最后一个 wave 装不满，SM 利用率下降（wave quantization，尾批凑不满一波的浪费）；
 3. 通信的尾巴落在最后，没有计算可以盖它。
 
 这三条其实是同一个病：**粒度的单位被 kernel 锁死了**。要更细的重叠，就得多切 kernel；多切 kernel，就多付 launch 和 wave 量化的代价。
@@ -85,7 +85,7 @@ Syncopate 的做法是把"通信的单位"从 kernel 里拿出来，变成 **com
 
 注意第 3 步：它**不搬数据**。很多融合方案为了对齐通信和计算的 layout，要额外做一次重排，多付一次全局读写；Syncopate 让 chunk 原地不动，只改 tile 的访问顺序。这是"用调度换搬移"。
 
-顺带说一句为什么必须是源到源：每个候选都要真编译一遍、真跑一遍，编译开销直接决定搜索能不能收敛。Syncopate 在 Triton 上做轻量改写、复用 Triton 的 JIT，才敢枚举上千个候选；如果每个候选都要走一遍完整的 CUTLASS 模板实例化，搜索本身就成了瓶颈。
+顺带说一句为什么必须是源到源。每个候选都要真编译一遍、真跑一遍，编译开销直接决定搜索能不能收敛。Syncopate 在 Triton 上做轻量改写、复用 Triton 的 JIT，才敢枚举上千个候选。如果每个候选都要走一遍完整的 CUTLASS 模板实例化，搜索本身就成了瓶颈。
 
 ### 2.4 数字与边界
 
@@ -142,9 +142,11 @@ $\lambda$ 是总 SM 数，$\mu_i$ 是第 $i$ 个计算需要的 threadblock 数�
 
 ### 3.3 从 $k^N$ 到线性
 
-$N$ 个通信、每个 $k$ 种配置，联合空间是 $k^N$（论文说实际超过 $1{,}000{,}000^N$）。Lagom 用一个优先级指标 $H$ 剪枝：$H_j$ 用"调这个通信能省多少通信时间"和"会让计算慢多少"构造一个收益与代价的比值，每次挑 $H$ 最大的通信调，把 NC/NT/C 按学习率往上加，直到通信时间小于计算时间、或通信自身到最优。
+$N$ 个通信、每个 $k$ 种配置，联合空间是 $k^N$（论文说实际超过 $1{,}000{,}000^N$）。Lagom 用一个优先级指标 $H$ 剪枝。$H_j = \Delta Y / \Delta x$（论文 Eq.7），是**代价与收益之比**：分子是调完这个通信后计算变慢了多少，分母是通信省下了多少。换句话说，它是"每省一单位通信时间，要付多少计算代价"。
 
-代价是它不再保证全局最优，只保证"按收益排序的贪心"；收益是复杂度从指数降到线性。
+于是算法每一轮挑 $H$ **最小**（性价比最高）的通信来调，把 NC/NT/C 按学习率往上加，直到通信时间小于计算时间、或通信自身到最优。
+
+代价是它不再保证全局最优，只保证"按性价比排序的贪心"；收益是复杂度从指数降到线性。
 
 ### 3.4 两个 pattern
 
@@ -236,9 +238,9 @@ TileLink 的原语分两组：
 
 在进入这四篇之前，还有三条背景值得知道。
 
-**Centauri（ASPLOS'24）** 把"通信分区加调度"形式化：把 collective 切成可独立调度的分区，再把分区和计算算子一起放进一个带依赖和资源约束的调度问题里，求一个更短的 makespan。它的思路是"用求解器替代手写规则"，但调度粒度还在分区或算子级，形状或拓扑一变就要重解。它和 TileLink 的差别也在这里：Centauri 把"切多细"交给求解器，TileLink 把"切多细"留给人，只保证切完之后语义正确。
+**Centauri（ASPLOS'24）** 把"通信分区加调度"形式化：把 collective 切成可独立调度的分区，再把分区和计算算子一起放进一个带依赖和资源约束的调度问题里，求一个更短的 makespan。它的思路是"用求解器替代手写规则"，但调度粒度还在分区或算子级，形状或拓扑一变就要重解。它和 TileLink 的差别也在这里：Centauri 把"切多细"交给求解器；TileLink 把"切多细"留给人，只保证切完之后语义正确。
 
-**TE 的 UserBuffers（TE-CCL）** 是工业界的"手工编译器"：在 TransformerEngine 里用 `ub_cfgs` 配置，`ub_overlap_ag` 决定 all-gather 走 UserBuffers 还是 NCCL，`fill_userbuffers_buffer_for_all_gather` 负责把 all-gather 的目标 buffer 准备好。它不生成新 kernel，而是在框架层把 TP 的 AG/RS 和 GEMM 用 NVSHMEM 拼成固定模式。好处是开箱即用，坏处是只覆盖少数几种模式。
+**TE 的 UserBuffers（TE-CCL）** 是工业界的"手工编译器"：在 TransformerEngine 里用 `ub_cfgs` 配置，`ub_overlap_ag` 决定 all-gather 走 UserBuffers 还是 NCCL，`fill_userbuffers_buffer_for_all_gather` 负责把 all-gather 的目标 buffer 准备好。它不生成新 kernel，而是在框架层把 TP 的 AG/RS 和 GEMM 用 NVSHMEM 拼成固定模式。好处是开箱即用；坏处是只覆盖少数几种模式。
 
 **Triton-distributed（[2504.19442](https://arxiv.org/abs/2504.19442)）** 是开源的原语层：把 tile 级通信原语做进 Triton，TileLink 的实现就落在这个仓库里。它让 tile-centric primitive 从论文变成了可以 import 的东西——这也是这批工作能快速复现的原因之一。
 
@@ -276,11 +278,13 @@ MLP 层，$d_{model}=4096$、TP=4：
 ### 6.4 边界
 
 - 论文正文没有写 GPU 型号和互联（至少 arXiv 版没有），所以 43.8 → 0.1 只能当趋势看，不能当某张卡上的绝对性能；
-- 只在 MLP、attention、Mamba 层验证，没有端到端训练；
+- 论文只在 MLP 与 attention 层上验证（Mamba 只是方法上的映射，没有实验），也没有端到端训练；
 - ring 顺序假设，每步 P2P 的同步点增加，跨节点时 ring 的跳数会放大延迟；
 - 它和 fused kernel 正交：论文自己说，进一步收益要靠算子级融合。
 
 ## 7. 四张脸放一起
+
+先给读法：第二列是"自动化发生在哪一层"，第三列是"怎么剪枝"，第四列是"有没有显式代价模型"，最后两列才是成绩和边界。**横向比之前先看第二列——四行自动化的根本不是同一个东西。**
 
 | | 自动化的是什么 | 搜索空间与方法 | 代价模型 | 头条 | 主要 caveat |
 |---|---|---|---|---|---|
@@ -289,7 +293,7 @@ MLP 层，$d_{model}=4096$、TP=4：
 | **TileLink** | 不自动搜；自动的是原语到指令的 lowering 与正确性 | 人写 tile 程序，旋钮（tile size/order、SM、backend）人手选 | 无 | 1.17–20.76×；AG+GEMM 1.27×、94.5% Flux；e2e 1.32× | AG+GEMM 仍慢 Flux 5.5%；20 SM 手选；仅 NVIDIA；无 pipeline 级 |
 | **CommFuse** | 不搜；自动的是分解加排序的算法 | O(1)：一条确定的 rank-adaptive 顺序 | 无（解析地消掉尾块） | 通信 43.8 到 0.1 ms；延迟 −36.9% | 未标 GPU；仅层内；B=4,S=8192 切分反例 |
 
-四行放在一起，能看到一条清晰的光谱：**从左到右，"搜索"越来越少，"改问题结构"越来越多。** Syncopate 在给定结构里搜参数；Lagom 在给定 kernel 外搜资源；TileLink 把结构暴露给人；CommFuse 直接改结构。而收益最大的两个数字（Lagom 的 1.35×、CommFuse 的 −36.9%）都来自改结构或改资源，不是"把某个 kernel 生成得更快"。
+四行放在一起，能看到一条清晰的光谱：**从左到右，"搜索"越来越少，"改问题结构"越来越多。** Syncopate 在给定结构里搜参数；Lagom 在给定 kernel 外搜资源；TileLink 把结构暴露给人；CommFuse 直接改结构。而真正靠"改结构或改资源"拿到的两个数字（Lagom 的 1.35×、CommFuse 的 −36.9%），都不是"把某个 kernel 生成得更快"。
 
 ## 8. 没有编译器时，怎么用这些想法
 
@@ -326,7 +330,7 @@ best: s_comm=16 makespan=187.5 (serial=263.3)
 - 负结果要一起记：Lagom 的对比里 AutoCCL 掉到 0.87×，Syncopate 只追平手写，TileLink 差 Flux 5.5%，CommFuse 在 $B=4, S=8192$ 上切分反而比 baseline 慢 43%。
 - 共同缺口：多节点与跨 NIC（Syncopate、TileLink 都留作 future work）、动态 shape、以及"什么时候不该 overlap"的判据。
 
-下一篇转向推理侧：decode 是 memory-bound，通信占比随 batch 变小，很多在训练里成立的结论到推理会翻转。[第十篇]({{< relref "comm-overlap-10-measurement" >}})会把这些数字真正测出来，[第十一篇]({{< relref "comm-overlap-11-summary" >}})再收口成地图。
+下一篇转向推理侧：decode 是 memory-bound，通信占比随 batch 变小，很多在训练里成立的结论到推理会翻转。[第十篇]({{< relref "comm-overlap-10-measurement" >}})会把这些数字真正测出来，[总结篇]({{< relref "comm-overlap-11-summary" >}})再收口成地图。
 
 ---
 

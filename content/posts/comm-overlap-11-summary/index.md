@@ -1,39 +1,43 @@
 ---
-title: "通算并行研读（十一）：2026 年的地图与五个开放问题"
+title: "通算并行研读（总结）：2026 年的地图与五个开放问题"
 date: 2026-11-02
 draft: false
-weight: 12
+weight: 16
 series: ["comm-overlap"]
 tags: ["通算并行", "系列", "总结", "分布式训练", "推理", "开放问题"]
 categories: ["训练框架"]
 ---
 
-写到这里，我们已经从流水线气泡走到 MoE 的 all-to-all，从 Megatron 的 bucket hook 走到 Flux 的 tile 级融合，再到 T-CCL 的 1.32 个 SM、Weave 的 persistent megakernel。是时候把地图摊开，看看哪些路已经修好、哪些还是断头路。
+写到这里，我们已经从流水线气泡走到 MoE 的 all-to-all，从 Megatron 的 bucket hook 走到 Flux 的 tile 级融合，再到 T-CCL 的 1.32 个 SM、Weave 的 persistent megakernel（一个 kernel 常驻跑完整层）。是时候把地图摊开，看看哪些路已经修好、哪些还是断头路。
 
 先说结论：**通算并行没有银弹，只有一张按粒度分层的地图。** 每一层能藏住的通信量、要付的代价、需要的工程改造都不同；选错层，再努力也拿不到收益。
 
 ## 1. 一张地图：五个层次
 
-| 层次 | 通信 | 主流手段 | 能藏住多少 | 主要代价 |
-|---|---|---|---|---|
-| **PP** | stage 间 P2P | GPipe → 1F1B → ZB → DualPipe | 气泡 24% → <1%（ZB-2p/DualPipe） | 显存 2×、调度复杂、要改模型 |
-| **DP** | 梯度 all-reduce / reduce-scatter | bucket + backward hook + 异步 | 暴露 ≈ 尾桶 $t$ | 桶大小/launch 权衡；显存 |
-| **TP** | 层内 all-reduce / all-gather | Flux tile 融合、T-CCL 低 SM、TileLink | 最高 96%（Flux，A100 NVLink） | 与 shape/硬件强绑定；kernel 复杂 |
-| **EP/MoE** | dispatch/combine all-to-all | DeepEP、Comet、Weave、Lancet | 86.5%（Comet）~47.1% overlap ratio（Weave） | routing skew、SM 争用、显存 |
-| **推理** | TP all-reduce、KV cache | NanoFlow、TokenWeave、FlashComm | 1.19–1.91× 吞吐 | 小 batch 阈值、精度、CUDA Graph |
+这一节只回答一件事：五个层次各自把通信藏到什么程度，代价是什么。
+
+先给读法：横着看是五个层次，竖着看每行是「手段 + 指标 + 代价」。**不要跨行比第五列的数字**——每行的分母、baseline、模型规模都不同，口径写在第四列里。
+
+| 层次 | 通信 | 主流手段 | 指标 / 口径 | 报告值（baseline / 规模） | 主要代价 |
+|---|---|---|---|---|---|
+| **PP** | stage 间 P2P | GPipe → 1F1B → ZB → DualPipe | 气泡率（气泡时间 / 总时间，baseline 1F1B） | 1.5B、$m=24$：24.31% → 4.33%（ZB-2p），显存 30 → 59 GB；6.2B、$m=128$：ZB-2p **0.29%** | 显存 ~2×、调度复杂、要改模型 |
+| **DP** | 梯度 all-reduce / reduce-scatter | bucket + backward hook + 异步 | 暴露时间 $t$（尾桶） | 约等于尾桶的 $t$，不是百分比 | 桶大小/launch 权衡；显存 |
+| **TP** | 层内 all-reduce / all-gather | Flux tile 融合、T-CCL 低 SM、TileLink | overlap efficiency（Flux 自己的定义） | 最高 **96%**（Flux，A100 NVLink） | 与 shape/硬件强绑定；kernel 复杂 |
+| **EP/MoE** | dispatch/combine all-to-all | DeepEP、Comet、Weave、Lancet | overlap ratio（Weave 口径） | 同口径 **14.3%（Comet）→ 47.1%（Weave）**；Comet 另报「藏住 86.5% 通信」，不是同一指标 | routing skew（专家负载不均）、SM 争用、显存 |
+| **推理** | TP all-reduce、KV cache | NanoFlow、TokenWeave、FlashComm | 端到端吞吐倍率（各自 baseline） | **1.19–1.91×** 吞吐 | 小 batch 阈值、精度、CUDA Graph |
 
 这张表最重要的信息不是"谁的数字大"，而是**每一层的"能藏住多少"和"代价"是绑定的**：
 
-- PP 的 ZB-2p 能把气泡压到 0.29%，但显存从 30 GB 涨到 59 GB；
+- PP 的 ZB-2p 在 1.5B 上把气泡压到 4.33%，显存从 30 GB 涨到 59 GB；0.29% 是 6.2B（$m=128$）的数，别套到 1.5B 上；
 - TP 的 Flux 能到 96% overlap efficiency，但 H800 上 decode 没有加速，小 m 时甚至 0.95×；
-- MoE 的 Comet 能藏 86.5%，但需要 NVSHMEM 常驻 buffer，每卡 2MN 字节；
+- MoE 的 Comet 能藏 86.5% 的通信（这是「藏住比例」，不是上表的 overlap ratio），但需要 NVSHMEM 常驻 buffer，每卡 2MN 字节；
 - 推理的 TokenWeave 能到 1.28× 延迟，但 Mixtral-8x22B 在 1K/2K 下是净开销。
 
 **所以"选型"不是选最快的论文，而是选代价你能接受的那一档。**
 
 ## 2. 三条主线
 
-把 2020–2026 的论文按时间排，会看到三条清晰的主线。
+这一节把 2020–2026 的工作压成三条主线。把论文按时间排，会看到它们反复在同一个方向上推进。
 
 ### 2.1 粒度下推：layer → chunk → tile → warp
 
@@ -67,7 +71,7 @@ $$
 
 $s$ 是分给通信的 SM 数，$s_0$ 是带宽饱和点。`sm_split_model.py` 的最优解在 $s=16$（$S=132$，$W_c=10000$，$W_m=3000$，$s_0=16$）：再多的 SM 不会让通信更快，只会偷走计算。
 
-**这也是"overlap tax"的根源**：通信不是不占资源，而是把资源从计算那里借走。Characterizing 测得的 18.9% 计算减速，就是这笔借债的利息。
+**这也是 overlap tax（通信从计算那里借资源要付的税）的根源**：通信不是不占资源，而是把资源从计算那里借走。Characterizing 测得的 18.9% 计算减速，就是这笔借债的利息。
 
 ### 2.3 语义与调度协同：overlap 不是免费的午餐
 
@@ -75,12 +79,14 @@ $s$ 是分给通信的 SM 数，$s_0$ 是带宽饱和点。`sm_split_model.py` �
 
 - ZB 的 optimizer 同步 bypass：为了让 W 接上下一轮 F，必须把 optimizer step 的同步从关键路径上拿掉，但又要保持同步训练的数学等价（论文 §4 用参数/梯度版本握手）；
 - DualPipe 的 8 步静态调度：把通信和计算写死成周期，靠"错峰"而不是"动态调度"；
-- CO2 的 local-SGD：直接允许 $\tau$ 步陈旧参数，用 staleness penalty 换 100% 扩展性；
-- MoE 的 capacity factor / token drop：overlap 的 chunk 切分可能改变路由结果，需要保证语义一致。
+- CO2 的 local-SGD（本地 SGD，允许参数陈旧）：直接允许 $\tau$ 步陈旧参数，用 staleness penalty 换 100% 扩展性；
+- MoE 的 capacity factor（每个专家最多收多少 token）/ token drop：overlap 的 chunk 切分可能改变路由结果，需要保证语义一致。
 
 **"能不能 overlap"是工程问题；"overlap 后还是不是同一个模型"是数学问题。** 后者往往被忽略，直到 loss 不收敛才被发现。
 
 ## 3. 五个开放问题
+
+这一节列五个我认为还没有答案的问题。
 
 ### 3.1 什么时候不该 overlap？
 
@@ -91,7 +97,7 @@ $s$ 是分给通信的 SM 数，$s_0$ 是带宽饱和点。`sm_split_model.py` �
 - Flux 在 H800 NVLink 上 decode **没有加速**，小 m 时 0.95×；
 - TokenWeave 的 simple fusion 在 512–8K 下 **0.92–0.98×**（比不融合慢）；
 - Lagom 的 AutoCCL 在某个 pattern 下 **0.87×**（比 NCCL 还差）；
-- Tile-level signaling 的 cCTA=2 在所有 shape 下都比不 overlap 慢；
+- Tile-level signaling（[2607.19539](https://arxiv.org/abs/2607.19539)）在它报告过的 shape 上，cCTA=2 反而比不 overlap 慢：通信 SM 太少，消费者跟不上生产者；
 - T-CCL 在 TP=4 的最差 shape 低于串行 baseline；
 - Characterizing 的 overlap 平均让计算慢 18.9%，很多场景净收益只有 10%。
 
@@ -133,7 +139,7 @@ Comet 的 $n_p/n_c$ 是"按层形状自适应"，但仍是**launch 前**决定�
 
 - DeepSeek-V3 的 DualPipe 要跨最多 4 节点，NVLink 160 GB/s vs IB 50 GB/s；
 - DisagMoE 在 8 节点时 all-to-all 占比从 22% 涨到 **78%**；
-- MegaScale 在 12,288 GPU 上 MFU 55.2%，但 0.5% 的慢机就能拖垮整体。
+- MegaScale 在 12,288 GPU 上 MFU（模型 FLOPs 利用率）55.2%，但 0.5% 的慢机就能拖垮整体。
 
 跨节点的 overlap 难点不同：
 
@@ -165,7 +171,7 @@ Comet 的 $n_p/n_c$ 是"按层形状自适应"，但仍是**launch 前**决定�
 Characterizing 的测量很刺眼：
 
 - overlap 峰值功耗高 **25%**；
-- H100 平均 38% TDP、峰值 **140% TDP**；
+- H100 平均 38% TDP（热设计功耗）、峰值 **140% TDP**；
 - 100 W 帽下，overlap 的慢化可达 **100%**（论文引言写 107%，两处不一致）。
 
 这意味着：
@@ -177,6 +183,8 @@ Characterizing 的测量很刺眼：
 **"性能 per watt"而不是"性能 per second"，可能是下一代 overlap 论文的分水岭。**
 
 ## 4. 按角色的建议
+
+这一节按角色给建议，每条都尽量落到可执行的动作。
 
 ### 4.1 做训练框架
 
@@ -190,7 +198,7 @@ Characterizing 的测量很刺眼：
 - 先测 SM active time 和 warp stall，确认瓶颈是"通信占 SM"还是"计算本身慢"；
 - 如果通信占 SM 多，先试低 SM 的 collective（T-CCL 风格），再考虑 fused kernel；
 - 如果做 fused kernel，先把 tile 级依赖画清楚，再决定 producer/consumer 的 CTA 比例；
-- 不要忽略 wave 边界：`sm_split_model.py` 的阶梯就是 wave 量化的结果。
+- 不要忽略 wave 边界：`sm_split_model.py` 的阶梯就是 wave 量化（按 SM 波次取整）的结果。
 
 ### 4.3 做推理
 
@@ -235,11 +243,13 @@ Characterizing 的测量很刺眼：
 - 2026 年的前沿：不是"能不能 overlap"，而是"在正确的粒度上、用正确的资源、对正确的 shape 做 overlap"。
 - 负结果和正结果一起看，才能判断一个方案是不是真收益。
 
-> **2026-11 补遗**：正文的 MoE 地图漏掉了 2026-04 的 UniEP，以及 2026 下半年的 MegaFlux、Entwine、mKernel、Mixture-of-Kittens、NCCL EP 等。UniEP 把“逐位可复现”做成 overlap 的硬约束，并用 persistent worker + 动态角色 + deterministic token mapping 拿到 1.03×–1.38×；这修正了“单 stream 不能做细粒度 overlap”和“overlap 只改性能、不改语义”两个默认假设。详见[补遗总览]({{< relref "comm-overlap-12-latest" >}})、[UniEP 深读]({{< relref "comm-overlap-13-uniep" >}})、[MegaFlux 深读]({{< relref "comm-overlap-14-megaflux" >}}) 和 [Entwine/mKernel]({{< relref "comm-overlap-15-tile-ecosystem" >}})。
+前面三篇补遗补上了正文没覆盖的 2026 年工作：UniEP（persistent worker + 确定性）、MegaFlux（routing skew）、Entwine/mKernel（tile 级节奏）。其中 **UniEP 把 bitwise 可复现做成 overlap 的硬约束**，是最值得回头看的一篇——它提醒你：overlap 的收益要能被复现才有意义。
+
+到这里整个专题就结束了。如果要动手，建议的顺序是：先按第一篇把三笔账算出来，再用实测手册确认瓶颈在哪一层，最后才挑这一层的方案——**不要反过来，先挑方案再找场景。**
 
 ---
 
-**系列导航**：[十：实测手册]({{< relref "comm-overlap-10-measurement" >}}) · [补遗总览]({{< relref "comm-overlap-12-latest" >}})
+**系列导航**：[十四：补遗三 Entwine/mKernel]({{< relref "comm-overlap-15-tile-ecosystem" >}}) · [专题首页]({{< relref "comm-overlap-00-index" >}})
 
 > 配套代码：`code/comm-overlap/`（7 个 CPU 模型 + 自测）
 > 系列索引：[通算并行研读（专题）]({{< relref "comm-overlap-00-index" >}})

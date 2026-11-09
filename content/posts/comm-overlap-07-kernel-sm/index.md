@@ -12,11 +12,11 @@ categories: ["算子开发"]
 
 这一篇往下走一层，进到 kernel 里面。
 
-先说结论：在 kernel 这一层，"overlap" 不再是"两条 stream 叠在一起"，而是**谁拥有哪个 SM、哪个 warp、哪个 issue slot**。stream 是软件抽象，SM 是硬件实体；两条 stream 能被同时调度，不等于两份工作能同时拿到发射机会。
+先说结论：在 kernel 这一层，"overlap" 不再是"两条 stream 叠在一起"，而是**谁拥有哪个 SM、哪个 warp、哪个 issue slot**。stream 是软件抽象，SM 是硬件实体。两条 stream 能被同时调度，不等于两份工作能同时拿到发射机会。
 
-一个常见的对账现场：nsys 上通信和计算叠得很漂亮，overlap ratio 90% 以上；换 ncu 看同一个 GEMM，Tensor Core 的忙碌比例掉了，warp 大量停在 `stall_long_scoreboard`，SM 的 active cycles 却没降。两个工具都没错，它们量的是不同的东西——nsys 量"时间轴上有没有重叠"，ncu 量"重叠的时候硬件资源被谁拿着"。
+一个常见的对账现场：nsys 上通信和计算叠得很漂亮，overlap ratio 90% 以上；换 ncu 看同一个 GEMM，Tensor Core 的忙碌比例掉了，warp 大量停在 `stall_long_scoreboard`，SM 的 active cycles 却没降。两个工具都没错，它们量的是不同的东西。nsys 量"时间轴上有没有重叠"，ncu 量"重叠的时候硬件资源被谁拿着"。
 
-本篇沿着这个视角走：先把 kernel 眼里的资源列清楚，再看三种实现风格，然后钻进 warp specialization 的握手细节，最后用一个几十行的模型把"通信该拿几个 SM"算出来，并用六篇论文的数字校准它。前置阅读是[第五篇]({{< relref "comm-overlap-05-tensor-parallel" >}})的 AG+GEMM 融合和[第六篇]({{< relref "comm-overlap-06-moe" >}})的 MoE 三段式。
+本篇沿着这个视角走：先把 kernel 眼里的资源列清楚，再看三种实现风格，然后钻进 warp specialization 的握手细节。最后用一个几十行的模型把"通信该拿几个 SM"算出来，并用六篇论文的数字校准它。前置阅读是[第五篇]({{< relref "comm-overlap-05-tensor-parallel" >}})的 AG+GEMM 融合和[第六篇]({{< relref "comm-overlap-06-moe" >}})的 MoE 三段式。
 
 ## 1. Kernel 眼里的七种资源
 
@@ -26,9 +26,9 @@ Hopper 的一个 SM 大概是这样一笔资产：4 个 warp scheduler、256 KB 
 
 | 资源 | 通信怎么吃它 | 计算怎么吃它 | 冲突时的表现 |
 |---|---|---|---|
-| SM / CTA 槽位 | NCCL、NVSHMEM 的 copy + reduce CTA 常驻 | GEMM 的 tile CTA | 计算 wave 装不满，尾部变长 |
+| SM / CTA（线程块）槽位 | NCCL、NVSHMEM 的 copy + reduce CTA 常驻 | GEMM 的 tile CTA | 计算 wave 装不满，尾部变长 |
 | warp scheduler | 通信 warp 轮询 flag、等 mbarrier | MMA warp 需要连续发射 | issue slot 被占，MMA 发射间隔变大 |
-| 寄存器 | 通信 kernel 用量低，但按 CTA 整块分配 | wgmma 的 accumulator 吃满 | occupancy 下降，双 buffer 放不下 |
+| 寄存器 | 通信 kernel 用量低，但按 CTA 整块分配 | wgmma 的 accumulator 吃满 | occupancy（常驻 warp 占比）下降，双 buffer 放不下 |
 | shared memory | 通信的 staging buffer（TMA 目标） | GEMM 的 A/B tile + epilogue | 一个 CTA 占满 smem，别的 CTA 进不来 |
 | TMA / copy 引擎 | bulk 拷贝、multicast | operand 加载 | TMA 队列排队，计算等 operand |
 | L2 / HBM 带宽 | 读写对端数据、做 reduction | operand、activation 流 | L2 hit rate 掉，HBM 拥塞 |
@@ -36,7 +36,7 @@ Hopper 的一个 SM 大概是这样一笔资产：4 个 warp scheduler、256 KB 
 
 这张表里只有第一行是**数量**问题（分几个 SM），其余六行都是同一批 SM 内部的**份额**问题。所以"SM 分区"只是 overlap 的第一层；第二层是同一个 SM 内部，warp 之间怎么分工——这就是 warp specialization 要解决的事。
 
-还有一个容易被忽略的点：分区的粒度不是 SM，而是 **CTA 槽位 × 每 SM 能常驻几个 CTA**。一个 SM 能不能同时放下一个通信 CTA 和一个计算 CTA，取决于两者的寄存器、shared memory 和线程数能否凑进同一个 SM。如果通信 CTA 要 100 KB smem、计算 CTA 要 200 KB，它们就永远不可能共居——所谓"分区"其实是"整 SM 归属"，没有任何共享余地。
+还有一个容易被忽略的点：分区的粒度不是 SM，而是 **CTA 槽位 × 每 SM 能常驻几个 CTA**。一个 SM 能不能同时放下一个通信 CTA 和一个计算 CTA，取决于两者的寄存器、shared memory 和线程数能否凑进同一个 SM。如果通信 CTA 要 100 KB smem、计算 CTA 要 200 KB，它们就永远不可能共居。所谓"分区"其实是"整 SM 归属"，没有任何共享余地。
 
 ## 2. 三种实现风格
 
@@ -65,15 +65,15 @@ Flux 稍有不同：它**不预设** producer/consumer 的比例，整个 grid �
 
 关键设计是 **tile 级信号**：consumer 算完一个 tile，就把这个 tile 的 ready 标志打上（flag 或 mbarrier arrive）；producer 看到就发，不等整个 GEMM 结束。反过来，producer 收到一个 tile 的数据就置 ready，consumer 取走继续算。全程没有 global barrier——不同 tile 处在流水线的不同阶段，谁先好谁先走。
 
-这条路线把"依赖粒度"从 kernel 降到了 tile，代价是：kernel 变成手写、和 shape 强绑定；对 Comet 来说，producer/consumer 的比例成了新的超参；一旦某个角色先干完，它只能空转——因为同一个 kernel 里，CTA 的角色是 launch 时写死的（Flux 的自调度缓解了这一点，但换成了 tile 顺序和信号的开销）。
+这条路线把"依赖粒度"从 kernel 降到了 tile，代价是：kernel 变成手写、和 shape 强绑定；对 Comet 来说，producer/consumer 的比例成了新的超参。还有一条：一旦某个角色先干完，它只能空转——因为同一个 kernel 里，CTA 的角色是 launch 时写死的（Flux 的自调度缓解了这一点，但换成了 tile 顺序和信号的开销）。
 
 ### 2.3 Persistent megakernel
 
-Weave 再往前一步：整个 MoE 层（dispatch、GEMM1、GEMM2、combine 等五个操作）塞进**一个** persistent kernel，grid 仍是 132，一次 launch 跑完整层。
+Weave 再往前一步：整个 MoE 层（dispatch、GEMM1（上投影）、SiLU、GEMM2（下投影）、combine 五个操作）塞进**一个** persistent kernel（常驻 kernel），grid 仍是 132，一次 launch 跑完整层。
 
 它多了两个能力：
 
-- **角色可变**。每层 routing 结束后，这一层的通信量和计算量就已知了；kernel 里跑一个轻量 cost model，算出该层的通信 SM 数 $c^*$ 和 chunk 数 $K^*$，然后按新分区干活。分区从"每个模型一次"变成"每层每卡一次"。
+- **角色可变**。每层 routing 结束后，这一层的通信量和计算量就已经确定。kernel 里跑一个轻量 cost model，算出该层的通信 SM 数 $c^*$ 和 chunk 数 $K^*$，然后按新分区干活；分区从"每个模型一次"变成"每层每卡一次"。
 - **工作可偷**。通信 SM 干完自己的活，如果 GEMM 还有 tile 没人算，它就去偷一个来算（bubble stealing）。"通信 SM 在 GEMM 中段空闲"的那段气泡就这样被填上了。
 
 代价也很清楚：整层重写、和特定模型结构绑定、cost model 得在 device 上跑（Weave 测到 0.54 μs，占 MoE 层时间不到 0.021%，可忽略）。这不是能塞进现有框架的改动，而是一个新 runtime。
@@ -109,7 +109,7 @@ Weave 再往前一步：整个 MoE 层（dispatch、GEMM1、GEMM2、combine 等�
 
 1. **发射是串行的**。TMA 发起本身只要一条指令（`cp.async.bulk.tensor`），但"发起 → 等 mbarrier → 消费"是一条长延迟依赖链。同一个 warp 在这条链上等的时候，warp scheduler 不会让它发 wgmma——它已经不是 eligible warp 了。
 2. **wgmma 要连续喂**。Hopper 的 wgmma 是 warpgroup 级（128 线程）的异步 MMA，accumulator 在寄存器里。Tensor Core 的吞吐靠"连续发射"维持；这 128 个线程如果还要分神算地址、发拷贝、等 barrier，MMA 的发射就会出现空隙。
-3. **寄存器预算翻倍**。producer 要描述符、地址、循环变量；consumer 要 accumulator 和 operand fragment。一个 warp 兼两职，寄存器按两者的最大值分配，occupancy 就下来了——occupancy 一掉，双 buffer 都放不下。
+3. **寄存器预算翻倍**。producer 要描述符、地址、循环变量；consumer 要 accumulator 和 operand fragment。一个 warp 兼两职，寄存器按两条角色的峰值活跃集（近似取和）分配，occupancy 就下来了——occupancy 一掉，双 buffer 都放不下。
 4. **wait 是 warp 粒度的**。只要这个 warp 还在等 barrier 的 phase，它就不会去发下一条 MMA。把 wait 放在专门的 producer warp 上，consumer warp 就只在自己真正缺 tile 时才等，不会被"下一块还没搬完"拖住。
 
 所以标准做法是**角色分离**：producer warp 只负责搬，consumer warpgroup 只负责算，中间用 mbarrier 握手。这不是为了架构好看，是为了让 Tensor Core 的 issue 流不断。
@@ -143,13 +143,15 @@ producer warp（1 个 elected thread）              consumer warpgroup（128 �
 
 这套机制里没有一次全局同步：每个 stage 有自己的 barrier，生产者和消费者各自推进。**tile 级 overlap 能成立，靠的就是"同步粒度 = buffer 粒度"，而不是"层粒度"。**
 
-对比 Ampere 的 `cp.async`：那是 per-thread 的异步拷贝，每个线程自己发、自己 `cp.async.wait_group`；Hopper 的 TMA 是**单线程发起、硬件搬运**，SM 这边几乎不占线程。这个差别直接决定了通信的 SM 占用：用 `cp.async` 搬 1 MB，要一堆线程算地址；用 TMA 搬 1 MB，只要一个线程发一条指令。
+对比 Ampere 的 `cp.async`：那是 per-thread 的异步拷贝，每个线程自己发、自己 `cp.async.wait_group`；Hopper 的 TMA 是**单线程发起、硬件搬运**，SM 这边几乎不占线程。这个差别直接决定了通信的 SM 占用。用 `cp.async` 搬 1 MB，要一堆线程算地址；用 TMA 搬 1 MB，只要一个线程发一条指令。
 
 T-CCL 就是把这个性质用到底：整个 collective 拆成一串 TMA load / store / reduce，单线程发起。它测到 128 KB 的 all-gather 平均只用 1.32 个活跃 SM，而 NCCL 要 3.30 个——同一份通信，SM 占用差 2.5 倍。
 
 ## 4. SM 分区：一个能算的模型
 
 ### 4.1 模型
+
+这个模型只回答一个问题：给通信 $s$ 个 SM，makespan 是多少。
 
 `code/comm-overlap/sm_split_model.py` 把一层看成两份工作：
 
@@ -206,10 +208,10 @@ best: s_comm=16 makespan=187.5 (serial=263.3)
 ### 4.3 三个区域，一条平台，两道台阶
 
 1. **$s < 16$：通信是瓶颈。** $T_{\text{comm}} = W_m/s$，每多给一个 SM，通信时间线性下降：750 → 375 → 250 → 187.5。这一段每一分投入都直接兑现。
-2. **$16 \le s \le 65$：平台。** 通信在 $s_0=16$ 处饱和，$T_{\text{comm}}$ 钉死在 187.5；计算虽然因为 SM 变少而变慢（未量化的原始值从 86.2 涨到 149.3），但一直没超过 187.5，所以 makespan 一动不动。多出来的 49 个 SM 在关键路径上是**隐形**的——不是"多给没关系"，而是"多给的这些根本没产生收益"。
+2. **$16 \le s \le 65$：平台。** 通信在 $s_0=16$ 处饱和，$T_{\text{comm}}$ 钉死在 187.5。计算虽然因为 SM 变少而变慢（未量化的原始值从 86.2 涨到 149.3），但一直没超过 187.5，所以 makespan 一动不动。多出来的 49 个 SM 在关键路径上是**隐形**的——不是"多给没关系"，而是"多给的这些根本没产生收益"。
 3. **$s \ge 66$：计算反超。** $s=66$ 时计算原始值 151.5，被 wave 量化抬到 200，超过 187.5，makespan 变成 200。从这里开始，每多给通信一个 SM，都是拿计算时间换的。
 
-wave 量化在这里制造了两道台阶：$s$ 从 32 加到 33，计算从 100 跳到 150（多了一个 wave）；从 65 加到 66，从 150 跳到 200。**计算时间不是随 $s$ 平滑上升，而是台阶式上升**——"多给一点没关系"这种直觉只在台阶内部成立，跨过台阶就翻脸。
+wave 量化在这里制造了两道台阶：$s$ 从 32 加到 33，计算从 100 跳到 150（多了一个 wave）；从 65 加到 66，从 150 跳到 200。**计算时间不是随 $s$ 平滑上升，而是台阶式上升**。"多给一点没关系"这种直觉只在台阶内部成立，跨过台阶就翻脸。
 
 串行基线 263.3 是 $10000/132 + 3000/16$。注意第二项：即使 132 个 SM 全给通信，有效带宽也只按 16 个算，所以"串行"不是"通信也变快"，而是"通信还是那么慢，只是排在计算后面"。最优 187.5 对 263.3，约 1.40×。
 
@@ -219,13 +221,15 @@ wave 量化在这里制造了两道台阶：$s$ 从 32 加到 33，计算从 100
 
 ## 5. 论文里的证据
 
+这一节拿六篇论文的公开数字对照上面的模型：哪些能被模型解释，哪些是模型没覆盖的。
+
 ### 5.1 Comet：132 个 CTA，划分点随 shape 走
 
-Comet 的 fused kernel 总 CTA 数等于 Hopper 的 SM 数（132），其中 $n_p$ 个做 producer、$n_c$ 个做 consumer。论文的原话是最优划分点 "is influenced by the shape of input and specific model configurations"。
+Comet 的 fused kernel 总 CTA 数等于 Hopper 的 SM 数（132），其中 $n_c$ 个分给通信、$n_p$ 个分给计算。在 layer1 的流水里，计算是 producer、通信是 consumer。论文的原话是最优划分点 "is influenced by the shape of input and specific model configurations"。
 
-具体数字（论文 Figure 8）：TP=8 时，输入长度 $M$ 从 4096 加到 16384，最优 $n_c$ 从 18 变到 26；把 TP 从 8 换成 4（$M=16384$），$n_c$ 又从 26 跳到 46。
+具体数字（论文 Figure 8）：TP=8 时，输入长度 $M$ 从 4096 加到 16384，最优通信 CTA 数 $n_c$ 从 18 变到 26；把 TP 从 8 换成 4（$M=16384$），$n_c$ 又从 26 跳到 46。
 
-也就是说：**同一个模型，换个序列长度、换个并行策略，最优分区就变了，而且幅度不小（26→46 接近翻倍）。** Comet 的应对是预先 profile 一批不同划分点的 kernel 变体、把最优配置存成 metadata，运行时按配置选——本质是"离线 sweep + 查表"。
+也就是说：**同一个模型，换个序列长度、换个并行策略，最优分区就变了。** TP 8→4 后每卡通信量变大，通信 CTA 从 26 涨到 46。Comet 的应对是预先 profile 一批不同划分点的 kernel 变体、把最优配置存成 metadata，运行时按配置选——本质是"离线 sweep + 查表"。
 
 这也解释了为什么"写死一个 `s_comm=20`"在生产里迟早出事。
 
@@ -260,13 +264,15 @@ arXiv 2609.07536 做的事和 `sm_split_model.py` 很像，但严谨得多：它
 | 128 KB | 1.32 | 3.30 | 1.98 |
 | 32 MB | 6.60 | 23.43 | 7.92 |
 
-32 MB 上 NCCL 要 23.43 个 SM，T-CCL 只要 6.60——**同样一份通信，SM 占用差 3.5 倍**。NCCL 的对称内存内核对小消息很有效（128 KB 上 1.98，比 NCCL 的 3.30 少四成），但到 128 MB 又回到 9.24，仍然比 T-CCL 的 6.60 多。这在分区模型里的含义很直接：$W_m$ 不变，但达到同样带宽所需的 $s_0$ 变小了，平台左缘左移，留给计算的 SM 更多。T-CCL 的 GEMM–collective overlap 案例里，把后端从 NCCL 换成 T-CCL，四卡上的算子级加速从 1.04× 提到 1.14×，原因就是"通信少占 SM"。
+32 MB 上 NCCL 要 23.43 个 SM，T-CCL 只要 6.60——**同样一份通信，SM 占用差 3.5 倍**。NCCL 的对称内存内核对小消息很有效（128 KB 上 1.98，比 NCCL 的 3.30 少四成），但到 128 MB 又回到 9.24，仍然比 T-CCL 的 6.60 多。
+
+这在分区模型里的含义很直接：$W_m$ 不变，但达到同样带宽所需的 $s_0$ 变小了，平台左缘左移，留给计算的 SM 更多。T-CCL 的 GEMM–collective overlap 案例里，把后端从 NCCL 换成 T-CCL，四卡上的算子级加速从 1.04× 提到 1.14×。原因就是"通信少占 SM"。
 
 ### 5.5 TokenWeave：2–8 个 SM 就够，但简单融合会更慢
 
 TokenWeave（2505.11329）把 AllReduce 和 RMSNorm 融成一个 kernel，靠 NVSHARP/Multimem，在 8×H100 上只用 2–8 个 SM；此前的工作做同样的通信要 16–20+ 个 SM。这是把 $s_0$ 打到极低的另一个例子——只占 H100 的 1.5%–6%，却能跑满带宽。
 
-但它同时给了一个负结果：**朴素融合（把 AllReduce 拆成 RS + AG，再和 RMSNorm 拼在一起）在 512–8K token 区间比串行还慢**，相对性能 0.98× / 0.96× / 0.93× / 0.92× / 0.96×（对应 512 / 1K / 2K / 4K / 8K）。原因是拆成 RS+AG 多了一轮读写，而 RMSNorm 本身是 memory-bound，和通信抢同一条 HBM 通道。真正有效的做法是让融合 kernel 只占 2–8 个 SM、把其余 SM 全留给计算，而不是"把两个算子塞进一个 kernel"就完事。
+但它同时给了一个负结果：**朴素融合（把 AllReduce 拆成 RS + AG，再和 RMSNorm 拼在一起）在 512–8K token 区间比串行还慢**，相对性能 0.98× / 0.96× / 0.93× / 0.92× / 0.96×（对应 512 / 1K / 2K / 4K / 8K）。原因是拆成 RS+AG 多了一轮读写，而 RMSNorm 本身是 memory-bound，和通信抢同一条 HBM 通道。真正有效的做法是让融合 kernel 只占 2–8 个 SM、把其余 SM 全留给计算；"把两个算子塞进一个 kernel"本身不等于 overlap。
 
 ### 5.6 Characterizing：分区模型里那个被忽略的 γ
 
@@ -290,6 +296,8 @@ TokenWeave（2505.11329）把 AllReduce 和 RMSNorm 融成一个 kernel，靠 NV
 
 ### 7.1 先量五个数
 
+看第三列：每个指标都对应一个具体问题，别只盯 SM active。
+
 | 指标 | ncu 里看什么 | 回答什么问题 |
 |---|---|---|
 | SM active | `sm__cycles_active.avg.pct_of_peak_sustained_elapsed` | 计算 kernel 在 overlap 时掉了多少 |
@@ -303,7 +311,7 @@ TokenWeave（2505.11329）把 AllReduce 和 RMSNorm 融成一个 kernel，靠 NV
 ### 7.2 四条经验
 
 1. **`s_comm` 从 sweep 选，不写常量。** 至少扫 0 到 $S$，步长 4；取平台左缘，不取最小值点。
-2. **盯 wave 边界。** 换 shape、换 TP/EP、换 chunk 数，都会让计算的 wave 数变，原来的 $s$ 可能正好跨在台阶边上。5.1 的 26→46 就是这个现象。
+2. **盯 wave 边界。** 换 shape、换 TP/EP、换 chunk 数，都会让计算的 wave 数变，原来的 $s$ 可能正好跨在台阶边上。5.1 的通信 CTA 26→46 就是这个现象。
 3. **先问"通信能不能少占 SM"，再问"该分几个 SM"。** T-CCL 的 3.5 倍、TokenWeave 的 2–8 个 SM，都是把 $s_0$ 打下来，比调分区更根本。
 4. **把负结果记下来。** 哪个 shape 下 overlap 反而慢、慢多少、是不是跨了 wave 边界——这比只报最好 case 有用，也是第十篇要做的事。
 
@@ -315,7 +323,7 @@ TokenWeave（2505.11329）把 AllReduce 和 RMSNorm 融成一个 kernel，靠 NV
 - SM 分区的最优点通常是一个**平台**，不是一个点；wave 边界让计算时间台阶式跳，所以选平台左缘、并随 shape 重扫。
 - 分区之外还有三件事同样重要：把 collective 的 SM 占用压下来（T-CCL）、把气泡从时间维度填掉（Weave 的 bubble stealing）、把 $\gamma$ 算进去（Characterizing）。
 
-往回看，[第五篇]({{< relref "comm-overlap-05-tensor-parallel" >}})讲的是"把 all-gather 融进 GEMM"，那篇里的 tile 级 overlap，在 kernel 里就是本篇的 producer/consumer；[第六篇]({{< relref "comm-overlap-06-moe" >}})讲三段式，本篇讲这三段在 SM 上怎么分家。下一篇换一个角度：既然分区要随 shape 变、又要算得准，那就把"选分区"交给编译器——Syncopate 的 chunk 抽象、Lagom 的联合调参和 TileLink 的 tile 级编程，都是这条路上的尝试。
+往回看，[第五篇]({{< relref "comm-overlap-05-tensor-parallel" >}})讲的是"把 all-gather 融进 GEMM"，那篇里的 tile 级 overlap，在 kernel 里就是本篇的 producer/consumer；[第六篇]({{< relref "comm-overlap-06-moe" >}})讲三段式，本篇讲这三段在 SM 上怎么分家。下一篇换一个角度：既然分区要随 shape 变、又要算得准，那就把"选分区"交给编译器。Syncopate 的 chunk 抽象、Lagom 的联合调参和 TileLink 的 tile 级编程，都是这条路上的尝试。
 
 ---
 

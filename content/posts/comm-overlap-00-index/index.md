@@ -44,7 +44,9 @@ categories: ["训练框架"]
 
 ### 1. 依赖：数据没到，就是不能算
 
-流水线并行的气泡，本质是"下游 stage 的输入还没来"。1F1B 能比 GPipe 省内存，是因为它让每个 stage 同时只有 $p$ 个 microbatch 在飞；Zero Bubble 能把气泡压到接近 0，是因为它发现**反向的 weight gradient（W）不依赖下游**，可以拿来填 input gradient（B）等待的空隙。
+流水线并行的气泡，本质是"下游 stage 的输入还没来"。1F1B 能比 GPipe 省内存，是因为它让每个 stage 同时只有 $p$ 个 microbatch 在飞；Zero Bubble 能把气泡压到接近 0，是因为它发现**权重梯度（W）虽然也要等下游的 dY，但它不产出别人要用的东西**——算完只往 `main_grad` 里累加，谁都不等它，所以可以离开关键路径、推迟到任意空隙里执行。
+
+这句话很容易被记成"W 不依赖下游"，那是错的：下游 dY 没回来，W 一样算不了。Zero Bubble 用到的是"**W 不在传递链上**"，而不是"W 没有依赖"。
 
 MoE 更难：dispatch 的 all-to-all 没完成，expert GEMM 就不知道自己要算哪些 token；combine 没完成，下一层 attention 就拿不到输入。所以 MoE 的 overlap 必须把 token 切成 chunk，让"第 $i$ 块的 expert 计算"和"第 $i+1$ 块的 dispatch"同时发生——**切是错的前提**。
 
@@ -80,7 +82,7 @@ $\eta=100\%$ 表示通信全被藏住；$\eta<0$ 表示 overlap 反而比串行�
 
 但只有 $\eta$ 不够。还要看**代价**：
 
-- 显存：Zero Bubble 的 ZB-H2 要把激活从 $p$ 份抬到 $2p-1$ 份；DualPipe 要存 $PP+1$ 份激活、参数量翻倍。
+- 显存：Zero Bubble 的 ZB-H2 要把在飞激活从 $p$ 份抬到 $2p-1$ 份；DualPipe 要存 $PP+1$ 份激活，且**每设备**参数 2×（每张卡持两个方向的 chunk，不是模型总参数翻倍）。
 - 算力：overlap tax 让计算慢 18.9%（平均）。
 - 工程复杂度：一个 fused kernel 可能只对某几种 shape 有效，换模型就要重调。
 
@@ -100,7 +102,7 @@ $\eta=100\%$ 表示通信全被藏住；$\eta<0$ 表示 overlap 反而比串行�
 
 ### 路线 A：先建立框架（推荐）
 
-读 **一**（性能账本）→ **二**（流水线气泡史）→ **六**（MoE 三段式）→ **十一**（总结）。这四篇把"切错融让"和"三笔账"串起来，不需要先懂 CUDA。
+读 **一**（性能账本）→ **二**（流水线气泡史）→ **六**（MoE 三段式）→ **总结**（总览地图）。这四篇把"切错融让"和"三笔账"串起来，不需要先懂 CUDA。
 
 ### 路线 B：做训练框架/并行策略
 
@@ -114,6 +116,39 @@ $\eta=100\%$ 表示通信全被藏住；$\eta<0$ 表示 overlap 反而比串行�
 
 读 **九**（NanoFlow/TokenWeave/FlashComm）→ **七**（SM 分区）→ **十**（怎么测）。推理侧的约束和训练不同：decode 是 memory-bound，通信占比随 batch 变小，overlap 的阈值更敏感。
 
+## 符号与命名约定（读公式前先看这张表）
+
+后面十几篇反复用到同一批符号，但**有两处历史上撞了车**：$T_B$ 在不同篇里指"整段反向"或"只含 dX"，$B$ 在流水线篇指 dX、在 MoE 篇指 combine。先在这里钉死，后文只引用、不再重复定义。
+
+| 记号 | 含义 | 说明 |
+|---|---|---|
+| $p$, $m$, $v$ | stage 数、每 step 的 microbatch 数、interleaved 的虚拟 stage 数 | 总 stage 数 $=p\cdot v$ |
+| $F$, $B$, $W$ | 一个 microbatch 在**一个 stage** 上的前向、dX（输入梯度）、dW（权重梯度） | **整段反向 $=B+W$** |
+| $T_F$, $T_B$, $T_W$ | 上面三件事的耗时 | 流水线公式里的 $T$ 都是"每 stage 每 microbatch" |
+| $M_B$, $M_W$ | 一个在飞 microbatch 的激活字节；它的 wgrad 待办字节 | 一般 $M_W<M_B$ |
+| 在飞数 (in-flight) | 已做完 F、还没做完 W 的 microbatch 个数 | 1F1B/ZB-H1 是 $p$，ZB-H2 是 $2p-1$ |
+| 气泡 / 气泡率 | $\text{cost}-m(T_F+T_B+T_W)$ / cost | 见下方"两种口径" |
+| $\eta$ | overlap efficiency $=1-\dfrac{T_{\text{exposed}}}{T_{\text{comm}}}$ | 分母是通信总量，不是端到端 |
+| $\gamma$ | overlap tax $=T_{\text{compute}}^{\text{overlap}}/T_{\text{compute}}^{\text{serial}}$ | 实测约 1.19（+18.9%） |
+
+**两处撞车的名字：**
+
+1. **$T_B$**。Zero Bubble 论文 Table 2、（二）§3 的 $T_B$ **只含 dX**，wgrad 单列 $T_W$；而教科书、（二）§2 惯用的 $T_B$ 是**整段反向**。换算关系：$T_B^{\text{旧}}=T_B+T_W$。所以 $(p-1)(T_F+T_B^{\text{旧}})$ 与 $(p-1)(T_F+T_B+T_W)$ 是同一个式子，不是两个。
+2. **$B$**。流水线篇里 $B$=dX；MoE 篇（六、七）的三段式 dispatch → compute → **combine** 里 $B$=combine。读 MoE 时把 $B$ 当"第三步"即可，与流水线无关。
+
+**命名也要分清（后面有几处专门的辨析）：**
+
+| 名字 | 是什么 | 气泡（等时 $T_F{=}T_B{=}T_W$） |
+|---|---|---|
+| 1F1B | 反向不拆，1F-1B 交替 | $(p-1)\cdot 3T$ |
+| 1F1B-split | 拆成 B/W，但 **W 紧跟 B**（"拆开了没重排"） | $(p-1)\cdot 2T$ |
+| ZB-H1 | 论文手写调度：warm-up 同 1F1B，W 按 stage 延后 | $(p-1)\cdot 1T$ |
+| ZB-H2 | 论文手写调度：warm-up 做到 $2p-1$，W 大量延后 | $(p-1)\cdot 0T$（**仅跨 step 稳态**） |
+| ZB-1p / ZB-2p | 论文的**自动调度**（ILP/启发式 + 显存上限） | 逼近上面两行，不是新公式 |
+| ZB1P | DualPipe README 里的叫法，$B$ 用"整段反向"口径 | 数值等于 ZB-H2 |
+
+**两种口径**：气泡公式默认**单步**（每个 step 结束有一次 optimizer 同步）。单步有个硬下界 $(p-1)T_F+m(T_F+T_B+T_W)$——最后一个 stage 最早只能在 $(p-1)T_F$ 后拿到第一批输入。所以 ZB-H2 的"零气泡"必须**跨 step** 才成立，并且要配合论文 §4 的 optimizer bypass（去掉那道同步）。本系列的 `schedule_sim.py` 用 `--barrier` / `--iters` 分别对应这两种口径。
+
 ## 目录
 
 1. [先算清三笔账：关键路径、暴露通信与 overlap tax]({{< relref "comm-overlap-01-performance-model" >}})
@@ -126,11 +161,13 @@ $\eta=100\%$ 表示通信全被藏住；$\eta<0$ 表示 overlap 反而比串行�
 8. [编译与自动调度：Syncopate、Lagom 与 tile 级编程]({{< relref "comm-overlap-08-compiler" >}})
 9. [推理侧：decode 的通算并行与它的阈值]({{< relref "comm-overlap-09-inference" >}})
 10. [实测手册：用 nsys/ncu 把 overlap 账算出来]({{< relref "comm-overlap-10-measurement" >}})
-11. [总结：2026 年的通算并行地图与五个开放问题]({{< relref "comm-overlap-11-summary" >}})
-12. [补遗·总览：2026 最新论文雷达与阅读路线]({{< relref "comm-overlap-12-latest" >}})
-13. [补遗一：UniEP 深读——persistent worker 与确定性 token mapping]({{< relref "comm-overlap-13-uniep" >}})
-14. [补遗二：MegaFlux 深读——routing skew 与专家复制]({{< relref "comm-overlap-14-megaflux" >}})
-15. [补遗三：Entwine、mKernel 与 2026 生态]({{< relref "comm-overlap-15-tile-ecosystem" >}})
+11. [补遗·导读：2026 最新论文雷达与阅读路线]({{< relref "comm-overlap-12-latest" >}})
+12. [补遗一：UniEP 深读——persistent worker 与确定性 token mapping]({{< relref "comm-overlap-13-uniep" >}})
+13. [补遗二：MegaFlux 深读——routing skew 与专家复制]({{< relref "comm-overlap-14-megaflux" >}})
+14. [补遗三：Entwine、mKernel 与 2026 生态]({{< relref "comm-overlap-15-tile-ecosystem" >}})
+15. [总结：2026 年的通算并行地图与五个开放问题]({{< relref "comm-overlap-11-summary" >}})
+
+另有一个平行的系列 [**源码精读**]({{< relref "comm-overlap-src" >}})：把 UniEP 与 Flux 的关键 kernel 逐行复制、只插注释不改代码，配 6 篇笔记。[导读]({{< relref "comm-overlap-src" >}}) · [UniEP dispatch]({{< relref "comm-overlap-src-01-dispatch-gemm" >}}) · [UniEP combine]({{< relref "comm-overlap-src-02-gemm-combine" >}}) · [确定性]({{< relref "comm-overlap-src-03-determinism" >}}) · [Flux AG+GEMM]({{< relref "comm-overlap-src-04-flux-ag-gemm" >}}) · [Flux GEMM+RS]({{< relref "comm-overlap-src-05-flux-gemm-rs" >}}) · [两边的对照]({{< relref "comm-overlap-src-06-compare" >}})
 
 ## 配套代码
 
@@ -139,7 +176,7 @@ $\eta=100\%$ 表示通信全被藏住；$\eta<0$ 表示 overlap 反而比串行�
 | 文件 | 作用 | 对应文章 |
 |---|---|---|
 | `overlap_model.py` | 统一性能账本：PP/DP/TP/MoE 的解析式 | 一 |
-| `schedule_sim.py` | 流水线调度模拟器（GPipe/1F1B/ZB-H2），输出 Gantt | 二 |
+| `schedule_sim.py` | 流水线调度模拟器（GPipe/1F1B/1F1B-split/ZB-H1/ZB-H2），`--iters` 跨步、`--barrier` 单步，输出 Gantt | 一、二 |
 | `bucket_sim.py` | DP bucket 的尾延迟 vs launch 开销 | 四 |
 | `moe_overlap.py` | MoE 三段流水 + 通信 SM 数扫描 | 六 |
 | `sm_split_model.py` | 通信/计算 SM 分区的最优解 | 七 |
@@ -148,8 +185,8 @@ $\eta=100\%$ 表示通信全被藏住；$\eta<0$ 表示 overlap 反而比串行�
 
 这些是**模型，不是实测**。它们的作用是让你在没卡的时候也能把趋势算对；真实数字以论文和你的 `ncu` 为准。
 
-补遗里还多了一套 [**源码精读**](../comm-overlap-src/)：把 UniEP 与 Flux 的关键 kernel 从上游逐行复制下来、
-只插注释不改代码（12 个文件、4536 行代码 + 2932 行注释），配 6 篇精读笔记。
+补遗还带出一个平行系列 [**源码精读**]({{< relref "comm-overlap-src" >}})：把 UniEP 与 Flux 的关键 kernel 从上游逐行复制，
+只插注释不改代码（12 个副本、4536 行代码 + 2932 行注释），配 **6 篇正文 + 1 篇总览**。
 模型算的是账，源码精读看的是账本是怎么被写出来的 —— 谁在等、等什么、等的时候谁在干活。
 
 ## 结论

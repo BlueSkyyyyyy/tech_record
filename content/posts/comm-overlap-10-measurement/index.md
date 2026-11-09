@@ -42,7 +42,7 @@ categories: ["训练框架"]
 
 这一层回答"值不值得做"，不回答"哪里没藏住"。**它最大的价值是给出分母**：后面所有比例都要拿它当基准。
 
-测量纪律：固定 shape / batch / 并行度，关掉 checkpoint、日志、eval，至少跑 20 步取中位数；对比 serial 和 overlap 时，除被测变量外一个都不许动。而且**端到端至少要跑三种配置**：serial、overlap、以及构造出来的 ideal（§5 详述）。只报 overlap 一个数，你无法判断收益是从"藏住通信"来的，还是从"计算本来就快"来的。
+测量纪律：固定 shape / batch / 并行度，关掉 checkpoint、日志、eval，至少跑 20 步取中位数。对比 serial 和 overlap 时，除被测变量外一个都不许动。而且**端到端至少要跑三种配置**：serial、overlap、以及构造出来的 ideal（§5 详述）。只报 overlap 一个数，你无法判断收益是从"藏住通信"来的，还是从"计算本来就快"来的。
 
 ### 1.2 第二层：时间轴（nsys）
 
@@ -69,7 +69,7 @@ comm          [=AR1=]        [====AR2====]
 
 ### 1.3 第三层：kernel（ncu）
 
-ncu 回答的是"这个 kernel 为什么慢"，pc 采样 + 硬件计数器，逐 kernel replay。分两类看。
+ncu 回答的是"这个 kernel 为什么慢"：PC 采样（程序计数器采样）加硬件计数器，逐 kernel replay。分两类看。
 
 对**计算 kernel**，看六个量：
 
@@ -84,7 +84,7 @@ ncu 回答的是"这个 kernel 为什么慢"，pc 采样 + 硬件计数器，逐
 
 - **传输字节**：从算法和 dtype 算，别从 profiler 猜；
 - **实测带宽** = bytes / duration，和链路峰值比（NVLink / IB 各算各的）；
-- **占用 SM 数**：grid size，这是"通信抢计算资源"的直接证据；
+- **活跃 SM 数**：用 nsys 的 active SM 口径，不要用 grid size（grid 只是 CTA 数），这是"通信抢计算资源"的直接证据；
 - **launch / 同步开销**：小消息时 duration 远大于 bytes/带宽，差值就是固定开销。
 
 三层的关系可以这样记：
@@ -113,7 +113,7 @@ nsys profile --trace=cuda,nvtx,osrt,cublas,cudnn \
 - `cuda` 必须有（kernel、memcpy、stream、API），`nvtx` 用来标逻辑边界，`osrt` 看线程和系统调用，`cublas`/`cudnn` 给库层标注；
 - `--sample=none --cpuctxsw=none` 关掉 CPU 采样和上下文切换记录，显著降低扰动——**默认是开的**，很多人不知道自己的 trace 被拖慢了几个点；
 - `--capture-range=cudaProfilerApi` 只抓 `torch.cuda.profiler.start()` 到 `stop()` 之间，天然排除 warmup；
-- **flag 名和取值以你的 nsys 版本为准**（`nsys --version`、`nsys profile --help`）。这里给的是模板，不是圣旨：不同年份的 nsys 对 `--trace` 的取值域、`--capture-range-end` 的行为都改过。
+- **flag 名和取值以你的 nsys 版本为准**（`nsys --version`、`nsys profile --help`）。这里给的是模板，不是圣旨。不同年份的 nsys 对 `--trace` 的取值域、`--capture-range-end` 的行为都改过。
 
 ### 2.2 先看聚合，再要区间
 
@@ -176,7 +176,7 @@ torch.cuda.nvtx.range_pop()
 
 ### 2.4 跨 rank 的时间基准
 
-每台机器有自己的时钟，nsys 的时间戳是本机的单调时钟。同节点多进程基本可比，**跨节点会有毫秒级偏移，而 overlap 的时间尺度常常就是几十微秒**——直接把两份 trace 贴在一起看，会得出"rank 0 比 rank 7 早发起 3ms"这种不存在的结论。
+每台机器有自己的时钟，nsys 的时间戳是本机的单调时钟。同节点多进程基本可比；**跨节点会有毫秒级偏移，而 overlap 的时间尺度常常就是几十微秒**。直接把两份 trace 贴在一起看，会得出"rank 0 比 rank 7 早发起 3ms"这种不存在的结论。
 
 没法统一时钟的时候，用锚点对齐：同一个 collective 在所有 rank 上几乎同时发起，取它在本端 trace 里的起点当锚，把各自的 trace 平移。这也是为什么 §2.3 的 NVTX 值得打——range 名里带上 step 号，锚点就好找了。真要跨节点细对，得靠 PTP/NTP 把机器时钟压到亚毫秒，并在报告里写明对齐方法。
 
@@ -205,11 +205,11 @@ timeline: CCCCCCCCCCCCCCBBBBBBBBBBBBBCCCCCCCBBBBBBBBBBBBCCCCCCCCCCCCCBBBBBBBBBBB
 - `compute=150`：三个 GEMM 区间的**并集**，不是 duration 相加；
 - `comm=90`：同理，是并集；
 - `overlap=80`：两个并集的交集；
-- `exposed=10`：`comm - overlap`，通信没被计算盖住的部分。timeline 末尾 5 个 `M`，每个字符代表 2 个单位，正好 10——**两个数可以互相对账**；
+- `exposed=10`：`comm - overlap`，通信没被计算盖住的部分。timeline 末尾那 5 个 `M` 大致对应它；但**不要在字符数上做精确对账**——80 个字符铺满 span，是缩放渲染（末尾的 `.` 也是取整），数字以 `span/compute/comm` 为准；
 - `overlap_ratio=88.9%`：$80/90$，**分母是 comm**；
-- `compute_share=93.8%`：$150/160$，说明时间轴上有 6.2% 的时间没有任何计算 kernel。
+- `compute_share=93.8%`：$150/160$，说明时间轴上有 6.2% 的时间没有任何计算 kernel。这个比例由三个数算出，和 timeline 的字符数无关。
 
-一个必须知道的边界：脚本里 `type=other` 的行会进 `streams` 统计，但**不进 span，也不进 compute/comm**。所以如果你把 fused kernel 归成 `other`（§2.2 建议的做法），span 会被低估。要么把这类 kernel 单独算一段再手动加回，要么在报告里注明"span 只覆盖 compute + comm"。**别让一个分类约定悄悄变成结论里的偏差。**
+一个必须知道的边界：脚本里 `type=other` 的行会进 `streams` 统计，但**不进 span，也不进 compute/comm**。所以如果你把 fused kernel 归成 `other`（§2.2 建议的做法），span 会被低估。要么把这类 kernel 单独算一段再手动加回；要么在报告里注明"span 只覆盖 compute + comm"。**别让一个分类约定悄悄变成结论里的偏差。**
 
 ### 为什么必须用并集/交集，而不是把 kernel 时间相加
 
@@ -254,7 +254,7 @@ TP 是五类里最需要"三个时间一起看"的：
 
 第三个除以第二个再减一（$T_{\text{gemm\_overlap}}/T_{\text{gemm}} - 1$），就是 compute slowdown。**这一步必须在 trace 里挑同名同 shape 的 kernel 比**，不能拿不同 tile 配置的 GEMM 比——那是两个 kernel，比出来的是实现差异不是 tax。
 
-SM 占用用 grid size 看：NCCL 一个 128 KB 的 all-gather 会拉起远多于必要的 CTA（T-CCL 测得平均 3.30 个 SM，它自己的实现是 1.32 个），这些 CTA 直接和 GEMM 抢 SM 和 L2。**再用 ncu 看同一段 GEMM 在 overlap 期间的 `sm__throughput`**：如果它比单跑时掉了一截，说明 SM 是真被抢走了，而不是被调度器挡住了。
+SM 占用要看 nsys 的 **active SM** 口径，不是 grid size：grid 只是 CTA 数，一个 CTA 不一定占满一个 SM（第七篇讲过，分区的粒度其实是 CTA 槽位）。T-CCL 测到 NCCL 一个 128 KB 的 all-gather 平均占 **3.30 个 active SM**，T-CCL 自己的实现只占 **1.32 个**，这些 SM 直接和 GEMM 抢 L2。**再用 ncu 看同一段 GEMM 在 overlap 期间的 `sm__throughput`**：如果它比单跑时掉了一截，说明 SM 是真被抢走了，而不是被调度器挡住了。
 
 Flux 给了这套账一个更干净的定义。它不直接量"通信被藏住多少"，而是先定义**有效通信时间**：
 
@@ -282,7 +282,7 @@ MoE 的账是三段流水：
 要测的：
 
 - **每段的时长**：按 chunk 分别计时，DeepEP 的 `EventOverlap` 或者自己打 NVTX。三段比例决定了理论上限——如果 $\sum d + \sum b > \sum c$，再怎么排也藏不完；
-- **通信占的 SM 数**：dispatch/combine 的 grid size。Comet 论文里 MoE 层通信占 47%，靠的就是 CTA specialization 把通信压到固定几个 SM；
+- **通信占的 SM 数**：dispatch/combine 的 active SM（nsys 口径；grid size 只能当 CTA 数参考）。Comet 论文里 MoE 层通信占 47%，靠的就是 CTA specialization 把通信压到固定几个 SM；
 - **routing skew**：每个 expert 分到的 token 数的 `max/mean`。**这个 profiler 给不了**，要在 router 之后打点。skew 大时最热的 expert 变成关键路径，其它 expert 的 SM 空转，此时"通信被藏住"没有任何意义——瓶颈在计算的不均衡；
 - **tail chunk**：最后一个 chunk 的 combine 必然暴露，没有任何计算能盖住它。chunk 越多 tail 越小，但 startup 越大；Syncopate 扫到的最优在 2–3 个 chunk，这个数很值得在自己的 workload 上重扫一遍。
 
@@ -291,7 +291,7 @@ MoE 的账是三段流水：
 ### 4.5 推理：TTFT、TPOT 和 wave 数
 
 - **TTFT**：prefill 的首 token 时间，通信主要在 TP 的 all-reduce 上；
-- **TPOT**：decode 每 token 的时间，**这是最容易骗人的指标**——它会被 batch 摊薄，报 TPOT 必须同时报 batch size；
+- **TPOT**：单请求两个输出 token 之间的间隔（inter-token latency），**这是最容易骗人的指标**——batch 增大不会把它"摊薄"：并发请求只会争抢 HBM 带宽和 SM，TPOT 通常持平或变差。所以报 TPOT 必须同时报 batch size 和并发数；
 - **tokens/s**：吞吐，和 TPOT 一起看才能判断是延迟优化还是吞吐优化；
 - **wave 数**：decode 的 GEMM 常常一个 wave 就结束，SM 本来就不满。此时"让 SM 给通信"代价小，但"计算能藏住通信"的空间也小；
 - **decode 的 overlap 阈值**：batch 越小，GEMM 越瘦，通信相对越贵，overlap 的收益阈值随之上移。`decode_overlap.py` 可以扫这条曲线。
@@ -326,7 +326,7 @@ $\gamma$ 用**同名同 shape 的 kernel duration 中位数**算，别用总时�
 
 tax 的物理来源是资源和功耗，所以必须同时记：
 
-- 功耗：`nvidia-smi dmon -s pucvmet -d 1`，一秒一条，看趋势够用。NVML 的采样粒度是 100ms 量级（Characterizing 用 NVML 100ms、AMD-SMI 20ms），**抓不到微秒级尖峰**——想看尖峰只能靠 nsys 的高分辨率采样或专门的功率计；
+- 功耗：`nvidia-smi dmon -s pucvmet -d 1`，一秒一条，看趋势够用。NVML（NVIDIA 管理库）的采样粒度是 100ms 量级（Characterizing 用 NVML 100ms、AMD-SMI 20ms），**抓不到微秒级尖峰**——想看尖峰只能靠 nsys 的高分辨率采样或专门的功率计；
 - 频率：`nvidia-smi -q -d CLOCK`，或从 ncu 的 `sm__cycles_elapsed.avg.per_second` 换算 SM 实际频率；
 - 锁不锁频：锁了（`nvidia-smi -lgc`）结论可复现但不代表生产；不锁则同一份代码两次跑可能差几个点。**报告里写清锁没锁，比锁了更重要。**
 

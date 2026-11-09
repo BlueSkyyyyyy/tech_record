@@ -58,7 +58,9 @@ A100 80GB 的转折点是 $312\ \text{TFLOPS} / 2.0\ \text{TB/s} \approx 156$ FL
 
 但实测不是这样。TokenWeave 的 Fig.1 在 H100 上测到：**TP 通信占 decode 总时间的约 20%，最高 23%。**
 
-差在哪里？差在 **16 KB 的消息是延迟受限的，不是带宽受限的**。一次 collective 的固定成本包括 kernel launch、rank 间同步、NVSHARP/Multimem 的建链与归约指令下发——这些开销跟消息多大基本无关。80 层、每层 2 次，一个 token 就是 **160 次 all-reduce**；粗估每次 collective 的固定开销 5–10 微秒（这个量级来自 launch 与 rank 同步，和消息大小无关），160 次就是 0.8–1.6 毫秒，占 8.75 毫秒权重加载（17.5 GB / 2.0 TB/s）的 9%–18%——正好落在 TokenWeave 测到的量级上。
+差在哪里？差在 **16 KB 的消息是延迟受限的，不是带宽受限的**。一次 collective 的固定成本包括 kernel launch、rank 间同步、NVSHARP/Multimem 的建链与归约指令下发——这些开销跟消息多大基本无关。
+
+80 层、每层 2 次，一个 token 就是 **160 次 all-reduce**。粗估每次 collective 的固定开销 5–10 微秒（这个量级来自 launch 与 rank 同步，和消息大小无关），160 次就是 0.8–1.6 毫秒；而权重加载是 8.75 毫秒（17.5 GB / 2.0 TB/s），固定开销占其中的 9%–18%——正好落在 TokenWeave 测到的量级上。
 
 这个观察决定了推理侧 overlap 的技术路线，和训练侧完全不同：
 
@@ -69,9 +71,11 @@ A100 80GB 的转折点是 $312\ \text{TFLOPS} / 2.0\ \text{TB/s} \approx 156$ FL
 | overlap 的收益来源 | 把通信藏进计算 | 减少 launch、减少 SM 占用、减少字节 |
 | 典型优化 | chunk、bucket、tile 融合 | 融合 kernel、量化、切 batch |
 
+读法：先把"限制因素"和"收益来源"两行对齐看，最后一行是它们的推论。
+
 **在 decode 里，省一次 launch 往往比省一半带宽更值钱。** 这句话是理解后面三篇论文的钥匙。
 
-顺带回答一个很自然的反问：**那把 batch 拉大不就行了？** 拉到 150 以上就进 compute-bound 区，通信占比自然下降。现实是拉不上去——KV cache 的显存占用随 batch 和上下文长度**线性增长**，而权重是固定的。70B 模型在长上下文下，KV cache 往往比权重还大；decode 的 batch 上限通常由显存决定，而不是由算力或带宽决定。**所以"阈值"不是一个可以靠调 batch 绕过去的东西，它是 serving 系统必须在原地解决的问题。** 这也是为什么下面三篇论文全都在"小 batch 且不能变大"这个约束下做文章。
+顺带回答一个很自然的反问：**那把 batch 拉大不就行了？** 拉到 150 以上就进 compute-bound 区，通信占比自然下降。现实是拉不上去——KV cache 的显存占用随 batch 和上下文长度**线性增长**，而权重是固定的。70B 模型在长上下文下，KV cache 往往比权重还大。decode 的 batch 上限通常由显存决定，而不是由算力或带宽决定。**所以"阈值"不是一个可以靠调 batch 绕过去的东西，它是 serving 系统必须在原地解决的问题。** 这也是为什么下面三篇论文全都在"小 batch 且不能变大"这个约束下做文章。
 
 ## 2. NanoFlow：复制算子，让三种瓶颈同时忙
 
@@ -103,20 +107,22 @@ NanoFlow（nano-batch × 复制算子）：
 
 ### 2.1 MILP 搜什么
 
-nano-batch 怎么切、切几个、按什么顺序排、每个 stream 分几个 SM——NanoFlow 把这四个决策丢给一个 **MILP** 求解器自动搜：
+nano-batch 怎么切、切几个、按什么顺序排、每个 stream 分几个 SM——NanoFlow 把这四个决策丢给一个 **MILP**（混合整数线性规划）求解器自动搜：
 
 - nano-batch 的**个数**与每个的**大小**（决定每个 kernel 的 grid 尺寸）；
 - 算子的**执行顺序**（谁先发，决定重叠窗口）；
 - 每个 stream 的 **SM quota**（决定 kernel 之间怎么抢 SM）。
 
-MILP 的目标函数里必须包含**kernel 干扰模型**：两个 kernel 同时跑，各自的耗时不等于单独跑。NanoFlow 用一个很简化的假设——两个 kernel 分享 SM 时，A 拿到 $R_A$ 比例的 SM，B 拿到 $R_B = 1 - R_A$，各自按 SM 比例缩放。这个假设显然不精确（还有 L2、HBM 带宽、功耗的耦合），所以它需要**对每个 kernel 做离线 profiling**，把"单跑耗时 vs SM 数"的曲线测出来喂给模型。
+MILP 的目标函数里必须包含**kernel 干扰模型**：两个 kernel 同时跑，各自的耗时不等于单独跑。NanoFlow 用一个归一化的性能代理 $R_A$ 描述 A 被拖慢了多少：A 只跑出单跑最好性能的 40%，就记 $R_A=0.4$；B 则假设拿到剩下的 $R_B = 1 - R_A$。注意 $R$ 不是"SM 占比"，而是以 GEMM 为中心的相对性能；B 的归一化性能 $P_B$（它对内存/网络带宽的利用程度）不是算出来的，而是一张 $R \to P$ 的实测表——来自两两 kernel 的离线 profiling。
+
+这个假设显然不精确（还有 L2、HBM 带宽、功耗的耦合），所以它要做两层离线 profiling：每个 kernel 的"耗时 vs SM 数"曲线，以及每一对 kernel 的干扰表。
 
 ### 2.2 数字与代价
 
 配置：LLaMA-2-70B，8×A100 80GB SXM，dense batch 2048。
 
 - 对比 TensorRT-LLM **1.91×**，对比 vLLM **4.18×**，对比 DeepSpeed-FastGen **3.45×**；
-- 达到理论最优的 **68.5%**（最好 case），其余配置 **50–72%**，最高 **78.5%**；
+- 达到理论最优的 **68.5%**（最好 case）；不同模型、不同配置在 **50–72%** 之间；
 - 低负载下 SLO 内的请求率提升 **1.64×**。
 
 需要照写的三个代价：
@@ -125,17 +131,17 @@ MILP 的目标函数里必须包含**kernel 干扰模型**：两个 kernel 同�
 2. **权重加载 I/O 翻倍。** 在 memory-bound 的 decode 里，这是硬成本。它能被"计算与通信重叠"的收益盖住，只在 batch 大到权重加载已经被摊薄之后才成立。
 3. **干扰模型假设 $R_B = 1 - R_A$。** 这个假设忽略了共享 L2 和 HBM 控制器带来的次线性/超线性效应，所以在带宽争用剧烈的形状上，MILP 解出来的"最优"可能不是最优。
 
-还有一条不写在论文摘要里、但一定会撞上的约束：**nano-batch 不能无限切小。** 每个 nano-batch 都要独立跑一个 kernel，切得太细时，每个 kernel 的 grid 都掉到 wave 下限以下——一个 wave 能装下的活被拆成三份，三份各占一个 wave，总时间反而翻倍。**NanoFlow 的 MILP 之所以要把 wave quantization 显式建进模型，原因和第五节那个 4K 阈值是同一个**：粒度小到一定程度，固定开销就变成主项。
+还有一条不写在论文摘要里、但一定会撞上的约束：**nano-batch 不能无限切小。** 每个 nano-batch 都要独立跑一个 kernel，切得太细时，每个 kernel 的 grid 都掉到 wave 下限以下——一个 wave 能装下的活被拆成三份，三份各占一个 wave，总时间反而翻倍。**这和第五节算出的 4K 阈值是同一个机制**：粒度小到一定程度，wave 的固定开销就变成主项。论文的模型里没有显式的 wave 项，它靠 profile 出来的 kernel 时间去吸收这部分；但这不影响"阈值存在"这个结论。
 
 ## 3. TokenWeave：wave-aware 切分与 AR-RMSNorm 融合
 
 TokenWeave（[2505.11329](https://arxiv.org/abs/2505.11329)）走的是另一条路：**不复制算子，只切 token，然后把切分本身的开销消掉。**
 
-### 3.1 为什么"切一半"不额外花钱
+### 3.1 为什么"切一半"可以不额外花钱
 
-GPU 上的 kernel 是按 **wave** 调度的：一个 wave 是能同时驻留在所有 SM 上的一批 CTA。如果一个 batch 的 GEMM 刚好占满 $k$ 个 wave，把它切成两半后，每半占 $k/2$ 个 wave——**只要 $k$ 是偶数，总 wave 数不变，切分在计算侧是免费的。**
+GPU 上的 kernel 是按 **wave** 调度的：一个 wave 是能同时驻留在所有 SM 上的一批 CTA（H100 是 132 个）。**朴素地把 token 对半分，并不免费。** 论文的反例是 300 个 CTA、正好 3 个 wave；对半分 150+150，每半都要 2 个 wave，总共 4 个——切分自己多付了一个 wave。
 
-这就是 "**wave-aware**" 的含义：切点要选在 wave 边界上，让两半的 wave 数加起来等于原来的 wave 数。切歪了（比如原 batch 只占 1.5 个 wave），两半各要 1 个 wave，总 wave 数从 1.5 涨到 2，反而慢 33%。这个现象在第五节的模型里会精确地重现。
+所以 TokenWeave 要的是 "**wave-aware**" 切分：切点选在 wave 边界上，让两半的 wave 数加起来等于原来的 wave 数。同样 300 个 CTA，smart split 切成 132+168，1 个 wave 加 2 个 wave，总数还是 3 个，计算侧才真正免费。切歪了就退化成 150+150，总 wave 从 3 涨到 4，反而慢约 33%。这个现象在第五节的模型里会精确地重现。
 
 切好之后，两个 split 走两个 CUDA stream：
 
@@ -155,12 +161,12 @@ TokenWeave（双流 + wave-aware 切分）：
 
 这一步是全文最巧的地方。标准 TP 的 row-parallel linear 之后是 all-reduce，然后接 RMSNorm。RMSNorm 要沿 hidden 维求平方和，所以它**必须在 all-reduce 之后**、且需要完整的 hidden 向量。
 
-TokenWeave 把顺序改成：**先 reduce-scatter，再 RMSNorm，最后按需 all-gather**。这样每张卡只持有 $1/N$ 的 hidden 切片，也**只归一化自己那 $1/N$**。平方和怎么办？搭在 reduce-scatter 的归约里一起算掉——collective 本来就要跨卡求和，多带一个标量几乎不花钱。
+TokenWeave 把 all-reduce 拆成 reduce-scatter + all-gather，顺序改成：**先 reduce-scatter，再 RMSNorm，最后按需 all-gather**。关键是它沿 **token 边界**切，不是沿 hidden 切：每张卡分到 $1/N$ 的 token，但每个 token 的 hidden 维是完整的。所以 RMSNorm 要的平方和可以在本地算完，**不需要跨卡再做一次标量归约**；RMSNorm 就这样被塞进了 reduce-scatter 和 all-gather 之间。
 
 结果是两个收益叠加：
 
-- RMSNorm 从"一次独立的 kernel launch + 一次完整的 HBM 读写"变成"归约里的一个附加项"；
-- 归约和归一化被融进**同一个 Multimem/NVSHARP kernel**，活跃 SM 从 **16–20+ 降到 2–8**。
+- RMSNorm 从"一次独立的 kernel launch + 一次完整的 HBM 往返"变成"ReduceScatter、RMSNorm、AllGather 融进同一个 kernel，中间结果尽量留在片上"；
+- 这个融合 kernel 基于 Multimem/NVSHARP，活跃 SM 从 **16–20+ 降到 2–8**。
 
 回到第一节的结论：decode 里省的是**固定开销**，不是带宽。少一次 launch、少占十几个 SM，正好打在这个点上。
 
@@ -172,7 +178,7 @@ TokenWeave 把顺序改成：**先 reduce-scatter，再 RMSNorm，最后按需 a
 - fused kernel 只占 **2–8 个 SM**（此前 16–20+）；
 - 延迟最高 **1.28×**，1K 以上普遍 **1.16–1.28×**；吞吐最高 **1.19×**（ShareGPT 1.19×，arXiv 1.15×）；
 - 单算子层面，fused AR-RMSNorm 在 H100 上 **1.34–1.39×**，B200 上 **1.24–1.38×**；
-- 单层对比 TileLink 最高 **1.35×**——注意 TileLink 自己在 **<4K 上也是负收益**。
+- 单层对比 TileLink 最高 **1.35×**——TileLink 在 2K 上就已经是负收益，要到 8K 以上才拿到最大 **1.2×**。
 
 必须照写的负结果和代价：
 
@@ -189,7 +195,9 @@ Flash Communication（[2412.04964](https://arxiv.org/abs/2412.04964)）严格说
 
 两个改动：
 
-**一是量化激活。** TP 的 all-reduce 传的是激活，激活的动态范围比权重温和，所以可以压得更狠：ReduceSum 用 **INT4**，AllGather 用 **INT8**，两者组合的方案被作者叫作 **"INT6"**（等效 6 bit）。
+**一是量化激活。** TP 的 all-reduce 传的是激活。这里有个反直觉的点：**激活比权重更难量化**——论文引 LLM.int8()/SmoothQuant 的结论，激活里存在 outlier，动态范围大；权重的分布反而温和。训练侧的通信量化只压权重和梯度，正好躲开了这个坑；推理侧要压的恰恰是激活。
+
+那为什么仍选 INT6？因为 decode 的 TP 链路上只有激活在传，不压它就没有别的可减；误差只能靠混合精度兜：ReduceSum 用 **INT4**，AllGather 用 **INT8**，两者组合的方案被作者叫作 **"INT6"**（等效 6 bit）。
 
 **二是换算法。** ring all-reduce 要 $2(N-1)$ 步；改成两步之后，每卡只做**一次 All2All reduce + 一次 AllGather**：
 
@@ -214,7 +222,7 @@ Flash Communication:
 三个必须一起读的限定：
 
 1. **A100 只有 1.19×，不是方法不行，是带宽太高。** A100 的 NVLink 带宽比 L40 高得多，通信本来就不那么疼，砍掉 3/4 的字节也换不来 2×。**收益和"通信占比"成正比，这条规律在量化上同样成立。**
-2. **权重也量化到 INT8 时掉得更多**（79.65 → 78.75）。说明激活量化的容错空间比权重更大——这也是为什么它只量化激活。
+2. **权重也量化到 INT8 时掉得更多**（79.65 → 78.75）。这说明权重压到 8 bit 之后，通信再压到 6 bit 的误差更显眼——论文因此把通信精度卡在 INT8/INT4 的混合上，而不是一路压到 INT4。
 3. **它减的是体积，不是重叠。** 通信该暴露还是暴露；只是暴露的那段时间变短了。**在 batch 很小、通信纯延迟受限的场景，量化帮不上忙**（消息已经从 16 KB 变成 4 KB，固定开销一分没少）。
 
 ## 5. 把阈值算出来：`decode_overlap.py`
@@ -277,7 +285,7 @@ threshold≈4096 tokens
 c(4096) = 20.0   m(4096) = 83.9   unsplit = 20.0 + 83.9 = 103.9
 c(2048) = 10.0   m(2048) = 41.9
 split = max(2×10.0, 2×41.9) + min(10.0, 41.9)
-      = max(20.0, 83.9) + 10.0 = 93.9          → 103.9 / 93.9 = 0.90x
+      = max(20.0, 83.9) + 10.0 = 93.9          → 93.9 / 103.9 = 0.90x
 ```
 
 $2c(2048)=20$ 和 $c(4096)=20$ 一模一样，切分在计算侧完全免费；省下的正是"最后一个半 batch 的通信尾巴" $c(2048)=10$。再往上一档（16384）为什么回落到 0.93×？因为 $c(16384)=70$（7 个 wave）而 $2c(8192)=80$（$2 \times 4$ 个 wave），**又多付了一个 wave**——只要 $T$ 落在"波数不是偶数"的位置，切分就要多付一次。
@@ -310,20 +318,22 @@ $2c(2048)=20$ 和 $c(4096)=20$ 一模一样，切分在计算侧完全免费；�
 prefill 侧的通算并行仍然值得做，尤其 MoE。**INC-MoE**（[2610.36339](https://arxiv.org/abs/2610.36339)）把 all-gather / reduce-scatter 挪进**交换机**（in-network），让双向链路并发，省掉 GPU 侧的收集与转发：
 
 - prefill 场景 TTFT **−33.1%**，吞吐 **+49.5%**；
-- 但 **N=2 时收益为零**——两个节点之间没有可并发的双向链路，in-network 归约退化成普通转发。
+- 但 **N=2 时收益为零**：按论文的加速比公式 $(N-2)/(2(N-1))$，$N=2$ 时分子为 0——ring 已经走到下界，没有可再省的那一跳。
 
 这个负结果值得记：**所有依赖"拓扑里的空闲维度"的优化，在最小规模上都会失效**。N=2 就是它的下界。
 
 ## 7. 决策表
 
-把训练、prefill、decode 三种场景的判据整理成一张表。注意每一行的"首选动作"不同，**用错行的代价是负收益**（表中通信占比是经验区间，不是某一篇的实测）：
+把训练、prefill、decode 三种场景的判据整理成一张表。注意每一行的"首选动作"不同，**用错行的代价是负收益**（表中通信占比是经验区间，不是某一篇的实测）。
+
+读法：先看第二列找瓶颈，再看最后两列的动作和禁忌；同一行的动作和禁忌不要同时做。
 
 | 场景 | 瓶颈资源 | 通信占比 | 首选动作 | 不要做什么 |
 |---|---|---|---|---|
 | 训练（大 GEMM） | 算力 | 10–50% | **切 + 错**：bucket、microbatch、1F1B、tile 融合 | 通信 <10% 时别动 SM 配额，overlap tax 会吃掉收益 |
 | prefill（长序列） | 算力 | 20–47%（MoE 尤甚） | **融 + 让**：AG+GEMM、in-network collective、SM 分区 | batch 太小时 EP 的 all-to-all 无处可藏，先合 batch |
 | decode（小 batch） | HBM 带宽 + 延迟 | ~20% | **减体积 + 省 launch**：低比特量化、AR-Norm 融合、少占 SM | **不要切 batch**：wave 数会翻倍（模型阈值 4K） |
-| decode（大 batch） | 从带宽转向算力 | 随 batch 下降 | **切 batch + 双流**：wave-aware split、nano-batch | 别复制算子——权重 I/O 翻倍会抵消收益 |
+| decode（大 batch） | 从带宽转向算力 | 随 batch 下降 | **切 batch + 双流**：wave-aware split，权重被摊薄后再考虑复制算子 | 权重 I/O 还没摊薄时别复制算子——翻倍的成本会抵消收益 |
 
 再给一个更短的决策顺序，遇到新 workload 按这个顺序问：
 
@@ -340,7 +350,7 @@ prefill 侧的通算并行仍然值得做，尤其 MoE。**INC-MoE**（[2610.363
 - **NanoFlow 用"复制算子"制造并发**，让算力/HBM/NVLink 三种资源同时忙，MILP 搜 nano-batch 与 SM 配额；1.91× vs TensorRT-LLM，达理论最优 68.5%。代价是权重 I/O 翻倍、干扰模型线性化、还差 31.5%。
 - **TokenWeave 用"wave-aware 切分 + 融合消开销"**，把阈值从 4K 推到 1K：延迟 1.28×、吞吐 1.19×、fused kernel 只占 2–8 个 SM。代价是没有 CUDA Graph、Mixtral 上净亏、朴素融合在 512–8K 全程更慢。
 - **Flash Communication 换的是体积不是时间**：INT6 量化 + 两步 all-reduce，节点内通信加速 >3×，但 A100 只有 1.19×（带宽越高收益越小）。
-- **阈值是结构性的**：`decode_overlap.py` 的 threshold≈4096 来自 wave 边界对齐——小 batch 下切分的第一个代价是把 wave 数从 1 抬到 2。三个独立来源（本模型、TokenWeave 的朴素融合负结果、TileLink 的 <4K 负收益）都指向 4K 附近。
+- **阈值是结构性的**：`decode_overlap.py` 的 threshold≈4096 来自 wave 边界对齐——小 batch 下切分的第一个代价是把 wave 数从 1 抬到 2。4K 是这个模型（以及 NanoFlow 那类 nano-batch 方案）的阈值；TokenWeave 在 dense 模型上把它推到 1K（Mixtral 仍要 4K），TileLink 则到 8K 以上才拿到最大 1.2×。
 
 **一句话**：训练侧的 overlap 在"抢空闲算力"，decode 侧的 overlap 在"抢已经很紧的固定开销"；前者几乎稳赚，后者必须先算阈值。
 
