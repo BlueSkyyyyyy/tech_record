@@ -29,10 +29,10 @@ import urllib.request
 from pathlib import Path
 
 UA = "Mozilla/5.0 (X11; Linux x86_64) ai-daily/1.0"
-MIRROR_API = "https://hf-mirror.com/api/daily_papers?date={date}"
-OFFICIAL_API = "https://huggingface.co/api/daily_papers?date={date}"
-OFFICIAL_LATEST_API = "https://huggingface.co/api/daily_papers?limit=100"
-MIRROR_LATEST_API = "https://hf-mirror.com/api/daily_papers?limit=100"
+MIRROR_API = "https://hf-mirror.com/api/daily_papers?date={date}&limit={limit}"
+OFFICIAL_API = "https://huggingface.co/api/daily_papers?date={date}&limit={limit}"
+OFFICIAL_LATEST_API = "https://huggingface.co/api/daily_papers?limit={limit}"
+MIRROR_LATEST_API = "https://hf-mirror.com/api/daily_papers?limit={limit}"
 MIRROR_PAGE = "https://hf-mirror.com/papers/date/{date}"
 OFFICIAL_PAGE = "https://huggingface.co/papers/date/{date}"
 
@@ -44,45 +44,69 @@ def fetch(url: str, timeout: int = 40) -> bytes:
         return resp.read()
 
 
+def fetch_json_retry(url_template: str, date: str = "", timeout: int = 45) -> object:
+    """请求 JSON；镜像偶尔会截断长响应，解析失败就降 limit / 重试一次。
+
+    url_template 里可用 {date} 与 {limit}。
+    """
+    last_exc: Exception | None = None
+    for limit in (100, 50, 25):
+        url = url_template.format(date=date, limit=limit)
+        for attempt in (1, 2):
+            try:
+                return json.loads(fetch(url, timeout))
+            except json.JSONDecodeError as exc:
+                last_exc = exc           # 截断/半包，降 limit 再来
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
+                last_exc = exc
+                break                    # 连不上就不用换 limit 了
+    raise ValueError(f"请求失败（{last_exc}）")
+
+
 def _daily_date(entry: dict) -> str:
     """条目「登上 daily」的日期（YYYY-MM-DD）；缺字段返回空串。"""
     p = entry.get("paper") or entry
     return (p.get("submittedOnDailyAt") or "")[:10]
 
 
-def try_sources(date: str, timeout: int = 40) -> tuple[list, str]:
-    """依次尝试各来源，返回 (paper 列表, 来源说明)。
+def try_sources(date: str, timeout: int = 45) -> tuple[list, str]:
+    """返回 (paper 列表, 来源说明)。
 
-    注意：`/api/daily_papers?date=` 有已知 bug——某天的批次刚开始收录时，按日期
-    过滤会返回 0，而不带 date 的接口（返回最新条目，按 daily 日倒序）里已经有
-    当天的论文。所以「按日期拿不到」时再退到「拿最新一批 + 本地按日期过滤」。
+    顺序有讲究，都是实测踩出来的：
+    1. **最新一批（不带 date）+ 本地按日期过滤**——最可信。`?date=` 在某天批次
+       刚开始收录时会返回 0（2026-11-09 实测），日期页也常常只给部分（2026-11-10
+       实测只给 2 篇，实际 23 篇）。
+    2. **按日期 API**——批次封板后它最准，也最省流量。
+    3. **日期页内嵌 JSON**——最后兜底。
     """
     errors = []
-    for url in (OFFICIAL_API, MIRROR_API):
-        try:
-            data = json.loads(fetch(url.format(date=date), timeout))
-            if isinstance(data, list) and data:
-                return data, url.format(date=date)
-            errors.append(f"{url}: 按日期过滤结果为空（上游 date 过滤滞后）")
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as exc:
-            errors.append(f"{url}: {exc}")
 
-    # 兜底 1：最新一批（不带 date），本地过滤
+    # 1) 最新一批，本地过滤
     for url in (OFFICIAL_LATEST_API, MIRROR_LATEST_API):
         try:
-            data = json.loads(fetch(url, timeout))
+            data = fetch_json_retry(url, date, timeout)
             if not isinstance(data, list):
                 errors.append(f"{url}: 返回不是 list")
                 continue
             picked = [e for e in data if _daily_date(e) == date]
             if picked:
-                return picked, url + f" (本地按 {date} 过滤)"
+                return picked, url.split("?")[0] + " (最新一批，本地按日期过滤)"
             newest = sorted({_daily_date(e) for e in data if _daily_date(e)}, reverse=True)[:3]
-            errors.append(f"{url}: 最新条目里没有 {date}（最新是 {newest}）")
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as exc:
+            errors.append(f"{url}: 最新一批里没有 {date}（最新是 {newest}）")
+        except ValueError as exc:
             errors.append(f"{url}: {exc}")
 
-    # 兜底 2：解析日期页
+    # 2) 按日期 API
+    for url in (OFFICIAL_API, MIRROR_API):
+        try:
+            data = fetch_json_retry(url, date, timeout)
+            if isinstance(data, list) and data:
+                return data, url.format(date=date, limit="")
+            errors.append(f"{url}: 按日期过滤为空（上游 date 过滤滞后）")
+        except ValueError as exc:
+            errors.append(f"{url}: {exc}")
+
+    # 3) 日期页
     for url in (OFFICIAL_PAGE, MIRROR_PAGE):
         try:
             page = fetch(url.format(date=date), timeout).decode("utf-8", "replace")
