@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-05：39 篇 HF Daily Papers — 回合级信用、机�
 subtitle: "TurnWise 把 GRPO 的信用拆到回合、DataFarm 用 coding agent 造机器人数据、SIMPLE 把推理能耗写成四参数定律"
 date: 2026-11-05
 draft: false
-weight: 5
+weight: 6
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "agent", "VLA", "推理系统", "扩散模型", "评测"]
 categories: ["LLM算法"]
