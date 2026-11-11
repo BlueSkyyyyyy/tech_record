@@ -66,8 +66,10 @@ TASK="$(cat <<EOF
 2. 正文写 code/ai-daily/docs/${TARGET_DATE}.md，文章壳写 content/posts/ai-daily-${TARGET_DATE}/index.md（frontmatter 的 date 写裸日期 ${TARGET_DATE}，weight 按「日期倒序」：导读恒 1，日报最新一天是 2，把比今天旧的所有篇 weight 各 +1）。
 3. 论文摘要必须自己重写并保留具体数字，禁止直接粘贴 brief 或 ai_summary；分组内按 upvotes 降序；Top 10 表放最前；结尾写「今天的三个观察」。
 4. 同步更新两处索引：content/posts/ai-daily-00-index/index.md 的「文章索引」（最新在上）、根 README.md 的「AI 日报」小节。
-5. 构建验证：/tmp/hugo_bin/hugo --gc --minify，确认 public/posts/ai-daily-${TARGET_DATE}/ 存在、无 ERROR。
-6. 提交并推送：只 add 本任务相关文件（content/posts/ai-daily-${TARGET_DATE}、code/ai-daily/docs/${TARGET_DATE}.md、content/posts/ai-daily-00-index/index.md、README.md），然后 git commit -m "post: AI 日报 ${TARGET_DATE}"、git push。不要 git add -A（仓库里有别的专题的半成品改动）；push 失败不要 force，把错误写进最终输出即可。
+5. 先修加粗：python3 code/ai-daily/fix_bold.py --fix code/ai-daily/docs/${TARGET_DATE}.md
+   （**加粗** 以「」（）等 CJK 标点收尾会在 doc_include 里退化成字面星号；这个脚本会自动把标点挪到 ** 外面。必须做到它输出 bold ok。）
+6. 构建验证：/tmp/hugo_bin/hugo --gc --minify，确认 public/posts/ai-daily-${TARGET_DATE}/ 存在、无 ERROR。
+7. 提交并推送：只 add 本任务相关文件（content/posts/ai-daily-${TARGET_DATE}、code/ai-daily/docs/${TARGET_DATE}.md、content/posts/ai-daily-00-index/index.md、README.md），然后 git commit -m "post: AI 日报 ${TARGET_DATE}"、git push。不要 git add -A（仓库里有别的专题的半成品改动）；push 失败不要 force，把错误写进最终输出即可。
 7. 全程不要向用户提问：遇到歧义按 agent_skills/ai-daily.md 的默认口径自行决定，并在最终输出里写明你的选择。
 
 完成标准：线上 https://blueskyyyyyy.github.io/tech_record/posts/ai-daily-${TARGET_DATE}/ 返回 200（推送后等 90 秒再查）。若 Actions 部署失败，把失败原因写进最终输出，不要反复重试。

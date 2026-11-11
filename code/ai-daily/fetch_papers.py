@@ -47,7 +47,8 @@ def fetch(url: str, timeout: int = 40) -> bytes:
 def fetch_json_retry(url_template: str, date: str = "", timeout: int = 45) -> object:
     """请求 JSON；镜像偶尔会截断长响应，解析失败就降 limit / 重试一次。
 
-    url_template 里可用 {date} 与 {limit}。
+    url_template 里可用 {date} 与 {limit}。网络层失败立即抛 ValueError（不再试别的
+    limit），否则一次跑下来会为了几个连不上的域名白等好几分钟。
     """
     last_exc: Exception | None = None
     for limit in (100, 50, 25):
@@ -56,11 +57,11 @@ def fetch_json_retry(url_template: str, date: str = "", timeout: int = 45) -> ob
             try:
                 return json.loads(fetch(url, timeout))
             except json.JSONDecodeError as exc:
-                last_exc = exc           # 截断/半包，降 limit 再来
+                last_exc = exc           # 截断/半包：降 limit 再试
             except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
-                last_exc = exc
-                break                    # 连不上就不用换 limit 了
-    raise ValueError(f"请求失败（{last_exc}）")
+                # 连不上/被墙：换 limit 也没用，立刻放弃这个源（别让 4 个源各耗 3×timeout）
+                raise ValueError(f"不可达（{exc}）") from exc
+    raise ValueError(f"响应始终无法解析（{last_exc}）")
 
 
 def _daily_date(entry: dict) -> str:
@@ -69,55 +70,75 @@ def _daily_date(entry: dict) -> str:
     return (p.get("submittedOnDailyAt") or "")[:10]
 
 
-def try_sources(date: str, timeout: int = 45) -> tuple[list, str]:
-    """返回 (paper 列表, 来源说明)。
+def _entry_id(entry: dict) -> str:
+    return ((entry.get("paper") or entry).get("id") or "").strip()
 
-    顺序有讲究，都是实测踩出来的：
-    1. **最新一批（不带 date）+ 本地按日期过滤**——最可信。`?date=` 在某天批次
-       刚开始收录时会返回 0（2026-11-09 实测），日期页也常常只给部分（2026-11-10
-       实测只给 2 篇，实际 23 篇）。
-    2. **按日期 API**——批次封板后它最准，也最省流量。
-    3. **日期页内嵌 JSON**——最后兜底。
+
+def try_sources(date: str, timeout: int = 30) -> tuple[list, str]:
+    """把各来源的结果**按 paper id 取并集**，返回 (entries, 来源说明)。
+
+    为什么要并集而不是「第一个成功的就用」：上游两个接口都会**部分返回**——
+    2026-11-11 实测 `?date=` 只给 3 篇（实际 29 篇），日期页也不全。任何单源
+    都不可信，只有并集才接近完整；`{date}` 过滤滞后时也一样（并集里最新一批
+    已经把当天收进去了）。
     """
-    errors = []
+    merged: dict[str, dict] = {}
+    stats: list[str] = []
+    errors: list[str] = []
 
-    # 1) 最新一批，本地过滤
-    for url in (OFFICIAL_LATEST_API, MIRROR_LATEST_API):
-        try:
-            data = fetch_json_retry(url, date, timeout)
-            if not isinstance(data, list):
-                errors.append(f"{url}: 返回不是 list")
+    def add(entries: list, label: str, only_date: bool) -> None:
+        n_new = 0
+        for e in entries:
+            if not isinstance(e, dict):
                 continue
-            picked = [e for e in data if _daily_date(e) == date]
-            if picked:
-                return picked, url.split("?")[0] + " (最新一批，本地按日期过滤)"
-            newest = sorted({_daily_date(e) for e in data if _daily_date(e)}, reverse=True)[:3]
-            errors.append(f"{url}: 最新一批里没有 {date}（最新是 {newest}）")
-        except ValueError as exc:
-            errors.append(f"{url}: {exc}")
+            if only_date and _daily_date(e) != date:
+                continue
+            pid = _entry_id(e)
+            if not pid:
+                continue
+            if pid not in merged:
+                merged[pid] = e
+                n_new += 1
+        stats.append(f"{label}={n_new}")
 
-    # 2) 按日期 API
-    for url in (OFFICIAL_API, MIRROR_API):
+    # 镜像优先（官方域名在本机被 DNS 污染，通常直接失败）
+    jobs = [
+        (MIRROR_LATEST_API, "mirror:latest", True),
+        (MIRROR_API, "mirror:date", False),
+        (OFFICIAL_LATEST_API, "official:latest", True),
+        (OFFICIAL_API, "official:date", False),
+    ]
+    dead_hosts: set[str] = set()      # 一个域名连不上就跳过它剩下的接口
+    for template, label, only_date in jobs:
+        host = template.split("/")[2]
+        if host in dead_hosts:
+            continue
         try:
-            data = fetch_json_retry(url, date, timeout)
-            if isinstance(data, list) and data:
-                return data, url.format(date=date, limit="")
-            errors.append(f"{url}: 按日期过滤为空（上游 date 过滤滞后）")
+            data = fetch_json_retry(template, date, timeout)
+            if isinstance(data, list):
+                add(data, label, only_date)
+            else:
+                errors.append(f"{label}: 返回不是 list")
         except ValueError as exc:
-            errors.append(f"{url}: {exc}")
+            errors.append(f"{label}: {exc}")
+            if "不可达" in str(exc):
+                dead_hosts.add(host)
 
-    # 3) 日期页
-    for url in (OFFICIAL_PAGE, MIRROR_PAGE):
-        try:
-            page = fetch(url.format(date=date), timeout).decode("utf-8", "replace")
-            data = parse_svelte_page(page)
-            if data:
-                return data, url.format(date=date) + " (page)"
-            errors.append(f"{url}: 页面里没有 data-props JSON")
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as exc:
-            errors.append(f"{url}: {exc}")
+    if not merged:
+        for url in (MIRROR_PAGE, OFFICIAL_PAGE):
+            try:
+                page = fetch(url.format(date=date), timeout).decode("utf-8", "replace")
+                add(parse_svelte_page(page), f"page:{url.split('/')[2]}", False)
+            except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError) as exc:
+                errors.append(f"page {url}: {exc}")
 
-    raise RuntimeError("所有数据源都失败或为空：\n  " + "\n  ".join(errors))
+    if not merged:
+        raise RuntimeError("所有数据源都失败或为空：\n  " + "\n  ".join(errors))
+
+    note = "并集：" + "，".join(stats)
+    if errors:
+        note += " | 失败：" + "；".join(errors[:3])
+    return list(merged.values()), note
 
 
 # --------------------------------------------------------------------------- 解析

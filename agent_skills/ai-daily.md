@@ -67,5 +67,5 @@
 - **同一天不要重复跑同一个日期**：先看 `content/posts/ai-daily-<date>/` 是否已存在，存在则只增量修订，不要新建第二篇。
 - **upvotes 会变**：文中注明「截至抓取时间」，同一篇隔天重抓数字会不同，不要为此改旧文。
 - **不要把 brief 直接贴进正文**：brief 是素材，正文必须重写、必须有观点。
-- **`**加粗**` 不要以「」（）收尾**：正文走 `doc_include`（`readFile|markdownify`），这类加粗会退化成字面星号（见 `agent_guide.md` 坑 #8）。写完 grep 一下 `\*\*「` 和 `\*\*（`，或构建后确认页面里没有裸 `**`。
+- **写完先跑 `python3 code/ai-daily/fix_bold.py --fix code/ai-daily/docs/<日期>.md`**：`**加粗**` 不要以「」（）收尾：正文走 `doc_include`（`readFile|markdownify`），这类加粗会退化成字面星号（见 `agent_guide.md` 坑 #8）。写完 grep 一下 `\*\*「` 和 `\*\*（`，或构建后确认页面里没有裸 `**`。
 - **frontmatter 的 `weight`**：导读恒为 1，日报按日期倒序 2、3、4…；不要用日期本身当 weight（日期大小和阅读顺序相反）。
