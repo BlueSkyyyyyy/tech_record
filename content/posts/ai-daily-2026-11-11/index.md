@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-11：29 篇 HF Daily Papers — 机器人上下文学�
 subtitle: "WICL 用一条演示 + 仿真排练把 RoboTwin 2.0 拉到 83.4%、零梯度；Tree-Ising 把 BF16 修复解成 QUBO，MATH-500 54.6% 对 51.7%、成本约 $0.90；WikiTrace 给每条记忆接回原始轨迹"
 date: 2026-11-11
 draft: false
-weight: 2
+weight: 3
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "具身智能", "世界模型", "agent", "记忆", "模型编辑", "量化", "评测"]
 categories: ["LLM算法"]
