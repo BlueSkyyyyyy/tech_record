@@ -20,7 +20,7 @@
 >
 > **MLA head_dim=512 小 shape**（目标卡对标点）：`(1, 256, 2, 512)` / `(1, 512, 4, 512)` / `(1, 1024, 2, 512)`；TE 训练 bwd 拒绝 `head_dim>256`，故仅列入推理 fwd 段。
 >
-> **AttnRes**（FLA `fused_attnres`，表末 6 行）：`attnres_fwd_bwd` 是一次调用的 **fwd+bwd 合计**（µs），shape 为 `(batch, seq, L, hidden)`，其中 L 是 depth source 数（Kimi-K3 的实际范围是 2…9，这里取两端 L=2 / L=9）；dtype bf16、融合输出 RMSNorm、`checkpoint_level=1`。详见下方「Kimi-K3 AttnRes 专项」。
+> **AttnRes**（FLA `fused_attnres`，表末 12 行）：`attnres_fwd` / `attnres_bwd` **分开独立计时**（µs），两者相加即为一次调用的训练步开销（各自四舍五入到 0.1 µs，故相加可能与单步实测差 ≤0.1 µs）；shape 为 `(batch, seq, L, hidden)`，其中 L 是 depth source 数（Kimi-K3 的实际范围是 2…9，这里取两端 L=2 / L=9）；dtype bf16、融合输出 RMSNorm、`checkpoint_level=1`。详见下方「Kimi-K3 AttnRes 专项」。
 >
 > 注：dsv4 / dsv4.1 / DeepSeek-V4-Pro 主 MLA 注意力 `head_dim=512`（qk=448+64，v=512）超出 TE fused_attn 在 H100 上训练 bwd 的支持范围（最大 256），仅推理 fwd 段 `fused_attn_fwd_infer` 可测；其生产实现是自研 CSA/DSA 稀疏注意力 kernel，故这里只测其 DSA indexer / 推理 fwd。
 
@@ -341,12 +341,18 @@
 | fused_attn_fwd_infer | torch.float16 | (1, 512, 4, 512) | H100 | 35.1 |
 | fused_attn_fwd_infer | torch.bfloat16 | (1, 1024, 2, 512) | H100 | 68.4 |
 | fused_attn_fwd_infer | torch.float16 | (1, 1024, 2, 512) | H100 | 67.8 |
-| attnres_fwd_bwd | torch.bfloat16 | (1, 1024, 2, 7168) | H100 | 109.3 |
-| attnres_fwd_bwd | torch.bfloat16 | (1, 1024, 9, 7168) | H100 | 256.6 |
-| attnres_fwd_bwd | torch.bfloat16 | (1, 2048, 2, 7168) | H100 | 207.6 |
-| attnres_fwd_bwd | torch.bfloat16 | (1, 2048, 9, 7168) | H100 | 509.7 |
-| attnres_fwd_bwd | torch.bfloat16 | (1, 4096, 2, 7168) | H100 | 395.0 |
-| attnres_fwd_bwd | torch.bfloat16 | (1, 4096, 9, 7168) | H100 | 1007.4 |
+| attnres_fwd | torch.bfloat16 | (1, 1024, 2, 7168) | H100 | 21.4 |
+| attnres_fwd | torch.bfloat16 | (1, 1024, 9, 7168) | H100 | 57.0 |
+| attnres_fwd | torch.bfloat16 | (1, 2048, 2, 7168) | H100 | 40.9 |
+| attnres_fwd | torch.bfloat16 | (1, 2048, 9, 7168) | H100 | 120.6 |
+| attnres_fwd | torch.bfloat16 | (1, 4096, 2, 7168) | H100 | 75.1 |
+| attnres_fwd | torch.bfloat16 | (1, 4096, 9, 7168) | H100 | 236.8 |
+| attnres_bwd | torch.bfloat16 | (1, 1024, 2, 7168) | H100 | 87.8 |
+| attnres_bwd | torch.bfloat16 | (1, 1024, 9, 7168) | H100 | 199.6 |
+| attnres_bwd | torch.bfloat16 | (1, 2048, 2, 7168) | H100 | 166.7 |
+| attnres_bwd | torch.bfloat16 | (1, 2048, 9, 7168) | H100 | 389.1 |
+| attnres_bwd | torch.bfloat16 | (1, 4096, 2, 7168) | H100 | 319.9 |
+| attnres_bwd | torch.bfloat16 | (1, 4096, 9, 7168) | H100 | 770.6 |
 
 ## Kimi-K3 MLA 专项（96 头 / qk=192 / v=128，TE fused_attn fwd + bwd）
 
