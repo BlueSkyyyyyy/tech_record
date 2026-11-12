@@ -19,7 +19,7 @@ So the *only* changed variable vs P7-44 is the kernel structure (tensor core kep
 operands streamed / not register-resident) -- dtype (fp32/tf32), inputs and op set
 are identical.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_mma.py \
         > .../harness/check_bwd_b2_mma.out.txt 2>&1
     B2MM_MODE=a | b | c | d

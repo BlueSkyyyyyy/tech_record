@@ -142,7 +142,7 @@ deep_jit 要求 `-std=c++20` 的原因之一。
 
 ## 9. H100 真机实验：64 项 ALL PASS
 
-`harness/exp_deepjit_utils.sh` 在 `kernel_lab`（H100/sm90）里：① 打印七个头的 sha256（见 `.out.txt`）；
+`harness/exp_deepjit_utils.sh` 在 `lab`（H100/sm90）里：① 打印七个头的 sha256（见 `.out.txt`）；
 ② `g++ -std=c++20 -O2 -I<deep_jit/include> src/deepjit_utils.cpp -ldw -ldl` **直接 include 真实头**编出纯 host
 程序，跑 json/str/uuid/command/filesystem/no_ref_ptr；③ 把 `src/deepjit_gil.cpp` 编成 pybind 模块，在
 Python 进程里 import 调 `GilScopedRelease`。C++ 段 **43/43**、Python 段 **21/21**，总判定 **ALL PASS**。

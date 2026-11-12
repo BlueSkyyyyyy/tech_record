@@ -1,7 +1,7 @@
 """cuBLAS (via torch.matmul) 的 BF16 GEMM 参考性能，与手写 TC kernel 同口径。
 
-在 kernel_lab 容器里跑：
-    docker exec kernel_lab python3 /ssd/.../13-tensor-core/cublas_bf16_ref.py
+在 lab 容器里跑：
+    docker exec lab python3 /workspace/.../13-tensor-core/cublas_bf16_ref.py
 """
 import torch
 

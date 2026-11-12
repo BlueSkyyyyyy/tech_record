@@ -15,7 +15,7 @@
 >
 > 目标卡代号敏感：全文用「目标卡」指代。
 
-参考版本：`~/github/DeepGEMM` commit `057ca59`（v2.8.1）；本机 `kernel_lab`（H100 sm90）。
+参考版本：`~/github/DeepGEMM` commit `057ca59`（v2.8.1）；本机 `lab`（H100 sm90）。
 
 ---
 

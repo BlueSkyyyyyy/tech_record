@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P93-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证 SM100 BF16 GEMM 的 `kSwapAB`(dgrad) 分支的
+# P93-1 实验 driver：在 lab(H100/sm90) 上真机验证 SM100 BF16 GEMM 的 `kSwapAB`(dgrad) 分支的
 #   **host 半边**（选核启发式 / storage / pipeline / launch），以及「swap == transpose」的数值恒等式。
 #   主 kernel（UMMA/TMEM/转置 STSM）是 SM100 专属，仅分析（见 docs/103）。
 # 对应源码 src/sm100_swap_ab_dgrad.cu（nvcc 直接 include 真实头文件 + torch）。

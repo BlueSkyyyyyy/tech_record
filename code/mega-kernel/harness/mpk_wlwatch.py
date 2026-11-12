@@ -5,14 +5,14 @@ whether worker[0] is actually spinning in that loop (a trap in the worker
 kernel cannot unblock the scheduler kernel, so a trap would still show up as a
 hang). Apply, run the probe, then restore.
 
-Run inside kernel_lab:
+Run inside lab:
   python3 mpk_wlwatch.py apply|restore
 """
 
 import os
 import sys
 
-MIRAGE_HOME = os.environ.get("MIRAGE_HOME", "/ssd/mirage_mpk_build")
+MIRAGE_HOME = os.environ.get("MIRAGE_HOME", "/workspace/mirage_mpk_build")
 CUH = os.path.join(MIRAGE_HOME,
                    "include/mirage/persistent_kernel/persistent_kernel.cuh")
 BAK = CUH + ".wlwatchbak"

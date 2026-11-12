@@ -305,5 +305,5 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a" \
 或者 MLA decode 的 producer/consumer warp specialization。
 
 > 环境：H100 80GB HBM3 SXM（CC 9.0，132 SM，HBM ~3.35 TB/s，BF16 TC dense ~989 TFLOPS）；
-> 容器 `kernel_lab`（CUDA 13.2）。所有数字来自本机实测，原始输出见
+> 容器 `lab`（CUDA 13.2）。所有数字来自本机实测，原始输出见
 > `code/kernel-opt/42-mla-decode-wgmma/*.out.txt`。

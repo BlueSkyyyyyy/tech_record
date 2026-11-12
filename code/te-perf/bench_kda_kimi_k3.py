@@ -26,7 +26,7 @@
 #   FLA_TILELANG / FLA_FLASH_KDA -> "0" disables; if none enabled, dispatch falls back
 #   to the default Triton `chunk_kda`.
 #
-# Usage (inside the kernel_lab container, on an idle GPU):
+# Usage (inside the lab container, on an idle GPU):
 #   python bench_kda_kimi_k3.py --mode support
 #   python bench_kda_kimi_k3.py --mode sweep --dtypes bfloat16 --seqs 1024,4096,8192,32768
 #   python bench_kda_kimi_k3.py --mode check

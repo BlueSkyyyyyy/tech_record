@@ -24,7 +24,7 @@ anchors the **K=256 `INTRA` fold enabling combination** (bf16 staging) to an ext
           the fold self-consistency `prod_bf16_intra` vs `prod_bf16 + standalone b3intra(K)`.
   Part C  resources: registers / spill / smem of the staging builds over the `(K,V)` grid.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_kv_anchor2.py \
         > .../harness/check_bwd_b2_kv_anchor2.out.txt 2>&1
     B2KA2_MODE=a | b | c

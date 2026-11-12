@@ -137,7 +137,7 @@ fp32 就地舍到 tf32，kernel 侧不必再写一遍 `cvt`。
 
 ## 7. H100 真机实测汇总
 
-实验 `harness/exp_tf32_rs_wgmma.{sh,out.txt}`（`kernel_lab`，H100/sm90a），真实头文件 sha256 见
+实验 `harness/exp_tf32_rs_wgmma.{sh,out.txt}`（`lab`，H100/sm90a），真实头文件 sha256 见
 `.out.txt`：
 
 **A) 选择器静态属性**——`TF32MMASelector<8/64/128/256>: M=64, K=8, kNumAccum=4/32/64/128`，全对。

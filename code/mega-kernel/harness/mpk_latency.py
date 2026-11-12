@@ -15,8 +15,8 @@ worker/scheduler done-events, `event.elapsed_time` for the pair measures the
 Requires the convergence workaround (see harness/mpk_latency_run.patch):
 `include/.../persistent_kernel.cuh` spin-counter + `-DMPK_DBG_WATCHDOG`.
 
-Run inside kernel_lab:
-  MIRAGE_HOME=/ssd/mirage_mpk_build CUDA_VISIBLE_DEVICES=7 \
+Run inside lab:
+  MIRAGE_HOME=/workspace/mirage_mpk_build CUDA_VISIBLE_DEVICES=7 \
     python3 -u mpk_latency.py --iters 200 --warmup 20 --device 0
 """
 

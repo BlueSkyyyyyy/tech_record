@@ -29,7 +29,7 @@ Parts
      §45 `cf` chain, 6 cases incl. non-divisible T, g=0, B=2.
   B  chain dev/wall (idle card): FLA reverse vs `cf` vs `pc` vs `pci`, + per-kernel attribution.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_prod_e2e.py \
         > .../harness/check_bwd_prod_e2e.out.txt 2>&1
     PE_MODE=correctness | timing

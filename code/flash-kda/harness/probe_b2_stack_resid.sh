@@ -19,7 +19,7 @@
 #   [D] `ncu` conflict-**type** split at grid=8192 (`type_arbitration` vs `mem_shared_op_ld`).
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   CUDA_VISIBLE_DEVICES=1 bash .../probe_b2_stack_resid.sh > .../probe_b2_stack_resid.out.txt 2>&1
 set -uo pipefail
 

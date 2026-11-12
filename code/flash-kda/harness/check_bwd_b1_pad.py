@@ -17,7 +17,7 @@ conflict-free.  Build the same source twice (`-DB1_PAD` on/off) and compare:
   Part B  kernel-only CUPTI us/call: unpadded vs padded vs FLA `dhu`
   Part C  smem footprint (the 16 B/row pad grows smem -> watch occupancy)
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_pad.py
 """
 import ctypes

@@ -33,7 +33,7 @@ Parts
   Part D  timing (kernel-only CUPTI `dev`): prod vs prod_bf16 vs prod_bf16_mma vs prod_intra at
           K!=V.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=3 python .../harness/check_bwd_b2_bf16_kv.py \
         > .../harness/check_bwd_b2_bf16_kv.out.txt 2>&1
     B2BKV_MODE=a | b | c | d

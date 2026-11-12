@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P79-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证两个 Mega 家族 JIT 包装层
+# P79-1 实验 driver：在 lab(H100/sm90) 上真机验证两个 Mega 家族 JIT 包装层
 #   csrc/jit_kernels/impls/sm100_bf16_mega_moe.hpp  （P10-1 拆过 kernel，本篇补 wrapper）
 #   csrc/jit_kernels/impls/sm100_mega_mhc.hpp       （P5-2 拆过 kernel，本篇补 wrapper）
 #   ./harness/exp_mega_moe_mhc_jit_wrapper.sh

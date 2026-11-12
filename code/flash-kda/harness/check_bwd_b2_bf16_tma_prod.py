@@ -26,7 +26,7 @@ exact again.
   Part C  timing: kernel-only `dev` for prod / prod_tma / prod_bf16 / prod_bf16_tma / bf16mma_tma.
   Part D  torch sanity: `dv2 = beta*(A@dv)` on the bf16-valued operands.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_bf16_tma_prod.py \
         > .../harness/check_bwd_b2_bf16_tma_prod.out.txt 2>&1
     B2TP_MODE=a | b | c | d

@@ -5,7 +5,7 @@
 # SWIZZLE_128B BVK=32 TMA, to explain the (large) timing gap in check_bwd_b2_tma64.out.txt.
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_tma64_ncu.sh > .../probe_b2_tma64_ncu.out.txt 2>&1
 set -uo pipefail
 

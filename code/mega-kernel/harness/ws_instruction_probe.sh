@@ -8,7 +8,7 @@
 set -u
 DEV=${DEV:-3}
 DG=${DG:-${HOME}/github/DeepGEMM}
-MPK=${MPK:-/ssd/mirage_mpk_build}
+MPK=${MPK:-/workspace/mirage_mpk_build}
 DGCUTLASS="$DG/deep_gemm/include"
 TPCUTLASS="$DG/third-party/cutlass/include"
 MPKCUTLASS="$MPK/deps/cutlass/include"

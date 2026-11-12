@@ -7,7 +7,7 @@
 > 让读者（和未来的自己）知道「某个 kernel / host 入口被哪几篇讲过」。
 >
 > 这是本专题第一篇**元层级**的增量：它不深挖某个 kernel，而是给前面 105 篇做一次**引用体检**，
-> 并**闭环修掉体检发现的真实错误**。**纯文件解析、不加载 GPU**；在 `kernel_lab`（H100）里跑只是
+> 并**闭环修掉体检发现的真实错误**。**纯文件解析、不加载 GPU**；在 `lab`（H100）里跑只是
 > 为了与其它实验同环境。
 >
 > 目标卡代号敏感：全文用「目标卡」指代。
@@ -236,7 +236,7 @@ kernel 被拆过，连 `locality_domain`（26 行）、`epilogue_class`（27 行
 ## 6. 复现
 
 ```bash
-# 在 kernel_lab(H100) 里（纯文件解析，也可直接在宿主机跑）
+# 在 lab(H100) 里（纯文件解析，也可直接在宿主机跑）
 bash harness/exp_deepgemm_source_audit.sh > harness/exp_deepgemm_source_audit.out.txt
 ```
 

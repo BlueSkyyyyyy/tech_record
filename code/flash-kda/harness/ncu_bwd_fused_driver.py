@@ -2,7 +2,7 @@
 and the unfused pair (`_dhu_kernel` + `_wy_dqkg_kernel`) on identical operands, for DRAM-byte
 attribution of the fusion.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_bwd_fused_driver.py --which fused --B 8 --T 2048 --H 8
     ncu -k regex:"_fused_b12_kernel" -c 1 --launch-skip 2 \
         --metrics dram__bytes_read.sum,dram__bytes_write.sum,... \

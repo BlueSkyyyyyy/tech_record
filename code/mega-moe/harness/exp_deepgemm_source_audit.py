@@ -11,7 +11,7 @@
           标识符是否真的出现在被引行里）。
   Part C  漂移清单：逐条列出对不上的引用（供人工修正）。
 
-不加载 GPU、不编译 kernel，纯文件解析，任何机器都能跑；在 kernel_lab(H100) 里跑只是为了
+不加载 GPU、不编译 kernel，纯文件解析，任何机器都能跑；在 lab(H100) 里跑只是为了
 和专题其它实验同一环境。
 
 用法：python exp_deepgemm_source_audit.py

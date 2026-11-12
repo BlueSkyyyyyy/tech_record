@@ -21,7 +21,7 @@ segment `k` adds *on top of the production kernel* -- the quantity P7-64 could n
   Part C  resources: ptxas regs / spill / smem per level.
 
 Timing口径: CUPTI `dev` (chain-style, `profile_dev`), idle card.  Builds use `-DB2M_PROD -DB2M_HDW`
-(the deployment form of §67).  Run inside `kernel_lab` (idle card), absolute paths:
+(the deployment form of §67).  Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_prod_levels.py \
         > .../harness/check_bwd_b2_prod_levels.out.txt 2>&1
     B2PL_MODE=a | b | c

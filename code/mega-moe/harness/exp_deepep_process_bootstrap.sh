@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P108-1 实验 driver：在 kernel_lab(H100/sm90) 上验证 DeepEP 的测试/进程引导层。
+# P108-1 实验 driver：在 lab(H100/sm90) 上验证 DeepEP 的测试/进程引导层。
 #   harness/exp_deepep_process_bootstrap.py（纯 Python，直接加载真实 deep_ep/utils/envs.py）
 #   bash harness/exp_deepep_process_bootstrap.sh > harness/exp_deepep_process_bootstrap.out.txt
 # 对应源码：~/github/DeepEP@93eb6eb

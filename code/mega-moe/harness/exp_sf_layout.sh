@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P15-1 实验 driver：在 kernel_lab(H100) 上跑 DeepGEMM SF 布局转换 / UE8M0 打包实测。
+# P15-1 实验 driver：在 lab(H100) 上跑 DeepGEMM SF 布局转换 / UE8M0 打包实测。
 #   bash harness/exp_sf_layout.sh > harness/exp_sf_layout.out.txt
 # 对应源码 exp_sf_layout.py；参考 ~/github/DeepGEMM 的
 # csrc/apis/layout.hpp、csrc/jit_kernels/impls/smxx_layout.hpp、

@@ -15,8 +15,8 @@
 //   例：umma_paths_audit \
 //        ~/github/DeepGEMM/deep_gemm/include/deep_gemm/ptx/tcgen05.cuh \
 //        ~/github/DeepGEMM/deep_gemm/include/cute/arch/mma_sm100_umma.hpp \
-//        /ssd/mirage_mpk_build/include/mirage/persistent_kernel/tasks/blackwell \
-//        /ssd/mirage_mpk_build/deps/cutlass/include/cute/arch/mma_sm100_umma.hpp
+//        /workspace/mirage_mpk_build/include/mirage/persistent_kernel/tasks/blackwell \
+//        /workspace/mirage_mpk_build/deps/cutlass/include/cute/arch/mma_sm100_umma.hpp
 
 #include <algorithm>
 #include <cstdio>

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """FA 反向：参考值 dump + 数值对拍 + 性能基准（FA / TE 对照）。
 
-用法（在 kernel_lab 容器内）：
+用法（在 lab 容器内）：
   python fa_bwd_bench.py dump  --shape "1 1024 40 128 kv=8 causal" ...
   python fa_bwd_bench.py bench --dtype fp16 --shape "1 256 2 512 causal" ...
   python fa_bwd_bench.py all

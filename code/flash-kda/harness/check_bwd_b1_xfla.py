@@ -30,7 +30,7 @@ Part D  pipeline determinism scan (BT 16/32/64 × NS 1/2/3): exposes a **race at
         (BT=16, NS=2)** in the hand-written mbarrier pipeline (base run-to-run differs),
         while NS=1/3 and BT=32/64 are bit-stable.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_xfla.py \
         > .../harness/check_bwd_b1_xfla.out.txt 2>&1
 """

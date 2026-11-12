@@ -145,7 +145,7 @@ DRAM 流量只有 206/357 MB。于是 D 的算子强度高、tensor pipe 65–76
 ## 8. 复现
 
 ```bash
-# H100 容器内（kernel_lab，已装 deep_gemm 2.8.1）
+# H100 容器内（lab，已装 deep_gemm 2.8.1）
 bash code/mega-moe/harness/exp_backward_ncu.sh   # 约 2~3 分钟
 # 原始输出：code/mega-moe/harness/exp_backward_ncu.out.txt
 ```

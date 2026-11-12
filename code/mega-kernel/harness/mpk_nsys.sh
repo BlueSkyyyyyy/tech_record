@@ -9,11 +9,11 @@
 # The script is kept (with a hard per-case `timeout`) so the attempt is
 # reproducible and its limits documented.
 #
-# Run inside kernel_lab:
+# Run inside lab:
 #   bash harness/mpk_nsys.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MIRAGE_HOME="${MIRAGE_HOME:-/ssd/mirage_mpk_build}"
+export MIRAGE_HOME="${MIRAGE_HOME:-/workspace/mirage_mpk_build}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 PROF=/tmp/mpkprof
 mkdir -p "$PROF"

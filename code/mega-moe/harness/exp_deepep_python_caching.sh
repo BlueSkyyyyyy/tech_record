@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P113-1 实验 driver：在 kernel_lab(H100/sm90) 上验证 DeepEP 的 Python 缓存基座。
+# P113-1 实验 driver：在 lab(H100/sm90) 上验证 DeepEP 的 Python 缓存基座。
 #   harness/exp_deepep_python_caching.py（纯 Python，按路径加载真实 semantic/find_pkgs/envs.py）
 #   bash harness/exp_deepep_python_caching.sh > harness/exp_deepep_python_caching.out.txt
 # 对应源码：~/github/DeepEP@93eb6eb（v1.2.1-41, __version__ 2.5.0）

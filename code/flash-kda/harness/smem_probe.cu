@@ -1,6 +1,6 @@
 // P2-2 探针：量化 K1 的 smem 占用与 union 复用收益。
 // 对应 csrc/smxx/fwd_kernel1.cuh:5-84 的 K1Layouts / SharedStorageK1。
-// 编译（在 kernel_lab 内）：
+// 编译（在 lab 内）：
 //   nvcc -std=c++17 -O2 -arch=sm_90a --expt-relaxed-constexpr --expt-extended-lambda \
 //     -I <FlashKDA>/cutlass/include -I <FlashKDA>/cutlass/tools/util/include -I <FlashKDA>/csrc \
 //     smem_probe.cu -o /tmp/smem_probe && /tmp/smem_probe

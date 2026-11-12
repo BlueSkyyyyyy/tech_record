@@ -1,6 +1,6 @@
 // 56 DeepSeek-V4-Pro 的 routed expert 权重其实是 FP4（e2m1 + E8M0 block-32）
 //
-// 真实 checkpoint（/ssd/models/DeepSeek-V4-Pro）里：
+// 真实 checkpoint（/models/DeepSeek-V4-Pro）里：
 //   · routed experts  w1/w3 [3072, 7168] w2 [7168, 3072]  →  存成 int8（2 个
 //     e2m1 nibble/byte）+ E8M0 scale（block 32，值 = 2^(b-127)）
 //   · shared expert / attention  →  FP8 e4m3 + ue8m0（block 128）

@@ -26,7 +26,7 @@ so the six outputs are **bit-for-bit identical** (verified incl. non-divisible T
           autograd and vs the baseline chain, and time chain-level.
   Part D  ncu bound analysis lives in `probe_b2_struct_ncu.out.txt` (see docs/07 §28).
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle card:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle card:
     CUDA_VISIBLE_DEVICES=1 python .../check_bwd_b2_struct.py
     B2S_MODE=correctness | timing | regs | chain
 """

@@ -11,7 +11,7 @@
 //   每 warp 私有 mbarrier（warp 内 lane0 发 + expect_tx，其余 lane 等 parity）。
 //   对比 62 的 cp.async 版：每 warp 24 条 `cp.async`（DEPTH2×RWW8）-> 2 条 bulk。
 //
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：hidden=7168, moe_inter=3072,
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：hidden=7168, moe_inter=3072,
 //   n_routed_experts=384, topk=6, expert_dtype=fp4（w2 [7168,3072]，FP4 e2m1 + E8M0 block-32）。
 //
 // 运行：scripts/run.sh 63-v4-fp4-ffn3/k2_tma.cu [B] [mode]

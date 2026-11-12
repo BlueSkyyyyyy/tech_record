@@ -12,7 +12,7 @@ STOP="$DIR/AUTOPILOT_STOP"
 LOCK="$DIR/autopilot.lock"
 PIDFILE="$DIR/autopilot.pid"
 OPENCODE="${HOME}/.opencode/bin/opencode"
-MODEL="local-vllm//ssd/models/DeepSeek-V4.1-Flash"
+MODEL="local-vllm//models/DeepSeek-V4.1-Flash"
 
 MAX_ROUNDS="${MAX_ROUNDS:-20}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-20}"

@@ -24,7 +24,7 @@ inside the dot but accumulated in fp32) — and measures kernel-only times (CUPT
   Part C  the P7-7-style number (ours B1 fed the fp32 workspace at BT=16 vs FLA bf16
           BT=64) and its decomposition: fp32->bf16 operand switch.
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed):
+Run inside `lab` (GPU, FlashKDA built, FLA installed):
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_dhu_dtype.py
 """
 import math

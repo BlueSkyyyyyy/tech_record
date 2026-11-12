@@ -20,7 +20,7 @@ Part B  kernel-only `dev` (CUPTI) + `wall`.
 The `ncu` half (L2 bytes / srcunit read / bank conflicts / duration, NAT sweep at NSTAGE=1) is
 `harness/probe_b2_tma_atom128_ncu.sh` (`..._ncu.out.txt`).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_tma_atom128.py \
         > .../harness/check_bwd_b2_tma_atom128.out.txt 2>&1
     B2TA128_MODE=a | b

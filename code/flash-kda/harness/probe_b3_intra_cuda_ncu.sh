@@ -4,7 +4,7 @@
 # Checks where the two sit -- tensor pipe, DRAM/L2, occupancy -- and where the ~1.3-1.45x
 # CUDA advantage (Part B) comes from.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b3_intra_cuda_ncu.sh > .../probe_b3_intra_cuda_ncu.out.txt 2>&1
 
 set -uo pipefail

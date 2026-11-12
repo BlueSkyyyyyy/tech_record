@@ -3,7 +3,7 @@
 #   * csrc/utils/layout.hpp                    （check_sf_layout / get_tma_aligned_size）
 #   * csrc/jit_kernels/impls/smxx_layout.hpp   （check_k_grouped_packed_ue8m0_tensor）
 #   源码 src/sf_contract_conformance.cu（nvcc 直接 include 真实头文件 + torch）。
-#   在 kernel_lab(H100/sm90) 上编译并运行真实契约函数（这两个函数不含 arch 门控）。
+#   在 lab(H100/sm90) 上编译并运行真实契约函数（这两个函数不含 arch 门控）。
 #   ./harness/exp_sf_contract_conformance.sh > harness/exp_sf_contract_conformance.out.txt
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

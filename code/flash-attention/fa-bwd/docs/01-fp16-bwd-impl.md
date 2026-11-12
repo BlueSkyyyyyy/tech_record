@@ -161,7 +161,7 @@ cd code/flash-attention/fa-bwd
 scripts/run.sh src/fp16/fa_bwd_fp16_onefile.cu
 
 # S=4096 case（需先 dump）
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python "$PWD/harness/fa_bwd_bench.py" dump \
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python "$PWD/harness/fa_bwd_bench.py" dump \
     --dtype fp16 --shape 1 4096 16 128 causal
 scripts/run.sh src/fp16/fa_bwd_fp16_onefile.cu \
     --dir=~/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp16 --iters=10
@@ -171,7 +171,7 @@ scripts/ncu.sh src/fp16/fa_bwd_fp16_onefile.cu --set full --launch-count 1 \
     --kernel-name regex:fa_bwd_fp16_kernel -- --iters=1
 
 # FA/TE 基线
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python "$PWD/harness/fa_bwd_bench.py" bench \
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python "$PWD/harness/fa_bwd_bench.py" bench \
     --dtype fp16 --shape 1 4096 16 128 causal
 ```
 
@@ -273,7 +273,7 @@ scripts/run.sh src/fp16/fa_bwd_fp16_onefile.cu \
     --dir=~/proj/output/fa-bwd/b1_s1024_h64_d128_kv1_causal_fp16 --iters=20
 scripts/ncu.sh src/fp16/fa_bwd_fp16_main.cu --set full --kernel-name regex:fa_bwd_fp16_kernel \
     --launch-count 1 -- --dir=~/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp16 --iters=1
-docker exec kernel_lab python "$PWD/harness/fa_bwd_bench.py" bench --requested --dtype fp16 --repeat 30
+docker exec lab python "$PWD/harness/fa_bwd_bench.py" bench --requested --dtype fp16 --repeat 30
 ```
 
 ---
@@ -358,7 +358,7 @@ scripts/run.sh src/fp16/fa_bwd_fp16_onefile.cu \
     --dir=~/proj/output/fa-bwd/b1_s512_h4_d512_causal_fp16 --iters=50
 scripts/ncu.sh src/fp16/fa_bwd_fp16_main.cu --set full --kernel-name regex:fa_bwd_fp16_kernel \
     --launch-count 1 -- --dir=~/proj/output/fa-bwd/b1_s1024_h2_d512_causal_fp16 --iters=1
-docker exec kernel_lab python "$PWD/harness/fa_bwd_bench.py" bench --requested --dtype fp16
+docker exec lab python "$PWD/harness/fa_bwd_bench.py" bench --requested --dtype fp16
 ```
 
 ---
@@ -5139,7 +5139,7 @@ bf16 逐项同量级（S1024H8 main 0.385→0.212 = 1.82×，S2048 1.206→0.680
 ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \
   scripts/run.sh src/fp16/fa_bwd_fp16_mma_main.cu \
   --dir=~/proj/output/fa-bwd/b1_s2048_h8_d256_causal_fp16 --iters=50
-docker exec kernel_lab .../fa_bwd_fp16_mma_main.out --dir=... --iters=50 --d256wgm=0
+docker exec lab .../fa_bwd_fp16_mma_main.out --dir=... --iters=50 --d256wgm=0
 ```
 
 原始输出：`src/fp16/fa_bwd_fp16_o131_d256_wgmma_ab.out.txt`（4 case × wgmma/mma）、

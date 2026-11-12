@@ -9,10 +9,10 @@ This exercises the full MPK pipeline end-to-end on real hardware:
   persistent kernel launch (workers + schedulers) -> in-kernel event
   scheduling -> output.
 
-Run inside the kernel_lab container with MIRAGE_HOME pointing at the mirage
+Run inside the lab container with MIRAGE_HOME pointing at the mirage
 checkout, e.g.:
 
-  MIRAGE_HOME=/ssd/mirage_mpk_build python3 mpk_smoke.py --workers 4 --schedulers 4
+  MIRAGE_HOME=/workspace/mirage_mpk_build python3 mpk_smoke.py --workers 4 --schedulers 4
 """
 
 import argparse

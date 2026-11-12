@@ -8,7 +8,7 @@
 dK/dV 的 `red` 压 (G-1)/G（MQA 最多 ×64）。本脚本把这条律与上界测量/打印出来，作为
 F4b 收口的可复现证据（判决见 docs/03 §109：loop-order 冲突 ⇒ 本卡不可行）。
 
-用法（在 kernel_lab 容器里跑，或宿主机用 --file 解析已存输出）：
+用法（在 lab 容器里跑，或宿主机用 --file 解析已存输出）：
   python harness/fa_fp8_red_law.py                 # 现场 ncu 测 5 个点
   python harness/fa_fp8_red_law.py --file src/fp8/fa_bwd_fp8_o86_gqa_red_probe.out.txt
 """

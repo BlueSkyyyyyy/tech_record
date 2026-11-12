@@ -4,8 +4,8 @@ Runs the CPU pure-PyTorch reference (token-recurrent golden + chunked) side by s
 with FLA's Triton ``chunk_kda`` on the *same* inputs (raw q/k logits; gate via
 ``use_gate_in_kernel``), reporting max abs / rel for output ``o`` and final state.
 
-Usage (inside kernel_lab):
-    python /ssd/.../code/flash-kda/harness/check_kda_ref.py
+Usage (inside lab):
+    python /workspace/.../code/flash-kda/harness/check_kda_ref.py
 """
 
 import os

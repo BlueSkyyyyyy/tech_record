@@ -254,7 +254,7 @@ CUTLASS_DEVICE void advance() {
 
 ## 5. H100 实测（`src/probe_clock64.cu` + `harness/exp_probe_clock64.sh`）
 
-在 kernel_lab（H100 80GB HBM3, sm90, driver 570.211.01）上以 `nvcc -arch=sm_90 -O3` 编译，
+在 lab（H100 80GB HBM3, sm90, driver 570.211.01）上以 `nvcc -arch=sm_90 -O3` 编译，
 **同一份源码分别以 `-DDG_PROBE_ENABLE=1` 与默认（0）编成两个二进制**，Python 侧用 numpy 解析
 binary 记录流。`probe.cuh` 的 sha256 = `a8c3ba24…`。**总判定 ALL PASS**：
 

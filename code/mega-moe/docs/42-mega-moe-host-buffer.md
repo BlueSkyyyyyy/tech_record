@@ -15,7 +15,7 @@
 > `deep_gemm._C.get_symm_buffer_size_for_mega_moe` / `get_token_alignment_for_mega_moe` /
 > `get_block_m_for_mega_moe`。因此本机 **H100（sm90）上可以真机对拍这层编排的每一个字节**。
 >
-> 参考版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（v2.8.1），本机 `kernel_lab`（H100 sm90）。
+> 参考版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（v2.8.1），本机 `lab`（H100 sm90）。
 > 实验：`harness/exp_mega_moe_host_buffer.py`（driver `harness/exp_mega_moe_host_buffer.sh`），
 > 输出 `harness/exp_mega_moe_host_buffer.out.txt`，7 组配置 **num_bytes 与全部 view 逐字段 ALL PASS**。
 

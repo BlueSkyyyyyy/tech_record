@@ -17,7 +17,7 @@ For each shape and dtype it reports:
   B. full FLA `chunk_kda` autograd chain (same dtype), the `dhu` kernel attributed per call;
   C. the autotune config FLA selected (BV / num_warps / num_stages) in each path.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_fla_dhu_baseline.py \
         > .../harness/check_bwd_fla_dhu_baseline.out.txt 2>&1
 """

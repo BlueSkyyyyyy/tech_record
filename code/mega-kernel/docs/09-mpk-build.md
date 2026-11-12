@@ -3,7 +3,7 @@
 > 本文是 `docs/06`（运行层源码走读）/`docs/07`（单 task device）/`docs/08`（编译层依赖分析器）
 > 的**构建侧补齐**。`docs/06` §0 当时明确写着「mirage 是一套 4.4 万行 C++ + 4.2 万行 CUDA 的完整
 > 编译器/运行时，在目标卡 H100/sm90 容器里从零编译成本过高，本轮不做构建/运行实验」。本文把这条
-> 尾巴补上：**在 `kernel_lab`（目标卡 H100/sm90，CUDA 13.2）容器里真把 mirage 编译出来**，并用
+> 尾巴补上：**在 `lab`（目标卡 H100/sm90，CUDA 13.2）容器里真把 mirage 编译出来**，并用
 > `PersistentKernel` API 搭了一个**最小 megakernel**（单层 RMSNorm）跑到了 **JIT 编译 + launch**。
 >
 > 快照：`https://github.com/mirage-project/mirage` 分支 `mpk`，**commit `f9eb70c`**（与
@@ -45,7 +45,7 @@
 
 ### 1.1 环境
 
-- 容器 `kernel_lab`（`scripts/lab.sh`），目标卡 **H100 80GB HBM3 / sm90 / 132 SM**。
+- 容器 `lab`（`scripts/lab.sh`），目标卡 **H100 80GB HBM3 / sm90 / 132 SM**。
 - `nvcc` release 13.2（V13.2.78）；`torch 2.12.0a0`；`cmake 3.31.6`；`ninja`；`mpirun`（`/usr/local/mpi`）。
 - 构建根目录（容器内）：`~/mirage_mpk_build`（快照 `f9eb70c` 的拷贝）。
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P46-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证 DeepGEMM 的 TMA 描述符构造层
+# P46-1 实验 driver：在 lab(H100/sm90) 上真机验证 DeepGEMM 的 TMA 描述符构造层
 #   csrc/jit_kernels/impls/runtime_utils.hpp（make_tma_* + dtype/swizzle 映射）。
 #   ./harness/exp_tma_descriptor.sh
 # 对应源码 src/tma_descriptor.cu（nvcc 直接 include 真实 runtime_utils.hpp + torch）。

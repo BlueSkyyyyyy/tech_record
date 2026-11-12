@@ -22,7 +22,7 @@ Parts
   Part C  stage-layout identity: prod vs prod+TMA bit-identity at each VD.
   Part D  static cost (smem vs VD).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=3 python .../harness/check_bwd_b2_kv_prod.py \
         > .../harness/check_bwd_b2_kv_prod.out.txt 2>&1
     B2KVP_MODE=a | b | c | d

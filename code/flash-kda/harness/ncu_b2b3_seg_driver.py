@@ -2,7 +2,7 @@
 B2/B3 kernel (see check_bwd_b2b3_seg.py) to confirm the byte traffic is preserved and
 locate each segment's bound.  fp32 operands to match the deployed chain.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_b2b3_seg_driver.py --variant no_post --B 8 --T 2048 --H 8
     ncu -k regex:_seg_b2b3_kernel -c 1 --launch-skip 3 --set full python ...
 """

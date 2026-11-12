@@ -20,7 +20,7 @@ Part A  correctness: tma vs base `dh/dv2/dh0` must be bit-identical; vs FLA `dhu
 Part B  CUPTI us/call for all three; `tma/base` shows how much of the removed-store gain
         is recovered, `nodh/base` is the §34.1 bound.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_tma_store.py \
         > .../harness/check_bwd_b1_tma_store.out.txt 2>&1
 """

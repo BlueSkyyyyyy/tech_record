@@ -24,7 +24,7 @@ measures that and pins it, so the boundary is closed with data rather than left 
           outputs + CUPTI `dev` base vs vecst.
   Part D  SASS: count `STG.E` (32-bit) vs `STG.E.64` in the `sand` build, base vs vecst.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_vecst_da.py \
         > .../harness/check_bwd_b2_vecst_da.out.txt 2>&1
     B2VD_MODE=a | b | c | d

@@ -25,7 +25,7 @@ Parts
   C  chain-wall reproducibility: Triton-B1 vs CUDA-B1 (no-cache / cache) chain, R rounds,
      to check the 1.65x and the run-to-run spread of the Triton baseline.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_launch_tax.py \
         > .../harness/check_bwd_b1_launch_tax.out.txt 2>&1
     B1LT_MODE=abc   # subset of parts

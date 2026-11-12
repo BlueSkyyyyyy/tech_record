@@ -18,8 +18,8 @@
 #   tag=bf16mmatma  -DB2M_BVK=64 -DB2M_BF16 -DB2M_BF16MMA -DB2M_TMA
 #
 # nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.  Idle GPU required.
-# Usage (inside kernel_lab, absolute path):
-#   bash /ssd/.../harness/probe_b2_write_knobs_ncu.sh > /ssd/.../probe_b2_write_knobs_ncu.out.txt 2>&1
+# Usage (inside lab, absolute path):
+#   bash /workspace/.../harness/probe_b2_write_knobs_ncu.sh > /workspace/.../probe_b2_write_knobs_ncu.out.txt 2>&1
 set -uo pipefail
 
 DIR=${HOME}/proj/tech_record/code/flash-kda

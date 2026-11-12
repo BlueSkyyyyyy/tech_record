@@ -37,7 +37,7 @@ stores), the variant §38 could not make reproducible:
           must be bit-identical (and vs bf16 FLA `dhu` 1 ulp), i.e. the fence changes
           *nothing* numerically while removing the race.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_race.py \
         > .../harness/check_bwd_b1_race.out.txt 2>&1
 """

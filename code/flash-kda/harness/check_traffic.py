@@ -18,8 +18,8 @@ one kernel invocation.  We compare those to closed-form predictions:
   K2 (recurrence): reads workspace + v + beta + h0
                  writes o + final_state
 
-Usage (inside kernel_lab):
-    python /ssd/.../harness/check_traffic.py | tee .../check_traffic.out.txt
+Usage (inside lab):
+    python /workspace/.../harness/check_traffic.py | tee .../check_traffic.out.txt
 """
 
 import csv

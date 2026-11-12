@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P77-1 实验 driver：在 kernel_lab(H100/sm90) 上直接编译并运行 DeepGEMM 的
+# P77-1 实验 driver：在 lab(H100/sm90) 上直接编译并运行 DeepGEMM 的
 #   **跨 SM / 跨 rank 同步原语** `deep_gemm/include/deep_gemm/comm/barrier.cuh`
 #   + 设备端对称指针 `layout/sym_buffer.cuh`（真实设备代码，架构无关）。
 #   ./harness/exp_comm_barrier.sh

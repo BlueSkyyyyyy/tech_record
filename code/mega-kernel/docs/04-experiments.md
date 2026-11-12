@@ -50,7 +50,7 @@
 | nvcc | release 13.2, V13.2.78 |
 | CUDA runtime | 13020 |
 
-容器 `kernel_lab` 内执行，入口脚本 `scripts/lab.sh`；各实验的原始输出落在
+容器 `lab` 内执行，入口脚本 `scripts/lab.sh`；各实验的原始输出落在
 `code/mega-kernel/harness/*.out.txt`。
 
 ### 1.2 三项基础能力：都通了（P0-3）
@@ -698,7 +698,7 @@ DeepGEMM 的生产形态（`docs/02`）。
 | 源码 | `src/<name>.cu` | 自包含单文件、`-arch=sm_90`（cluster 类用 `sm_90a`）编译即可 |
 | 原始输出 | `harness/<name>.out.txt` | 逐轮表格、ncu 指标行、SASS 片段，本文所有数字都出自这里 |
 | 运行脚本 | `harness/<name>.sh`（多数实验有） | 编译 + 运行命令的存档 |
-| 公共入口 | `scripts/lab.sh` | 容器 `kernel_lab` 内 `lab.sh exec "<cmd>"`，workdir 通常在容器内 `/tmp` |
+| 公共入口 | `scripts/lab.sh` | 容器 `lab` 内 `lab.sh exec "<cmd>"`，workdir 通常在容器内 `/tmp` |
 
 按主题找名字：
 

@@ -29,7 +29,7 @@ This script is the controlled experiment:
   Part C  land the winner into the assembled chain: correctness vs FLA + timing.
   Part D  bound analysis in `probe_b3_l1_ncu.out.txt` (ncu).
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle card:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle card:
     CUDA_VISIBLE_DEVICES=1 python .../check_bwd_b3_l1.py
     B3L_MODE=correctness | timing | chain
 """

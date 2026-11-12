@@ -17,8 +17,8 @@ Loss ``L = <o, dout> + <S_T, dfinal_state>``; FLA gives ``q/k/v/g/beta/h0`` grad
 via autograd, the reference gives them by the hand-derived chain rule (run in
 fp64, so the reported error is the *BF16 kernel* backward error, not ours).
 
-Usage (inside kernel_lab, GPU):
-    python /ssd/.../code/flash-kda/harness/check_bwd_fla.py
+Usage (inside lab, GPU):
+    python /workspace/.../code/flash-kda/harness/check_bwd_fla.py
 """
 
 import os

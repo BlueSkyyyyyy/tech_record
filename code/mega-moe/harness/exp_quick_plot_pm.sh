@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P118-1 实验 driver：在 kernel_lab(H100/sm90) 上验证 DeepGEMM 的 NCU PM-sampling 离线绘图工具。
+# P118-1 实验 driver：在 lab(H100/sm90) 上验证 DeepGEMM 的 NCU PM-sampling 离线绘图工具。
 #   harness/exp_quick_plot_pm.py（纯 host/Python，importlib 按路径加载真实 scripts/quick_plot_pm.py）
 #   bash harness/exp_quick_plot_pm.sh > harness/exp_quick_plot_pm.out.txt
 # 对应源码：~/github/DeepGEMM@057ca59（deep_gemm 2.8.1, v2.1.1.post3-24-g057ca59）

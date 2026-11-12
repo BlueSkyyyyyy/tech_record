@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P116-1 实验 driver：在 kernel_lab(H100/sm90) 上验证两库共用的「错误 / 断言层」。
+# P116-1 实验 driver：在 lab(H100/sm90) 上验证两库共用的「错误 / 断言层」。
 #   src/exception_layer.cu    （host 宏 + 设备 trap，直接 #include 两库真实头文件）
 #   src/exception_bridge.cpp  （pybind11：EPException/DGException → Python RuntimeError）
 #   harness/exp_ep_dg_exception.py（驱动 + 宏普查 + 负向编译）

@@ -1,7 +1,7 @@
 // 61（主题 26p）：DeepSeek-V4-Pro routed expert 的 FP4 decode FFN 端到端
 // （w1/w3 -> SwiGLU -> per-128 int8 量化 -> w2），承接 59/60 的 grouped GEMV。
 //
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：
 //   hidden=7168, moe_intermediate_size=3072, n_routed_experts=384, topk=6,
 //   expert_dtype=fp4（真实 checkpoint 的 routed expert 是 FP4 e2m1 + E8M0 block-32）。
 // 官方语义取自 inference/model.py:596（gate=w1(x), up=w3(x), clamp, silu(gate)*up, w2）。

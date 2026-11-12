@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P11-1 实验 driver：在 kernel_lab(H100/sm90) 上跑 DeepGEMM 的 FP8 einsum 投影
+# P11-1 实验 driver：在 lab(H100/sm90) 上跑 DeepGEMM 的 FP8 einsum 投影
 #   `bhr,hdr->bhd`（MLA 吸收投影的 FP8 版，per-token×per-block block-scale）。
 #   bash harness/exp_fp8_einsum.sh > harness/exp_fp8_einsum.out.txt
 # 对应源码 exp_fp8_einsum.py；参考 ~/github/DeepGEMM 的

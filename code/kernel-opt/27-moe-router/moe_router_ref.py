@@ -6,7 +6,7 @@
 - permutation: 用 index_select / index_copy 做 permute / unpermute
 - unpermute(weighted): scatter_add 或 index_add
 
-运行（在 kernel_lab 容器里）：
+运行（在 lab 容器里）：
   python3 moe_router_ref.py [M]
 """
 import sys

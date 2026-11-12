@@ -32,7 +32,7 @@
 
 using bf16 = __nv_bfloat16;
 
-// DeepSeek-V4-Pro DSA indexer 口径（/ssd/models/DeepSeek-V4-Pro/config.json）
+// DeepSeek-V4-Pro DSA indexer 口径（/models/DeepSeek-V4-Pro/config.json）
 constexpr int ID = 128;   // index_head_dim
 constexpr int IHI = 64;   // index_n_heads
 constexpr int TOPK = 1024;  // index_topk

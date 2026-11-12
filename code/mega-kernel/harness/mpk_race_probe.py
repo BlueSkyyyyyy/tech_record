@@ -11,10 +11,10 @@ The reference is computed *after* the launch so the GPU is idle between nvcc
 and pk(), matching the official test's timing (the race is timing sensitive).
 
 Environment:
-  MIRAGE_HOME  path to the mirage checkout (default /ssd/mirage_mpk_build)
+  MIRAGE_HOME  path to the mirage checkout (default /workspace/mirage_mpk_build)
 
-Run inside kernel_lab, e.g.:
-  MIRAGE_HOME=/ssd/mirage_mpk_build CUDA_VISIBLE_DEVICES=7 \
+Run inside lab, e.g.:
+  MIRAGE_HOME=/workspace/mirage_mpk_build CUDA_VISIBLE_DEVICES=7 \
     python3 -u mpk_race_probe.py --workers 128 --schedulers 16
 """
 

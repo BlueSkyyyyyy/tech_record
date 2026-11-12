@@ -33,7 +33,7 @@ A latent harness bug fixed this round (not a kernel change): `wy_dqkg_torch`
 `b_do`, so it was only index-correct at `K==V`; the templates now use the `K`-shaped tensors
 (bit-identical at `K==V`).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_kvcross.py \
         > .../harness/check_bwd_b2_kvcross.out.txt 2>&1
     B2KC_MODE=a | a2 | a3 | b

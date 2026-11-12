@@ -6,7 +6,7 @@
   2. cuda-graph loop   —— 把 384 次 launch 录成一张 CUDA graph 回放（去掉 host 开销）
   3. masked(batched)   —— decode：A=(G,max_m,K) 全部按 max_m 计算（cuBLAS batched 语义，无早退）
 
-shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：
+shape 取自 /models/DeepSeek-V4-Pro/config.json：
   hidden=7168(K), moe_intermediate_size=3072(N), n_routed_experts=384, num_experts_per_tok=6
 """
 import argparse

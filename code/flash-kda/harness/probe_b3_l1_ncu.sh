@@ -4,7 +4,7 @@
 # (loop ns=1 vs ns=2) -- does software-pipelining the k-loop actually cut the
 # `long_scoreboard`/raise `tensor%`, and how do DRAM bytes / Duration move?
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b3_l1_ncu.sh > .../probe_b3_l1_ncu.out.txt 2>&1
 
 set -uo pipefail

@@ -253,7 +253,7 @@ mHC 用「**owner init + 全体任务 wait_init**」的分布式版本。某个 
 ## 6. H100(sm90) 真实设备代码实测
 
 `src/mega_gate_mhc_split_barrier.cu` 直接 `#include` 四个真实头文件，`harness/
-exp_mega_gate_mhc_split_barrier.sh` 在 kernel_lab(H100/sm90) 上 `nvcc -arch=sm_90` 编译运行。真实头
+exp_mega_gate_mhc_split_barrier.sh` 在 lab(H100/sm90) 上 `nvcc -arch=sm_90` 编译运行。真实头
 文件 sha256：`scheduler/mega_gate.cuh = 4aef186a…`、`scheduler/mega_mhc.cuh = bf774cfa…`、
 `layout/mega_gate.cuh = 543ca6ee…`、`layout/mega_mhc.cuh = ca34571a…`、`ptx/utils.cuh = 8a9d5e03…`、
 `ptx/ld_st.cuh = 912e9f9a…`。

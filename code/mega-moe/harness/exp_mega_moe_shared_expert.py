@@ -16,7 +16,7 @@
     * **共享专家的数学**（x@W1ᵀ → SwiGLU → @W2ᵀ，无权重，加进 combine）**架构无关**，
       本机用真实 SM90 BF16 GEMM kernel 跑出来与 fp64 参考对拍（Part D）。
 
-只依赖 torch + deep_gemm（已在 kernel_lab 安装）。
+只依赖 torch + deep_gemm（已在 lab 安装）。
 """
 
 import math

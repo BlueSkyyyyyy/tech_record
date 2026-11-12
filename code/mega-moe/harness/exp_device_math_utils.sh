@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P44-1 实验 driver：在 kernel_lab(H100/sm90) 上直接编译并运行 DeepGEMM **设备端数学与工具层**
+# P44-1 实验 driver：在 lab(H100/sm90) 上直接编译并运行 DeepGEMM **设备端数学与工具层**
 #   （`deep_gemm/include/deep_gemm/common/{math,utils,types,packing}.cuh` 的真实设备代码）。
 #   bash harness/exp_device_math_utils.sh > harness/exp_device_math_utils.out.txt
 # 对应源码 src/device_math_utils.cu；参考 ~/github/DeepGEMM 的 common/math.cuh 与

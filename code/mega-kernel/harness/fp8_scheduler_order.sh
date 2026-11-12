@@ -8,7 +8,7 @@
 # 无需 SM100 硬件（目标卡 H100/sm90 也没有）。快照钉死 f9eb70c。
 set -u
 DEV=${DEV:-3}
-MPK=${MPK:-/ssd/mirage_mpk_build}
+MPK=${MPK:-/workspace/mirage_mpk_build}
 DEEPGEMM=${DEEPGEMM:-${HOME}/github/DeepGEMM}
 SRC=${HOME}/proj/tech_record/code/mega-kernel/src/fp8_scheduler_order.cu
 BIN=/tmp/fp8_scheduler_order

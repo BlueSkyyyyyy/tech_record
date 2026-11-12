@@ -11,7 +11,7 @@
   2. 在 H100 上调用真实 `deep_gemm.get_block_m_for_mega_moe` 逐点比对（应 100% 一致）；
   3. 附带复刻 `get_pipeline_config_for_mega_moe`（smem 预算 → num_stages），打印配置表。
 
-只依赖 numpy / math，不需要 GPU；在 `kernel_lab`（H100）里跑以证明 binding 可用。
+只依赖 numpy / math，不需要 GPU；在 `lab`（H100）里跑以证明 binding 可用。
 """
 
 import math

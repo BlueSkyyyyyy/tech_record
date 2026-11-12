@@ -33,7 +33,7 @@ top of B2's value, exactly as before).  The three outside adds vanish.
   Part C   same with a bf16 operands sanity variant is unnecessary -- the kernel arithmetic
            is untouched; we only change *where* the accumulator lives.
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle card:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle card:
     CUDA_VISIBLE_DEVICES=1 python .../check_bwd_b3_accum.py
     B3A_MODE=correctness | chain | timing
 """

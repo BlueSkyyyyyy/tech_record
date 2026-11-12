@@ -6,7 +6,7 @@
 //   - 路径 S (无该优化)：u_bf16(C 片段) --STSM_N--> smem --LDSM_N--> B 片段 --gemm--> U
 // 二者 B 操作数应逐位相同，U 应完全相同。
 //
-// 编译（kernel_lab 内，FlashKDA 绝对路径）：
+// 编译（lab 内，FlashKDA 绝对路径）：
 //   nvcc -std=c++17 -O2 -arch=sm_90a --expt-relaxed-constexpr --expt-extended-lambda \
 //     -I <FlashKDA>/cutlass/include -I <FlashKDA>/cutlass/tools/util/include \
 //     movm_probe.cu -o /tmp/movm_probe && /tmp/movm_probe

@@ -30,7 +30,7 @@ Scope boundary (honest): this file implements *only* the GEMM core; the B2 final
 are **not** ported here -- see docs/07 §47.6.  What it establishes is whether the
 "register-resident accumulators + occupancy" premise holds at the dominant GEMMs.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_core.py \
         > .../harness/check_bwd_b2_core.out.txt 2>&1
     B2C_MODE=a | b | c | d

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P16-1 实验 driver：在 kernel_lab(H100) 直接编译并运行 DeepGEMM 真实设备代码
+# P16-1 实验 driver：在 lab(H100) 直接编译并运行 DeepGEMM 真实设备代码
 #   deep_gemm::pack_fp32_into_ue8m0<kNumGroups>（K-grouped SF 打包）。
 #   ./harness/exp_kgrouped_sf_pack.sh
 # 对应源码 src/kgrouped_sf_pack.cu，输出见 harness/exp_kgrouped_sf_pack.out.txt。

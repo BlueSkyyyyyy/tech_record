@@ -50,7 +50,7 @@ FLA 调用面：前向入口 `ChunkKDAFunction.forward`（`fla/ops/kda/chunk.py:
 
 参考侧一律跑 fp64，故报出的数是 **FLA bf16 内核误差**（不是我们的）。
 
-运行（`kernel_lab`、GPU）：
+运行（`lab`、GPU）：
 
 ```
 FLA_DISABLE_BACKEND_DISPATCH=1 python3 \

@@ -11,7 +11,7 @@ only the operand fetch changes).
           bit-identity across non-TMA / TMA@32 / TMA@64.
   Part B  timing: gate_qkg vs gate (same staging), plus the TMA variants, and vs full Triton B2.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_gate_qkg.py \
         > .../harness/check_bwd_b2_gate_qkg.out.txt 2>&1
     B2GQ_MODE=a | b

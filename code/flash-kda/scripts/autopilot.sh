@@ -12,7 +12,7 @@ STOP="$DIR/AUTOPILOT_STOP"
 LOCK="$DIR/autopilot.lock"
 PIDFILE="$DIR/autopilot.pid"
 OPENCODE="${HOME}/.opencode/bin/opencode"
-MODEL="local-vllm//ssd/models/DeepSeek-V4.1-Flash"
+MODEL="local-vllm//models/DeepSeek-V4.1-Flash"
 
 MAX_ROUNDS="${MAX_ROUNDS:-200}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
@@ -25,7 +25,7 @@ PROMPT='你是 tech_record 仓库的长期自驱 agent，负责推进「Kimi Del
    的 fla.ops.kda.chunk_kda（用 torch.autograd 穿过去拿反向），必要时自行推导。
 3. 分析文档写到 code/flash-kda/docs/<NN>-*.md（会被 doc_include 内联到博客，**里面不要写 {{< >}} 短代码**）；
    可运行参考实现写到 code/flash-kda/src/（纯 PyTorch，自带 if __name__ 自测）；探测/dump/对拍脚本写到 code/flash-kda/harness/。
-4. 需要 GPU 的实验用 `code/flash-kda/scripts/lab.sh exec "..."` 在 kernel_lab 容器里跑（绝对路径），结果留同目录 *.out.txt。
+4. 需要 GPU 的实验用 `code/flash-kda/scripts/lab.sh exec "..."` 在 lab 容器里跑（绝对路径），结果留同目录 *.out.txt。
    数值对拍要有真实数字（max abs/rel），性能用 CUPTI/自有计时；不确定的结论标明「待验证」。
 5. 精读源码时贴**真实核对过的行号**（宁可不标也不标错）；讲清「为什么」而不是只描述「是什么」。
 6. 更新 code/flash-kda/ROADMAP.md（状态/当前进度/下一步），git 只 add 本专题路径（不要 git add -A），

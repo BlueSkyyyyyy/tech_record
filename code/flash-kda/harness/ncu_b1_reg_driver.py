@@ -2,7 +2,7 @@
 (`harness/b1_reg_probe.cu`).  Mirrors `ncu_b1_cuda_driver.py` but targets `b1r_launch`
 and pre-builds `b1_cuda_probe.so` (the wmma base) too so the two can be paired.
 
-Usage (inside kernel_lab), pre-compile first (nvcc hangs under ncu):
+Usage (inside lab), pre-compile first (nvcc hangs under ncu):
     nvcc ... b1_reg_probe.cu -o /tmp/b1_reg.so
     ncu -k regex:b1_reg_cuda -c 1 --launch-skip 3 --set full \
         python ncu_b1_reg_driver.py --which reg --B 2 --T 1024 --H 8 --bt 64 --ns 1 --no-build

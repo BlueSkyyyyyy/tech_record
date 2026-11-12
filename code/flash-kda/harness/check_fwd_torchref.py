@@ -25,7 +25,7 @@ C. **Exact-algebra equality** — run the same blocked loop in fp64 (no bf16 cas
    sigmoid) against our ``kda_chunked_fwd`` in fp64: the two independent transcriptions
    of the chunked algebra must agree to ~machine precision.
 
-Run inside `kernel_lab` (needs the built ``flash_kda_C`` + nvcc for the inline sigmoid):
+Run inside `lab` (needs the built ``flash_kda_C`` + nvcc for the inline sigmoid):
     python ~/proj/tech_record/code/flash-kda/harness/check_fwd_torchref.py
 """
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P26-1 实验 driver：在 kernel_lab(H100) 上验证 DeepGEMM 的 `set_tc_util` 语义与影响面。
+# P26-1 实验 driver：在 lab(H100) 上验证 DeepGEMM 的 `set_tc_util` 语义与影响面。
 #   bash harness/exp_tc_util.sh > harness/exp_tc_util.out.txt
 # 源码 exp_tc_util.py；参考 ~/github/DeepGEMM 的
 #   csrc/apis/config.hpp, csrc/runtime/runtime.hpp,

@@ -32,7 +32,7 @@
 
 using bf16 = __nv_bfloat16;
 
-// Qwen3-8B（/ssd/models/qwen3-8B/config.json）
+// Qwen3-8B（/models/qwen3-8B/config.json）
 constexpr int Hq = 40;          // num_attention_heads
 constexpr int Hkv = 8;          // num_key_value_heads
 constexpr int G = Hq / Hkv;     // GQA group = 5

@@ -15,7 +15,7 @@ partial with `mma.sync.m16n8k8.tf32` (2 n-tiles x 2 k-steps per term) instead of
   Part B  timing: `da` (scalar) vs `da_mma` (isolated delta over the GEMM-only core) and vs the
           full Triton B2.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_da_mma.py \
         > .../harness/check_bwd_b2_da_mma.out.txt 2>&1
     B2DAMMA_MODE=a | b

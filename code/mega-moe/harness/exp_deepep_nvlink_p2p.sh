@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P109-1 实验 driver：在 kernel_lab(H100/sm90) 上验证 DeepEP 的 NVLink 连接自检与 P2P 拓扑。
+# P109-1 实验 driver：在 lab(H100/sm90) 上验证 DeepEP 的 NVLink 连接自检与 P2P 拓扑。
 #   harness/exp_deepep_nvlink_p2p.py（纯 Python + pynvml，直接加载真实 deep_ep/utils/envs.py）
 #   src/nvlink_p2p_matrix.cu      （真机 P2P 拷贝带宽矩阵）
 #   bash harness/exp_deepep_nvlink_p2p.sh > harness/exp_deepep_nvlink_p2p.out.txt

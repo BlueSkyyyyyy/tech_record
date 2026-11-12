@@ -42,7 +42,7 @@
 ## 复跑
 
 ```bash
-# kernel_lab、空闲 GPU
+# lab、空闲 GPU
 cd code/te-perf
 python check_kda_precision.py --seqs 512,1024,4096,8192,16384,32768 --seeds 0,1
 ```

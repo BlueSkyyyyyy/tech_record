@@ -11,7 +11,7 @@ Two orthogonal flags let us attribute the bytes:
   --bk  N             K-tile; BK=K removes the `i_k` loop, hence the `K/BK`-fold re-read
                       of the V-side operands v_new/do/dv/v (§26.6 item (2)).
 
-Usage (inside kernel_lab, idle card):
+Usage (inside lab, idle card):
     CUDA_VISIBLE_DEVICES=1 python ncu_b2_hdh_driver.py --hdh fp32 --bk 64
     ncu -k regex:_wy_dqkg_kernel_late -c 1 --launch-skip 3 \
         --metrics dram__bytes_read.sum,dram__bytes_write.sum,lts__t_bytes.sum,\

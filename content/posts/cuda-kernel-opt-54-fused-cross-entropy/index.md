@@ -179,7 +179,7 @@ if (mt >= Mt || nt >= Nt) return;      // padding 出界
 
 ## 四、实测
 
-环境：H100 SXM（132 SM，3.35 TB/s，bf16 TC 989 TFLOPS），`kernel_lab` 容器。
+环境：H100 SXM（132 SM，3.35 TB/s，bf16 TC 989 TFLOPS），`lab` 容器。
 shape 取自 `~/models/DeepSeek-V4-Pro/config.json`：`M=8192, H=7168, V=129280`。
 `fused_ce.cu` 内 `bench_ms(warmup=5, iters=20)`。
 

@@ -9,7 +9,7 @@
 // 若把 dequant 融进 GEMM 主循环（而不是先物化 bf16 权重再跑 cuBLAS），
 // 就能把这 4× 的字节节省兑现成时间。
 //
-// 真实 shape 取自 /ssd/models/qwen3-8B/config.json：
+// 真实 shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408（MLP up_proj/gate_proj）。
 //   本文件默认测 M=64（小 batch decode）× N=17408 × K=5120，group_size=128。
 //

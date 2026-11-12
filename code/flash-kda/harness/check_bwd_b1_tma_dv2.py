@@ -20,7 +20,7 @@ Variants (all also `-DB1T_ETMA`):
 Part A  correctness: tma2 vs base must be BIT-IDENTICAL (`dh`/`dv2`/`dh0`); vs FLA sanity.
 Part B  CUPTI us/call for all six; recovered = (base-variant)/(base-ablation).
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_tma_dv2.py \
         > .../harness/check_bwd_b1_tma_dv2.out.txt 2>&1
 """

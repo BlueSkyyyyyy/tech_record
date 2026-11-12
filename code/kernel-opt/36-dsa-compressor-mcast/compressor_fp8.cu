@@ -3,7 +3,7 @@
 // 背景：35 篇的合并投影（X[M,7168] @ Wm[2C,7168]^T）用 bf16 跑到 ~650 TFLOPS，ncu 显示
 // 最佳配置是 tensor-pipe 受限（76%），而不是 35 诊断的 L2 受限。既然 bf16 已近本设计天花板，
 // 就把投影按 DeepSeek-V4-Pro 真实的量化方案 **FP8 e4m3 + weight_block 128×128** 做一遍：
-//   /ssd/models/DeepSeek-V4-Pro/config.json:
+//   /models/DeepSeek-V4-Pro/config.json:
 //     quantization_config = {quant_method: fp8, fmt: e4m3, activation_scheme: dynamic,
 //                            weight_block_size: [128,128], scale_fmt: ue8m0}
 //

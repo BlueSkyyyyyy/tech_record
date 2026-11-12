@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 管理 kernel 优化系列专用的 GPU 实验容器 kernel_lab。
+# 管理 kernel 优化系列专用的 GPU 实验容器 lab。
 #
 # 为什么需要单独的容器：宿主机的 ncu 权限是 RmProfilingAdminOnly=1，
 # 且普通容器没有 CAP_SYS_ADMIN，ncu 会报 ERR_NVGPUCTRPERM。
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 IMAGE="${LAB_IMAGE:-dsv4-inf:latest}"
-NAME="${LAB_NAME:-kernel_lab}"
+NAME="${LAB_NAME:-lab}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 
 up() {

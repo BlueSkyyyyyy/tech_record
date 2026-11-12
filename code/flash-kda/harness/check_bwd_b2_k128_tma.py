@@ -7,7 +7,7 @@ streamed with `cp.async.bulk.tensor` (SWIZZLE_128B) instead of `cp.async`.  Same
 the main harness (torch fp32 golden).  Reuses the main harness's build/load/run helpers with a
 TMA-tagged shared object.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=3 python .../harness/check_bwd_b2_k128_tma.py \
         > .../harness/check_bwd_b2_k128_tma.out.txt 2>&1
 """

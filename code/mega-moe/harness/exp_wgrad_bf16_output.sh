@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P136-1 实验 driver：在 kernel_lab(H100) 量化 MoE wgrad 换成 bf16 输出的精度代价与落地。
+# P136-1 实验 driver：在 lab(H100) 量化 MoE wgrad 换成 bf16 输出的精度代价与落地。
 #   bash harness/exp_wgrad_bf16_output.sh > harness/exp_wgrad_bf16_output.out.txt
 #   第一段：exp_wgrad_bf16_output.py —— 精度分解（Part A）、跨步累积（Part B）、计时（Part C）。
 set -euo pipefail

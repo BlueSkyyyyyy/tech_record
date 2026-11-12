@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P10-1 实验 driver：在 kernel_lab(H100) 上
+# P10-1 实验 driver：在 lab(H100) 上
 #   1) 编译并运行 src/bf16_mega_moe_epilogue.cu（BF16 L1/L2 epilogue 数值语义）；
 #   2) 运行 harness/exp_bf16_mega_moe.py（block config / symm buffer 尺寸 / 权重重排）。
 #   ./harness/exp_bf16_mega_moe.sh

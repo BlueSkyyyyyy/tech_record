@@ -24,7 +24,7 @@ a K2-shaped rewrite.  Two orthogonal, free-ish knobs on the same source:
   Part C  smem footprint per variant
   Part D  register/occupancy (`cuobjdump -res-usage`) -- ILP2 needs 2*MT2 accumulator frags
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_ilp_cuda.py
 ncu pairing of base vs ilp1/ilp2:
     bash .../harness/probe_b1_cuda_ilp_ncu.sh > .../probe_b1_cuda_ilp_ncu.out.txt 2>&1

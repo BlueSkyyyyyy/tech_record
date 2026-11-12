@@ -38,7 +38,7 @@ Non-divisible T: everything is zero-padded to `Tp = NG*64` and the chain is run 
 (pad tokens have q=v=beta=g=0, so they are inert); the FLA golden sees the same padded inputs
 so the comparison is apples-to-apples.
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle card:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle card:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_ws_reuse64.py
     W64_MODE=correctness|timing
 """

@@ -8,8 +8,8 @@
 # the causal channel: `long_scoreboard` and `warp cyc/issue` should drop when pipelining
 # is turned on, and split-K should not move them much.
 #
-# Usage (inside kernel_lab):
-#   bash /ssd/.../harness/probe_bwd_ilp_ncu.sh > /ssd/.../harness/probe_bwd_ilp_ncu.out.txt 2>&1
+# Usage (inside lab):
+#   bash /workspace/.../harness/probe_bwd_ilp_ncu.sh > /workspace/.../harness/probe_bwd_ilp_ncu.out.txt 2>&1
 
 set -uo pipefail
 

@@ -15,7 +15,7 @@ choice P7-21 made for the 512 B `E^tot` row) and re-measures:
 The `ncu` byte/duration side lives in `harness/probe_b2_tma64_ncu.sh`
 (`harness/probe_b2_tma64_ncu.out.txt`).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_tma64.py \
         > .../harness/check_bwd_b2_tma64.out.txt 2>&1
     B2T64_MODE=a | b

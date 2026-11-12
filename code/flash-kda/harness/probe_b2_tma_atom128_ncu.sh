@@ -7,7 +7,7 @@
 # is the §54 reference.
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   CUDA_VISIBLE_DEVICES=1 bash .../probe_b2_tma_atom128_ncu.sh > .../probe_b2_tma_atom128_ncu.out.txt 2>&1
 set -uo pipefail
 

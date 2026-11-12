@@ -15,7 +15,7 @@ registers/smem (no re-read of `dApre`), so:
   Part B  timing: sand kernel (GEMM core + dApre + sandwich) vs the dA kernel (delta),
           and vs the full Triton B2.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_sand.py \
         > .../harness/check_bwd_b2_sand.out.txt 2>&1
     B2S_MODE=a | b

@@ -5,7 +5,7 @@
 # bf16 core still sits where §78/§81 left the six-segment core (1-2 block/SM, emission-limited).
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_bf16mma_e2e_ncu.sh > .../probe_bf16mma_e2e_ncu.out.txt 2>&1
 set -uo pipefail
 

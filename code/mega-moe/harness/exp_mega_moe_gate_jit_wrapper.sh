@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P86-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证两个「mega 家族」JIT 启动包装层
+# P86-1 实验 driver：在 lab(H100/sm90) 上真机验证两个「mega 家族」JIT 启动包装层
 #   csrc/jit_kernels/impls/sm100_fp8_fp4_mega_moe.hpp  （P3/P79 拆过 kernel，本篇补 FP8 wrapper）
 #   csrc/jit_kernels/impls/sm100_bf16_mega_gate.hpp    （P5-1/P47 拆过 kernel，本篇补 gate wrapper）
 #   ./harness/exp_mega_moe_gate_jit_wrapper.sh

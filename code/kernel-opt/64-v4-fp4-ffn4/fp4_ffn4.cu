@@ -10,7 +10,7 @@
 //           (b) 纯 ALU 的 PRMT 位拼装（把 16 项有符号表用两次 prmt + 逐字节符号掩码拼出 4 个 int8）。
 //   ② K2 并行粒度：K=I=3072 每行只有 3 个 16B chunk / lane，prefetch runway 太短。
 //
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：
 //   hidden=7168, moe_intermediate_size=3072, n_routed_experts=384, topk=6, expert_dtype=fp4
 // 语义取自 inference/model.py:596（gate=w1(x), up=w3(x), clamp 10, silu(gate)*up, w2）。
 //

@@ -20,7 +20,7 @@ crossing cases `(K,V) in {(64,256),(256,64)}`.
 Reference / baseline: torch fp32 (`allow_tf32=False`) as the algebraic golden; the identical-op
 Triton core (`check_bwd_b2_core.py`, already generic in K,V) where its `[V,K]` smem fits.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=3 python .../harness/check_bwd_b2_k128.py \
         > .../harness/check_bwd_b2_k128.out.txt 2>&1
     B2K_MODE=a | b | d

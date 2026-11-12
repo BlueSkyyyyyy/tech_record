@@ -2,7 +2,7 @@
 //
 // 承接 28（gate_wgmma.cu）：DeepSeek-V4-Pro 的 router 前门 gate GEMM
 //   logits[M, E] = X[M, H] @ Wg[E, H]^T
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：hidden=7168, n_routed=384。
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：hidden=7168, n_routed=384。
 //
 // 28 的 ncu（M=32768，最佳 256×128 s4 = 600 TFLOPS）显示：
 //   Compute 69.6%、tensor pipe 68.2%、L2 **79.1%**、DRAM 53.4%、occ 26%。

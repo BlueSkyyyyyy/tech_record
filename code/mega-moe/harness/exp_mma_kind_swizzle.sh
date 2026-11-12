@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P128-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证 DeepGEMM 启发式共用的
+# P128-1 实验 driver：在 lab(H100/sm90) 上真机验证 DeepGEMM 启发式共用的
 #   「元素位宽 / TMA swizzle 模式」公共选择器 + GemmDesc 的 dtype→MmaKind 派生管道 +
 #   Python 公开布局别名层。
 #   - csrc/jit_kernels/heuristics/utils.hpp : get_num_element_bits / get_swizzle_mode

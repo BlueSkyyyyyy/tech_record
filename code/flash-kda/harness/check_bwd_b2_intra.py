@@ -15,7 +15,7 @@ Parts:
   B  resources: registers / spills / smem of `prod` vs `prod_intra`.
   C  timing: one `prod_intra` launch vs `prod` + standalone `b3intra` (CUPTI `dev` + event `wall`).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_intra.py \
         > .../harness/check_bwd_b2_intra.out.txt 2>&1
     B2I_MODE=a | a2 | b | c

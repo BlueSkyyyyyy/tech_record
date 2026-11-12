@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P37-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证 DeepJIT 的 post_hook 后处理机制 +
+# P37-1 实验 driver：在 lab(H100/sm90) 上真机验证 DeepJIT 的 post_hook 后处理机制 +
 #   磁盘产物（meta.json / cubin）/ CUDA↔Ascend 后端抽象。
 #   ./harness/exp_deepjit_posthook.sh
 # 对应源码 src/deepjit_posthook.cpp，输出见 harness/exp_deepjit_posthook.out.txt。

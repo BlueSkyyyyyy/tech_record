@@ -7,7 +7,7 @@
 //   q_nope : [H][B][DC]   q_pe : [H][B][DR]
 //   score(h,j) = q_nope_h · c_kv_j + q_pe_h · k_pe_j        （DK = DC+DR = 576）
 //   O_h        = sum_j softmax(score) * c_kv_j              （V 维度 = DC = 512）
-// 真实 shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json（num_attention_heads=128,
+// 真实 shape 取自 /models/DeepSeek-V4-Pro/config.json（num_attention_heads=128,
 // head_dim=512, qk_rope_head_dim=64, num_key_value_heads=1）。
 //
 // decode 是「算力/带宽平衡」算子：FLOPs = 2*H*(DK+DV)*B*L，字节 = B*L*(DK)*2。

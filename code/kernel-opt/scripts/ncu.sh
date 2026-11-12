@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在 kernel_lab 容器里用 ncu 剖析一个 .cu 源文件。
+# 在 lab 容器里用 ncu 剖析一个 .cu 源文件。
 #
 # 用法：
 #   scripts/ncu.sh path/to/foo.cu --set full --kernel-name regex:foo [程序参数...]
@@ -31,7 +31,7 @@ ARCH_FLAG=""
 
 LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lab.sh"
 "$LAB" up >/dev/null
-LAB_NAME="${LAB_NAME:-kernel_lab}"
+LAB_NAME="${LAB_NAME:-lab}"
 
 # 逐参数引用，避免 <、>、| 等被远端 shell 解释
 NCU_ARGS=""

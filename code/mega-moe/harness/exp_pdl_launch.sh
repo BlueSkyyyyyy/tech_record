@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P42-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证 DeepGEMM/DeepJIT 的 **kernel 发射层**
+# P42-1 实验 driver：在 lab(H100/sm90) 上真机验证 DeepGEMM/DeepJIT 的 **kernel 发射层**
 #   —— PDL（Programmatic Dependent Launch）、cluster / non-portable cluster、dynamic shared memory，
 #   以及 DeepJIT `LaunchOptions` 的 host 语义。
 #   ./harness/exp_pdl_launch.sh

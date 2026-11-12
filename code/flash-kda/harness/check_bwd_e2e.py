@@ -20,7 +20,7 @@ The chain is what a target-card backward has to reproduce: dAv -> B1 -> B2 -> B3
 the four GEMM stages of §5.2, and the tail reverse-cumsum is the B0 gate chain (already
 validated on its own in §6.8).
 
-Run inside `kernel_lab` (GPU):
+Run inside `lab` (GPU):
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_e2e.py
 """
 import math

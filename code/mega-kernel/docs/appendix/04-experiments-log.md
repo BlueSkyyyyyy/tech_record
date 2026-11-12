@@ -125,7 +125,7 @@
 
 ### 0.1 目的
 
-MegaKernel 的实测需要三块基础能力，先确认它们在本机容器 `kernel_lab` 上「能编译、能跑」：
+MegaKernel 的实测需要三块基础能力，先确认它们在本机容器 `lab` 上「能编译、能跑」：
 
 1. **persistent kernel + cooperative grid sync**：单 kernel 常驻、跨 block 同步——P5「单持久化 kernel」的前提。
 2. **CUDA Graph capture/replay**：消除 launch 开销——P4-1 / P5-1 的对照组。

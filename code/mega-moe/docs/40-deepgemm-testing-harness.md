@@ -14,7 +14,7 @@
 >
 > 这三个都不是 SM100 专属、也不是 kernel 本身，**H100 真机可跑**。本文用真实数字讲清它们的语义与坑。
 
-参考版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（v2.8.1），本机 `kernel_lab`（H100 sm90）。
+参考版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（v2.8.1），本机 `lab`（H100 sm90）。
 
 ---
 
@@ -341,7 +341,7 @@ def uneven_all_gather(tensor, dim=0, group=None):
 ## 7. H100 实测
 
 脚本 `harness/exp_testing_harness.py`（driver `harness/exp_testing_harness.sh`，输出
-`harness/exp_testing_harness.out.txt`）在 `kernel_lab`（H100 sm90）上跑，六组 **ALL PASS**。
+`harness/exp_testing_harness.out.txt`）在 `lab`（H100 sm90）上跑，六组 **ALL PASS**。
 
 ### 7.1 `calc_diff` 性质（§3 的表）
 

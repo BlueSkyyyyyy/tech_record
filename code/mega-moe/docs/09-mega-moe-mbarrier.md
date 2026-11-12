@@ -241,7 +241,7 @@ SM90/SM100 通用的。实验 `src/mbarrier_pipeline.cu` 在 H100 上搭一条�
   full）与 1 个 consumer warp（`wait full(phase)` → 校验 → `arrive empty`）搭 `NSTAGES` 级流水，
   用 `advance_pipeline` 同款相位翻转；对比 `NSTAGES=1`（串行化，无重叠）与 `NSTAGES=4`（流水）。
 
-在 `kernel_lab`（H100 sm90）运行，原始输出见 `harness/exp_mbarrier_pipeline.out.txt`：
+在 `lab`（H100 sm90）运行，原始输出见 `harness/exp_mbarrier_pipeline.out.txt`：
 
 ```
 NVIDIA H100 80GB HBM3, 9.0, 570.211.01

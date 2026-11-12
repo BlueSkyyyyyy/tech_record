@@ -26,7 +26,7 @@ at the harness's gate scale), so this prototype does the A64/P64/w64 reconstruct
 **fp64**; a production implementation computes A64 per sub-chunk block with a per-pair
 rescale (bounded), or mirrors K1.  qg64/kg64 need no such care (their exponents are <= 0).
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle GPU:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle GPU:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_rechunk.py
     RC_MODE=correctness|timing
 """

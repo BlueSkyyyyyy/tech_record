@@ -259,7 +259,7 @@ ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -lcuda" \
 ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -lcuda" \
   scripts/run.sh 26-moe-cluster-multicast/moe_cluster.cu grp128x128s3_c2 32768
 
-# ncu（注意 cluster kernel 也要在 kernel_lab 里跑）
+# ncu（注意 cluster kernel 也要在 lab 里跑）
 scripts/ncu.sh 26-moe-cluster-multicast/moe_cluster.cu \
   --kernel-name regex:moe_kernel --launch-count 1 \
   --metrics lts__throughput.avg.pct_of_peak_sustained_elapsed,lts__t_sectors_op_read.sum \

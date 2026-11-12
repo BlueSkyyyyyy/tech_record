@@ -30,7 +30,7 @@ Together A and B form a bit-exact triangle ``packed-kernel == ref-packed == ref-
 
 Cases mirror P4-4: ``L=1<CHUNK``, ``L=CHUNK``, non-divisible total ``T``, ``g=0``,
 
-Run inside `kernel_lab` (needs the built ``flash_kda_C`` + nvcc for the inline sigmoid):
+Run inside `lab` (needs the built ``flash_kda_C`` + nvcc for the inline sigmoid):
     CUDA_VISIBLE_DEVICES=<idle> python ~/proj/tech_record/code/flash-kda/harness/check_varlen_torchref.py
 """
 

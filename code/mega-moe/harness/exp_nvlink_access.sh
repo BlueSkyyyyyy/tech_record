@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P3-4 实验 driver：在 kernel_lab(H100) 编译并运行「本地 vs NVLink 远端访存」实验。
+# P3-4 实验 driver：在 lab(H100) 编译并运行「本地 vs NVLink 远端访存」实验。
 #   ./harness/exp_nvlink_access.sh
 # 对应源码 src/nvlink_access.cu，输出见 harness/exp_nvlink_access.out.txt。
 set -euo pipefail

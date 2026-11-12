@@ -9,11 +9,11 @@
 # change), sets MPK_EXTRA_DEFINES=-DMPK_DBG_SCHED_FIRST, runs
 # harness/mpk_latency_multi.py, and restores the checkout (trap EXIT).
 #
-# Run inside kernel_lab:
+# Run inside lab:
 #   bash harness/mpk_latency_multi.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MIRAGE_HOME="${MIRAGE_HOME:-/ssd/mirage_mpk_build}"
+export MIRAGE_HOME="${MIRAGE_HOME:-/workspace/mirage_mpk_build}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 PATCH="$HERE/mpk_sched_first.patch"
 PY="$HERE/mpk_latency_multi.py"

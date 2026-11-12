@@ -7,7 +7,7 @@
 - 目标：把 KDA 前反向讲透，并给出**可运行**的参考实现与实测数字。
 - 参考实现：FlashKDA（forward，SM90+，`CHUNK=16`，`D=128`）；反向以 `flash-linear-attention` 的
   `chunk_kda` autograd / 自行推导为参照。
-- 环境：复用 `kernel_lab` 容器（`scripts/lab.sh` 指向 kernel-opt 的脚本；含 CUDA/nvcc/ncu/PyTorch）。
+- 环境：复用 `lab` 容器（`scripts/lab.sh` 指向 kernel-opt 的脚本；含 CUDA/nvcc/ncu/PyTorch）。
 - 博客专题：`content/posts/flash-kda-*`，正文由 `code/flash-kda/docs/*.md` 经 `doc_include` **实时内联**。
 
 ## 目录

@@ -17,7 +17,7 @@
 //   + KSPLIT：沿 K 切，grid.y = KSPLIT，`atomicAdd` 归约，把 waves 抬到 ≥1
 //   + 预取：block 内把下一个 16B 权重先读出来，提升 MLP
 //
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：
 //   hidden=7168, moe_intermediate_size=3072, expert_dtype=fp4（w1 [3072,7168]）。
 //
 // 运行：scripts/run.sh 58-v4-fp4-decode/fp4_decode.cu [MT]

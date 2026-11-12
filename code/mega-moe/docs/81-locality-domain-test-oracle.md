@@ -246,7 +246,7 @@ test_locality_domain.py:77: assert deep_gemm.is_localization_available()
 
 ## 6. H100 实测（`harness/exp_locality_domain_test_oracle.{py,sh,out.txt}`）
 
-实验在 `kernel_lab`（H100 80GB HBM3、sm90、132 SM）上跑，**16 PASS / 0 FAIL**。分六部分：
+实验在 `lab`（H100 80GB HBM3、sm90、132 SM）上跑，**16 PASS / 0 FAIL**。分六部分：
 
 **Part A —— 顶层结构**：确认 5 用例 + 2 helper 可见、`__main__` 顺序、常量 `NUM_SMS_PER_TPC=2`。
 

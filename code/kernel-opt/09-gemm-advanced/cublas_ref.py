@@ -1,7 +1,7 @@
 """cuBLAS (via torch.matmul) 的 fp32 SGEMM 参考性能。
 
-在 kernel_lab 容器里跑：
-    docker exec kernel_lab python3 /ssd/home/.../cublas_ref.py
+在 lab 容器里跑：
+    docker exec lab python3 /workspace/.../cublas_ref.py
 """
 import torch
 

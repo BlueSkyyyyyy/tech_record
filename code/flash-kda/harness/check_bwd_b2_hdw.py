@@ -19,7 +19,7 @@ output bit.
     Part D   wall: event-pair wall (`REPS` calls per pair, averaged) as a second timing口径, so
              the (notable) ncu-vs-CUPTI disagreement on this kernel can be cross-checked.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_hdw.py \
         > .../harness/check_bwd_b2_hdw.out.txt 2>&1
     B2H_MODE=a | b | c

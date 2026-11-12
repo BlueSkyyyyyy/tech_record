@@ -9,7 +9,7 @@
 # duration -- all over the same 8 MB working set x 4 iters.
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_cpasync_bypass_ncu.sh > .../probe_cpasync_bypass_ncu.out.txt 2>&1
 set -uo pipefail
 

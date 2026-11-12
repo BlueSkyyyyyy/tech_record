@@ -22,8 +22,8 @@
 
 ## 环境 / 运行
 
-- 复用 kernel-opt 的实验容器 `kernel_lab`（含 CUDA 13.2 / nvcc / ncu / PyTorch / **flash_attn 2.7.4** / **TE 2.14**）。
-- 参考实现探测：`docker exec kernel_lab python .../harness/probe_refs.py`（已通过：FA/TE 反向均与 fp32 ref 吻合）。
+- 复用 kernel-opt 的实验容器 `lab`（含 CUDA 13.2 / nvcc / ncu / PyTorch / **flash_attn 2.7.4** / **TE 2.14**）。
+- 参考实现探测：`docker exec lab python .../harness/probe_refs.py`（已通过：FA/TE 反向均与 fp32 ref 吻合）。
 - dump + 对拍 + 基准：`harness/fa_bwd_bench.py {dump|bench|all}`（已通过：S=4096 causal，FA ~132 TF、TE ~230 TF）。
 - 编译运行自己的 kernel：`scripts/run.sh src/fp16/fa_bwd_fp16_onefile.cu`；剖析：`scripts/ncu.sh ...`。
 
@@ -4975,7 +4975,7 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
 > **（第一百零九轮）**：**P3-3c——`harness/fa_bwd_run.py` 一键「跑 ours + 汇总」**。
 > 落实上轮下一步候选 ①：新增 `harness/fa_bwd_run.py`——自动扫 dump 目录、按 `meta.json`
 > （`dtype`/`varlen`/`causal`）选 host（fp16/bf16/fp8 × 单/两文件）、调 `scripts/run.sh`
-> 在 `kernel_lab` 编译运行 `--dump`、最后调 `fa_bwd_compare.py` 汇总。定长走默认 `sm_90`、
+> 在 `lab` 编译运行 `--dump`、最后调 `fa_bwd_compare.py` 汇总。定长走默认 `sm_90`、
 > varlen 走 `sm_90a + -DFA_WGMMA`；**同一 (host, 构建配置) 只编译一次、其余复用二进制**。
 > **实测：全部 73 个 case × 单/两文件 = 146 次运行、0 失败，仅编译 12 次（134 次复用）**；
 > 数值与 §32/§33 逐位/同量级一致（fp16 S512 `1.671/1.771/1.899e-3`、S4096
@@ -6361,7 +6361,7 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
     单/两文件、定长/varlen 两套构建），再把 case 名喂给 compare；case 一多易漏项、无法一键复现。
   - **新增 `harness/fa_bwd_run.py`（纯 host 编排，device 一行未改）**：自动扫 dump 目录、按
     `meta.json`（`dtype`/`varlen`/`causal`）选 host（fp16/bf16/fp8 × 单/两文件，两文件=`ours`、
-    单文件=`ours_sf`）、调 `scripts/run.sh` 在 `kernel_lab` 编译运行 `--dump`、最后调
+    单文件=`ours_sf`）、调 `scripts/run.sh` 在 `lab` 编译运行 `--dump`、最后调
     `fa_bwd_compare.py` 汇总。定长走默认 `sm_90`；varlen 走 `ARCH="" NVCC_FLAGS=
     "-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA"`。**同一 (host, 构建配置) 只编译一次，
     其余 case 复用已产出的可执行文件**。CLI：`--dtype/--glob/--case/--impls/--fixed-only/
@@ -6488,7 +6488,7 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
      （本轮重跑即出现 `7.108e-01↔7.107e-01`）。`--check`/`--apply` 按「逐行结构相同 + 数值在
      `--rtol`（默认 `5e-3`）内」判等价，原子次序噪声不会把文档判陈旧；`--rtol 0` 可逐值复核。
    - **实测**（GPU：`fa_bwd_run.py --dtype fp8 --impls twofile` 重跑全部 28 个 fp8 case，
-     在 kernel_lab 内编译运行）：`--check` 在 rtol=5e-3 下 **OK（rc=0）**、`--rtol 0` 精确报出
+     在 lab 内编译运行）：`--check` 在 rtol=5e-3 下 **OK（rc=0）**、`--rtol 0` 精确报出
      上述原子噪声（rc=1）；把某格改成 `9.999e-03` 后 `--check` rc=1 并打印 diff；
      `--apply` 幂等（rtol 内不改写文件）。另修 `IMPL_LABEL` 缺 `fa3`（`--doc-table` 此前把
      FA3 列显示为裸 `fa3`）。数值与 §32–§38 历史**逐位/同量级一致**（fp8 S4096
@@ -9149,7 +9149,7 @@ dK/dV 跨 CTA `red`（110M 扇区/74% L2）。TE 用 tile 64×64×128 / 384 线�
   - **搬运量（ncu，CN=2，R=128，grid=4096，copy=0，同 binary A/B）**：`lts op_read`
     **52.6–52.9M → 33.82M（0.64×，−36%）**、`srcunit_tex op_read` 52.4M→33.55M、**L2 利用率
     49.6%→31.5%**、`dram bytes_read` 恒 8.40MB（K 常驻 L2）、**Duration 391→393µs（1.00×）**。
-    CN=4 的 ncu replay 在本工具链下不稳定（残留死锁进程，需 `docker exec kernel_lab pkill`），
+    CN=4 的 ncu replay 在本工具链下不稳定（残留死锁进程，需 `docker exec lab pkill`），
     只留 CN=4 的正确性。
   - **不集成判据**：① 主 kernel L2 ≈ `red` 105.38M（~80%）+ `read` 24.24M（**~19%**）+ 写 0.14M，
     multicast **不动 `red`** ⇒ prize 上限 ~9% L2、实测 ~6%；② causal 的 `ntiles` 随 m 块差

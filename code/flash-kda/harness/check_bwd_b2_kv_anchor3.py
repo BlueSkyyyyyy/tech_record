@@ -23,7 +23,7 @@ cp.async `BVK=64` control to separate them:
   Part B  resources: registers / spill / smem of the three builds over the `(K,V)` grid.
   Part C  timing (CUPTI `dev` + event `wall`): the two engine/tiling changes in `us`.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=3 python .../harness/check_bwd_b2_kv_anchor3.py \
         > .../harness/check_bwd_b2_kv_anchor3.out.txt 2>&1
     B2KA3_MODE=a | b | c

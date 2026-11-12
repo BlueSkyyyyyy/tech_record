@@ -9,9 +9,9 @@
 #
 # Pre-build the .so outside ncu (running nvcc under ncu hangs), then profile with --no-build.
 #
-# Usage (inside kernel_lab):
-#   bash /ssd/.../harness/probe_b1_tma_ncu.sh \
-#       > /ssd/.../harness/probe_b1_tma_ncu.out.txt 2>&1
+# Usage (inside lab):
+#   bash /workspace/.../harness/probe_b1_tma_ncu.sh \
+#       > /workspace/.../harness/probe_b1_tma_ncu.out.txt 2>&1
 set -uo pipefail
 
 DIR=${HOME}/proj/tech_record/code/flash-kda

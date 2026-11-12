@@ -11,7 +11,7 @@
 # 无需 SM100 硬件（目标卡 H100/sm90 也没有）。快照 mirage f9eb70c / CUTLASS f3fde583。
 set -u
 DEV=${DEV:-3}
-MPK=${MPK:-/ssd/mirage_mpk_build}
+MPK=${MPK:-/workspace/mirage_mpk_build}
 CUTLASS=${CUTLASS:-$MPK/deps/cutlass}
 SRC=${HOME}/proj/tech_record/code/mega-kernel/src/fp8_linear_support.cu
 BIN=/tmp/fp8_linear_support

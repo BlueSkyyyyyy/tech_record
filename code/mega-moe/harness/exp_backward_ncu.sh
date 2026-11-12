@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 反向性能归因实验 driver：在 kernel_lab(H100) 用 ncu 采集四个 grouped GEMM kernel 的硬指标。
+# 反向性能归因实验 driver：在 lab(H100) 用 ncu 采集四个 grouped GEMM kernel 的硬指标。
 #   bash harness/exp_backward_ncu.sh > harness/exp_backward_ncu.out.txt
 # 对应 exp_backward_ncu.py。
 #   第一段：五个 section（SpeedOfLight/Occupancy/LaunchStats/Memory/Compute）。

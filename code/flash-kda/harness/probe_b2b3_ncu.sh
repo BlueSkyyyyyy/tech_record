@@ -4,7 +4,7 @@
 # the P7-22 chain split shows B2+B3 = ~66% of backward device time, so their bound is the
 # open question.  We read SpeedOfLight / Occupancy / stall reasons / memory traffic.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2b3_ncu.sh > .../probe_b2b3_ncu.out.txt 2>&1
 
 set -uo pipefail

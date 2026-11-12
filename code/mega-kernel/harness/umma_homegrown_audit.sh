@@ -8,7 +8,7 @@
 # 纯 host 侧文本审计，不 launch kernel（SM100 本体在目标卡 H100/sm90 不可执行）。
 set -u
 DG=${DG:-${HOME}/github/DeepGEMM}
-MPK=${MPK:-/ssd/mirage_mpk_build}
+MPK=${MPK:-/workspace/mirage_mpk_build}
 DGHOME="$DG/deep_gemm/include/deep_gemm/ptx/tcgen05.cuh"
 DGCUT="$MPK/deps/cutlass/include/cute/arch/mma_sm100_umma.hpp"
 MPKPTX="$MPK/include/mirage/persistent_kernel/tasks/blackwell/sm100_ptx.cuh"

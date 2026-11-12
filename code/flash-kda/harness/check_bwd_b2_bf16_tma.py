@@ -16,7 +16,7 @@ The comparison is clean because both bf16 builds stage the *same bf16 values* an
   Part B  kernel-only timing: dev (CUPTI) + wall, all four variants.
   Part C  static smem + registers.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_bf16_tma.py \
         > .../harness/check_bwd_b2_bf16_tma.out.txt 2>&1
     B2BT_MODE=a | b | c

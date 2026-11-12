@@ -1,6 +1,6 @@
 // 53 融合 RoPE（主题 18）：rotary position embedding + YaRN 频率缩放
 //
-// 真实语义取自 `/ssd/models/DeepSeek-V4-Pro/inference/model.py`：
+// 真实语义取自 `/models/DeepSeek-V4-Pro/inference/model.py`：
 //   precompute_freqs_cis(dim, seqlen, original_seq_len, base, factor, beta_fast, beta_slow)
 //     -> freqs_cis = polar(1, outer(t, freqs))，freqs 带 YaRN 线性 ramp
 //   apply_rotary_emb(q[..., -rd:], freqs_cis)（rd=rope_head_dim=64）

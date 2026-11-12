@@ -122,7 +122,7 @@ kernel 端用「gap 不读不写」绕过：
 
 ## 7. H100 实测（`harness/exp_sf_layout.{py,sh,out.txt}`）
 
-全部在 kernel_lab(H100) 真机跑，六组 **ALL PASS**：
+全部在 lab(H100) 真机跑，六组 **ALL PASS**：
 
 - **A `get_tma_aligned_size`**：`align(x, 16/elem_size)` 对 3 种 element_size × 10 个 x 逐点一致；
   `(4095,4)→4096`（fp32 scale 行距）、`(4095,1)→4096`。

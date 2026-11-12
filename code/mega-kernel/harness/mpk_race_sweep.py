@@ -31,8 +31,8 @@ Interpretation
   * threadfence fixes it but
     compiler_barrier does not           -> hardware memory ordering
 
-Run inside kernel_lab:
-  MIRAGE_HOME=/ssd/mirage_mpk_build CUDA_VISIBLE_DEVICES=7 \
+Run inside lab:
+  MIRAGE_HOME=/workspace/mirage_mpk_build CUDA_VISIBLE_DEVICES=7 \
     python3 -u mpk_race_sweep.py --reps 3 --hang-timeout 25
 """
 
@@ -44,7 +44,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MIRAGE_HOME = os.environ.get("MIRAGE_HOME", "/ssd/mirage_mpk_build")
+MIRAGE_HOME = os.environ.get("MIRAGE_HOME", "/workspace/mirage_mpk_build")
 CUH = os.path.join(MIRAGE_HOME,
                    "include/mirage/persistent_kernel/persistent_kernel.cuh")
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P28-1 实验 driver：在 kernel_lab(H100/sm90) 上直接编译并运行 DeepGEMM **PTX 原语底座**
+# P28-1 实验 driver：在 lab(H100/sm90) 上直接编译并运行 DeepGEMM **PTX 原语底座**
 #   （`deep_gemm/include/deep_gemm/ptx/{ld_st,utils}.cuh`、`common/ring_pipeline.cuh` 的真实设备代码）。
 #   ./harness/exp_ptx_primitives.sh
 # 对应源码 src/ptx_primitives.cu，输出见 harness/exp_ptx_primitives.out.txt。

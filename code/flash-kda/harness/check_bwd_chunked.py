@@ -10,7 +10,7 @@ Three oracles, all on the same inputs:
 3. ``torch.autograd`` driven through ``kda_token_recurrent`` (does not reuse P/L, so an
    independent control).
 
-Usage (inside kernel_lab, CPU or GPU):
+Usage (inside lab, CPU or GPU):
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_chunked.py
 """
 

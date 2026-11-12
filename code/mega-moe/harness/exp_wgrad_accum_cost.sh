@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P135-1 实验 driver：在 kernel_lab(H100) 量化 MoE wgrad 的「强制累积（fp32 D 回读）」代价。
+# P135-1 实验 driver：在 lab(H100) 量化 MoE wgrad 的「强制累积（fp32 D 回读）」代价。
 #   bash harness/exp_wgrad_accum_cost.sh > harness/exp_wgrad_accum_cost.out.txt
 #   第一段：exp_wgrad_accum_cost.py —— 正确性 sanity + wgrad/dgrad 对照 + 两因子分解 + K 扫描 + 访存账。
 #   第二段：ncu 单次 launch，采 DRAM 读/写字节 与时长，核对 Part E 的解析访存账（k 真实路径 vs m 等价）。

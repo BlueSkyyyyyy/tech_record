@@ -27,7 +27,7 @@ Parts:
   C  cost: does a deeper pipeline / deeper store buffer help?  CUPTI us/call (idle card).
   D  after the fences, deep NS/SDEPTH vs the NS=1/SDEPTH=2 baseline is bit-identical.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_deep_ns.py \
         > .../harness/check_bwd_b1_deep_ns.out.txt 2>&1
 """

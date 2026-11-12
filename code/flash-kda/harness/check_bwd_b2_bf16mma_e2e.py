@@ -32,7 +32,7 @@ Parts
   B  chain dev/wall (idle card): FLA vs cf vs pc/pci/pcb/pcib/pcibm/pcibmd, per-kernel attribution.
   C  static resources (ptxas): regs / spill / smem of the six CUDA B2 builds.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_bf16mma_e2e.py \
         > .../harness/check_bwd_b2_bf16mma_e2e.out.txt 2>&1
     BM_MODE=correctness | timing | res

@@ -3,7 +3,7 @@
 # and B3 (`intra`) at the deployed CHUNK=16 granularity, fp32 operands (P7-26 §29.1).
 # Checks the fusion's traffic claim: DRAM read/write bytes, L2 traffic, tensor density.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2b3_fused_ncu.sh > .../probe_b2b3_fused_ncu.out.txt 2>&1
 
 set -uo pipefail

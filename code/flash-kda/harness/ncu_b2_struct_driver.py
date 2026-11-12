@@ -4,7 +4,7 @@ against the baseline, in isolation.
 Synthesizes workspace-shaped operands (values irrelevant) and launches exactly one B2
 variant, so `ncu -k regex:_wy_dqkg_kernel` targets it unambiguously.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_b2_struct_driver.py --which late --B 8 --T 2048 --H 8 --bt 16 --nw 4
     ncu -k regex:_wy_dqkg_kernel -c 1 --launch-skip 3 --set full \
         python ncu_b2_struct_driver.py --which late --B 8 --T 2048 --H 8 --bt 16

@@ -182,7 +182,7 @@ test_lazy_init.py:153:      print('DG_CUDA_CLEAN', flush=True)
 
 ## 6. H100 实测
 
-实验 `harness/exp_lazy_init_test_oracle.py`（+`.sh` / `.out.txt`）在 `kernel_lab`（H100 sm90）上跑，
+实验 `harness/exp_lazy_init_test_oracle.py`（+`.sh` / `.out.txt`）在 `lab`（H100 sm90）上跑，
 **7 PASS / 0 FAIL**。四部分：
 
 **Part C —— 原样跑真实测试模块**（与官方 `__main__` 同款命令 `--num-processes 8`）：

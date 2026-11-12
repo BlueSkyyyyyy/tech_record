@@ -6,7 +6,7 @@
 # shared-load bank-conflict / instruction issue from the bf16 (`OPS`) scratch row stride?
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_vdw_ncu.sh > .../probe_b2_vdw_ncu.out.txt 2>&1
 set -uo pipefail
 

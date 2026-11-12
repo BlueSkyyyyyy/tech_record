@@ -16,7 +16,7 @@ FlashKDA supports: ``D=128``, ``CHUNK=16``, bf16. FLA runs the matching
 Also prints effective FLOPs/s and bytes/s using a simple analytic cost model of
 the chunked forward (see ``docs/07-perf.md`` for the derivation).
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ~/proj/tech_record/code/flash-kda/harness/bench_fwd.py
 """
 

@@ -7,7 +7,7 @@
 
   * 扫描 `~/proj/output/fa-bwd/<case>/`（要求有 `ref_{dq,dk,dv}.npy`）；
   * 按 `meta.json` 的 `dtype` / `varlen` / `causal` 选 host 与参数，调用 `scripts/run.sh`
-    （**在 kernel_lab 容器内编译运行**）生成 `<prefix>_{dq,dk,dv}.npy`；
+    （**在 lab 容器内编译运行**）生成 `<prefix>_{dq,dk,dv}.npy`；
   * 同一 (host, 构建配置) 只编译一次，其余 case 直接复用已产出的可执行文件；
   * 最后调用 `fa_bwd_compare.py` 汇总 ours vs ref/FA/TE，并落盘原始输出。
 
@@ -62,7 +62,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent          # code/flash-attention/fa-bwd
 OUT_ROOT = Path(os.path.expanduser("~/proj/output/fa-bwd"))
 RUN_SH = ROOT / "scripts" / "run.sh"
-CONTAINER = os.environ.get("LAB_NAME", "kernel_lab")
+CONTAINER = os.environ.get("LAB_NAME", "lab")
 
 # host 源文件/可执行文件名（单文件 vs 两文件）。两文件 = 当前最优 mma 路径的 host，
 # 与 P3-3/P3-3b 的 `ours` 口径一致；单文件用 `ours_sf`。

@@ -13,7 +13,7 @@
 > **不存在**——所以「接线」部分是**源码精读 + 推演，仅分析**；但「融合省掉哪些全局中间张量、
 > 省多少、真机收益几何」是**架构无关**的，本篇给真实数字。
 >
-> 参考版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（v2.8.1）；本机 `kernel_lab`（H100 sm90）。
+> 参考版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（v2.8.1）；本机 `lab`（H100 sm90）。
 > 实测：`harness/exp_mhc_backward_worker.{sh,py,out.txt}` + `src/mhc_backward_worker.cu`。
 > 目标卡代号敏感：全文一律用「目标卡」指代。
 

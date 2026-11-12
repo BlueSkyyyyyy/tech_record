@@ -8,7 +8,7 @@
 # driver only loads the .so.  The Triton path's setup launches many kernels, so pin with
 # `-k regex:` to the single kernel of interest.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_core_ncu.sh > .../probe_b2_core_ncu.out.txt 2>&1
 
 set -uo pipefail

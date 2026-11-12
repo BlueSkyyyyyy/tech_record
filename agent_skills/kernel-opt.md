@@ -18,14 +18,14 @@
 - 已读技巧台账 `code/kernel-opt/TECHNIQUES.md`（**每篇必须往里加技巧条目 + 更新性能榜**）。
 - 环境：宿主机有 `docker` 权限；镜像 `dsv4-inf:latest` 已存在（含 CUDA 13.2 / nvcc / ncu / nsys / PyTorch）。
 
-## 环境：kernel_lab 容器（关键）
+## 环境：lab 容器（关键）
 
 宿主机 `nvidia-smi` 显示 8×H100，但**宿主 `RmProfilingAdminOnly=1`**，普通容器里 ncu 会报
 `ERR_NVGPUCTRPERM`。必须用带 `--cap-add SYS_ADMIN` 的容器——已封装为 `code/kernel-opt/scripts/lab.sh`：
 
 ```bash
 cd ~/proj/tech_record/code/kernel-opt
-scripts/lab.sh up          # 创建/启动 kernel_lab（幂等，可重复调用）
+scripts/lab.sh up          # 创建/启动 lab（幂等，可重复调用）
 scripts/lab.sh enter       # 交互 shell
 scripts/lab.sh status
 ```
@@ -47,22 +47,22 @@ scripts/lab.sh status
    把新踩的坑追加到本文件或 `agent_guide.md`。
 6. **回写台账**：在 `TECHNIQUES.md` 新增技巧条目（原理/场景/代码/实测收益/坑）并刷新性能榜；
    模型类文章更新「模型场景台账」。
-7. **模型场景优先**：第五部分（MLA/DSA/MoE/FP8/MuonClip…）是当前重点，要用 `/ssd/models/*/config.json`
+7. **模型场景优先**：第五部分（MLA/DSA/MoE/FP8/MuonClip…）是当前重点，要用 `/models/*/config.json`
    的真实参数构造 shape，并对标 `~/github/` 里的 FlashMLA / DeepGEMM / cutlass 等实现给出差距。
 8. **提交**：每篇 commit & push 一次，信息格式 `post:` / `bench:` / `skill:`。**不要**创建 `AUTOPILOT_STOP`。
 
 ## 验收标准
 
-- [ ] 配套代码在 `kernel_lab` 里实跑通过，原始输出已留存
+- [ ] 配套代码在 `lab` 里实跑通过，原始输出已留存
 - [ ] 文章数字全部来自实测（不是猜的），关键结论有 ncu 支撑
 - [ ] ROADMAP 状态、「下一步」、索引已更新
 - [ ] `hugo --gc --minify` 无 ERROR，线上页面 200
 
 ## 已知坑
 
-- **ncu 权限**：必须 `kernel_lab`（含 SYS_ADMIN）。用 `kimi26_train` 会 `ERR_NVGPUCTRPERM`。
+- **ncu 权限**：必须 `lab`（含 SYS_ADMIN）。用 `trainer` 会 `ERR_NVGPUCTRPERM`。
 - **容器 root 建目录**：首次以容器 workdir 创建目录会属 root，宿主写不进去；
-  用 `docker exec kernel_lab chown -R 1001:1001 <dir>` 修。
+  用 `docker exec lab chown -R 1001:1001 <dir>` 修。
 - **`~` 是软链**到 `~`；`readlink -f` 后路径一致，脚本已处理。
 - **H100 峰值常量**（写文章换算用）：HBM ~3.35 TB/s；FP32 CUDA core ~66.9 TFLOPS；
   BF16/FP16 Tensor Core dense ~989 TFLOPS；FP8 ~1978 TFLOPS。
@@ -204,7 +204,7 @@ scripts/lab.sh status
 - **`timeout` 杀不掉容器里的 GPU 进程**：`timeout N scripts/run.sh …` 超时时只杀掉宿主上的
   `docker exec`，容器里的可执行文件（如 deadlock 的 kernel）会**继续占着 GPU 空转**，污染后续所有
   基准（26 篇实测被拖慢约 2×、数字全废）。症状：`nvidia-smi` 看到残留进程，宿主 `pkill` 报
-  `Operation not permitted`（进程属容器 root）。修法：`docker exec kernel_lab pkill -9 -f <name>.out`。
+  `Operation not permitted`（进程属容器 root）。修法：`docker exec lab pkill -9 -f <name>.out`。
   **跑 benchmark 前先确认 GPU 干净**，超时后也要主动清理。
 - **TMA cluster multicast（26 篇）**：`cudaLaunchKernelEx` 的 `clusterDim.x=CN` 要求 `grid.x % CN == 0`；
   leader 发 `cp.async.bulk.tensor.2d...multicast::cluster` + mask，每个 CTA 仍各自 `arrive.expect_tx`；
@@ -279,7 +279,7 @@ scripts/lab.sh status
   吞掉，看不到任何输出）。
 - **基准的长短会改变结论**（36 篇）：同一 kernel `bench_ms(run, 200, 100)` 比 `bench_ms(run, 5, 30)`
   慢 ~10%（H100 共享机上持续负载会降频）。**head-to-head 必须在同一进程、同样 warmup/iters 下测**；
-  跨文件的数字不能直接比。超时后用 `docker exec kernel_lab pkill -9 -f <binary>.out` 清残留进程，
+  跨文件的数字不能直接比。超时后用 `docker exec lab pkill -9 -f <binary>.out` 清残留进程，
   否则 100% 占用的死锁 kernel 会污染后续所有基准（36 篇实测被拖慢 ~2×）。
 - **用 wgmma 指令自身的 `scale_d=0` 清零累加器，别用通用 FMA 写 `acc=0`**（37 篇）：后者会被 ptxas
   判为 `C7514`（非 wgmma 指令定义了 wgmma 累加器）并主动串行化 wgmma。DeepGEMM 的
@@ -375,7 +375,7 @@ scripts/lab.sh status
 - **跑基准前必须确认 GPU 上没有残留的 compute 进程**（54 篇踩到）：多次 `timeout` 触发的
   死锁 kernel 会一个个留下来占着 GPU 0，**让所有基准一致地虚慢 ~2×**（且宿主 `pkill` 对容器
   root 进程无效）。症状极隐蔽：单个 kernel「app 测 49 ms / ncu 测 22 ms」差 2.2×、cuBLAS 也
-  比 torch 慢一倍。修法：每轮 timeout 后 `docker exec kernel_lab pkill -9 -f <bin>`，跑基准前
+  比 torch 慢一倍。修法：每轮 timeout 后 `docker exec lab pkill -9 -f <bin>`，跑基准前
   `nvidia-smi --query-compute-apps=pid,process_name --format=csv` 确认空。**app 与 ncu 数字
   系统性差 ~2× 时，先查残留进程，别急着怀疑 clock。**
 - **手搓的 grid remap（superblock swizzle / 1D 解码）必须是严格双射**（54 篇踩到）：当

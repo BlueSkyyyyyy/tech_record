@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P119-1 实验 driver：在 kernel_lab(H100/sm90) 上真跑 DeepEP 的 CMake 调试构建链。
+# P119-1 实验 driver：在 lab(H100/sm90) 上真跑 DeepEP 的 CMake 调试构建链。
 #   harness/exp_deepep_cmake_build.py（纯构建 / 文件解析，不加载 GPU）
 #   bash harness/exp_deepep_cmake_build.sh > harness/exp_deepep_cmake_build.out.txt
 # 对应源码：~/github/DeepEP@93eb6eb（v2.5.0）

@@ -21,7 +21,7 @@ torch 参考 / FLA 对应 kernel / autograd / FlashKDA K1 workspace 对拍。
   * ``inner = exp(A_log) * (g + dt_bias)``；``gate = lower_bound * sigmoid(inner)``；
   * ``g_cum = local_cumsum_{chunk}(gate) * log2e``（**块内**累计，单位 log2，<=0）。
 
-跑法（kernel_lab 容器内，绝对路径）：
+跑法（lab 容器内，绝对路径）：
   python ~/proj/tech_record/code/flash-kda/harness/check_bwd_b0_gate.py
 """
 

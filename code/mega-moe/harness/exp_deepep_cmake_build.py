@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P119-1 实验：在 kernel_lab(H100/sm90) 上真跑 DeepEP 的 CMake 调试构建链。
+"""P119-1 实验：在 lab(H100/sm90) 上真跑 DeepEP 的 CMake 调试构建链。
 
 对照两组构建路径：
   A. `setup.py`（真装包路径，torch CUDAExtension，见第 124 篇）——本脚本不重跑，只做静态对照。

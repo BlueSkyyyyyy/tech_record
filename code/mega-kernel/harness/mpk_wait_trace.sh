@@ -7,11 +7,11 @@
 # both for ~2 s and prints which stream (if any) completes. This localizes the
 # spinning kernel. Contrasts prewarm=none (HANG) with prewarm=cast_1elem (PASS).
 #
-# Run inside kernel_lab:
+# Run inside lab:
 #   bash harness/mpk_wait_trace.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MIRAGE_HOME="${MIRAGE_HOME:-/ssd/mirage_mpk_build}"
+export MIRAGE_HOME="${MIRAGE_HOME:-/workspace/mirage_mpk_build}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 
 for pw in none cast_1elem; do

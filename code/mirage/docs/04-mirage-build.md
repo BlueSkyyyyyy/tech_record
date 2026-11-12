@@ -27,7 +27,7 @@
 | 项 | 值 |
 |---|---|
 | GPU | NVIDIA H100 80GB HBM3（sm90，compute capability 9.0） |
-| 容器 | `kernel_lab`（PyTorch 官方镜像系） |
+| 容器 | `lab`（PyTorch 官方镜像系） |
 | CUDA | 13.2（`nvcc` V13.2.78） |
 | Python / PyTorch | 3.12 / 2.12.0a0 |
 | CPU | 96 核（影响编译时间） |

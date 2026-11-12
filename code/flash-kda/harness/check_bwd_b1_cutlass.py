@@ -25,7 +25,7 @@ Part C  run-to-run determinism of the CUTLASS build (BT 16/32/64 × NS 1/2/3), s
 
 Assumes CUTLASS headers at ~/github/cutlass/include.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_cutlass.py \
         > .../harness/check_bwd_b1_cutlass.out.txt 2>&1
 """

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P88-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证 DeepEP 的「编译期配置面 + DeepJIT 接入」
+# P88-1 实验 driver：在 lab(H100/sm90) 上真机验证 DeepEP 的「编译期配置面 + DeepJIT 接入」
 #   deep_ep/include/deep_ep/common/compiled.cuh   （编译期 ABI / 常量，架构无关）
 #   csrc/runtime/jit.hpp                          （init_jit：Config 五参 + 8 条 nvcc flag）
 #   csrc/utils/system.hpp                         （get_env）

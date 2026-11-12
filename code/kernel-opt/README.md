@@ -81,7 +81,7 @@
 
 ## 怎么跑
 
-宿主机上直接调用脚本即可（自动进 `kernel_lab` 容器编译运行）：
+宿主机上直接调用脚本即可（自动进 `lab` 容器编译运行）：
 
 ```bash
 cd ~/proj/tech_record/code/kernel-opt

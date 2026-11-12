@@ -19,7 +19,7 @@
 //
 // 两个版本共用同一份 GEMM 代码（模板参数 FUSE），所以差异**只有**被省掉的那几趟显存搬运。
 //
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：
 //   hidden=7168, moe_intermediate_size=3072, n_routed_experts=384,
 //   num_experts_per_tok=6, scoring_func=sqrtsoftplus, topk_method=noaux_tc。
 //

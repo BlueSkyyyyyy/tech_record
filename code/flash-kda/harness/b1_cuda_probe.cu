@@ -24,7 +24,7 @@
 // chunk stages (NSTAGE=1 == issue-then-wait immediately, no overlap; NSTAGE=2/3 == prefetch
 // the next chunk(s) while computing the current one).
 //
-// Build (inside kernel_lab):
+// Build (inside lab):
 //   nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared b1_cuda_probe.cu -o /tmp/b1_cuda.so
 // The host launcher is `extern "C" b1_launch(...)` and is called from
 // `harness/check_bwd_b1_cuda.py` via ctypes with raw device pointers.

@@ -2,7 +2,7 @@
 # P7-108 (companion to probe_b2_stack_resid.sh): does the `(64,256)` bank-conflict residual depend on
 # the grid *size* or on how the grid splits into `(B,T,H)`?  Sweeps three shapes with the SAME grid
 # (`B*ceil(T/16)*H = 2048`) at fixed `(K,V)=(64,256)`.  Reuses the `.so` built by probe_b2_stack_resid.sh.
-# Usage (inside kernel_lab):  bash .../probe_b2_stack_resid_knee.sh > ..._knee.out.txt 2>&1
+# Usage (inside lab):  bash .../probe_b2_stack_resid_knee.sh > ..._knee.out.txt 2>&1
 set -uo pipefail
 DIR=${HOME}/proj/tech_record/code/flash-kda
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-1}

@@ -13,11 +13,11 @@
 #      focus each, print backtrace + PC + source line;
 #   4. detach and kill the probe.
 #
-# Run inside kernel_lab:
+# Run inside lab:
 #   bash harness/mpk_cudagdb.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MIRAGE_HOME="${MIRAGE_HOME:-/ssd/mirage_mpk_build}"
+export MIRAGE_HOME="${MIRAGE_HOME:-/workspace/mirage_mpk_build}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 PROBE="${HERE}/mpk_cudagdb_probe.py"
 CMDS="${HERE}/mpk_cudagdb.cmds"

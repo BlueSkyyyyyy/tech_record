@@ -20,7 +20,7 @@ so `h`+`dh` are **72.5% of B2's read bytes** (2*128*128*4 B per chunk).
    Part D  per-kernel attribution in the chain: the B2 kernel itself does speed up (~1.10x
            on the large shape), so the lever is real but only with *native* bf16 operands.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../check_bwd_b2_hdh.py
     B2H_MODE=correctness | timing | sweep | chain
 """

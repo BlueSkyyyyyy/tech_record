@@ -7,7 +7,7 @@
 #   * FLA   = `chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64` (its native BT=64)
 # and read SpeedOfLight / Occupancy / stall reasons / memory traffic.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash ${HOME}/proj/tech_record/code/flash-kda/harness/probe_bwd_ncu.sh \
 #       > ${HOME}/proj/tech_record/code/flash-kda/harness/probe_bwd_ncu.out.txt 2>&1
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # P12-1 实验 driver：DeepGEMM 稀疏 MQA logits（DeepSeek 稀疏注意力 indexer 第二级打分，
-# 主 kernel SM100 专属）。在 kernel_lab(H100/sm90) 上做架构无关语义验证：
+# 主 kernel SM100 专属）。在 lab(H100/sm90) 上做架构无关语义验证：
 #   (A) metadata 尺寸/布局公式；(B) 稀疏选择 + 压缩列映射（用真实 SM90 dense kernel 取全量）；
 #   (C) unaligned ks 偏移；(D) host 契约在 sm90 被拒。
 #   bash harness/exp_sparse_mqa_logits.sh > harness/exp_sparse_mqa_logits.out.txt

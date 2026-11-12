@@ -21,7 +21,7 @@ This script closes that last integration gap, entirely on FlashKDA's own forward
           `torch.autograd` through `fla.ops.kda.chunk_kda` (P6-7 setup: same activation-unit
           operands, all in-kernel transforms off).
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed):
+Run inside `lab` (GPU, FlashKDA built, FLA installed):
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_ws_reuse.py
 """
 import math

@@ -23,7 +23,7 @@ forward: FLA's forward is dominated by ~0.8 ms of per-kernel Python launch wrapp
 
 Also prints a per-kernel breakdown (CUPTI) and a kernel count.
 
-Usage (inside kernel_lab, GPU):
+Usage (inside lab, GPU):
     python ~/proj/tech_record/code/flash-kda/harness/bench_bwd.py
 """
 import math

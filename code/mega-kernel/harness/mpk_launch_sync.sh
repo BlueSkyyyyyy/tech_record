@@ -12,11 +12,11 @@
 # If MPK_DBG_LAUNCH_SYNC turns HANG into PASS with *no device-code change*,
 # the race is host-side launch/handshake ordering on the NonBlocking streams.
 #
-# Run inside kernel_lab:
+# Run inside lab:
 #   bash harness/mpk_launch_sync.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MIRAGE_HOME="${MIRAGE_HOME:-/ssd/mirage_mpk_build}"
+export MIRAGE_HOME="${MIRAGE_HOME:-/workspace/mirage_mpk_build}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 DEV=0
 HT=20

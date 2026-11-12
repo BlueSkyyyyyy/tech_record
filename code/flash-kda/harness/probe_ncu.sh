@@ -5,7 +5,7 @@
 # time so the output can be labelled unambiguously (the demangled CUTLASS kernel
 # names are enormous, so we strip them and rely on the section headers).
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash ${HOME}/proj/tech_record/code/flash-kda/harness/probe_ncu.sh \
 #       > ${HOME}/proj/tech_record/code/flash-kda/harness/probe_ncu.out.txt 2>&1
 

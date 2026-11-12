@@ -102,7 +102,7 @@ grid  (一次 kernel 启动的全部线程)
 
 初学者最容易混的是 `ncu` 和 `nsys`：**单算子内部指标用 ncu，端到端时序用 nsys。** 本系列主要用 `ncu`。
 
-### 实验环境：一个专门的容器 `kernel_lab`
+### 实验环境：一个专门的容器 `lab`
 
 本机是 8 × H100 80GB SXM，宿主 CUDA 驱动能跑 CUDA 13.2。但这里有个坑：宿主的 `RmProfilingAdminOnly=1`，意味着**只有具备特权能力的进程才能读 GPU 性能计数器**；普通容器里跑 `ncu` 会直接报：
 
@@ -115,7 +115,7 @@ NVIDIA GPU Performance Counters on the target device 0.
 
 ```bash
 cd ~/proj/tech_record/code/kernel-opt
-scripts/lab.sh up        # 创建/启动 kernel_lab（幂等）
+scripts/lab.sh up        # 创建/启动 lab（幂等）
 scripts/lab.sh enter     # 进去交互
 ```
 
@@ -166,7 +166,7 @@ Device : NVIDIA H100 80GB HBM3
 
 - GPU 以 **warp（32 线程）** 为调度单位、以 **block** 为资源分配单位；存储层次从寄存器到 HBM 延迟差几百倍，优化的主线是**搬数据**。
 - **Roofline** 用「算术强度 AI」判断内存受限还是计算受限；H100 的内存天花板是 **3.35 TB/s**，绝大多数 elementwise / reduction 算子都撞在这条线上。
-- 工具链：`nvcc` 编译、**`ncu` 看单 kernel 内部**、`nsys` 看端到端；本系列在特权容器 `kernel_lab` 里跑，否则 `ncu` 没有权限。
+- 工具链：`nvcc` 编译、**`ncu` 看单 kernel 内部**、`nsys` 看端到端；本系列在特权容器 `lab` 里跑，否则 `ncu` 没有权限。
 
 下一篇进入正题：写出第一个 CUDA kernel，并第一次看到「一个算子可以多快」。
 

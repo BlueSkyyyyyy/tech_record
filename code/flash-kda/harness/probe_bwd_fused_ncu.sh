@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # P7-27: ncu DRAM/latency attribution of the fused B1+B2 kernel vs the unfused pair.
-# Run inside kernel_lab on an idle card:
-#   CUDA_VISIBLE_DEVICES=1 bash /ssd/.../harness/probe_bwd_fused_ncu.sh
+# Run inside lab on an idle card:
+#   CUDA_VISIBLE_DEVICES=1 bash /workspace/.../harness/probe_bwd_fused_ncu.sh
 set -u
 cd ${HOME}/proj/tech_record/code/flash-kda
 export FLA_DISABLE_BACKEND_DISPATCH=1

@@ -4,7 +4,7 @@ Launches exactly one B3 variant (elementwise baseline `_intra_kernel` or the MMA
 `_intra_kernel_mma`) on synthesized workspace-shaped operands so `ncu -k regex:<name>`
 targets it unambiguously -- the P7-23 B2/B3 driver pattern.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_b3_mma_driver.py --which base --B 8 --T 2048 --H 8 --bt 16 --nw 4
     ncu -k regex:_intra_kernel_mma -c 1 --launch-skip 3 --set full \\
         python ncu_b3_mma_driver.py --which mma --B 8 --T 2048 --H 8 --bt 16

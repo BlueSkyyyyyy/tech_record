@@ -12,7 +12,7 @@ This harness isolates that decision with the pure-PyTorch chunked reference:
 
 Metrics are max_abs / max_rel of output ``o`` and final state ``S`` vs the fp64 golden.
 
-Usage (inside kernel_lab, absolute path):
+Usage (inside lab, absolute path):
     python ~/proj/tech_record/code/flash-kda/harness/check_state_bf16.py
 """
 

@@ -5,7 +5,7 @@
 #  - grep audit：DeepGEMM 自建层的 9 struct 调用者、elect_one_sync 守卫、MPK 侧各层消费者。
 set -u
 DG=${DG:-${HOME}/github/DeepGEMM}
-MPK=${MPK:-/ssd/mirage_mpk_build}
+MPK=${MPK:-/workspace/mirage_mpk_build}
 DGHOME="$DG/deep_gemm/include/deep_gemm/ptx/tcgen05.cuh"
 DGCUT="$DG/deep_gemm/include/cute/arch/mma_sm100_umma.hpp"
 MPKDIR="$MPK/include/mirage/persistent_kernel/tasks/blackwell"

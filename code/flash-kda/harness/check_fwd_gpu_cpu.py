@@ -16,7 +16,7 @@ Parts:
   C  knock-on: the fp32 *chunked backward* vs token backward gap (P5-4 table) collapses
      when tf32 is off.
 
-Usage (inside kernel_lab; CPU-only works, GPU parts skipped):
+Usage (inside lab; CPU-only works, GPU parts skipped):
     python ~/proj/tech_record/code/flash-kda/harness/check_fwd_gpu_cpu.py
 """
 

@@ -5,7 +5,7 @@ claim (fusion removes the `dq/dk/dg` + `dA` round trip).
 Operands are fp32 to match the deployed chain (P7-26 §29.1: only the B1 operands are
 bf16; B2/B3 run fp32).
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_b2b3_fused_driver.py --which fused --B 8 --T 2048 --H 8 --bt 16 --nw 8
     ncu -k regex:_fused_b2b3_kernel -c 1 --launch-skip 3 --set full \\
         python ncu_b2b3_fused_driver.py --which fused --B 8 --T 2048 --H 8

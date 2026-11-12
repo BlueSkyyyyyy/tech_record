@@ -28,7 +28,7 @@ Parts
   C  timing (CUPTI `dev`, kernel-only): `prod_intra` per variant + `prod` reference, K in
      {64,128}, 2 shapes.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_intra_pad.py \
         > .../harness/check_bwd_b2_intra_pad.out.txt 2>&1
     B2IP_MODE=a | b | c

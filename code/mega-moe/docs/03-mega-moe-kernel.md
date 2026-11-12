@@ -184,7 +184,7 @@ pybind 暴露为 `deep_gemm.get_block_m_for_mega_moe`（`deep_gemm/__init__.py:8
 2. 调用真实 binding，逐点比较 `block_m`；
 3. 打印每种形状下的配置表（block M / store / K / pull / stages / smem）。
 
-在 `kernel_lab`（H100 sm90）运行，原始输出见 `harness/exp_block_config.out.txt`：
+在 `lab`（H100 sm90）运行，原始输出见 `harness/exp_block_config.out.txt`：
 
 ```
 ranks  exp    tok topk        mma  blkM stL1 stL2  blkK   pull stages  smemKiB real_match

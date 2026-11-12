@@ -16,7 +16,7 @@ that already paid off for B1) or whether it needs a structural rewrite:
           DRAM-bound (h/dh re-read + 247 regs -> 12.5% occ), B3 is FMA/L1-bound with ~0
           tensor-core use.
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle card:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle card:
     CUDA_VISIBLE_DEVICES=1 python .../check_bwd_b2b3_e2e.py
     B2B3_MODE=timing | correctness | split | sweep
 """

@@ -280,7 +280,7 @@ auto previous_group_offset = scheduler.template get_global_idx<true, sched::Inde
 
 ## 6. H100 实测
 
-`harness/exp_mgrouped_dgrad.py`（输出 `.out.txt`）在 H100（sm90）的 `kernel_lab` 里跑 DeepGEMM 2.8.1
+`harness/exp_mgrouped_dgrad.py`（输出 `.out.txt`）在 H100（sm90）的 `lab` 里跑 DeepGEMM 2.8.1
 （`arch_major=9`），用 linear2 dgrad 形状（A=dY、B=W2、D=dA）。
 
 **A. 三种布局的 API 语义**：

@@ -16,11 +16,11 @@ Design note: each batch builds its own PersistentKernel because grid_dim for
 rmsnorm_layer is (batch,1,1) -- the operator graph is batch-specialized, exactly
 as in mpk_latency.py / the official test_mode tests.
 
-Run inside kernel_lab on the *clean* scheduler-first build (see
+Run inside lab on the *clean* scheduler-first build (see
 harness/mpk_latency_multi.sh, which applies harness/mpk_sched_first.patch and
 sets MPK_EXTRA_DEFINES=-DMPK_DBG_SCHED_FIRST -- no kernel-code changes):
 
-  MIRAGE_HOME=/ssd/mirage_mpk_build CUDA_VISIBLE_DEVICES=7 \\
+  MIRAGE_HOME=/workspace/mirage_mpk_build CUDA_VISIBLE_DEVICES=7 \\
     python3 -u mpk_latency_multi.py --device 0 --batch-list 1,8,16,32
 """
 

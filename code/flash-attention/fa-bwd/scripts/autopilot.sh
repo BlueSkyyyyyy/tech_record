@@ -12,7 +12,7 @@ STOP="$DIR/AUTOPILOT_STOP"
 LOCK="$DIR/autopilot.lock"
 PIDFILE="$DIR/autopilot.pid"
 OPENCODE="${HOME}/.opencode/bin/opencode"
-MODEL="local-vllm//ssd/models/DeepSeek-V4.1-Flash"
+MODEL="local-vllm//models/DeepSeek-V4.1-Flash"
 
 MAX_ROUNDS="${MAX_ROUNDS:-14}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-30}"
@@ -21,14 +21,14 @@ TIMEOUT_PER_ROUND="${TIMEOUT_PER_ROUND:-5400}"
 PROMPT='你是 tech_record 仓库的长期自驱 agent，负责推进「flash-attention 反向（fa-bwd）」项目。按以下步骤**只完成一个增量**，做完就停。
 1. 先读 code/flash-attention/fa-bwd/ROADMAP.md 的「下一步」「当前进度」，再读 docs/00-fa-bwd-optimization-catalog.md、code/kernel-opt/agent_skills/kernel-opt.md（环境/ncu 权限/峰值常量）。
 2. 完成 ROADMAP 里的**一个 P 项**（例如 P1-1 单文件 fp16 反向），代码写到 code/flash-attention/fa-bwd/src/<dtype>/。
-3. 用 code/flash-attention/fa-bwd/scripts/run.sh 在 kernel_lab 容器里编译运行；用 scripts/ncu.sh 剖析；把实测原始输出留在同目录 *.out.txt。
+3. 用 code/flash-attention/fa-bwd/scripts/run.sh 在 lab 容器里编译运行；用 scripts/ncu.sh 剖析；把实测原始输出留在同目录 *.out.txt。
 4. 数值对拍：用自己的 kernel 读 ${HOME}/proj/output/fa-bwd/<case>/ 的 q,k,v,do.npy，算 dq,dk,dv，
    与 ref_*.npy（以及 TE/FA）比对，报告 max abs/rel diff；必要时用 harness/fa_bwd_bench.py dump 新 shape。
 5. 性能对标：用 harness/fa_bwd_bench.py bench 或自己写计时，与 FA2/TE 同 shape 对比，给出 TFLOPS 与峰值占比。
 6. 更新 docs/ 分析文档（实现与优化逐条说明、ncu bound 结论）与 ROADMAP（状态/进度/下一步），git add/commit/push，必要时验证线上（本项目文档不上站点，可只 push 代码与 md）。
 关键要求：**单文件 + 两文件**两种形式；fp16、bf16、fp8（fp8 最重点，参考 TE 的 E4M3/E5M2 + rowwise scaling）。
 **不要创建 AUTOPILOT_STOP（只有用户能停）。** 若遇无法解决的阻塞，写入 ROADMAP「阻塞」并结束本轮。
-全程不要请求人工确认、不要用 question 类工具。GPU 用 kernel_lab 容器，ncu 必须在该容器里跑，git push 需要代理（NO_PROXY 已含本地 vLLM）。
+全程不要请求人工确认、不要用 question 类工具。GPU 用 lab 容器，ncu 必须在该容器里跑，git push 需要代理（NO_PROXY 已含本地 vLLM）。
 **安全**：不要在仓库任何文件（文章/代码/注释/commit message）里出现目标 AI 卡的实际代号，一律用「目标卡」指代。
 **本轮只做 fp8 性能（见 ROADMAP『fp8 专项冲刺』+『下一批（fp8 继续）F6/F3b/F4b』）**：核心是降 L2 搬运量（ksplit 导致 Q/dO 重读 + 跨 CTA red），向 TE 逼近：ours fp8 默认还是 mma.sync（HMMA/LDSM），要用 `ncu --page source --print-source sass` 研究 TE 的 `..._flash_bprop_wgmma_f8_...`（QGMMA+TMA+WARPGROUP, 64x64x128, 384线程, 132 CTA）并逐步把 fp8 main 切到 wgmma+TMA 路径（F1→F5）。工具 `harness/te_fp8_ncu.py`。
 **对标**：与 FA 对比时一律用 **FA3（flash_attn_3，SM90，本机已编译好 3.0.0）**，不要用 flash_attn 2.7.4（那是 FA2/SM80）；基准统一用纯反向口径 `harness/fa_vs_te_bwd_only.py`（FA2/FA3/TE 三列）。

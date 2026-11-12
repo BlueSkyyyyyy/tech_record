@@ -172,7 +172,7 @@ asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.u8.s32 ...");  // A=s8, B=u8
 
 ## 四、实测：小 M 权重带宽翻倍
 
-运行环境同前作：kernel_lab 容器、H100 80GB HBM3（132 SM，HBM 3.35 TB/s）。
+运行环境同前作：lab 容器、H100 80GB HBM3（132 SM，HBM 3.35 TB/s）。
 `warmup=5, iters=50`，同进程 head-to-head（原始输出
 `48-w4a8-imma/sweep_all.out.txt`）。
 

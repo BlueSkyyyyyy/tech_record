@@ -13,7 +13,7 @@ coupling), so this segment is verifiable standalone like P7-52's `dvb` / P7-53's
   Part B  timing: dA kernel (GEMM core + segment) vs the GEMM-only core (delta) and vs the full
           Triton B2.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_da.py \
         > .../harness/check_bwd_b2_da.out.txt 2>&1
     B2DA_MODE=a | b

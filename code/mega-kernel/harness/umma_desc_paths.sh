@@ -10,7 +10,7 @@
 # 快照: mirage f9eb70c / CUTLASS f3fde583 / DeepGEMM 057ca59。
 set -u
 DEV=${DEV:-3}
-MPK=${MPK:-/ssd/mirage_mpk_build}
+MPK=${MPK:-/workspace/mirage_mpk_build}
 CUTLASS=${CUTLASS:-$MPK/deps/cutlass}
 DEEPGEMM=${DEEPGEMM:-${HOME}/github/DeepGEMM}
 SRC=${HOME}/proj/tech_record/code/mega-kernel/src/umma_desc_paths.cu

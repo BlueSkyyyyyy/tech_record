@@ -2,8 +2,8 @@
 """探测本机可用的 FA / TE 反向参考实现，并做一次数值对拍。
 
 用来在写自己的 kernel 之前确认「参考实现能跑、数值对得上、接口怎么调」。
-在 kernel_lab 容器里运行：
-    docker exec kernel_lab python ~/proj/tech_record/code/flash-attention/fa-bwd/harness/probe_refs.py
+在 lab 容器里运行：
+    docker exec lab python ~/proj/tech_record/code/flash-attention/fa-bwd/harness/probe_refs.py
 """
 import math
 import os

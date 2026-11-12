@@ -26,8 +26,8 @@
 并用 `CUDA_VISIBLE_DEVICES=<idle_id>` 固定到空闲卡，勿在推理期间运行。进入容器执行：
 
 ```bash
-# 1. 进入容器 kimi26_train
-docker exec -it kimi26_train bash
+# 1. 进入容器 trainer
+docker exec -it trainer bash
 
 # 2. 把脚本拷进容器（或在容器内直接挂载宿主路径运行）
 #    脚本与本目录同步，直接在宿主侧写好的 ~/tech_record/code/te-perf/ 下

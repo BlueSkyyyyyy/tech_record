@@ -21,7 +21,7 @@ Parts
   B  chain dev/wall (idle card): FLA reverse vs (CUDA-B1 + unfused) vs (Triton-B1 + fused)
      vs (CUDA-B1 + fused), + per-kernel B1 device attribution.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_cudab1_fused_e2e.py \
         > .../harness/check_bwd_cudab1_fused_e2e.out.txt 2>&1
     CF_MODE=correctness | timing

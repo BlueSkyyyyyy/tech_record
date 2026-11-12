@@ -28,14 +28,14 @@ fa-bwd/
 cd ~/proj/tech_record/code/flash-attention/fa-bwd
 
 # 参考实现探测（FA2.7.4 与 TE2.14 反向 vs fp32 ref）
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python "$PWD/harness/probe_refs.py"
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python "$PWD/harness/probe_refs.py"
 
 # 生成某个 case 的输入并 dump ref/fa/te 的 I/O（可在 ~/proj/output/fa-bwd 查看）
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python "$PWD/harness/fa_bwd_bench.py" dump \
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python "$PWD/harness/fa_bwd_bench.py" dump \
     --dtype fp16 --shape 1 4096 16 128 causal
 
 # 性能基准（FA vs TE）
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python "$PWD/harness/fa_bwd_bench.py" bench \
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python "$PWD/harness/fa_bwd_bench.py" bench \
     --dtype fp16 --shape 1 4096 16 128 causal
 
 # 编译/运行我们自己的 kernel

@@ -32,7 +32,7 @@ Parts
           `dAv -> B1 -> B2 -> B3 -> cumsum` chain, at the deployment granularity CHUNK=16.
   Part C  register/occupancy + DRAM bytes via `ncu` (optional; separate driver).
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle card:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle card:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_fused.py
     B12F_MODE=timing ...   # skip Part A
 """

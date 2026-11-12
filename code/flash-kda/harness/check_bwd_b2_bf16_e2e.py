@@ -18,7 +18,7 @@ Parts:
   A  correctness: `pcb` / `pcib` vs FLA autograd (six grads), and vs the fp32 `pc`.
   B  chain dev/wall (idle card): FLA vs cf vs pc vs pcb / pcib, per-kernel attribution.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_bf16_e2e.py \
         > .../harness/check_bwd_b2_bf16_e2e.out.txt 2>&1
     BE_MODE=correctness | timing

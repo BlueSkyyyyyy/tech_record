@@ -4,7 +4,7 @@
 # late-load reordering removes the spills (n_regs 255/12 -> 252/0 at nw=4).  This script
 # quantifies what that buys: registers, achieved occupancy, SpeedOfLight, stall mix, traffic.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_struct_ncu.sh > .../probe_b2_struct_ncu.out.txt 2>&1
 
 set -uo pipefail

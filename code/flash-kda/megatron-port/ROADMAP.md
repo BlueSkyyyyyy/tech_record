@@ -52,7 +52,7 @@
 - [x] **M0-1** 读通 FLA `fla/ops/kda`（`chunk.py`/`chunk_fwd.py`/`chunk_bwd.py`/
       `chunk_intra.py`/`wy_fast.py`/`gate.py`）、公共状态核
       `fla/ops/common/chunk_delta_h.py`，产出 `docs/01`/`docs/02` 结构脑图（真实行号）。
-- [x] **M0-2** 环境：`kernel_lab` 内 `fla` 0.5.2 + torch 2.12 + H100；确认
+- [x] **M0-2** 环境：`lab` 内 `fla` 0.5.2 + torch 2.12 + H100；确认
       `fla.ops.kda.chunk_kda` 可跑；`FLA_DISABLE_BACKEND_DISPATCH=1` 钉回 Triton。
 - [x] **M0-3** 定位 Megatron 调用面 `~/proj/Megatron-LM/megatron/core/ssm/gated_delta_net/`
       （`kda.py`/`gdn.py`/`common.py`），记入 `docs/00`。
@@ -357,7 +357,7 @@
   `Failed to bind NVLink SHARP (NVLS) Multicast memory`。
 - **varlen 对拍先打印 `final_state.shape`**：参考逐序列的终态若带 `[N,1,...]` 的 B=1 维，
   与 FLA 的 `[N,...]` 相比会在损失里隐式广播成 `[N,N,...]`，把形状错伪装成 O(1) 数值差。
-- **容器内 `import megatron.core` 有两条 import 期版本断言**（`kernel_lab`，2026-10）：
+- **容器内 `import megatron.core` 有两条 import 期版本断言**（`lab`，2026-10）：
   (1) `megatron/core/dist_checkpointing/strategies/nvrx.py:44-46` 的
   `Minimum required nvidia-resiliency-ext package version is 0.6.0`（容器装 0.5.0），
   在 `import megatron` 前设 `nvidia_resiliency_ext.__version__ = "0.6.0"` 骗过版本比较

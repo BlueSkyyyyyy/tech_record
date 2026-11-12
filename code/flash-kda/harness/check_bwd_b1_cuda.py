@@ -18,7 +18,7 @@ of the Triton prototype is naturally expressible and is left as a single chain.
   Part B  kernel-only CUPTI timing: NSTAGE = 1/2/3, BT = 16/32/64, vs FLA `dhu`
   Part C  smem footprint per (BT, NSTAGE)
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_cuda.py
 """
 import ctypes

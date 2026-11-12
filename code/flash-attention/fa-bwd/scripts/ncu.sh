@@ -27,7 +27,7 @@ ARCH_FLAG=""
 
 LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lab.sh"
 "$LAB" up >/dev/null
-LAB_NAME="${LAB_NAME:-kernel_lab}"
+LAB_NAME="${LAB_NAME:-lab}"
 
 NCU_ARGS=""
 for a in "${NCU_OPTS[@]}"; do NCU_ARGS+=" $(printf '%q' "$a")"; done

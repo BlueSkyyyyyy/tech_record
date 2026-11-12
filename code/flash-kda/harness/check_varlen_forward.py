@@ -25,7 +25,7 @@ D. **Edge lengths** — ``L=1`` (shorter than CHUNK), ``L=CHUNK``, lengths not m
 E. **State combinations** — `HasStateIn/HasStateOut` in the varlen template must each be
    handled: no-state, state-in only, state-out only, both (bf16).
 
-Run inside `kernel_lab` (needs the built ``flash_kda_C``):
+Run inside `lab` (needs the built ``flash_kda_C``):
     python ~/proj/tech_record/code/flash-kda/harness/check_varlen_forward.py
 """
 

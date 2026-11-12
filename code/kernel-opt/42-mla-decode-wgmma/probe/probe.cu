@@ -13,7 +13,7 @@
 //
 //   Q[BM,DK] SW128 · K[KT,DK] SW128 · P[BM,KT] SW128 · V^T[DV,KT] SW128
 //
-// 真实 shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：
+// 真实 shape 取自 /models/DeepSeek-V4-Pro/config.json：
 //   num_attention_heads=128, head_dim=512, qk_rope_head_dim=64, num_key_value_heads=1
 //   → H=128, DC=512, DR=64, DV=512, DK=576
 //

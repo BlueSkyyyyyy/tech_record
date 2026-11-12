@@ -5,7 +5,7 @@
 # `B2M_INTRA_SPAD` in b2_mma_probe.cu), shape b8t2048h8.
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_intra_pad_ncu.sh > .../probe_b2_intra_pad_ncu.out.txt 2>&1
 set -uo pipefail
 

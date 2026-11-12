@@ -22,7 +22,7 @@ Two parts, so the two possible contract mistakes are separated:
   ``kda_gate``/``torch.sigmoid``.  The residual here is the **gate activation contract**
   (softplus vs the ``safe_gate`` clamp, dt_bias layout, log-space units).
 
-Run (inside kernel_lab, GPU):
+Run (inside lab, GPU):
     FLA_DISABLE_BACKEND_DISPATCH=1 python3 \
         ~/proj/tech_record/code/flash-kda/megatron-port/harness/check_port_fla.py
 """

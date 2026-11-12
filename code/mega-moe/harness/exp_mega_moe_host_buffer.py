@@ -18,7 +18,7 @@
      memory），验证 view、别名（x == shared_l1_acts）、M-major SF、以及 `base` 复用语义；
   D) 打印 ring 容量随形状的变化，说明「为什么要在所有候选 BLOCK_M 上取最大」。
 
-只依赖 torch + deep_gemm（已在 kernel_lab 安装）。GPU 仅用于把 symm buffer 放在 cuda 上。
+只依赖 torch + deep_gemm（已在 lab 安装）。GPU 仅用于把 symm buffer 放在 cuda 上。
 """
 
 import math

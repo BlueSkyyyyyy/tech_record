@@ -17,7 +17,7 @@
 //   C. **加深流水 + 拉 occupancy**（v3）。转置 scale 后 smem 从 25KB→~40KB，
 //      register 不变（101）→ STAGES=3/4 仍能塞 5 个 CTA/SM，把 active warp 拉起来。
 //
-// shape 取自 /ssd/models/qwen3-8B/config.json：
+// shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408, group_size=128；对称 int4 权重。
 //   N=17408（MLP up/gate），K=5120，测 M=1..16（decode）。
 //   权重 44.6MB(int4) + scale 2.8MB，纯读上界见 46 篇（~2568 GB/s）。

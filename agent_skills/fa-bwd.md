@@ -8,7 +8,7 @@
 
 - 读 `agent_guide.md`（目录约定/坑，尤其：**不要写目标卡代号**、`fa_include` 内联渲染机制）。
 - 读控制面板 `code/flash-attention/fa-bwd/ROADMAP.md`（每次先读，从「下一步」做起，做完更新）。
-- 环境：复用 `kernel_lab` 容器（`code/flash-attention/fa-bwd/scripts/lab.sh` 指向 kernel-opt 的脚本）。
+- 环境：复用 `lab` 容器（`code/flash-attention/fa-bwd/scripts/lab.sh` 指向 kernel-opt 的脚本）。
 
 ## 关键事实
 
@@ -30,7 +30,7 @@
 
 ## 验收标准
 
-- [ ] 代码在 `kernel_lab` 编译运行、结果正确（fp16~1e-3 / bf16~1e-2 / fp8 另定）
+- [ ] 代码在 `lab` 编译运行、结果正确（fp16~1e-3 / bf16~1e-2 / fp8 另定）
 - [ ] 有实测数字与 ncu 证据；dump/对拍/性能表更新
 - [ ] 博客专题页面（内联 docs）构建无 ERROR、线上 200
 - [ ] 无目标卡代号等敏感信息

@@ -32,7 +32,7 @@ Parts
   B  chain dev/wall (idle card): FLA reverse vs `cf` (Triton fused) vs the eight fold variants,
      plus the `*_vec/base` ratios.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_vecst_e2e.py \
         > .../harness/check_bwd_b2_vecst_e2e.out.txt 2>&1
     B2VE_MODE=correctness | timing

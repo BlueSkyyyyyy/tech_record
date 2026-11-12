@@ -17,7 +17,7 @@ realized in the real chain.  This script closes that loop:
   Part C  isolated B1 kernel-only sweep over BT (16 = deployment granularity, 64) x NS, to
           reconcile with §17's standalone numbers in the *same* kernel build.
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle card:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle card:
     CUDA_VISIBLE_DEVICES=1 python .../check_bwd_b1_pipe_e2e.py
     B1P_MODE=timing ...   # skip Part A
     B1P_MODE=correctness ...

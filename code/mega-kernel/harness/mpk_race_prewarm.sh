@@ -8,11 +8,11 @@
 # Evidence that (a) the hang is not in the worker polling loop and (b) it is
 # prevented by a preceding *row/whole-tensor reduction*.
 #
-# Run inside kernel_lab:
+# Run inside lab:
 #   bash harness/mpk_race_prewarm.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MIRAGE_HOME="${MIRAGE_HOME:-/ssd/mirage_mpk_build}"
+export MIRAGE_HOME="${MIRAGE_HOME:-/workspace/mirage_mpk_build}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 DEV=0
 HT=20

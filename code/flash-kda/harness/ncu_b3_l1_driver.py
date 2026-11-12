@@ -5,7 +5,7 @@ Launches exactly one B3 variant so `ncu -k regex:<name>` targets it unambiguousl
   mma   -> _intra_kernel_mma       (P7-24 MMA-diagonal)
   loop  -> _intra_kernel_loop      (P7-29: k-blocks looped + software-pipelined)
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_b3_l1_driver.py --which loop --B 8 --T 2048 --H 8 --bt 16 --nw 4 --bk 64 --ns 2
     ncu -k regex:_intra_kernel_loop -c 1 --launch-skip 3 --set full \\
         python ncu_b3_l1_driver.py --which loop ...

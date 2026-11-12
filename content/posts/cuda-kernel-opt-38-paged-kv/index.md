@@ -327,5 +327,5 @@ cd code/kernel-opt
 scripts/run.sh 38-paged-kv/paged_decode.cu 64 32768 2 all
 scripts/ncu.sh 38-paged-kv/paged_decode.cu --set detailed \
     --kernel-name regex:paged_decode_mma --launch-count 1 -- 64 32768 2 v3b
-docker exec kernel_lab python3 38-paged-kv/paged_ref.py 64 32768
+docker exec lab python3 38-paged-kv/paged_ref.py 64 32768
 ```

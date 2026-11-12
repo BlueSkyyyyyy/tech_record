@@ -9,7 +9,7 @@ chunked-forward symbols of `src/kda_ref.py::kda_chunked_fwd`
 Part B (structural): under `torch.profiler`, run a real FLA `chunk_kda` forward+backward and
 list the Triton kernel launch counts, i.e. the actual kernel decomposition.
 
-Run inside `kernel_lab`:
+Run inside `lab`:
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_kernel_map.py
 """
 import os

@@ -13,7 +13,7 @@ their bf16 rounding, the golden takes fp64. Reported metrics: max_abs and max_re
 (peak-relative, denominator = max|golden|), for output ``o`` and final state. States
 are compared in the ``Sᵀ`` (``[V,K]``) layout for all pairs.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ~/proj/tech_record/code/flash-kda/harness/check_three_way.py
 """
 

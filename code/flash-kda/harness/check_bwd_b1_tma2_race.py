@@ -32,7 +32,7 @@ the *deployed-best* variant:
 
   Part D  after the fix, `tma2_full` NS=2/3 vs NS=1 are bit-identical (multi-stage now safe).
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_tma2_race.py \
         > .../harness/check_bwd_b1_tma2_race.out.txt 2>&1
 """

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P5-1 实验 driver：在 kernel_lab(H100) 编译并运行 Mega Gate 路由算法移植实验。
+# P5-1 实验 driver：在 lab(H100) 编译并运行 Mega Gate 路由算法移植实验。
 #   ./harness/exp_mega_gate_routing.sh
 # 对应源码 src/mega_gate_routing.cu，输出见 harness/exp_mega_gate_routing.out.txt。
 set -euo pipefail

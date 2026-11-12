@@ -35,7 +35,7 @@ def _silence_fd1():
         os.close(saved)
         os.close(devnull)
 
-SNAP = os.environ.get("MIRAGE_SNAP", "/ssd/mirage_mpk_build")
+SNAP = os.environ.get("MIRAGE_SNAP", "/workspace/mirage_mpk_build")
 HOPPER_DIR = os.path.join(SNAP, "tests/runtime_python/cute/hopper")
 TASKS_HOPPER = os.path.join(
     SNAP, "include/mirage/persistent_kernel/tasks/cute/hopper")

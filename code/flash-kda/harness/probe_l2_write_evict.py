@@ -14,7 +14,7 @@ read `--readmb` footprints swept from here.
 `ncu` collection lives in `harness/probe_l2_write_evict_ncu.sh`
 (`harness/probe_l2_write_evict_ncu.out.txt`).
 
-Run inside `kernel_lab`:
+Run inside `lab`:
     CUDA_VISIBLE_DEVICES=1 python .../harness/probe_l2_write_evict.py \
         --mode 0 --outmb 8 --readmb 0
 """

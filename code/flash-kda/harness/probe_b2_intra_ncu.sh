@@ -4,7 +4,7 @@
 # to see where the +~43us on the big shape goes (extra q/k/g + dAqk staging, exp2f, smem).
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_intra_ncu.sh > .../probe_b2_intra_ncu.out.txt 2>&1
 set -uo pipefail
 

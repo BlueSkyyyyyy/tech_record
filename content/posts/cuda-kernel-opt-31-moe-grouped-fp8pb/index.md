@@ -175,7 +175,7 @@ decode 是带宽受限（折叠免费）。
 
 - **per-tensor grouped（我们的上界）**：同二进制 per-tensor 980.5 @32k；25 篇的 per-tensor
   best 1007.9，cuBLAS per-expert graph loop 1028.8（32k）。
-- **per-block grouped 的 SOTA 是 DeepGEMM 的 block-scale grouped GEMM**，但本机 `kernel_lab`
+- **per-block grouped 的 SOTA 是 DeepGEMM 的 block-scale grouped GEMM**，但本机 `lab`
   容器缺 `elfutils/libdwfl-dev`，`import deep_gemm` 的 `_C` 扩展编不出来（见路线图「阻塞」），
   暂时给不出精确差距。
 - **cuBLAS 侧也没有 block-scale 入口**：实测 `torch._scaled_mm` 只接受 TensorWise / RowWise

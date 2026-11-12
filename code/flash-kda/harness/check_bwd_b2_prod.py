@@ -18,7 +18,7 @@ already anchored to torch/FLA in its own round.
           all outputs (`db` + `sand` + `gate`, each carrying its own copy of the GEMM core).
   Part D  torch sanity: prod's gate triple vs a torch transcription of the gate chain.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_prod.py \
         > .../harness/check_bwd_b2_prod.out.txt 2>&1
     B2P_MODE=a | b | c | d

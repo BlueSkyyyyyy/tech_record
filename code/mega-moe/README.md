@@ -7,7 +7,7 @@
 
 - 参考实现：`~/github/DeepGEMM`（Mega MoE、grouped GEMM、backward 的 wgrad API）；
   `~/github/DeepEP`（dispatch/combine 通信原语、symmetric memory）。
-- 环境：`kernel_lab` 容器（H100 sm90）。**注意：Mega MoE 主实现是 SM100（Blackwell）**，
+- 环境：`lab` 容器（H100 sm90）。**注意：Mega MoE 主实现是 SM100（Blackwell）**，
   本机跑不了端到端；本专题以**源码精读 + 线上资料 + 可行的 grouped-GEMM/backward 数值实验**为主。
 - 博客专题：`content/posts/mega-moe-*`，正文由 `code/mega-moe/docs/*.md` 经 `doc_include` **实时内联**。
 

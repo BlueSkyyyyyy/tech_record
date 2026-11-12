@@ -10,7 +10,7 @@
 
 ## 1. 环境基线
 
-`kernel_lab` 容器（`scripts/lab.sh`）内实测：
+`lab` 容器（`scripts/lab.sh`）内实测：
 
 | 项 | 值 |
 |---|---|

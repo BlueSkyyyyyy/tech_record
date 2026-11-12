@@ -17,7 +17,7 @@ builds only by the fp32 accumulation order (P7-74).
   Part B  kernel-only timing: dev (CUPTI), the four bf16 / fp32 pairs.
   Part C  static smem + registers.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_bf16mma_tma.py \
         > .../harness/check_bwd_b2_bf16mma_tma.out.txt 2>&1
     B2BT_MODE=a | b | c

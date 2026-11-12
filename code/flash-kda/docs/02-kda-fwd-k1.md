@@ -674,7 +674,7 @@ $$
 ### 12.4 实跑验证
 
 `harness/check_workspace_layout.py`（原始输出 `harness/check_workspace_layout.out.txt`）
-在 `kernel_lab` 里对**已编译**扩展做三项核对：
+在 `lab` 里对**已编译**扩展做三项核对：
 
 1. **A 字段预算**：六个字段全部 128 B 对齐，`kPerTile=13824` 与 `flash_kda.cpp:20` 的
    `3*16*128*2+128*4+2*16*16*2` 相等。

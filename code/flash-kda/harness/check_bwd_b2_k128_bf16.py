@@ -22,7 +22,7 @@ Parts:
   D  TMA cross: `-DB2M_BF16 -DB2M_BF16MMA -DB2M_TMA` (bf16 128 B atoms => `BVK=64`) vs the
      cp.async bf16mma build -- bit-for-bit (the P7-88 staging-only-swaps-transport claim).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=3 python .../harness/check_bwd_b2_k128_bf16.py \
         > .../harness/check_bwd_b2_k128_bf16.out.txt 2>&1
     B2KB_MODE=a | b | c | d

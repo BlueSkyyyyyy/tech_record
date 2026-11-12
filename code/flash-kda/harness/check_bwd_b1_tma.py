@@ -11,7 +11,7 @@ handed back through per-stage `empty` mbarriers — no `__syncthreads()` in the 
           the P7-19 reg kernel (`b1_reg_probe.cu`) and the wmma base (`b1_cuda_probe.cu`)
   Part C  smem footprint vs reg
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_tma.py
 """
 import ctypes

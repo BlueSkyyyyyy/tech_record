@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P33-1 实验 driver：在 kernel_lab(H100/sm90) 上跑 DeepGEMM 测试断言辅助 tests/utils.py。
+# P33-1 实验 driver：在 lab(H100/sm90) 上跑 DeepGEMM 测试断言辅助 tests/utils.py。
 #   先 nvcc 编 src/test_utils_sr.cu（device 侧随机舍入 oracle），再跑 exp_test_utils.py 逐条对拍。
 #   bash harness/exp_test_utils.sh > harness/exp_test_utils.out.txt
 set -euo pipefail

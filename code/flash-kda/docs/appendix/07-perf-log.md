@@ -11189,7 +11189,7 @@ case = `B2 T1024 H8` / `T512 H4` / `T250 H3`（非整除）。非整除 `T` 下 
 ```
 
 `harness/check_bwd_b2_kvcross.py` 的解析打印同步改了（`NW = 8`，`4*BT*4 → NW*BT*4`），并用
-`B2KC_MODE`（默认全跑）在 `kernel_lab` 重跑重生成 `check_bwd_b2_kvcross.out.txt`：**Part A/A3/B 的全部
+`B2KC_MODE`（默认全跑）在 `lab` 重跑重生成 `check_bwd_b2_kvcross.out.txt`：**Part A/A3/B 的全部
 实测列逐字节不变**（同指令流确定性），仅那 4 行解析打印从 `13568/25856/50432` 变为
 `13824/26112/50688`——即**只有解析式错、测量从未错**。§104.4/§104.5 的结论不受影响（它们只依赖实测列）。
 
@@ -12519,7 +12519,7 @@ matmul**。**未改 `src/` 的算术。**
 
 ### 117.1 关键事实：本容器的 torch 默认 `allow_tf32=True`
 
-在 `kernel_lab`（NGC `nv26.04`）里：
+在 `lab`（NGC `nv26.04`）里：
 
 ```
 torch.backends.cuda.matmul.allow_tf32 = True      # 容器默认
@@ -12650,7 +12650,7 @@ CPU 跑的（其 `check_bwd_ref.out.txt` fp32 行 $\sim10^{-7}$ 本就干净）�
 ### 118.3 交付物修正：artifact 与 prose 一致
 
 `harness/check_bwd_chunked.py` 在模块顶部加显式 `allow_tf32=False`（并更新
-`forward_precision_note` 文档串），在 `kernel_lab` 重跑重生成 `check_bwd_chunked.out.txt`：
+`forward_precision_note` 文档串），在 `lab` 重跑重生成 `check_bwd_chunked.out.txt`：
 
 ```
   fp32 : dq=7.15e-07/2.53e-07  dk=5.72e-06/8.90e-07  dv=5.07e-07/5.23e-07

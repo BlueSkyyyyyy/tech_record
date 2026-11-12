@@ -5,7 +5,7 @@
 > 本篇把它们逐条锚定到 FLA `chunk_kda`，并顺手更正路线图里的一处前提错误
 > （`chunk_size∈{16,32,64}` → 实际只允许 `{32,64}`）。
 >
-> 行号按 **`kernel_lab` 容器内 pip 包 `fla==0.5.2`**（`/usr/local/lib/python3.12/dist-packages/fla`）
+> 行号按 **`lab` 容器内 pip 包 `fla==0.5.2`**（`/usr/local/lib/python3.12/dist-packages/fla`）
 > 实测核对；与 `docs/00–05` 引用的 `~/proj/flash-linear-attention` clone 行号可能不同（上游在动）。
 
 ---

@@ -120,7 +120,7 @@ dw   = Σ_j dp_j · (q ⊙ V_j / r_j)              # dq/dw 只有 [D]，沿 N �
 
 ## 2. 测试口径
 
-- 容器 `kernel_lab`；**空闲 GPU**（`CUDA_VISIBLE_DEVICES=7`，跑前/跑后 0 MiB、0% util）；
+- 容器 `lab`；**空闲 GPU**（`CUDA_VISIBLE_DEVICES=7`，跑前/跑后 0 MiB、0% util）；
   H100 80GB SXM，132 SM；torch `2.12.0a0+…nv26.04`、triton 3.6.0。
 - **FLA 是 checkout 里的 0.6.0**（`main @ cf9f520f`，2026-11-03），不是容器 site-packages
   里的 0.5.2 —— 脚本用 `FLA_SRC` 把 checkout 插到 `sys.path[0]`。**不设 `FLA_SRC` 会静默测到
@@ -410,7 +410,7 @@ AttnRes 的输出紧接着就是下一个 sublayer 的 prenorm。FLA 的 `output
 ## 6. 复跑
 
 ```bash
-# 在 kernel_lab 容器内，选一张空闲卡
+# 在 lab 容器内，选一张空闲卡
 export FLA_SRC=~/proj/flash-linear-attention
 export LD_LIBRARY_PATH=~/proj/Megatron-Bridge/.venv/lib/python3.12/site-packages/z3/lib:$LD_LIBRARY_PATH
 cd ~/proj/tech_record/code/te-perf

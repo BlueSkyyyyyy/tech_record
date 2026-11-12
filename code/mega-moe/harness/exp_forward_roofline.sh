@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P132-1 实验 driver：在 kernel_lab(H100) 给 Mega MoE **前向**的两段 m-grouped GEMM 做 roofline 归因。
+# P132-1 实验 driver：在 lab(H100) 给 Mega MoE **前向**的两段 m-grouped GEMM 做 roofline 归因。
 #   bash harness/exp_forward_roofline.sh > harness/exp_forward_roofline.out.txt
 # 对应 exp_forward_roofline.py（GEMM 本体）与 src/moe_forward_epilogue.cu（SwiGLU+量化 epilogue 预算）。
 #   第一段：event 计时（single-shot 热启动 / sustained 持续负载）+ 字节/AI/roofline 分析。

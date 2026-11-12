@@ -20,7 +20,7 @@ forward-substitution (same structure as FLA's `merge_16x16_to_64x64_inverse_kern
 6 off-diagonal `A64` blocks, the 6 merge formulas, and `w64`.  Everything is compared
 against the torch prototype (`recover_operands_64`) and FLA's own forward@64.
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle card:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle card:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_rechunk_pass.py
     RP_MODE=correctness|timing
 """

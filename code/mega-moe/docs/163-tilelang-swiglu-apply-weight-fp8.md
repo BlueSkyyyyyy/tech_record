@@ -157,7 +157,7 @@ E4M3 量化（相对精度 ~2⁻³），差异在绝大多数元素上被舍入�
 
 ## 6. H100 真机实测
 
-全部在 `kernel_lab`（H100/sm90）真跑；真实源码 sha256 见 `.out.txt`
+全部在 `lab`（H100/sm90）真跑；真实源码 sha256 见 `.out.txt`
 （`swiglu_apply_weight_to_fp8.py 301783c3…`、`utils.py aab1e230…`、`common/math.cuh 576e9db1…`）。
 
 ### A) host 公式

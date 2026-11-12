@@ -17,7 +17,7 @@ Reference / baseline: torch fp32 (`allow_tf32=False`) as the algebraic golden; t
 identical-op Triton core (`check_bwd_b2_core.py`) as the `tl.dot` baseline (it is already
 generic in K,V).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=3 python .../harness/check_bwd_b2_kv.py \
         > .../harness/check_bwd_b2_kv.out.txt 2>&1
     B2KV_MODE=a | b | d

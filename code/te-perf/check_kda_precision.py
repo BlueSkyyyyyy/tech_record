@@ -17,7 +17,7 @@
 #   ref_rel  = max_abs / max|o_gold|                       (signal-normalized)
 # and the mutual difference FlashKDA vs Triton.
 #
-# Usage (inside kernel_lab, on an idle GPU):
+# Usage (inside lab, on an idle GPU):
 #   python check_kda_precision.py
 #   python check_kda_precision.py --seqs 1024,4096,8192 --seeds 0,1,2
 #

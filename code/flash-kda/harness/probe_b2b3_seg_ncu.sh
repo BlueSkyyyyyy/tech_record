@@ -3,7 +3,7 @@
 # (full / no_post / no_lgemm / allcheap).  Confirms the byte traffic is preserved
 # across variants (same loads/stores) and locates each segment's bound.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2b3_seg_ncu.sh > .../probe_b2b3_seg_ncu.out.txt 2>&1
 
 set -uo pipefail

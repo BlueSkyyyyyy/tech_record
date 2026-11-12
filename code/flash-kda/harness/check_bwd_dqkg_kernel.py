@@ -32,7 +32,7 @@ The kernel *semantics* (loaded-into-register orientations are all transposed):
     (i_k==0) b_dA = dv @ v^T ; b_dvb = A @ dv ; b_dv2 = b_dvb*beta ; b_db = sum_V(b_dvb*v)
     ... decay rescale / gate chain / dA = -A^T (beta*...) A^T ...
 
-Run inside `kernel_lab`:
+Run inside `lab`:
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_dqkg_kernel.py
 """
 import math

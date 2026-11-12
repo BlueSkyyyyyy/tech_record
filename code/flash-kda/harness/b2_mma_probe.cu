@@ -33,7 +33,7 @@
 // merged them into one production launch (`-DB2M_PROD`); P7-63 folds the B3 `intra` diagonal
 // into that production launch (`-DB2M_INTRA`).
 //
-// Build (inside kernel_lab):
+// Build (inside lab):
 //   nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared b2_mma_probe.cu -o /tmp/b2_mma.so
 // Host entry `extern "C" b2mma_launch(...)`, called from check_bwd_b2_mma.py via ctypes.
 #include <cuda_runtime.h>

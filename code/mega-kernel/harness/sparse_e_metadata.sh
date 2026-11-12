@@ -6,8 +6,8 @@
 # 用 MPK 快照钉死的 deps/cutlass（f3fde583）。末尾附 consumer audit（grep）。
 set -u
 DEV=${DEV:-3}
-CUTLASS=${CUTLASS:-/ssd/mirage_mpk_build/deps/cutlass}
-MPK=${MPK:-/ssd/mirage_mpk_build}
+CUTLASS=${CUTLASS:-/workspace/mirage_mpk_build/deps/cutlass}
+MPK=${MPK:-/workspace/mirage_mpk_build}
 SRC=${HOME}/proj/tech_record/code/mega-kernel/src/sparse_e_metadata.cu
 BIN=/tmp/sparse_e_metadata
 nvcc -std=c++17 -O2 -arch=sm_90a -I"$CUTLASS/include" "$SRC" -o "$BIN" || exit 1

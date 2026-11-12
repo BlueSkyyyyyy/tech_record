@@ -18,7 +18,7 @@ stores are left scalar (small, one-thread-per-entry layout).
           cross-checked against FLA (tf32 floor, unchanged from P7-57).
   Part B  timing: CUPTI `dev` base vs vecst per segment, and the gate segment delta.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_vecst_seg.py \
         > .../harness/check_bwd_b2_vecst_seg.out.txt 2>&1
     B2V_MODE=a | b

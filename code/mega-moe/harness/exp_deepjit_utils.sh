@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P160-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证 DeepJIT 的「支撑工具层」——
+# P160-1 实验 driver：在 lab(H100/sm90) 上真机验证 DeepJIT 的「支撑工具层」——
 #   deep_jit/utils/{filesystem,command,str,uuid,json,gil,no_ref_ptr}.hpp
 #   （hash/parser/env/lazy/exception 已分别在第 33/38/40/116 篇拆过，本篇补剩余这层）
 #   bash harness/exp_deepjit_utils.sh > harness/exp_deepjit_utils.out.txt

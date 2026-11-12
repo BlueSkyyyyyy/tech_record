@@ -5,7 +5,7 @@
 # `vv` row paddings B2M_VVSTRIDE in {0,8,16,24,32}.  If the conflict count tracks the stride, the
 # hypothesis holds; if it is flat, the uptick is not a pure stride-phase artifact.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_vvstride_ncu.sh > .../probe_b2_vvstride_ncu.out.txt 2>&1
 set -uo pipefail
 DIR=${HOME}/proj/tech_record/code/flash-kda

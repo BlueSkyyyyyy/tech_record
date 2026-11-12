@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P87-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证 SM100 HyperConnection prenorm GEMM
+# P87-1 实验 driver：在 lab(H100/sm90) 上真机验证 SM100 HyperConnection prenorm GEMM
 #   csrc/jit_kernels/impls/sm100_tf32_hc_prenorm_gemm.hpp      （host JIT 包装层）
 #   deep_gemm/include/deep_gemm/impls/sm100_tf32_hc_prenorm_gemm.cuh （SM100 kernel）
 #   ./harness/exp_hc_prenorm_sm100.sh

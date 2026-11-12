@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P45-1 实验 driver：在 kernel_lab(H100/sm90) 上直接编译并运行 DeepGEMM 的
+# P45-1 实验 driver：在 lab(H100/sm90) 上直接编译并运行 DeepGEMM 的
 #   per-warp `%clock64` 追踪探针（`deep_gemm/include/deep_gemm/common/probe.cuh` 的真实设备代码）。
 #   ./harness/exp_probe_clock64.sh
 # 对应源码 src/probe_clock64.cu，输出见 harness/exp_probe_clock64.out.txt。

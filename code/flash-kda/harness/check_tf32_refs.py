@@ -17,7 +17,7 @@ GPU numeric comparison but never pins the tf32 policy; (B) a **dynamic** run of 
 central reference comparisons (forward & backward, chunked vs token vs autograd) under
 `allow_tf32` ON **and** OFF, with real max_abs/max_rel; (C) the conclusion.
 
-Run inside `kernel_lab` (GPU):
+Run inside `lab` (GPU):
     python ~/proj/tech_record/code/flash-kda/harness/check_tf32_refs.py \
         > ~/proj/tech_record/code/flash-kda/harness/check_tf32_refs.out.txt 2>&1
 """

@@ -7,7 +7,7 @@
 # conflicts, XU/exp2 pipe, tensor/SM/DRAM SOL, duration, and SASS MUFU/LDG/STG counts.
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_gate_ncu.sh > .../probe_b2_gate_ncu.out.txt 2>&1
 set -uo pipefail
 

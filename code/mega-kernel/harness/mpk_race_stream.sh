@@ -17,11 +17,11 @@
 # dtype-conversion kernel anywhere on the device), not default-stream history.
 # If cast_s2 HANGs, the key is that the cast ran on the torch default stream.
 #
-# Run inside kernel_lab:
+# Run inside lab:
 #   bash harness/mpk_race_stream.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MIRAGE_HOME="${MIRAGE_HOME:-/ssd/mirage_mpk_build}"
+export MIRAGE_HOME="${MIRAGE_HOME:-/workspace/mirage_mpk_build}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 DEV=0
 HT=20

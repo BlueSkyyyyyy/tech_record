@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P107-1 实验 driver：在 kernel_lab(H100/sm90) 上验证 DeepEP 的环境变量 / 开关面。
+# P107-1 实验 driver：在 lab(H100/sm90) 上验证 DeepEP 的环境变量 / 开关面。
 #   Part A: harness/deepep_env_probe.cpp（g++ host，真实 include csrc/utils/system.hpp::get_env）
 #   Part B: harness/exp_deepep_envs.py（纯 Python，复用真实生成的 deep_ep/envs.py + check_nccl_so）
 #   bash harness/exp_deepep_envs.sh > harness/exp_deepep_envs.out.txt

@@ -9,7 +9,7 @@
 //
 // 与 51 最佳（wA_s2k8 / wA_s3k4）同进程对照。
 //
-// shape 取自 /ssd/models/qwen3-8B/config.json：
+// shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408, group_size=128；对称 int4 权重。
 //   N=17408（MLP up/gate），K=5120，测 M=1..16（decode）。
 //

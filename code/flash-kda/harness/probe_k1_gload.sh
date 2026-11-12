@@ -12,7 +12,7 @@
 #   3. Budget: measure K1 DRAM read at small + design point and compute the
 #      share contributed by that load (sectors * 32B).
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash ${HOME}/proj/tech_record/code/flash-kda/harness/probe_k1_gload.sh \
 #       > ${HOME}/proj/tech_record/code/flash-kda/harness/probe_k1_gload.out.txt 2>&1
 

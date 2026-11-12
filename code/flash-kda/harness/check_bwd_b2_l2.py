@@ -15,7 +15,7 @@ The `vecst` change is the deployable, free, numerically-lossless part of the fix
 the cp.async read-side amplification (probe output) is a separate, structural item
 (next lever = TMA, per the B1 §19-24 lesson).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_l2.py \
         > .../harness/check_bwd_b2_l2.out.txt 2>&1
     B2L_MODE=a | b | c

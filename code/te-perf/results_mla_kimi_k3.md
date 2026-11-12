@@ -53,7 +53,7 @@ softmax scale 也一致：K3 用 `192 ** -0.5`，TE 默认 `1/sqrt(q.size(-1))`�
 
 ## 3. 计时口径
 
-- 容器 `kimi26_train`；**空闲卡 GPU 0**（`CUDA_VISIBLE_DEVICES=0`，跑前/跑后均 0 MiB、0% util，
+- 容器 `trainer`；**空闲卡 GPU 0**（`CUDA_VISIBLE_DEVICES=0`，跑前/跑后均 0 MiB、0% util，
   其余 7 张卡也全空闲）；H100 80GB SXM，132 SM，SM clock 1980 MHz。
 - `time(us)` = **CUPTI 纯 device kernel 时间**（`torch.profiler`，warmup=10、repeat=50 取均值），
   **不含 launch / 主机派发**；与 `bench_te.py` 完全同一套 `KernelTimer.device_time`。
@@ -163,7 +163,7 @@ GEMM，KDA 层也不在此列，所以不能当成整模型 step time。
 
 ```bash
 # 进容器（TE 2.14 / torch 2.12 / H100）
-docker exec -it kimi26_train bash
+docker exec -it trainer bash
 cd ~/proj/tech_record/code/te-perf
 
 # 1) 正确性：TE fwd+bwd vs torch fp32 参考（s=512，cos 应 >0.999）

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P114-1 实验 driver：在 kernel_lab(H100/sm90) 上验证两库的「构建 / 打包 / 安装期地基」。
+# P114-1 实验 driver：在 lab(H100/sm90) 上验证两库的「构建 / 打包 / 安装期地基」。
 #   harness/exp_build_packaging.py（纯 host/Python，按路径加载真实 find_pkgs.py + ast 抽取两个 setup.py）
 #   bash harness/exp_build_packaging.sh > harness/exp_build_packaging.out.txt
 # 对应源码：~/github/DeepEP@93eb6eb（v1.2.1-41, __version__ 2.5.0）

@@ -19,7 +19,7 @@ This script closes that loop:
 
 Only B1 changes; B2/B3 keep the tf32 path (P7-8 showed `dAv/B2/B3` are already ahead).
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed):
+Run inside `lab` (GPU, FlashKDA built, FLA installed):
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_b1_bf16_e2e.py
     B1BF_CASES=1 ...   # correctness only
     B1BF_TIMING_ONLY=1 ...  # timing only

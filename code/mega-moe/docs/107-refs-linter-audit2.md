@@ -12,7 +12,7 @@
 > ③ 量化一个非平凡现象——**审计文档的自指涉**：第 106 篇按设计引用了一批「坏引用」当作修正名单，
 > 下一轮体检会把这 5 条当成新错误。
 >
-> **纯文件解析，不加载 GPU，任何机器都能跑**；在 `kernel_lab(H100)` 里跑只为与专题其它实验同环境。
+> **纯文件解析，不加载 GPU，任何机器都能跑**；在 `lab(H100)` 里跑只为与专题其它实验同环境。
 > 源码坐标：`~/github/DeepGEMM`（commit `057ca59`）、`~/github/DeepEP`（commit `93eb6eb`）。
 > 实验：`harness/check_refs.py` + `harness/check_refs.sh` → `harness/check_refs.out.txt`。
 

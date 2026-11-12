@@ -13,7 +13,7 @@
 >
 > 目标卡代号敏感：全文用「目标卡」指代。
 
-参考版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（v2.8.1），本机 `kernel_lab`（H100 sm90）。
+参考版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（v2.8.1），本机 `lab`（H100 sm90）。
 实测脚本：`harness/exp_fp4_mega_moe_weights.{py,sh}`，原始输出 `harness/exp_fp4_mega_moe_weights.out.txt`
 （`ALL_OK = True`）。
 

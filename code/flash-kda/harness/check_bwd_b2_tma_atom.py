@@ -13,7 +13,7 @@ This file is the correctness + timing half; the `ncu` byte/conflict/duration hal
   Part B  kernel-only `dev` (CUPTI) + `wall` for {base32, tma32} x {base64, tma_atom64}
           (+vecst): does the atom split finally stack TMA@BVK=64 on top of the best tiling?
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_tma_atom.py \
         > .../harness/check_bwd_b2_tma_atom.out.txt 2>&1
     B2TA_MODE=a | b

@@ -15,7 +15,7 @@ Same methodology as M6: feed both sides the *same* bf16 operands, run the port r
 fp64, and read the residual as the FLA bf16-kernel error.  ``src/kda_ref.py`` was extended with
 GVA (``repeat_interleave`` on q/k, matching FLA's group-sum autograd) and ``state_v_first``.
 
-Run (inside kernel_lab, GPU):
+Run (inside lab, GPU):
     FLA_DISABLE_BACKEND_DISPATCH=1 python3 \
         ~/proj/tech_record/code/flash-kda/megatron-port/harness/check_port_fla_m7.py
 """

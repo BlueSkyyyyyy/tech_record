@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P21-1 实验 driver：在 kernel_lab(H100/sm90) 上直接编译并运行 DeepGEMM 真实 epilogue 算子
+# P21-1 实验 driver：在 lab(H100/sm90) 上直接编译并运行 DeepGEMM 真实 epilogue 算子
 #   （deep_gemm/include/deep_gemm/epilogue/operators.cuh:12-92 原样抽取）。
 #   ./harness/exp_epilogue_operators.sh
 # 对应源码 src/epilogue_operators.cu，输出见 harness/exp_epilogue_operators.out.txt。

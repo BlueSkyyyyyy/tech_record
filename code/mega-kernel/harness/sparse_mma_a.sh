@@ -7,8 +7,8 @@
 # 末尾附 consumer audit（grep）：CUTLASS 有稀疏 builder、MPK 零引用。
 set -u
 DEV=${DEV:-3}
-CUTLASS=${CUTLASS:-/ssd/mirage_mpk_build/deps/cutlass}
-MPK=${MPK:-/ssd/mirage_mpk_build}
+CUTLASS=${CUTLASS:-/workspace/mirage_mpk_build/deps/cutlass}
+MPK=${MPK:-/workspace/mirage_mpk_build}
 SRC=${HOME}/proj/tech_record/code/mega-kernel/src/sparse_mma_a.cu
 BIN=/tmp/sparse_mma_a
 nvcc -std=c++17 -O2 -arch=sm_90a -I"$CUTLASS/include" "$SRC" -o "$BIN" || exit 1

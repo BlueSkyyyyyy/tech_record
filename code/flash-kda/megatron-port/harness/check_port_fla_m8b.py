@@ -23,7 +23,7 @@ CP (FLA kernels, real NCCL ranks) vs non-CP (FLA kernels, full sequence).  Becau
 and non-CP share the same bf16 kernel family, an *aligned* partition is expected to be
 bit-identical (as the forward was in M8-1 §5); the point of the test is exactly that.
 
-Run (inside kernel_lab, idle GPUs):
+Run (inside lab, idle GPUs):
     CUDA_VISIBLE_DEVICES=3,4,5,6,7 FLA_DISABLE_BACKEND_DISPATCH=1 python3 \
         ~/proj/tech_record/code/flash-kda/megatron-port/harness/check_port_fla_m8b.py
 """

@@ -14,7 +14,7 @@ It is a *complete* B2 output (never touched by the gate chain), so it is verifia
   Part B  timing: db kernel vs the same build with the db segment skipped (`B2M_NODB`), and
           vs the full Triton B2.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_db.py \
         > .../harness/check_bwd_b2_db.out.txt 2>&1
     B2DB_MODE=a | b

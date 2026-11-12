@@ -19,7 +19,7 @@ global in both layouts, so the folded intra contribution is unaffected.
   Part B  resources: registers / spill / smem of prod_intra vs prod_intra_tma.
   Part C  timing: CUPTI `dev` + event `wall`, prod_intra vs prod_intra_tma.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_intra_tma.py \
         > .../harness/check_bwd_b2_intra_tma.out.txt 2>&1
     B2IT_MODE=a | b | c

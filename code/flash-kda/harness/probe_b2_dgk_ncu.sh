@@ -7,7 +7,7 @@
 #   dgkcf  -> conflict-free dgk reduction
 # Each variant is pre-built (nvcc hangs under ncu, P7-16) and profiled separately.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_dgk_ncu.sh > .../probe_b2_dgk_ncu.out.txt 2>&1
 
 set -uo pipefail

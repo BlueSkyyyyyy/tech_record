@@ -21,7 +21,7 @@ Four parts, all on the fp32 FLA forward intermediates (same setup as check_bwd_e
   Part D  full chain dAv -> B1 -> B2 -> B3 -> rev-cumsum with the two stored-P
           precisions, six gradients vs `torch.autograd` -- end-to-end cost of bf16 P.
 
-Run inside `kernel_lab` (idle GPU):
+Run inside `lab` (idle GPU):
     CUDA_VISIBLE_DEVICES=1 python ~/proj/tech_record/code/flash-kda/harness/check_bwd_p_dtype.py
 """
 import math

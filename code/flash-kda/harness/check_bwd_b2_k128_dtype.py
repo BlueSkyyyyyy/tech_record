@@ -25,7 +25,7 @@ Parts
   Part C  resources: registers / spill / smem of the builds at each (K,V).
   Part D  timing (kernel-only CUPTI `dev`): prod vs prod_bf16 vs prod_bf16_mma vs prod_bf16_vdw.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=3 python .../harness/check_bwd_b2_k128_dtype.py \
         > .../harness/check_bwd_b2_k128_dtype.out.txt 2>&1
     B2KDT_MODE=a | b | c | d

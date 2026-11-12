@@ -33,7 +33,7 @@
 
 ## 0. 口径与常量
 
-- **测试机**：H100 80GB HBM3（sm90），CUDA 13.2 / nvcc / ncu，容器 `kernel_lab`。
+- **测试机**：H100 80GB HBM3（sm90），CUDA 13.2 / nvcc / ncu，容器 `lab`。
 - **基线 shape**（causal，D=128，scale=1/√D）：
   - `b1_s512_h16`（B=1,S=512,H=16）
   - `b1_s1024_h32`（B=1,S=1024,H=32）
@@ -928,9 +928,9 @@ scripts/run.sh src/fp8/fa_bwd_fp8_main.cu --iters=5 \
 
 # FA / TE 基线（CUPTI 纯 device 时间）
 H=harness/fa_bwd_bench.py
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python $H bench --dtype fp16 \
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python $H bench --dtype fp16 \
     --shape 1 512 16 128 causal --shape 1 1024 32 128 causal --shape 1 4096 16 128 causal
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python $H bench --dtype fp8 \
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python $H bench --dtype fp8 \
     --shape 1 4096 16 128 causal
 
 # ncu（示例：fp8 mma main）
@@ -2074,7 +2074,7 @@ varlen 两套构建），再把 case 名喂给 `fa_bwd_compare.py`。选取的 c
   `src/fa_bwd_run_p33c_summary.out.txt`；最后调用 `fa_bwd_compare.py` 写
   `src/fa_bwd_compare_p33c_summary.out.txt`。
 - CLI：`--dtype/--glob/--case/--impls {twofile,singlefile,both}/--fixed-only/--varlen-only/
-  --iters/--no-run/--dry-run`；可从任意 cwd 运行，内部用绝对路径与 `kernel_lab` 容器。
+  --iters/--no-run/--dry-run`；可从任意 cwd 运行，内部用绝对路径与 `lab` 容器。
 
 ### 34.2 实测（**全部 73 个 case × 单/两文件 = 146 次运行**；原始输出
 `src/{fp16,bf16,fp8}/fa_bwd_<dtype>_p33c_run.out.txt`，汇总 `src/fa_bwd_run_p33c_summary.out.txt`、
@@ -2476,7 +2476,7 @@ ours = 两文件 `fa_bwd_{fp16,bf16,fp8}_mma_main` 端到端 event（preprocess+
 python3 harness/fa_bwd_compare.py --check docs/04-numerics-and-perf-summary.md
 # 原地同步
 python3 harness/fa_bwd_compare.py --apply docs/04-numerics-and-perf-summary.md
-# 跑 ours + 同步一把梭（调用 scripts/run.sh，在 kernel_lab 内编译）
+# 跑 ours + 同步一把梭（调用 scripts/run.sh，在 lab 内编译）
 python3 harness/fa_bwd_run.py --doc-table-apply
 ```
 
@@ -2861,7 +2861,7 @@ fp8 的正常原子噪声——这正是 §40 只做「报告」而没有直接�
 
 ### 41.4 现场小样本重跑（证明自动 gate 挂在真实编译/运行路径上）
 
-在 `kernel_lab` 容器里以 `fa_bwd_run.py --case <fp16 与 fp8 各一> --impls both` 真编译真运行
+在 `lab` 容器里以 `fa_bwd_run.py --case <fp16 与 fp8 各一> --impls both` 真编译真运行
 （4 次运行 / 2 次编译），随后默认 auto gate：fp16 worst `4.883e-04`、fp8 worst `4.768e-07`，
 退出码 **0**；对拍值与历史一致（fp16 `1.671/1.771/1.899e-3`、fp8 `2.426/2.975/3.735e-1`）。
 原始输出 `src/fa_bwd_p33g_live_sweep.out.txt`、`src/fa_bwd_p33g_gate_small.out.txt`。

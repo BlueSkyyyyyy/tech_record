@@ -19,7 +19,7 @@
 // 另测 **L2 persisting window**（cudaAccessPolicyWindow 把 Wm 钉进 L2）：ratio=128 时 Wm 仅 14.7MB、
 // ratio=4 时 29.4MB，都 < 50MB L2，理论上可常驻，看能否压 L2 抖动。
 //
-// 真实 shape（/ssd/models/DeepSeek-V4-Pro/config.json）：hidden_size=7168, head_dim=512,
+// 真实 shape（/models/DeepSeek-V4-Pro/config.json）：hidden_size=7168, head_dim=512,
 //   qk_rope_head_dim=64, compress_ratios ∈ {128,4,0}。
 //
 // 运行：

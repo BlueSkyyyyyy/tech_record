@@ -12,7 +12,7 @@
 //   · 正确的做法是「每 warp 一行、warp 内 K 维并行 + shuffle 归约」的
 //     带宽最优 GEMV，int4 用 16B 向量读、scale 预取进 smem。
 //
-// 真实 shape 取自 /ssd/models/qwen3-8B/config.json：
+// 真实 shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408, group_size=128, 对称 int4。
 // 测 M=1（默认）及小 M 扫（MT 个 token 共享一次权重读）。
 //

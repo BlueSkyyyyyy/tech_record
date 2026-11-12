@@ -5,7 +5,7 @@
 # issue slots are starved by memory latency, i.e. whether a latency-hiding K2-shape
 # restructure has ~2x of headroom).
 #
-# Usage (inside kernel_lab, idle card):
+# Usage (inside lab, idle card):
 #   CUDA_VISIBLE_DEVICES=2 bash .../probe_b2b3_bound_ncu.sh > .../probe_b2b3_bound_ncu.out.txt 2>&1
 
 set -uo pipefail

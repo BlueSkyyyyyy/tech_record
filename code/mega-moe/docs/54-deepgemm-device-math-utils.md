@@ -226,7 +226,7 @@ return __uint_as_float((254u - sf_exp) << 23);   // float 版；bf16 版 << 7
 
 ## 8. H100 实测（`src/device_math_utils.cu` + `harness/exp_device_math_utils.sh`）
 
-在 kernel_lab（H100 80GB HBM3, sm90）上以 `nvcc -arch=sm_90 -O3` **直接 include 真实头文件**
+在 lab（H100 80GB HBM3, sm90）上以 `nvcc -arch=sm_90 -O3` **直接 include 真实头文件**
 编译运行（四个头 sha256 见 `.out.txt`），Python 侧用真实 `deep_gemm.utils.math.ceil_to_ue8m0`
 与 torch 做独立参考。**总判定 ALL PASS**：
 

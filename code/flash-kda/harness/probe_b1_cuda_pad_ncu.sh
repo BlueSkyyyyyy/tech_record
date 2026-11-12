@@ -10,9 +10,9 @@
 # Each config is pre-built outside ncu (running nvcc under ncu hangs), then profiled with
 # `--no-build`.
 #
-# Usage (inside kernel_lab):
-#   bash /ssd/.../harness/probe_b1_cuda_pad_ncu.sh \
-#       > /ssd/.../harness/probe_b1_cuda_pad_ncu.out.txt 2>&1
+# Usage (inside lab):
+#   bash /workspace/.../harness/probe_b1_cuda_pad_ncu.sh \
+#       > /workspace/.../harness/probe_b1_cuda_pad_ncu.out.txt 2>&1
 
 set -uo pipefail
 

@@ -10,7 +10,7 @@ We do ``WARMUP`` calls first, then ``PROF`` calls that ncu actually profiles,
 so that ``ncu --launch-skip`` / ``--launch-count`` can target individual kernels
 by name (``-k regex:flash_kda_fwd_recurrence``).
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_driver.py --B 1 --T 1024 --H 4
     ncu -k regex:flash_kda_fwd_recurrence -c 1 --set full \\
         python ncu_driver.py --B 1 --T 1024 --H 4

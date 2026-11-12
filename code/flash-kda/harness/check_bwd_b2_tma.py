@@ -11,7 +11,7 @@ The `ncu` byte/duration decomposition lives in `harness/probe_b2_tma_ncu.sh`
   Part B  kernel-only `dev` (CUPTI) + `wall` for base / vecst / tma / tma_vecst.
   Part C  restates the ncu decomposition so the numbers are in one place.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_tma.py \
         > .../harness/check_bwd_b2_tma.out.txt 2>&1
     B2T_MODE=a | b | c

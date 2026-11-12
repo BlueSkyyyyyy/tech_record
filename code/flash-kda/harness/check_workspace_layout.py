@@ -14,7 +14,7 @@ C. Run an *actual* varlen forward into a canary-filled workspace, then
    kernel never wrote past its own ``H*total_tiles*per_tile`` region
    (the allocation is the upper bound, the launch uses the exact tile count).
 
-Run inside `kernel_lab` (needs CUDA + the built `flash_kda_C`).
+Run inside `lab` (needs CUDA + the built `flash_kda_C`).
 """
 
 import math

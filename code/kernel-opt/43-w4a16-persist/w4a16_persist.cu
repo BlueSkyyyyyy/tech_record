@@ -15,7 +15,7 @@
 // round-robin 分给 P=2*NSM 个 persistent CTA。stage→(item,kb) 用闭式映射
 // （t/CHUNK、t%CHUNK），无需任何 per-stage 元数据数组。
 //
-// 真实 shape 取自 /ssd/models/qwen3-8B/config.json：
+// 真实 shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408, group_size=128, 对称 int4。
 // 默认测 M=64（decode）× N=17408 × K=5120。
 //

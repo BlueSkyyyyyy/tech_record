@@ -282,7 +282,7 @@ fp8_tma_pb_ws_kernel(const __grid_constant__ CUtensorMap tmA,
 }
 
 // ---------------------------------------------------------------------------
-// host（与 24 同：真实 shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json）
+// host（与 24 同：真实 shape 取自 /models/DeepSeek-V4-Pro/config.json）
 // ---------------------------------------------------------------------------
 static CUtensorMap make_tmap(void* ptr, uint64_t K, uint64_t R, uint32_t boxK, uint32_t boxR) {
   CUtensorMap tm;

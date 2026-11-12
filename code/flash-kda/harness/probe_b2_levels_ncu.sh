@@ -4,7 +4,7 @@
 # Part B marginal-cost curve can be read against the pipe that actually fills.
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab, idle card):
+# Usage (inside lab, idle card):
 #   CUDA_VISIBLE_DEVICES=1 bash .../probe_b2_levels_ncu.sh > .../probe_b2_levels_ncu.out.txt 2>&1
 set -uo pipefail
 

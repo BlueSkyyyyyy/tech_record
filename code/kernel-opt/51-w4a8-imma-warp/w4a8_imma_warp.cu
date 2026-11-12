@@ -12,7 +12,7 @@
 //   TILED  —— 权重用 K-blocked 布局 `Wt[g][N][64B]`（一个 warp 一个 stage 的 W = 连续 2KB）
 //   WMODE  —— 0=W 每 stage 载入；1=A 每 warp 一次性预载整段（消冗余 A 的 L2 流量）
 //
-// shape 取自 /ssd/models/qwen3-8B/config.json：
+// shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408, group_size=128；对称 int4 权重。
 //   N=17408（MLP up/gate），K=5120，测 M=1..16（decode）。
 //   权重 44.6MB(int4) + scale 2.8MB，纯读上界见 46 篇（~2568 GB/s）。

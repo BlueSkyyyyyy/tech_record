@@ -286,7 +286,7 @@ uint32_t current_shape_k, current_k_start = 0, current_sf_k_cumsum = 0;  // :66
 ## 6. H100 实测（真实数字）
 
 `harness/exp_kgrouped_api.py`（输出 `harness/exp_kgrouped_api.out.txt`）在 8×H100 的
-`kernel_lab` 容器里跑 DeepGEMM 2.8.1（`arch_major=9`）：
+`lab` 容器里跑 DeepGEMM 2.8.1（`arch_major=9`）：
 
 **A. SM90 `nt` API 语义**（用 DeepGEMM 自带 `tests/generators.py` 造数据，FP8 per-128 量化，
 输出 fp32 accumulate）：

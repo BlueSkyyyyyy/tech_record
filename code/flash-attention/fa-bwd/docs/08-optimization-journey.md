@@ -408,7 +408,7 @@ smem 冲突 + 低 occ
      ——落实 §33 候选 ①。此前每次对拍要手写 `scripts/run.sh <host> --dir=<case> --dump=ours
      [--full] [--varlen]`（还要区分单/两文件、定长/varlen 两套构建）再手动跑 `fa_bwd_compare.py`。
      新脚本自动扫 dump 目录、按 `meta.json`（dtype/varlen/causal）选 host 与参数、调 `run.sh`
-     在 `kernel_lab` 编译运行、最后汇总。**关键工程点：同一 (host, 构建配置) 只编译一次**，
+     在 `lab` 编译运行、最后汇总。**关键工程点：同一 (host, 构建配置) 只编译一次**，
      其余 case 复用已产出的可执行文件。**实测：全部 73 个 case × 单/两文件 = 146 次运行、0 失败，
      仅编译 12 次（134 次复用）**；数值与 §32/§33 的 kernel **逐位/同量级一致**（fp16 S512
      `1.671/1.771/1.899e-3`、S4096 `1.883/1.734/1.966e-3`；fp8 S512 `0.2426/0.2975/0.3735`；
@@ -2639,7 +2639,7 @@ O68/O70 只补了定长 full 的 **D=128**（TMA）与 **D=256**（均衡 FULL �
   没有把 ksplit / hswap / mrev / ovlql / ovlcap 放在同一 binary、同一 session、同一批形状上一起扫。
   本轮补这一刀，并顺带把「主 kernel 的 L2 `red` 到底还能不能动」用 TE 同 session ncu 再钉一次。
 - **方法（新工具 `harness/fa_fp8_main_sweep.py`，纯 harness）**：把 Hopper 构建
-  （`-DFA_WGMMA -DFA_TMA`）出的 `src/fp8/fa_bwd_fp8_main.out` 在 kernel_lab 容器里按
+  （`-DFA_WGMMA -DFA_TMA`）出的 `src/fp8/fa_bwd_fp8_main.out` 在 lab 容器里按
   「4 case × 9 配置」矩阵跑，解析 `[timing] total` / `quant|preprocess|main`，给出「默认 vs 每档」
   的 total×/main×。case 覆盖 MHA S4096、大 H GQA（q32/kv4、q40/kv8）、MQA（q64/kv1）。
 - **结果（`src/fp8/fa_bwd_fp8_o116_knob_sweep.out.txt`，iters=50/100）**：

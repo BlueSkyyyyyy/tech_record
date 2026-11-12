@@ -9,7 +9,7 @@ and, for a set of shapes, reports:
 The shapes are chosen so that grid_k2 = B*H spans the interesting regimes:
 grid < SM (grid-limited) vs grid >= 3*SM (occupancy could matter).
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python bench_k2_occ.py --smem           # just print smem budget per variant
     python bench_k2_occ.py                  # timing table
 """

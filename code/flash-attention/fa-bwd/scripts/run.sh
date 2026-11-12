@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在 kernel_lab 容器里编译并运行一个 .cu。用法：scripts/run.sh src/fp16/foo.cu [程序参数...]
+# 在 lab 容器里编译并运行一个 .cu。用法：scripts/run.sh src/fp16/foo.cu [程序参数...]
 # 环境变量：ARCH=sm_90  GPU=0  NVCC_FLAGS="..."  INCLUDES="-I/path"
 set -euo pipefail
 
@@ -18,7 +18,7 @@ ARCH_FLAG=""
 
 LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lab.sh"
 "$LAB" up >/dev/null
-LAB_NAME="${LAB_NAME:-kernel_lab}"
+LAB_NAME="${LAB_NAME:-lab}"
 
 docker exec -e CUDA_VISIBLE_DEVICES="$GPU" "$LAB_NAME" bash -lc \
   "cd '$DIR' && nvcc -O3 $ARCH_FLAG -lineinfo $INCLUDES $NVCC_FLAGS '$NAME.cu' -o '$NAME.out' && \

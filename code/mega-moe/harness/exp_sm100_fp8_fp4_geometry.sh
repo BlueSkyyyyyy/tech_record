@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P25-1 实验 driver：在 kernel_lab(H100/sm90) 上直接编译并运行 DeepGEMM **SM100 FP8/FP4 稠密 GEMM
+# P25-1 实验 driver：在 lab(H100/sm90) 上直接编译并运行 DeepGEMM **SM100 FP8/FP4 稠密 GEMM
 #   主 kernel** 里**架构无关的几何/描述符设备代码**（真实函数原样抽取/真实头文件）。
 #   ./harness/exp_sm100_fp8_fp4_geometry.sh
 # 对应源码 src/sm100_fp8_fp4_geometry.cu，输出见 harness/exp_sm100_fp8_fp4_geometry.out.txt。

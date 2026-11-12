@@ -22,7 +22,7 @@ Method (mirrors P7-114: static inventory + dynamic ON/OFF, real max_abs/max_rel)
           e2e) as child processes, once with `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=0` and once `=1`,
           and diff every reported comparison line.  Real numbers, not assertions.
 
-Run inside `kernel_lab` (GPU):
+Run inside `lab` (GPU):
     cd ~/proj/Megatron-LM && \
     CUDA_VISIBLE_DEVICES=<idle> MEGATRON_ROOT=~/proj/Megatron-LM \
     MEGATRON_LM_DIR=~/proj/Megatron-LM \

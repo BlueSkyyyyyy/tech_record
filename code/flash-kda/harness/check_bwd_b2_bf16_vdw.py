@@ -18,7 +18,7 @@ granularity, `rds()` widens bf16->fp32 exactly as `rd()`), and uses it to run th
   Part C  resources: regs / spill / smem (the smem drop from fp32->bf16 scratch tiles).
   Part D  timing: kernel-only `dev`, one production launch.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_bf16_vdw.py \
         > .../harness/check_bwd_b2_bf16_vdw.out.txt 2>&1
     B2VDW_MODE=a | b | c | d

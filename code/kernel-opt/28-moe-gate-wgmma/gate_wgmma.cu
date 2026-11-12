@@ -2,7 +2,7 @@
 //
 // 承接 27（moe_router.cu）：DeepSeek-V4-Pro 的 router 前门 gate GEMM
 //   logits[M, E] = X[M, H] @ Wg[E, H]^T
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：hidden=7168, n_routed=384。
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：hidden=7168, n_routed=384。
 // 27 篇用 mma.sync + ldmatrix + cp.async 双缓冲只做到 204~257 TFLOPS（cuBLAS 的 ~28%），
 // ncu 显示瓶颈是 No Eligible 57.6% / L2 60.7%。本版两步走：
 //   (a) gate_async_kernel : wgmma SS + SW128 swizzle + cp.async 多级流水（复用 20/22）

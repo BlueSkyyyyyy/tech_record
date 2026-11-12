@@ -138,7 +138,7 @@ L1 输出**（`sm100_fp8_fp4_mega_moe.cuh:1134`，见第 111 篇 §1），于是
 
 ## 3. H100 真机实测
 
-`harness/exp_mega_gate_backward.sh` 在 kernel_lab(H100) 上编译运行 `src/mega_gate_backward.cu`
+`harness/exp_mega_gate_backward.sh` 在 lab(H100) 上编译运行 `src/mega_gate_backward.cu`
 （**逐行移植** `sqrt_softplus`(:19-24) 与"归一化 + bias 排名"语义）并跑
 `harness/exp_mega_gate_backward.py`（手写反向 vs torch autograd，float64）。原始输出见
 `harness/exp_mega_gate_backward.out.txt`。

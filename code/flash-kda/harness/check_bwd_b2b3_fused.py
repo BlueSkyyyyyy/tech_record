@@ -22,7 +22,7 @@ This script is the controlled experiment that §32.6 / §31.3 called for:
           vs FLA autograd + vs the unfused MMA chain, and chain timing.
   Part D  static register/occupancy read (no GPU needed): nw sweep.
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle card:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle card:
     CUDA_VISIBLE_DEVICES=1 python .../check_bwd_b2b3_fused.py
     F23_MODE=correctness | timing | chain
 """

@@ -7,7 +7,7 @@ hardware bound is now the open question.  This driver synthesizes workspace-shap
 (values irrelevant, only shape/dtype/tiling) and launches exactly one of the two kernels,
 so ``ncu -k regex:<name>`` targets it unambiguously.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_b2b3_driver.py --which b2 --B 8 --T 2048 --H 8 --bt 16 --nw 4
     ncu -k regex:_wy_dqkg_kernel -c 1 --launch-skip 3 --set full \\
         python ncu_b2b3_driver.py --which b2 --B 8 --T 2048 --H 8 --bt 16

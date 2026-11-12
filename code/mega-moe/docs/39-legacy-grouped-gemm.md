@@ -232,7 +232,7 @@ if use_psum_layout or k_alignment != 128 or not accumulate or out_dtype != torch
 ## 7. H100 实测
 
 脚本 `harness/exp_legacy_grouped_gemm.py`（driver `harness/exp_legacy_grouped_gemm.sh`，
-输出 `harness/exp_legacy_grouped_gemm.out.txt`）在 `kernel_lab`（H100 sm90）上跑，**16/16 PASS**：
+输出 `harness/exp_legacy_grouped_gemm.out.txt`）在 `lab`（H100 sm90）上跑，**16/16 PASS**：
 
 ```
 mk_alignment_for_contiguous_layout = 128

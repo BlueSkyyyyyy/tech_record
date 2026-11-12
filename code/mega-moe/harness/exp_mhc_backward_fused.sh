@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P121-1 实验 driver：在 kernel_lab(H100) 上
+# P121-1 实验 driver：在 lab(H100) 上
 #   1) 编译并运行 src/mhc_backward_fused.cu —— 把 mHC 反向拆成 6 段（K0/G0/K1/G1a/G1b/K2），
 #      device(fp32) 六段 vs host 单片 double 参考对拍；并计时元素级三段（H=64）。
 #   2) 运行 harness/exp_mhc_backward_fused.py —— 真实形状（H=7168）的手写反向 vs autograd、

@@ -166,7 +166,7 @@
 ## 6. 可复现
 
 ```bash
-# 在 kernel_lab 容器里（复用专题环境）
+# 在 lab 容器里（复用专题环境）
 bash code/mega-moe/harness/exp_refs_drift_review.sh \
   > code/mega-moe/harness/exp_refs_drift_review.out.txt
 ```

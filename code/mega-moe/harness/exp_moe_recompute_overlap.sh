@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P172-1 实验 driver：在 kernel_lab(H100) 上运行 harness/exp_moe_recompute_overlap.py，
+# P172-1 实验 driver：在 lab(H100) 上运行 harness/exp_moe_recompute_overlap.py，
 # 用真实 SM90 FP8 grouped kernel 量「重算 L1 ∥ 不依赖 h 的反向 GEMM」的并发重叠 vs SM 预算分区。
 #   ./harness/exp_moe_recompute_overlap.sh
 # 输出见 harness/exp_moe_recompute_overlap.out.txt。

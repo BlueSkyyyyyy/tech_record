@@ -671,7 +671,7 @@ GQA kv4 = 12.01/21.25/31.56e-3（与 §6e–§6i 记录一致）。单/两文件
 cd code/flash-attention/fa-bwd
 
 # 1) dump bf16 输入/参考（S=512、S=4096 causal）
-docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py dump --dtype bf16 \
+docker exec lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py dump --dtype bf16 \
     --shape 1 512 16 128 causal --shape 1 4096 16 128 causal"
 
 # 2) 编译运行 + 数值对拍
@@ -686,7 +686,7 @@ scripts/ncu.sh src/bf16/fa_bwd_bf16_onefile.cu --set full \
     --dir=~/proj/output/fa-bwd/b1_s512_h16_d128_causal_bf16 --iters=1
 
 # 4) FA/TE bf16 基线
-docker exec kernel_lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench --dtype bf16 \
+docker exec lab bash -lc "cd $PWD/harness && python fa_bwd_bench.py bench --dtype bf16 \
     --shape 1 512 16 128 causal --shape 1 4096 16 128 causal"
 ```
 

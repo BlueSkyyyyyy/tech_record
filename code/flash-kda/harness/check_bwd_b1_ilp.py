@@ -25,7 +25,7 @@ closes:
 Part A  correctness of every variant vs FLA `dhu` (bf16, same BT), incl. non-divisible T.
 Part B  kernel-only CUPTI timing matrix at BT=16 / BT=64, variants vs FLA.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_ilp.py
 """
 import os

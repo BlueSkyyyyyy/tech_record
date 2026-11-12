@@ -13,7 +13,7 @@
 > 它**不是 kernel、不含 SM100 专属 PTX**，因此 **H100（sm90）真机可跑**。本文用真实数字逐条核对
 > 它编码的约定，并用真实 SM90 kernel 做端到端对拍。
 
-参考版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（v2.8.1），本机 `kernel_lab`（H100 sm90）。
+参考版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（v2.8.1），本机 `lab`（H100 sm90）。
 实验：`harness/exp_test_generators.py`（driver `harness/exp_test_generators.sh`），
 输出 `harness/exp_test_generators.out.txt`，**41 PASS / 0 FAIL**。
 

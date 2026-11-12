@@ -123,7 +123,7 @@ if constexpr (FP8) {
 ## 三、实测
 
 环境：H100 SXM（132 SM，3.35 TB/s，BF16 TC 989 TFLOPS，**FP8 TC 1978 TFLOPS**），
-`kernel_lab` 容器。`fused_ce_fp8.cu` 内 `bench_ms(warmup=5, iters=20)`；
+`lab` 容器。`fused_ce_fp8.cu` 内 `bench_ms(warmup=5, iters=20)`；
 bf16/fp8 两条路径在**同一个进程、同一份数据**上跑，避免跨进程降频。
 
 ### 3.1 $M=8192$ 主扫参

@@ -5,7 +5,7 @@
 # diagonal sub-blocks (which at NC=1 is *all* of B3) actually moves work onto the
 # TensorCores and what the Duration/regs/occupancy do.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b3_mma_ncu.sh > .../probe_b3_mma_ncu.out.txt 2>&1
 
 set -uo pipefail

@@ -5,7 +5,7 @@
 # round is to decide whether the `dw` global round-trip is a real cost.
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_hdw_ncu.sh > .../probe_b2_hdw_ncu.out.txt 2>&1
 set -uo pipefail
 

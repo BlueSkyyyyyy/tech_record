@@ -1,7 +1,7 @@
 // 27 MoE（一）：router + top-k + token permutation
 //
 // 复现 DeepSeek-V4 / Kimi-K2.6 的 MoE 前门（gate）整条链，shape 取自
-// /ssd/models/DeepSeek-V4-Pro/config.json：
+// /models/DeepSeek-V4-Pro/config.json：
 //   hidden=7168, n_routed_experts=384, num_experts_per_tok=6,
 //   scoring_func=sqrtsoftplus, topk_method=noaux_tc, norm_topk_prob=true,
 //   routed_scaling_factor=2.5。

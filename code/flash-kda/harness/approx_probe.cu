@@ -5,7 +5,7 @@
 // 以及门控衰减乘子 2^(gate_scale * sigmoid_approx(x))（fwd_kernel1.cuh:321-328）
 // 相对「精确双精度参照」的误差。
 //
-// 编译（在 kernel_lab 内）：
+// 编译（在 lab 内）：
 //   nvcc -O2 -arch=sm_90a approx_probe.cu -o /tmp/approx_probe && /tmp/approx_probe
 #include <cstdio>
 #include <cmath>

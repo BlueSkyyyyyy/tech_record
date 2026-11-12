@@ -3,7 +3,7 @@
 Loads the requested variant (see bench_k2_occ.VARIANTS) and issues warmup+prof
 forward calls so ``ncu -k regex:flash_kda_fwd_recurrence`` can profile K2.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     ncu -k regex:flash_kda_fwd_recurrence -c 1 --launch-skip 3 \
         --section Occupancy --section SpeedOfLight \
         python ncu_driver_occ.py --variant cond_in2_out2 --B 8 --T 2048 --H 64

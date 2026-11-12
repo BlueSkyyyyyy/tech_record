@@ -17,7 +17,7 @@ never touched:
 Methodology identical to M6/M7: both sides get the *same* bf16 operands, the port
 reference runs in fp64, and the residual is read as the FLA bf16-kernel error.
 
-Run (inside kernel_lab, GPU):
+Run (inside lab, GPU):
     FLA_DISABLE_BACKEND_DISPATCH=1 python3 \
         ~/proj/tech_record/code/flash-kda/megatron-port/harness/check_port_fla_m8.py
 """

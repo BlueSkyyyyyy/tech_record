@@ -239,7 +239,7 @@ for mn, real_ks_cpu, aligned_ks_cpu, psum_layout, num_groups, gran_k, k_alignmen
 ## 6. H100 实测
 
 脚本 `harness/exp_sf_layout_test_oracle.py` 直接 `import test_layout` 复用它的 oracle 与测试体，
-在 `kernel_lab`（H100 80GB HBM3, sm90）上跑出 **8 PASS / 0 FAIL**：
+在 `lab`（H100 80GB HBM3, sm90）上跑出 **8 PASS / 0 FAIL**：
 
 ### Part A：顶层结构（真机 introspection）
 

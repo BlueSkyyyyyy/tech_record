@@ -17,7 +17,7 @@ The ``ours`` path synthesises operands directly (never calls FLA/Triton/TileLang
 setup launches dozens of kernels and, under ``ncu``, dominated wall time (repeated
 ``nvidia-smi`` subprocesses from the backend dispatcher).
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_b1_cuda_driver.py --which ours --B 2 --T 1024 --H 8 --bt 64 --ns 1
     ncu -k regex:b1_dhu_cuda -c 1 --launch-skip 3 --set full \\
         python ncu_b1_cuda_driver.py --which ours --B 2 --T 1024 --H 8 --bt 64 --ns 1

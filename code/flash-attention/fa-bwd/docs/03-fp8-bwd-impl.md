@@ -170,7 +170,7 @@ TE 由 `fa_bwd_bench.py bench --dtype fp8` 测得（`..._refbench.out.txt`）；
 ```bash
 cd code/flash-attention/fa-bwd
 # dump FP8 case（含 TE FP8 参考输出）：
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python harness/fa_bwd_bench.py dump \
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python harness/fa_bwd_bench.py dump \
     --dtype fp8 --shape 1 512 16 128 causal
 # 编译运行 + 对拍（默认 case b1_s512_h16_d128_causal_fp8）：
 scripts/run.sh src/fp8/fa_bwd_fp8_onefile.cu --iters=10
@@ -181,7 +181,7 @@ scripts/run.sh src/fp8/fa_bwd_fp8_onefile.cu --iters=5 \
 scripts/ncu.sh src/fp8/fa_bwd_fp8_onefile.cu --set full --launch-count 1 \
     --kernel-name regex:fa_bwd_fp8_kernel -- --iters=1
 # TE FP8 基线：
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python harness/fa_bwd_bench.py bench \
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python harness/fa_bwd_bench.py bench \
     --dtype fp8 --shape 1 4096 16 128 causal
 ```
 
@@ -730,7 +730,7 @@ scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --kernel-name regex:fa_bwd_fp8_mma_ker
   --metrics smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio,smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio \
   -- --dir=~/proj/output/fa-bwd/b1_s4096_h16_d128_causal_fp8 --iters=1
 # TE FP8 基线
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python \
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python \
   ~/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_bench.py \
   bench --dtype fp8 --shape 1 4096 16 128 causal
 ```
@@ -821,7 +821,7 @@ scripts/run.sh src/fp8/fa_bwd_fp8_mma_onefile.cu --iters=20 \
 scripts/ncu.sh src/fp8/fa_bwd_fp8_main.cu --set full --kernel-name regex:fa_bwd_fp8_mma_kernel \
   --launch-count 1 -- --dir=~/proj/output/fa-bwd/b1_s1024_h32_d128_kv4_causal_fp8 --iters=1
 # TE FP8 基线
-docker exec -e CUDA_VISIBLE_DEVICES=0 kernel_lab python \
+docker exec -e CUDA_VISIBLE_DEVICES=0 lab python \
   ~/proj/tech_record/code/flash-attention/fa-bwd/harness/fa_bwd_bench.py \
   bench --requested --dtype fp8
 ```
@@ -2494,7 +2494,7 @@ O7e-3（§26）用 `--page source --csv` 按源码行聚合 `L1 Wavefronts Share
 
 ```bash
 # A/B（同 shape 先后编两个二进制）
-docker exec kernel_lab bash -lc "cd <...>/src/fp8 && \
+docker exec lab bash -lc "cd <...>/src/fp8 && \
   nvcc -O3 -arch=sm_90 -DFA_FUSE_EPI=0 fa_bwd_fp8_main.cu -o /tmp/fp8_fuse0.out && \
   nvcc -O3 -arch=sm_90 -DFA_FUSE_EPI=1 fa_bwd_fp8_main.cu -o /tmp/fp8_fuse1.out"
 # 默认（FUSE=1）跑
@@ -7193,7 +7193,7 @@ baseline_fp8.out.txt`）⇒ 默认 ours main/TE ≈5.2×、F6 ≈9.4×。**F6 �
 ```bash
 scripts/run.sh src/fp8/fa_bwd_fp8_mma_variant_probe.cu
 scripts/run.sh src/fp8/fa_bwd_fp8_f6_directb_smoke.cu
-docker exec kernel_lab bash -lc "cd .../src/fp8 && nvcc -O3 -gencode=arch=compute_90a,code=sm_90a \
+docker exec lab bash -lc "cd .../src/fp8 && nvcc -O3 -gencode=arch=compute_90a,code=sm_90a \
   -DFA_WGMMA -DFA_TMA -lcuda fa_bwd_fp8_main.cu -o /tmp/fp8wg.out && \
   cuobjdump --dump-resource-usage /tmp/fp8wg.out | grep -A1 wgmma2"
 ARCH="" NVCC_FLAGS="-gencode=arch=compute_90a,code=sm_90a -DFA_WGMMA -DFA_TMA -lcuda" \

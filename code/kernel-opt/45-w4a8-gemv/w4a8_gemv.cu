@@ -11,7 +11,7 @@
 //   · int4→int8 用 `PRMT`（`__byte_perm`）+ 一次 XOR/SUB 做符号展开。
 // 目标：把每元素 ALU 指令数从 ~5 降到 ~2，顶到 60%+ HBM。
 //
-// 真实 shape 取自 /ssd/models/qwen3-8B/config.json：
+// 真实 shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408, group_size=128, 对称 int4。
 // 默认测 M=1，可扫小 M（MT 个 token 共享一次权重读）。
 //

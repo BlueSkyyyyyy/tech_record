@@ -23,7 +23,7 @@ This script implements the general `etot` gather and re-runs the three-way check
 (torch explicit recurrence / Triton kernel / FLA `dhu`) on non-divisible T, plus a
 sanitity rerun on a divisible T to show the fix is a no-op there.
 
-Run inside `kernel_lab`:
+Run inside `lab`:
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_dhu_boundary.py
 """
 import os

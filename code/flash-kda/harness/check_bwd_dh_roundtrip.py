@@ -25,7 +25,7 @@ isolation with controlled ablations:
           worth its structural cost, or whether (as §26/§29 found for `h/dh` bf16)
           it is only a sub-10% lever.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_dh_roundtrip.py \
         > .../harness/check_bwd_dh_roundtrip.out.txt 2>&1
 """

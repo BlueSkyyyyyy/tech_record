@@ -14,7 +14,7 @@ two implementations we compare:
 We warm up (Triton JIT + FLA autotune) then run ``--prof`` calls that ncu profiles,
 so ``--launch-skip`` / ``-k regex:<name>`` can target one kernel unambiguously.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_bwd_driver.py --which ours --B 2 --T 1024 --H 8 --bt 16
     ncu -k regex:_dhu_kernel -c 1 --launch-skip 3 --set full \\
         python ncu_bwd_driver.py --which ours --B 2 --T 1024 --H 8 --bt 16

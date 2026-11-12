@@ -26,7 +26,7 @@ Notation (docs/05 §7, docs/06 Part A mapping, all per chunk `c`, `t` = intra-ch
             - w^T @ dU                             (delta / predict branch)
     dh0   = dS after chunk 0                       (adjoint of the initial state)
 
-Run inside `kernel_lab`:
+Run inside `lab`:
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_dhu_kernel.py
 """
 import os

@@ -12,7 +12,7 @@ This harness bit-checks it against the Triton MMA B3 (`check_bwd_b3_mma.py::buil
 on the **same** `dAqk`/`dAkk`, and against the per-chunk torch golden (`intra_torch`), for
 several shapes incl. a non-divisible `T` and `g=0`; then times it (CUPTI `dev` + event `wall`).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b3_intra_cuda.py \
         > .../harness/check_bwd_b3_intra_cuda.out.txt 2>&1
     B3IC_MODE=a | b | c

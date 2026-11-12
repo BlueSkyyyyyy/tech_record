@@ -12,7 +12,7 @@
 // 与 46 的 `gemm_mma_w4a16_kernel` 逐位等价（同一 smem 布局与 ldmatrix 地址），
 // 可与 `mma_b16_k8` 同进程 head-to-head。
 //
-// shape 取自 /ssd/models/qwen3-8B/config.json：
+// shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408, group_size=128, 对称 int4。
 // 默认 N=17408（MLP up/gate），K=5120（hidden）。权重 int4 44.6MB + scale 2.8MB。
 //

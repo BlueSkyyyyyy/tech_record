@@ -1,7 +1,7 @@
 // 35 DSA compressor：把 KV 按 compress_ratio 做「门控池化」压成更少的 key
 //
 // 真实算子来自 DeepSeek-V4 官方推理实现
-//   /ssd/models/DeepSeek-V4-Pro/inference/model.py:279（class Compressor）
+//   /models/DeepSeek-V4-Pro/inference/model.py:279（class Compressor）
 // DSA 稀疏注意力只在「压缩后的 KV」上算 indexer / top-k；compressor 就是那张
 // 「把 r 个连续 token 的 KV 用学习到的门控 softmax 池化成一个 compressed key」的算子。
 //
@@ -14,7 +14,7 @@
 //     前半 slots 来自上一个窗的前一半 dim、后半 slots 来自本窗的后一半 dim。
 //   最后 out = RMSNorm(out)，对末 rope_head_dim(64) 维做 RoPE，再写回 kv_cache。
 //
-// 真实 shape（/ssd/models/DeepSeek-V4-Pro/config.json）：
+// 真实 shape（/models/DeepSeek-V4-Pro/config.json）：
 //   hidden_size=7168, head_dim=512, qk_rope_head_dim=64,
 //   compress_ratios=[128,...,4,...]（ratio 128 与 4 交替，末层 0=不压缩）
 //   投影权重 wkv/wgate 在 checkpoint 里是 bf16（参考实现用 fp32 计算）。

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P99-1 实验 driver：在 kernel_lab(H100/sm90) 上跑 DeepGEMM 的 CUDA Graph 兼容性面。
+# P99-1 实验 driver：在 lab(H100/sm90) 上跑 DeepGEMM 的 CUDA Graph 兼容性面。
 #   bash harness/exp_cuda_graph_capture.sh > harness/exp_cuda_graph_capture.out.txt
 # 对应 exp_cuda_graph_capture.py；参考 ~/github/DeepGEMM 的 csrc/apis/{mega_mhc,mega_gate,attention}.hpp、
 # csrc/runtime/runtime.hpp、third-party/deep_jit/.../backend/cuda/kernel.hpp、tests/test_mega_mhc.py。

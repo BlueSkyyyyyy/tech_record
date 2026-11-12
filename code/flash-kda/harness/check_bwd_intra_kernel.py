@@ -22,7 +22,7 @@ Notation (docs/05 §7, docs/06 §3.4), per chunk `c`, `t` = intra-chunk row:
     dAkk            [BT,BT]  = strictly-lower A-matrix adjoint (from `wy_dqkg`)
 Outputs: dq, dk [BT,K], db [BT], dg [BT,K] (additive).
 
-Run inside `kernel_lab`:
+Run inside `lab`:
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_intra_kernel.py
 """
 import math

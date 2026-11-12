@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P26-1 实验 driver：在 kernel_lab(H100) 编译运行 tensor-core 利用率节流机制复刻。
+# P26-1 实验 driver：在 lab(H100) 编译运行 tensor-core 利用率节流机制复刻。
 #   bash harness/exp_tc_util_throttle.sh > harness/exp_tc_util_throttle.out.txt
 # 对应源码 src/tc_util_throttle.cu（逻辑取自 sm100_bf16_gemm.cuh:326-343）。
 set -euo pipefail

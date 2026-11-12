@@ -21,7 +21,7 @@ This harness races the bf16-mma build against the P7-73 bf16(tf32) and fp32 buil
   Part B  kernel-only timing: fp32 / bf16(tf32) / bf16-mma (CUPTI dev + wall).
   Part C  static: smem bytes + registers of all three builds.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_bf16mma.py \
         > .../harness/check_bwd_b2_bf16mma.out.txt 2>&1
     B2BMM_MODE=a | b | c

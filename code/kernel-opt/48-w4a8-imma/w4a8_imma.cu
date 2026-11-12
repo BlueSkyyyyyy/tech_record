@@ -17,7 +17,7 @@
 // 所以**完全不需要 ldmatrix**——直接从行主序 smem 取 word 即可（见 imma_test.cu）。
 // 而且 B 可以直接从 int4 的 smem 现场展开，省掉「展开后再写回 smem」的往返。
 //
-// shape 取自 /ssd/models/qwen3-8B/config.json：
+// shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408, group_size=128。
 // 默认 N=17408（MLP up/gate），K=5120。int4 权重 44.6MB + scale 2.8MB。
 //

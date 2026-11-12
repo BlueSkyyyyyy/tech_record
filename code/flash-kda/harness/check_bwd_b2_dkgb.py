@@ -18,7 +18,7 @@ as its own output to check the GEMM standalone.
   Part B  timing: dkgb kernel (GEMM core + segment) vs the GEMM-only core (delta) and vs the
           full Triton B2.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_dkgb.py \
         > .../harness/check_bwd_b2_dkgb.out.txt 2>&1
     B2D_MODE=a | b

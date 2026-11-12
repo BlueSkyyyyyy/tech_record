@@ -22,7 +22,7 @@ Parts
   C  end-to-end chain (idle card): `pci_tma` (TMA fold) vs `pci` (non-TMA fold) vs `cf` --
      six gradients vs FLA autograd + chain dev/wall.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_tma_damma.py \
         > .../harness/check_bwd_b2_tma_damma.out.txt 2>&1
     B2TD_MODE=a | b | c

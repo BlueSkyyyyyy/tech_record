@@ -47,7 +47,7 @@
 #               inside backward for checkpoint_level=1, that recompute is included).
 #   step      = fwd+bwd with a fresh graph each call.
 #
-# How to run (inside the kernel_lab container, on an IDLE GPU; FLA main is 0.6.0 while
+# How to run (inside the lab container, on an IDLE GPU; FLA main is 0.6.0 while
 # the container's installed fla is 0.5.2, so point FLA_SRC at the checkout):
 #
 #   export FLA_SRC=~/proj/flash-linear-attention

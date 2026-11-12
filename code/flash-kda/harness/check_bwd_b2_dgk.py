@@ -12,7 +12,7 @@ attribution with a controlled ablation on `b2_mma_probe.cu`:
 The other three ops (`dq/dk/dw`) are untouched in every variant, so their bitwise equality
 with the baseline is a strong invariant that the ablation is controlled.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_dgk.py \
         > .../harness/check_bwd_b2_dgk.out.txt 2>&1
     B2DGK_MODE=a | b

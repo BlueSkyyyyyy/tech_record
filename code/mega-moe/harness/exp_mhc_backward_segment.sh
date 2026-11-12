@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P125-1 实验 driver：在 kernel_lab(H100/sm90) 上直接编译并运行
+# P125-1 实验 driver：在 lab(H100/sm90) 上直接编译并运行
 #   src/mhc_backward_segment.cu —— 用**真实头文件**核对 mHC 反向单 kernel 接线的关键一环：
 #     A) 前向 Post worker 的 lane-ownership 网格（由 layout/mega_mhc.cuh 派生）
 #     B) device 分段归约 vs host double（正确网格 vs 全 32-lane 错误归约）

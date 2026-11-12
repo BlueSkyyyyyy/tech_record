@@ -15,7 +15,7 @@
 //   3) 写一个按 M 选 kernel 的运行时分派器，量化它相对「只用一种 kernel」
 //      的净收益。
 //
-// 真实 shape 取自 /ssd/models/qwen3-8B/config.json：
+// 真实 shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408, group_size=128, 对称 int4。
 // 默认 N=17408（MLP up/gate），K=5120（hidden）。权重 int4 44.6MB + scale 2.8MB。
 //

@@ -24,7 +24,7 @@
 # The core timing/accounting helpers are imported from bench_te.py so both
 # scripts report identical numbers.
 #
-# Usage (inside the kimi26_train container, on an idle GPU):
+# Usage (inside the trainer container, on an idle GPU):
 #   CUDA_VISIBLE_DEVICES=0 python bench_mla_kimi_k3.py --check
 #   CUDA_VISIBLE_DEVICES=0 python bench_mla_kimi_k3.py --warmup 10 --repeat 50 \
 #       --csv mla_kimi_k3.csv

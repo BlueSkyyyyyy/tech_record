@@ -32,7 +32,7 @@
 // ::build_intra_mma`) on the *same* `dAqk`/`dAkk`.  Folding it into the production B2 launch
 // (shared smem/signature, adding into the gate's final dq/dk/dg) is the follow-up step.
 //
-// Build (inside kernel_lab):
+// Build (inside lab):
 //   nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared b3_intra_probe.cu -o /tmp/b3_intra.so
 #include <cuda_runtime.h>
 #include <cstdint>

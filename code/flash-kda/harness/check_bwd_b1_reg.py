@@ -12,7 +12,7 @@ fp32 smem master and the fp32 staging round-trips of `b1_cuda_probe.cu`.
           the *base* wmma prototype (`b1_cuda_probe.cu`) on the same operands
   Part C  smem footprint vs base
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_reg.py
 """
 import ctypes

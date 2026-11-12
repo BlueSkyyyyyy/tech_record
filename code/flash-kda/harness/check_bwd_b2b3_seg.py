@@ -33,7 +33,7 @@ actually attributable to a given byte stream* without perturbing the compute gra
     Part C  static register/spill/smem per variant.
     Part D  (ncu driver) confirms the DRAM/L2 byte deltas and the SOL per variant.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../check_bwd_b2b3_seg.py > .../check_bwd_b2b3_seg.out.txt 2>&1
     SEG_MODE=a | b | c
 """

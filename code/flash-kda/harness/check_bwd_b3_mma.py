@@ -31,7 +31,7 @@ This script is the controlled experiment that P7-23 Â§26.5 called for ("B3 MMA å
           and vs the baseline chain, and time chain-level (dev, CUPTI).
   Part D  bound analysis lives in `probe_b3_mma_ncu.out.txt`: tensor%, Duration, regs.
 
-Run inside `kernel_lab` (GPU, FlashKDA built, FLA installed), idle card:
+Run inside `lab` (GPU, FlashKDA built, FLA installed), idle card:
     CUDA_VISIBLE_DEVICES=1 python .../check_bwd_b3_mma.py
     B3M_MODE=correctness | timing | chain
 """

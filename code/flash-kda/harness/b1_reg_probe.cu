@@ -21,7 +21,7 @@
 // register state per warp: S as (K/16)*2 m16n8 accumulators (8*2*4 = 64 fp32).
 // Each warp owns BW=16 V columns; BV = NW*BW columns per CTA.
 //
-// Build (inside kernel_lab):
+// Build (inside lab):
 //   nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared b1_reg_probe.cu -o /tmp/b1_reg.so
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>

@@ -22,7 +22,7 @@ pipeline).  So this round answers three cheap questions *without building the CU
   Part D  conclusion / design input for the target-card CUDA port (and the DRAM floor from the
           §30 byte counts).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2b3_bound.py \
         > .../harness/check_bwd_b2b3_bound.out.txt 2>&1
     B23_MODE=a | b | c

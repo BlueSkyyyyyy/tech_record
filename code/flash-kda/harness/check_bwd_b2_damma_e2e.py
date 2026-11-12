@@ -30,7 +30,7 @@ Parts
   B  chain dev/wall (idle card): FLA reverse vs `cf` (Triton fused) vs the four fold variants, plus
      the `pci_mma_tma/pci_mma` and `pci_mma/pci` ratios.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_damma_e2e.py \
         > .../harness/check_bwd_b2_damma_e2e.out.txt 2>&1
     B2DM_MODE=correctness | timing

@@ -8,7 +8,7 @@
 
 - 读 `agent_guide.md`（目录约定/坑，尤其：**不要写目标卡代号**、`doc_include` 内联渲染机制）。
 - 读控制面板 `code/mega-moe/ROADMAP.md`（每次先读，从「下一步」做起，做完更新）。
-- 环境：复用 `kernel_lab` 容器（`code/mega-moe/scripts/lab.sh` 指向 kernel-opt 的脚本）。
+- 环境：复用 `lab` 容器（`code/mega-moe/scripts/lab.sh` 指向 kernel-opt 的脚本）。
 
 ## 关键事实
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P89-1 实验 driver：在 kernel_lab(H100) 上运行 harness/exp_mega_moe_forward_emul.py，
+# P89-1 实验 driver：在 lab(H100) 上运行 harness/exp_mega_moe_forward_emul.py，
 # 用 SM90 grouped FP8/BF16 kernel 复刻 Mega MoE 前向流水线并做误差分解。
 #   ./harness/exp_mega_moe_forward_emul.sh
 # 输出见 harness/exp_mega_moe_forward_emul.out.txt。

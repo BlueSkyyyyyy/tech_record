@@ -8,7 +8,7 @@
   * 纯 KV 读取带宽（sum(k)+sum(v)）作为 HBM 可达上限
 给出 GB/s（按每 token 读一遍 KV 的口径），与手写 kernel 对比。
 
-运行：docker exec kernel_lab python3 paged_ref.py [B] [L]
+运行：docker exec lab python3 paged_ref.py [B] [L]
 """
 import sys
 import time

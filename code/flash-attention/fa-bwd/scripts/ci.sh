@@ -10,7 +10,7 @@
 #   scripts/ci.sh --no-run              # 不用 GPU：只复核已有 npy + gate + docs 校验
 #   scripts/ci.sh --dtype fp8 --hopper  # 只跑 fp8、走 TMA+wgmma 快路
 #   scripts/ci.sh --perf-baseline fp16  # 另跑纯反向基线落盘
-# 环境变量：LAB_NAME（默认 kernel_lab）。
+# 环境变量：LAB_NAME（默认 lab）。
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"

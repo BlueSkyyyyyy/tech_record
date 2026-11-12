@@ -14,7 +14,7 @@
 import sys, os, numpy as np, torch
 from safetensors import safe_open
 
-CKPT = "/ssd/models/DeepSeek-V4-Pro/model-00002-of-00064.safetensors"
+CKPT = "/models/DeepSeek-V4-Pro/model-00002-of-00064.safetensors"
 H = 7168
 I = 3072
 OUT = os.path.dirname(os.path.abspath(__file__))

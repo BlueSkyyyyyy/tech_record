@@ -11,7 +11,7 @@ nvcc -std=c++17 -O2 -arch=sm_90a "$SRC" -o "$BIN" || exit 1
 echo "\$ CUDA_VISIBLE_DEVICES=$DEV $BIN"
 CUDA_VISIBLE_DEVICES="$DEV" "$BIN"
 
-MPK=${MPK:-/ssd/mirage_mpk_build}
+MPK=${MPK:-/workspace/mirage_mpk_build}
 BW="$MPK/include/mirage/persistent_kernel/tasks/blackwell"
 DENSE="$BW/linear_fp8_sm100.cuh"
 MOE="$BW/fp8_group_gemm_sm100.cuh"

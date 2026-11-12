@@ -19,7 +19,7 @@
 //       S = S*e + scale*(q^T @ do) - (w^T @ du)
 //   dh0 = S
 //
-// Build (inside kernel_lab):
+// Build (inside lab):
 //   nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared b1_tma_probe.cu -o /tmp/b1_tma.so -lcuda
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>

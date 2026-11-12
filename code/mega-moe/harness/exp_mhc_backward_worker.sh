@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P122-1 实验 driver：在 kernel_lab(H100) 上
+# P122-1 实验 driver：在 lab(H100) 上
 #   1) 编译并运行 src/mhc_backward_worker.cu —— per-token 融合 worker（K1+G1a+K2 一个 block）
 #      device(fp32) vs host 单片 double 参考对拍，并与六段分段路径计时对比（H=64）。
 #   2) 运行 harness/exp_mhc_backward_worker.py —— 真实形状（H=7168）下「融合省掉的全局往返」

@@ -22,7 +22,7 @@ independently of the bf16 `op_t`; `rds()` reads them without bf16 de-quantizatio
   Part C  timing: kernel-only `dev` prod vs prod_bf16 vs prod_bf16_mma.
   Part D  torch sanity: `dv2 = beta*(A@dv)` on the same operands.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_bf16_prod.py \
         > .../harness/check_bwd_b2_bf16_prod.out.txt 2>&1
     B2BP_MODE=a | b | c | d

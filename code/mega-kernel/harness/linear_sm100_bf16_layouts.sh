@@ -10,8 +10,8 @@
 # deps/cutlass（f3fde583）。
 set -u
 DEV=${DEV:-3}
-CUTLASS=${CUTLASS:-/ssd/mirage_mpk_build/deps/cutlass}
-MPK=${MPK:-/ssd/mirage_mpk_build}
+CUTLASS=${CUTLASS:-/workspace/mirage_mpk_build/deps/cutlass}
+MPK=${MPK:-/workspace/mirage_mpk_build}
 SRC=${HOME}/proj/tech_record/code/mega-kernel/src/linear_sm100_bf16_layouts.cu
 BIN=/tmp/linear_sm100_bf16_layouts
 nvcc -std=c++17 -O2 -arch=sm_90a -I"$CUTLASS/include" "$SRC" -o "$BIN" 2>/dev/null \

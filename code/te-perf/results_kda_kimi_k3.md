@@ -16,7 +16,7 @@ gate_lower_bound=-5.0`；MLA 96 头 / qk=192 / v=128。每个 KDA 层是 `[B,T,9
 
 ## 2. 计时口径（反向是独立测的）
 
-- 容器 `kernel_lab`（torch 2.12、**FLA 0.5.2**、FlashKDA、TE 2.14）；H100 80GB；**空闲 GPU**（util 0%）。
+- 容器 `lab`（torch 2.12、**FLA 0.5.2**、FlashKDA、TE 2.14）；H100 80GB；**空闲 GPU**（util 0%）。
 - `device_ms` = **CUPTI 纯 device kernel 时间**（`torch.profiler`，不含 launch）；warmup=5、repeat=20。
 - **前向 `fwd`**：`no_grad` 下直接计时。
 - **反向 `bwd`（独立）**：先**在计时区外**用 `requires_grad` 建一次图，随后计时区**只跑**
@@ -100,7 +100,7 @@ gate_lower_bound=-5.0`；MLA 96 头 / qk=192 / v=128。每个 KDA 层是 `[B,T,9
 ## 7. 复跑
 
 ```bash
-# kernel_lab 容器、确认 GPU 空闲（util=0%）后
+# lab 容器、确认 GPU 空闲（util=0%）后
 cd code/te-perf
 python bench_kda_kimi_k3.py --mode support --dtypes bfloat16,float16,float32,float8_e4m3fn,float8_e5m2
 python bench_kda_kimi_k3.py --mode sweep --dtypes bfloat16 \

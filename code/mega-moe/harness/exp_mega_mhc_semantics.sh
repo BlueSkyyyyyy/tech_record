@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P5-2 实验 driver：在 kernel_lab(H100) 编译并运行 Mega mHC 的架构无关数值语义移植实验。
+# P5-2 实验 driver：在 lab(H100) 编译并运行 Mega mHC 的架构无关数值语义移植实验。
 #   ./harness/exp_mega_mhc_semantics.sh
 # 对应源码 src/mega_mhc_semantics.cu，输出见 harness/exp_mega_mhc_semantics.out.txt。
 set -euo pipefail

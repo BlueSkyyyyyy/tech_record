@@ -18,7 +18,7 @@ This harness races the bf16-native build against the fp32 build:
   Part B  kernel-only timing: bf16 vs fp32 build (CUPTI dev + wall).
   Part C  static: smem bytes + registers of both builds.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=2 python .../harness/check_bwd_b2_bf16.py \
         > .../harness/check_bwd_b2_bf16.out.txt 2>&1
     B2BF_MODE=a | b | c

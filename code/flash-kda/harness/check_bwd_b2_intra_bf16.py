@@ -18,7 +18,7 @@ Parts:
      rc -- does halving the `3*BT*KD*4` staging actually make K=256 foldable on its own?
   C  timing: isolated `prod_intra` vs the two bf16 variants (CUPTI `dev`), K=V=128.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_intra_bf16.py \
         > .../harness/check_bwd_b2_intra_bf16.out.txt 2>&1
     B2IB_MODE=a | b | c

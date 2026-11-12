@@ -4,7 +4,7 @@ Launches exactly one CUDA kernel (`b3intra_kernel`) on synthesized operands so
 `ncu -k regex:b3intra_kernel` targets it unambiguously.  `--which ours` runs the CUDA
 probe; `--which triton` runs the Triton MMA B3 (`_intra_kernel_mma`) as the reference.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ncu_b3_intra_cuda_driver.py --which ours --B 8 --T 2048 --H 8
     ncu -k regex:b3intra_kernel -c 1 --launch-skip 3 --set full \\
         python ncu_b3_intra_cuda_driver.py --which ours --B 8 --T 2048 --H 8

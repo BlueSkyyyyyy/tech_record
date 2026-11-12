@@ -2,7 +2,7 @@
 """35 DSA compressor 的 PyTorch 对照脚本。
 
 三件事：
-  1) 忠实复刻 /ssd/models/DeepSeek-V4-Pro/inference/model.py:279 (class Compressor)
+  1) 忠实复刻 /models/DeepSeek-V4-Pro/inference/model.py:279 (class Compressor)
      的 prefill 语义（fp32 计算），作为「理论正确性 + eager 基线」。
   2) 单独计时 reference 里两个 fp32 Linear（wkv / wgate）→ 说明「两次独立 GEMM」的成本。
   3) 计时同一个算子用 bf16 合并 GEMM（cuBLAS：X[M,D] @ Wm[2C,D]^T）的成本，

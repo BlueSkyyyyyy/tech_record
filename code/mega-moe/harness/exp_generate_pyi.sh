@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P115-1 实验 driver：在 kernel_lab(H100/sm90) 上验证 DeepGEMM 的 Python 类型桩生成器。
+# P115-1 实验 driver：在 lab(H100/sm90) 上验证 DeepGEMM 的 Python 类型桩生成器。
 #   harness/exp_generate_pyi.py（纯 host/Python，按路径加载真实 scripts/generate_pyi.py）
 #   bash harness/exp_generate_pyi.sh > harness/exp_generate_pyi.out.txt
 # 对应源码：~/github/DeepGEMM@057ca59（deep_gemm 2.8.1, v2.1.1.post3-24-g057ca59）

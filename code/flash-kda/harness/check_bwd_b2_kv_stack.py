@@ -33,7 +33,7 @@ Parts:
      INTRA fold becomes infeasible (> 227 KiB).
   C  timing (CUPTI `dev`) at `K=V=128` and one `K!=V`: base vs each stacked twin.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=4 python .../harness/check_bwd_b2_kv_stack.py \
         > .../harness/check_bwd_b2_kv_stack.out.txt 2>&1
     B2KS_MODE=a | b | c

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P67-1 实验 driver：在 kernel_lab(H100/sm90) 上真机验证 DeepGEMM 的共享 TMA 拷贝层与环形流水线
+# P67-1 实验 driver：在 lab(H100/sm90) 上真机验证 DeepGEMM 的共享 TMA 拷贝层与环形流水线
 #   deep_gemm/include/deep_gemm/common/tma_copy.cuh + common/ring_pipeline.cuh。
 #   ./harness/exp_tma_copy_ring.sh
 # 对应源码 src/tma_copy_ring.cu（nvcc 直接 include 真实头文件跑真实设备代码）。

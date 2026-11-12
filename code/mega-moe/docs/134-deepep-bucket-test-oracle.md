@@ -13,7 +13,7 @@
 > 其中 `test_session.py:62/75` 与 `test_all_gather.py:55/80` 用的**逐位判据（`rtol=0`/`torch.equal`）**
 > 是整个测试套件里最严的一档——本篇解释它为什么成立、边界在哪。
 >
-> 参考版本：`~/github/DeepEP` 公开版 commit `93eb6eb`（v2.5.0）。本机 `kernel_lab`（H100 sm90，8 卡）。
+> 参考版本：`~/github/DeepEP` 公开版 commit `93eb6eb`（v2.5.0）。本机 `lab`（H100 sm90，8 卡）。
 > 实测：`harness/exp_deepep_bucket_tests.{py,sh}` + `.out.txt`。
 > 目标卡代号敏感：全文一律用「目标卡」指代。
 >

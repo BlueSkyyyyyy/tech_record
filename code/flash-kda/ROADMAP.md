@@ -20,7 +20,7 @@
 
 ## 环境 / 参考坐标
 
-- 容器 `kernel_lab`（`scripts/lab.sh`），GPU H100 sm90。
+- 容器 `lab`（`scripts/lab.sh`），GPU H100 sm90。
 - FlashKDA：`~/github/FlashKDA`（forward，`CHUNK=16`，`D=128`，SM90+）。
 - FLA（反向参照）：容器内 `pip install flash-linear-attention` 后 `from fla.ops.kda import chunk_kda`。
 - 注意：**目标卡代号敏感**，一律写「目标卡」。
@@ -133,7 +133,7 @@
 
 - [x] **P6-1** FLA `chunk_kda` 提供 **Triton** 反向（非 CUDA）：逐 kernel 精读其 5 个 kernel 分解，
       并与 P5-4 的 chunked backward 逐式对照；同时基于 FlashKDA 前向 workspace 给出目标卡 CUDA 反向设计。
-- [x] **P6-2** （可选）在 `kernel_lab` 上写最小可运行反向 kernel（复刻状态伴随 `dhu`/B1）并与参考对拍。
+- [x] **P6-2** （可选）在 `lab` 上写最小可运行反向 kernel（复刻状态伴随 `dhu`/B1）并与参考对拍。
 - [x] **P6-3** 关闭 P6-2 的「非整除 T」边界：定位 host 侧 `E_tot` 记账假设整除的 bug（尾块 58 行
       未被寻址），改为按最后有效 token 取 $E^{tot}$；非整除 T 实测 Triton↔FLA 仍 1e-8~4e-5；
       澄清「K 的 64 分段」是 FLA 同 program 内展开、非正确性约束。
@@ -2059,7 +2059,7 @@
       **勘误**：§104.3/§104.5 首版把解析增量写成 `NW=4`（`192K+1280`），与同表实测 `192K+1536` 差
       **256 B**、被顺手记成「余 `256 B` 为对齐」；核对源码确认 `b2_mma_probe.cu:72` 是 `constexpr int NW = 8`
       （`idbrow[NW][BT]·4 = 512`，`:633`），三项 `192K + 1024 + 512` 与实测**逐字节闭合、无对齐项**。
-      同步改 `harness/check_bwd_b2_kvcross.py`（`NW=8`、`4*BT*4 → NW*BT*4`）、在 `kernel_lab` 重跑
+      同步改 `harness/check_bwd_b2_kvcross.py`（`NW=8`、`4*BT*4 → NW*BT*4`）、在 `lab` 重跑
       （`check_bwd_b2_kvcross.out.txt`）——**Part A/A3/B 全部实测列逐字节不变**（同指令流确定性），
       仅 4 行解析打印从 `13568/25856/50432` 纠正为 `13824/26112/50688`。§104.4/§104.5 结论不受影响。
       见 `docs/07` §104.3/§104.6、`docs/08-summary.md`。**下一步（可选）**：专题维持维护态；
@@ -2166,7 +2166,7 @@
 
 1. 读本文件「任务清单」选**一个未完成子项**（优先 P0→P1→… 顺序，但可并行做数值/精读）。
 2. 写/改 `docs/<NN>-*.md`（会被内联到博客）与必要的 `src/`、`harness/` 代码。
-3. 用 `scripts/lab.sh exec "..."` 在 `kernel_lab` 里跑，结果留 `*.out.txt`。
+3. 用 `scripts/lab.sh exec "..."` 在 `lab` 里跑，结果留 `*.out.txt`。
 4. 数值不吻合要贴出输入/误差并排查，不可含糊带过。
 5. `/tmp/hugo_bin/hugo --gc --minify` 确认无 ERROR；`git add` 只加本专题路径；commit 前缀 `kda:`；
    `git pull --rebase` 后 push（网络失败只本地 commit 并在本文件记「待推送」）。
@@ -2897,7 +2897,7 @@
     实测 `192K+1536` 差 **256 B**，被顺手记成「余 `256 B` 为对齐」；核对源码确认 `b2_mma_probe.cu:72` 是
     `constexpr int NW = 8`、`idbrow[NW][BT]`（`:633`）→ `NW·BT·4 = 512`，三项 `192K + 1024 + 512` 与实测
     **逐字节闭合、无对齐项**。改 `harness/check_bwd_b2_kvcross.py`（`NW=8`、`4*BT*4 → NW*BT*4`）并在
-    `kernel_lab`（空闲 GPU）重跑：**Part A/A3/B 全部实测列逐字节不变**，仅 4 行解析打印从
+    `lab`（空闲 GPU）重跑：**Part A/A3/B 全部实测列逐字节不变**，仅 4 行解析打印从
     `13568/25856/50432` 纠正为 `13824/26112/50688`（`check_bwd_b2_kvcross.out.txt`）。**`b2_mma_probe.cu`
     一行未改**；§104.4/§104.5 结论不受影响。见 `docs/07` §104.6、`docs/08-summary.md`。**下一步（可选）**：
     专题维持维护态；`K/V` 非 2 的幂在 `BW=KD/NW∈{8,16,32}`/`BVK` 约束外（§104.5）、不可测。

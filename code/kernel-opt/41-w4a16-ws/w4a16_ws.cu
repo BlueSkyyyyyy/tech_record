@@ -10,7 +10,7 @@
 //   NCONS 个 consumer warpgroup(各 128 线程)：只发 wgmma.m64n128k16
 // 用 mbarrier full/empty 握手，让 producer 的反量化与 consumer 的 wgmma 真正重叠。
 //
-// 真实 shape 取自 /ssd/models/qwen3-8B/config.json：
+// 真实 shape 取自 /models/qwen3-8B/config.json：
 //   hidden_size=5120, intermediate_size=17408, group_size=128, 对称 int4。
 // 默认测 M=64（decode）× N=17408 × K=5120。
 //

@@ -7,7 +7,7 @@
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu; the
 # driver only loads the .so.  Triton path setup launches many kernels -> pin `-k regex`.
 #
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_mma_ncu.sh > .../probe_b2_mma_ncu.out.txt 2>&1
 
 set -uo pipefail

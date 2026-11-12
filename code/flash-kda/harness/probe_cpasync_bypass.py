@@ -8,7 +8,7 @@ same buffer; only the load instruction differs (see the .cu header).  `ncu`
 collection lives in `harness/probe_cpasync_bypass_ncu.sh`
 (`harness/probe_cpasync_bypass_ncu.out.txt`).
 
-Run inside `kernel_lab`:
+Run inside `lab`:
     CUDA_VISIBLE_DEVICES=2 python .../harness/probe_cpasync_bypass.py \
         --mode 0 --pat 1 --nunits 4096 --iters 8
 """

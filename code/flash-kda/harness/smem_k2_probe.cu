@@ -1,6 +1,6 @@
 // P3-1 探针：量化 K2 的 smem 占用、pipeline stage 预算与 union 复用。
 // 对应 csrc/smxx/fwd_kernel2.cuh:9-112 的 K2Layouts / SharedStorageK2。
-// 编译（在 kernel_lab 内，FlashKDA 绝对路径）：
+// 编译（在 lab 内，FlashKDA 绝对路径）：
 //   nvcc -std=c++17 -O2 -arch=sm_90a --expt-relaxed-constexpr --expt-extended-lambda \
 //     -I <FlashKDA>/cutlass/include -I <FlashKDA>/cutlass/tools/util/include -I <FlashKDA>/csrc \
 //     smem_k2_probe.cu -o /tmp/smem_k2_probe && /tmp/smem_k2_probe

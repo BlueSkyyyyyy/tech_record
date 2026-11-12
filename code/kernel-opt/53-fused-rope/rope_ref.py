@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """53 融合 RoPE：与 model.py 语义对拍 + PyTorch SOTA 口径计时。
 
-用法（在 kernel_lab 容器里）：
+用法（在 lab 容器里）：
     cd code/kernel-opt/53-fused-rope && python3 rope_ref.py
 先用 `scripts/run.sh 53-fused-rope/rope.cu dump <scenario>` 生成 dump_*_{meta,in,out}。
 """

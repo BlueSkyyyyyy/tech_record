@@ -4,7 +4,7 @@
 背景：ROADMAP「fp8 专项冲刺 / 下一批 F6·F3b·F4b」把 fp8 主 kernel 的 L2 墙逐条收口后，
 唯一还没系统复核的是**纯 host/运行期旋钮**（ksplit / hswap / mrev / 端到端量化重叠 / 栅格封顶）
 在同一 binary 里的联合最优性。本脚本把 `src/fp8/fa_bwd_fp8_main.cu` 编译出的可执行文件在
-kernel_lab 容器里按「case × 配置」矩阵跑一遍，解析 `[timing]` 行，给出
+lab 容器里按「case × 配置」矩阵跑一遍，解析 `[timing]` 行，给出
 「默认 vs 每档」的 main / total 比，用于一次性判定默认档是否已是最优。
 
 用法（宿主机，任意目录）：
@@ -26,7 +26,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_ROOT = Path(os.path.expanduser("~/proj/output/fa-bwd"))
-CONTAINER = "kernel_lab"
+CONTAINER = "lab"
 BIN = "fa_bwd_fp8_main.out"
 BIN_DIR = "src/fp8"
 

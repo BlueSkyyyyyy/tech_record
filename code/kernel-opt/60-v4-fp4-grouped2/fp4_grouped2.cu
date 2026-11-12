@@ -13,7 +13,7 @@
 //   MINCTA   __launch_bounds__(256,MINCTA) 压寄存器换 CTA/SM（59 是 117 regs / 2 CTA）
 //   路由     balanced / 75% hot（96 专家 0 token）/ 幂律（尾部大量 0）
 //
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：
 //   hidden=7168, moe_intermediate_size=3072, n_routed_experts=384, topk=6, expert_dtype=fp4。
 //
 // 运行：scripts/run.sh 60-v4-fp4-grouped2/fp4_grouped2.cu [B]

@@ -11,7 +11,7 @@
 # pure device time. Compared against hard-coded roofline numbers for
 # NVIDIA H100 SXM (132 SM, 80GB HBM3).
 #
-# Usage (run inside the kimi26_train container, on a machine owning the GPU):
+# Usage (run inside the trainer container, on a machine owning the GPU):
 #   python bench_te.py                # run everything, no correctness check
 #   python bench_te.py --check        # run a one-shot correctness check first
 #   python bench_te.py --rmsnorm-only # only rmsnorm / rmsnorm_bwd

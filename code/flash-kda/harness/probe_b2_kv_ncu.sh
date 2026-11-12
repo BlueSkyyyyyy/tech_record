@@ -7,7 +7,7 @@
 # tail should *shrink* in relative terms.
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   bash .../probe_b2_kv_ncu.sh > .../probe_b2_kv_ncu.out.txt 2>&1
 set -uo pipefail
 

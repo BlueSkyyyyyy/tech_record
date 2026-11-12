@@ -22,7 +22,7 @@ It is a *complete* B2 output triple (`dq`/`dk`/`dg`), so it is verifiable standa
   Part B  timing: gate kernel vs the same build with the gate segment skipped (`B2M_NODG`), and
           vs the full Triton B2.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_gate.py \
         > .../harness/check_bwd_b2_gate.out.txt 2>&1
     B2G_MODE=a | b

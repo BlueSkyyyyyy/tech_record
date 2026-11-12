@@ -15,7 +15,7 @@
 > 直接 include 真实头文件、**运行真实契约函数**，对 spec 的每一条断言做正/负用例对拍。
 >
 > 核对版本：`~/github/DeepGEMM` 公开版 commit `057ca59`（Public release 26/09/30），本机
-> `kernel_lab`（H100 80GB HBM3, sm90）。实验：`harness/exp_sf_contract_conformance.{sh,out.txt}`
+> `lab`（H100 80GB HBM3, sm90）。实验：`harness/exp_sf_contract_conformance.{sh,out.txt}`
 > + `src/sf_contract_conformance.cu`。
 
 ---

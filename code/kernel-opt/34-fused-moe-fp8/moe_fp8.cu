@@ -22,7 +22,7 @@
 //   gate/up 双累加器 2×64=128 fp32，per-block 的 fin 再 2×64=128，合计 256 > 255
 //   的每线程寄存器上限（这一段作为负结果写进文章）。
 //
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：
 //   hidden=7168, moe_intermediate_size=3072, n_routed_experts=384,
 //   num_experts_per_tok=6, e4m3 + ue8m0 + weight_block 128x128。
 //

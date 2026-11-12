@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P30-1 实验 driver：在 kernel_lab(H100) 上跑 DeepGEMM 测试基座
+# P30-1 实验 driver：在 lab(H100) 上跑 DeepGEMM 测试基座
 #   deep_gemm/testing/{bench,numeric,utils}.py + deep_gemm/utils/dist.py 的语义与实测。
 #   bash harness/exp_testing_harness.sh > harness/exp_testing_harness.out.txt
 # 对应源码 exp_testing_harness.py；参考 ~/github/DeepGEMM 的

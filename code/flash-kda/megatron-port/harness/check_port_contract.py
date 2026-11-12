@@ -22,7 +22,7 @@
 #      FLA `initial_state must be float32` assertion (`chunk.py:597`).
 #   H  static code audit of the contract lines + `gdn_pre_gated_delta_rule_fusion` gap.
 #
-# Usage (GPU, inside kernel_lab):
+# Usage (GPU, inside lab):
 #   FLA_DISABLE_BACKEND_DISPATCH=1 python harness/check_port_contract.py
 # Env:
 #   MEGATRON_ROOT  default ~/proj/Megatron-LM

@@ -8,10 +8,10 @@ NOT perturb the timing-sensitive race the way instrumentation does (docs/09
 section 9.3/9.4).
 
 Env:
-  MIRAGE_HOME  path to the mirage checkout (default /ssd/mirage_mpk_build)
+  MIRAGE_HOME  path to the mirage checkout (default /workspace/mirage_mpk_build)
 
-Run inside kernel_lab:
-  MIRAGE_HOME=/ssd/mirage_mpk_build CUDA_VISIBLE_DEVICES=7 \
+Run inside lab:
+  MIRAGE_HOME=/workspace/mirage_mpk_build CUDA_VISIBLE_DEVICES=7 \
     python3 -u mpk_cudagdb_probe.py --workers 128 --schedulers 16
 """
 

@@ -28,7 +28,7 @@ Parts
   Part C  timing (CUPTI `dev`, kernel-only): one `prod_intra` launch vs `prod` + standalone
            `b3intra`, per `K`.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=4 python .../harness/check_bwd_b2_k128_intra.py \
         > .../harness/check_bwd_b2_k128_intra.out.txt 2>&1
     B2KI_MODE=a0 | a | b | c

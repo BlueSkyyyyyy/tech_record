@@ -29,7 +29,7 @@ C. **Genuine fp32 h0** -- feed an h0 that is *not* bf16-representable; confirm t
    not cast to bf16 explicitly.
 D. **State-combination sweep** -- fp32 in-only / out-only / both, each vs ``B=1``.
 
-Run inside `kernel_lab` (needs the built ``flash_kda_C``):
+Run inside `lab` (needs the built ``flash_kda_C``):
     python ~/proj/tech_record/code/flash-kda/harness/check_varlen_forward_fp32state.py
 """
 

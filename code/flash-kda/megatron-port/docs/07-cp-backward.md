@@ -5,7 +5,7 @@
 > 本篇补上缺口：**上下文并行（CP）的反向**（`dhu` 的 CP 前处理 + 跨 rank `dht` 收发）
 > 与 **`varlen × CP` 组合**的梯度锚定。
 >
-> 行号按 **`kernel_lab` 容器内 pip 包 `fla==0.5.2`**
+> 行号按 **`lab` 容器内 pip 包 `fla==0.5.2`**
 > （`/usr/local/lib/python3.12/dist-packages/fla`）实测核对；与 clone 版可能不同（上游在动）。
 
 ---

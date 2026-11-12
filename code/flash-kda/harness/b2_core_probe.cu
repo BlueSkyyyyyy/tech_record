@@ -31,7 +31,7 @@
 // fp32 registers per thread (8 rows x 3), `dgk` is 1; warp lanes own 32 consecutive
 // `kk` (coalesced `h/dh` smem) while `do/v_new/dv` reads broadcast within a warp.
 //
-// Build (inside kernel_lab), same as the other `*_probe.cu`:
+// Build (inside lab), same as the other `*_probe.cu`:
 //   nvcc -std=c++17 -O3 -arch=sm_90a -Xcompiler -fPIC -shared b2_core_probe.cu -o /tmp/b2_core.so
 // Host entry: `extern "C" b2_core_launch(...)`, called from
 // `harness/check_bwd_b2_core.py` via ctypes with raw device pointers.

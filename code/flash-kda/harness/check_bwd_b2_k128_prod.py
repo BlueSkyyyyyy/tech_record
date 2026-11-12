@@ -26,7 +26,7 @@ Parts
   Part C  stage-layout identity: prod vs prod+TMA at K!=128 (bit-identical).
   Part D  static cost (regs / spill / smem vs K).
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=3 python .../harness/check_bwd_b2_k128_prod.py \
         > .../harness/check_bwd_b2_k128_prod.out.txt 2>&1
     B2KP_MODE=a | b | c | d

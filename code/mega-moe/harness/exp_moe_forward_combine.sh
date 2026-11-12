@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P133-1 实验 driver：在 kernel_lab(H100/sm90) 上复刻 Mega MoE **前向收尾两段**
+# P133-1 实验 driver：在 lab(H100/sm90) 上复刻 Mega MoE **前向收尾两段**
 #   （L2 bf16 epilogue 写回 + combine 归约），补全第 142 篇缺的「非 GEMM 段」。
 #   bash harness/exp_moe_forward_combine.sh > harness/exp_moe_forward_combine.out.txt
 # 对应源码 src/moe_forward_combine.cu（直接 include 真实头文件跑真实设备代码）与

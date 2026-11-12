@@ -21,7 +21,7 @@
 //
 // 正确性：折叠无损 ⇒ MODE 1 与 MODE 0 的 GEMM 结果应当**逐位相等**（最强验证）。
 //
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：
 //   hidden=7168, moe_intermediate_size=3072, n_routed_experts=384,
 //   num_experts_per_tok=6, e4m3 + ue8m0 + weight_block 128x128。
 //

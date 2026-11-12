@@ -14,7 +14,7 @@
 //   grouped      ：一个 kernel，grid.y = 384 experts，每 CTA 吃下该 expert 的全部 m 个 token
 //                  （权重 decode 一次、dp4a 复用 m 次；赢并行度 + 权重复用）
 //
-// shape 取自 /ssd/models/DeepSeek-V4-Pro/config.json：
+// shape 取自 /models/DeepSeek-V4-Pro/config.json：
 //   hidden=7168, moe_intermediate_size=3072, n_routed_experts=384, topk=6,
 //   expert_dtype=fp4（w1 [N=3072, K=7168]，FP4 e2m1 + E8M0 block-32）。
 //   平衡路由 (t*6+j)%384 让每个专家恰好拿到 B/64 个 token（B=64/128/256/512 → m=1/2/4/8）。

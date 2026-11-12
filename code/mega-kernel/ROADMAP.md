@@ -20,7 +20,7 @@
 
 ## 环境 / 参考坐标
 
-- 容器 `kernel_lab`（`scripts/lab.sh`），GPU H100 sm90。
+- 容器 `lab`（`scripts/lab.sh`），GPU H100 sm90。
 - MPK 论文快照：`~/github/ai-infra-book/experiments/ch05/05-08/sources/mpk-v2.txt`（2717 行）。
 - DeepGEMM mega 家族：`~/github/DeepGEMM`；hpc-ops：`~/github/hpc-ops`。
 - **目标卡代号敏感**：一律写「目标卡」。**不要编造 URL**。
@@ -34,7 +34,7 @@
 - [x] **P0-1** 通读 MPK 论文快照，产出章节地图与关键图/表清单（进 `docs/00` §6「MPK 论文导航」）。
 - [x] **P0-2** 收集案例：`~/github/DeepGEMM`（mega_moe/mega_gate/mega_mhc）、`~/github/hpc-ops`、Kimi K3 报告相关段落。
       产出 `docs/02-production-cases.md`（案例源码坐标清单，含 commit 与核对过的行号）。
-- [x] **P0-3** 环境探测：`kernel_lab` 能否跑 persistent kernel / CUDA Graph / PDL 小实验（H100 支持 PDL）。
+- [x] **P0-3** 环境探测：`lab` 能否跑 persistent kernel / CUDA Graph / PDL 小实验（H100 支持 PDL）。
       结果见 `docs/04-experiments.md` §0，源码 `src/probe_env.cu`，原始输出 `harness/probe_env.out.txt`：
       三项均**可编译可运行**（cooperative grid sync 0.330ms/200 轮；CUDA Graph 1.56×；PDL ok）。
 
@@ -481,7 +481,7 @@
 
 ### P25 线上实现构建与端到端冒烟（`docs/09-mpk-build.md`）
 
-- [x] **P25-1** 在 `kernel_lab`（目标卡 H100/sm90，CUDA 13.2）容器里**从零构建 mirage**
+- [x] **P25-1** 在 `lab`（目标卡 H100/sm90，CUDA 13.2）容器里**从零构建 mirage**
       （快照 `mirage-project/mirage` 分支 `mpk` commit `f9eb70c`），并用 `PersistentKernel` API
       生成/编译/launch 一个**最小 megakernel**（单层 RMSNorm，随机张量，无 HF 权重），补齐
       `docs/06` §0「构建成本过高、未做」的尾巴。见 `docs/09-mpk-build.md`、脚本

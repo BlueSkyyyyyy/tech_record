@@ -14,7 +14,7 @@ FlashKDA state is stored as ``Sᵀ`` ([V,K], matching the K2 ``s_acc`` layout an
 wrapper docstring ``[N,H,V,K]``); the golden uses ``S`` ([K,V]). We therefore pass
 ``initial_state = h0ᵀ`` and compare ``final_state`` against ``Sᵀ``.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ~/proj/tech_record/code/flash-kda/harness/check_fwd_numerics.py
 """
 

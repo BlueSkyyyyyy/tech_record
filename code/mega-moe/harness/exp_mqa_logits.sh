@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P9-1 实验 driver：在 kernel_lab(H100/sm90) 上跑 DeepGEMM 稀疏注意力 indexer 的 MQA logits。
+# P9-1 实验 driver：在 lab(H100/sm90) 上跑 DeepGEMM 稀疏注意力 indexer 的 MQA logits。
 #   `fp8_fp4_mqa_logits`（连续）与 `fp8_fp4_paged_mqa_logits`（分页）实测。
 #   bash harness/exp_mqa_logits.sh > harness/exp_mqa_logits.out.txt
 # 对应源码 exp_mqa_logits.py；参考 ~/github/DeepGEMM

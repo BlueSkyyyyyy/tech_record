@@ -14,11 +14,11 @@
 # This is the same non-invasive attach method as harness/mpk_cudagdb.sh; the
 # only difference is the -G build so cuda-gdb can resolve struct fields/types.
 #
-# Run inside kernel_lab:
+# Run inside lab:
 #   bash harness/mpk_debug_counters.sh
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export MIRAGE_HOME="${MIRAGE_HOME:-/ssd/mirage_mpk_build}"
+export MIRAGE_HOME="${MIRAGE_HOME:-/workspace/mirage_mpk_build}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-7}"
 export MPK_EXTRA_DEFINES="${MPK_EXTRA_DEFINES:--G}"
 # The -G build blocks the host thread *inside cudaLaunchKernel* (the scheduler

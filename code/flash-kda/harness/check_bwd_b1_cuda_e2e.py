@@ -33,7 +33,7 @@ Parts
   D  isolated B1 kernel-only at the deployment granularity (BT=16): CUDA NSTAGE sweep vs
      Triton pipe NS sweep, to see the granularity-matched head-to-head.
 
-Run inside `kernel_lab` (idle card):
+Run inside `lab` (idle card):
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b1_cuda_e2e.py \
         > .../harness/check_bwd_b1_cuda_e2e.out.txt 2>&1
     B1CE_MODE=chain  # skip A/D

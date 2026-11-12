@@ -7,7 +7,7 @@ gradient (``dq, dk, dv, dg, dbeta``) plus ``dh0`` (with a random upstream grad o
 the final state as well). A central finite-difference spot check on a few entries
 is included so that autograd itself is not the sole oracle.
 
-Usage (inside kernel_lab, CPU is enough):
+Usage (inside lab, CPU is enough):
     python ~/proj/tech_record/code/flash-kda/harness/check_bwd_ref.py
 """
 

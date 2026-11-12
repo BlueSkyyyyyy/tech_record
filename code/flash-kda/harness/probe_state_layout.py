@@ -11,7 +11,7 @@ influences the output. This script isolates it:
 Conclusion (verified): FlashKDA stores ``S^T`` = ``[V, K]``; ``src/kda_ref.py`` uses
 ``S`` = ``[K, V]``. Evidence referenced by ``docs/04-numerics.md`` §3.
 
-Usage (inside kernel_lab):
+Usage (inside lab):
     python ~/proj/tech_record/code/flash-kda/harness/probe_state_layout.py
 """
 

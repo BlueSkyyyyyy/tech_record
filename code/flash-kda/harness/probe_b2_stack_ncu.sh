@@ -21,7 +21,7 @@
 # Shape fixed at `B8T2048H8`.
 #
 # NOTE: nvcc hangs under ncu in this container (P7-16) -> pre-build outside ncu.
-# Usage (inside kernel_lab):
+# Usage (inside lab):
 #   CUDA_VISIBLE_DEVICES=1 bash .../probe_b2_stack_ncu.sh > .../probe_b2_stack_ncu.out.txt 2>&1
 set -uo pipefail
 

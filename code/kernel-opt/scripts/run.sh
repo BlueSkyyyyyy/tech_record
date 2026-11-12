@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 在 kernel_lab 容器里编译并运行一个 .cu 源文件。
+# 在 lab 容器里编译并运行一个 .cu 源文件。
 #
 # 用法：
 #   scripts/run.sh path/to/foo.cu [程序参数...]
@@ -25,6 +25,6 @@ ARCH_FLAG=""
 LAB="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lab.sh"
 "$LAB" up >/dev/null
 
-LAB_NAME="${LAB_NAME:-kernel_lab}"
+LAB_NAME="${LAB_NAME:-lab}"
 CMD="cd '$DIR' && nvcc -O3 $ARCH_FLAG -lineinfo $NVCC_FLAGS '$NAME.cu' -o '$NAME.out' && CUDA_VISIBLE_DEVICES=$GPU ./'$NAME.out' $*"
 docker exec -e CUDA_VISIBLE_DEVICES="$GPU" "$LAB_NAME" bash -lc "$CMD"

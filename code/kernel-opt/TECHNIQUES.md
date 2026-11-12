@@ -234,7 +234,7 @@
 |---|---|---|---|---|---|---|
 | F1 | ncu 看 stall 指纹 | 定位 stall | `smsp__average_warps_issue_stalled_*` | `10` | long_scoreboard=访存依赖 | 用 `--` 分隔 ncu 与程序参数 |
 | F2 | source/SASS 对照 | 依赖链分析 | `--page source --print-source cuda,sass` | `10` | STL/LDL 定位 spill | — |
-| F3 | 容器 profiling 权限 | ncu | 需 SYS_ADMIN/SYS_PTRACE | `scripts/lab.sh` | 否则 ERR_NVGPUCTRPERM | 用 kernel_lab，不用 kimi26_train |
+| F3 | 容器 profiling 权限 | ncu | 需 SYS_ADMIN/SYS_PTRACE | `scripts/lab.sh` | 否则 ERR_NVGPUCTRPERM | 用 lab，不用 trainer |
 | F4 | event 与 ncu 口径差异 | 写文 | ncu replay 会拉长 | `14` | event 8.4µs vs ncu 11.26µs | 同一结论用同一口径 |
 
 ### G. 模型场景 / 注意力（15）

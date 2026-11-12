@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# P8-2 实验 driver：在 kernel_lab(H100) 上跑 DeepGEMM einsum 的两个 MLA 投影
+# P8-2 实验 driver：在 lab(H100) 上跑 DeepGEMM einsum 的两个 MLA 投影
 #   `bhr,hdr->bhd` / `bhd,hdr->bhr`（batched GEMM over heads）实测。
 #   bash harness/exp_einsum_mla.sh > harness/exp_einsum_mla.out.txt
 # 对应源码 exp_einsum_mla.py；参考 ~/github/DeepGEMM 的

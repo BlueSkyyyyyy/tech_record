@@ -31,7 +31,7 @@ Parts
   Part C  timing (CUPTI `dev`, kernel-only): one `prod_bf16_intra` launch vs `prod_bf16` +
           standalone `b3intra` (bf16 build), per `K`.
 
-Run inside `kernel_lab` (idle card), absolute paths:
+Run inside `lab` (idle card), absolute paths:
     CUDA_VISIBLE_DEVICES=1 python .../harness/check_bwd_b2_k128_intra_bf16.py \
         > .../harness/check_bwd_b2_k128_intra_bf16.out.txt 2>&1
     B2KIB_MODE=a | b | c
