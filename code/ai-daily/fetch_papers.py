@@ -70,6 +70,27 @@ def _daily_date(entry: dict) -> str:
     return (p.get("submittedOnDailyAt") or "")[:10]
 
 
+def fetch_latest_union(template: str, timeout: int = 30) -> list:
+    """「最新一批」接口在不同 limit 下会返回**不同的切片**（实测 2026-11-12：
+    limit=100 是旧快照、没有当天，limit=30 才有 17 篇），所以按多个 limit 取并集。
+    """
+    merged: dict[str, dict] = {}
+    for limit in (30, 100, 50):
+        try:
+            data = json.loads(fetch(template.format(date="", limit=limit), timeout))
+        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError):
+            continue
+        if not isinstance(data, list):
+            continue
+        for e in data:
+            pid = _entry_id(e)
+            if pid and pid not in merged:
+                merged[pid] = e
+    if not merged:
+        raise ValueError("各 limit 都没拿到数据")
+    return list(merged.values())
+
+
 def _entry_id(entry: dict) -> str:
     return ((entry.get("paper") or entry).get("id") or "").strip()
 
@@ -108,13 +129,15 @@ def try_sources(date: str, timeout: int = 30) -> tuple[list, str]:
         (OFFICIAL_LATEST_API, "official:latest", True),
         (OFFICIAL_API, "official:date", False),
     ]
+    latest_templates = {MIRROR_LATEST_API, OFFICIAL_LATEST_API}
     dead_hosts: set[str] = set()      # 一个域名连不上就跳过它剩下的接口
     for template, label, only_date in jobs:
         host = template.split("/")[2]
         if host in dead_hosts:
             continue
         try:
-            data = fetch_json_retry(template, date, timeout)
+            data = fetch_latest_union(template, timeout) if template in latest_templates \
+                else fetch_json_retry(template, date, timeout)
             if isinstance(data, list):
                 add(data, label, only_date)
             else:
