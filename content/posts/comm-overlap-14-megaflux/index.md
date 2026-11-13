@@ -1,5 +1,5 @@
 ---
-title: "通算并行研读（补遗二）：MegaFlux 深读——routing skew、专家复制与前后向流水"
+title: "通算并行研读（补遗二）：MegaFlux 深读——复制热点专家，再把副本通信塞进流水"
 date: 2026-11-03
 draft: false
 weight: 14
@@ -8,226 +8,114 @@ tags: ["通算并行", "系列", "MoE", "MegaFlux", "routing skew", "专家复�
 categories: ["训练框架"]
 ---
 
-UniEP 解决的是“单层内的顺序和调度”，MegaFlux（[2610.00671](https://arxiv.org/abs/2610.00671)）解决的是另一个老问题：
+**把「固定专家放置」换成「按 token 块复制热点专家」，让最慢那张卡不再决定整层时间；代价是副本权重要传、梯度要额外归约，必须塞进前后向流水才不亏**。
 
-> **routing 不均匀时，固定专家放置会让最慢的 GPU 决定整层延迟。**
+读完你会知道：
 
-这两件事正交：UniEP 管 token 怎么排、SM 怎么切；MegaFlux 管专家副本放哪、token block 分给谁。把两者叠起来，才是“顺序 + 负载”都顾到的 MoE overlap。
+- skew 到多重，复制才划得来；
+- 「复制几个」怎么变成一条水位线；
+- 副本权重和梯度归约，怎么塞进 megakernel 而不互相等。
 
-这一篇拆 MegaFlux 的四个部分：怎么量化 skew、怎么规划复制、怎么把复制通信塞进前后向、以及它的收益和边界。
+## 1. skew 一重，最慢那张卡就是整层的时间
 
-## 1. 问题：固定放置下，skew 直接变成 straggler
+MoE 的专家按固定规则放在 EP rank 上。热门专家所在的 GPU 收到更多 token，算得更久；冷门专家那张卡早早算完，等 all-to-all。整层时间由最慢的卡决定，其余算力空转。
 
-这一节先量化问题：固定放置下，routing skew 会怎样变成 straggler（拖后腿的那张卡）。
-
-MoE 的 expert 通常按固定规则放在 EP rank 上。热 expert 所在的 GPU 会收到更多 token，计算更久；冷 expert 的 GPU 早早算完，等 all-to-all/combine。层延迟由最慢的 GPU 决定，其他 GPU 的算力被浪费。
-
-MegaFlux 用 DA-MoE 的 skew 指标量化：
+有多重，用 DA-MoE 的 skew 指标量：
 
 $$
 \kappa = E \sum_{e=1}^{E}\left(\frac{c_e}{\sum_j c_j}\right)^2
 $$
 
-其中 $c_e$ 是专家 $e$ 收到的 token 数，$E$ 是专家数。均匀路由 $\kappa=1$，越大越不均。
+$c_e$ 是专家 $e$ 的 token 数，$E$ 是专家数；均匀路由 $\kappa=1$，越大越不均。
 
-论文在 8×B200（EP8）上回放 OLMoE / Qwen3 等 workload 的 P95-skew 路由，和“只改 expert ID、保持 token 数不变”的 balanced 路由对比：
+MegaFlux（[2610.00671](https://arxiv.org/abs/2610.00671)）在 8×B200（EP8）上回放 OLMoE / Qwen3 的 P95-skew 路由，和「只改 expert ID、token 数不变」的 balanced 路由对比：延迟高 **7.3%–41.0%**。
 
-- P95 路由比 balanced 路由延迟高 **7.3%–41.0%**；
-- 即使底座已经是 CuTeDSL MegaMoE（计算和通信已经 pipeline），固定放置仍然把 skew 暴露在关键路径上。
+底座已经是 CuTeDSL MegaMoE，计算和通信已经 pipeline，固定放置仍把 skew 留在关键路径上。
 
-这说明：**只做 kernel 内 overlap 不够，放置本身要动态化。**
+所以只做 kernel 内 overlap 不够，放置本身要动态化。
 
-## 2. Planner：以 token block 为单位的复制规划
+## 2. 复制几个：把最大负载压到一条水位线
 
-这一节讲 planner：复制谁、复制几份、放在哪。
+复制不能按 token 均分。把一个专家的 token 劈给几个副本，每个副本都可能拿到不满一个 tile 的尾巴（partial tile），Tensor Core 白算。
 
-### 2.1 为什么按 block，不按 token
+MegaFlux 以 token block（一个专家的一段连续 token 行）为单位：每个专家按最多 $\beta$ 行切块，$\beta$ 对齐 FC1/FC2 tile 的 token 维，每个专家最多一个 partial block，复制和分配都按块走。负载因此近似等于 token block 数，规划变成整数规划。
 
-如果把一个专家的 token 均分给多个副本，每个副本都可能拿到不满一个 tile 的尾部，产生 partial tile（不满一个 tile 的尾巴），浪费 Tensor Core。MegaFlux 的做法是：
-
-- 把每个专家的 routed rows 切成 **最多 $\beta$ 行**的 token block，$\beta$ 与 megakernel 的 FC1/FC2 tile 的 token 维对齐；
-- 每个专家最多只有一个 partial block，不管复制多少份；
-- 复制和分配都以 block 为单位。
-
-这样计算负载可以用 block 数近似，规划问题变成整数规划。
-
-### 2.2 形式化：min-max 负载 + 复制预算
-
-设：
-
-- $c_e$：专家 $e$ 的总 token 数；
-- $h(e)$：专家 $e$ 的 owner GPU；
-- $b_e = \lceil c_e / \beta \rceil$：block 数；
-- $q_{er}$：分给 GPU $r$ 的专家 $e$ 的 block 数；
-- $s$：每个 GPU 的 replica budget（最多复制多少个远程专家）。
-
-目标：
+设专家 $e$ 有 $c_e$ 个 token、$b_e=\lceil c_e/\beta\rceil$ 块，常驻卡（owner）记作 $h(e)$，GPU $r$（共 $P$ 张）分到 $q_{er}$ 块，每张卡最多接 $s$ 个远程专家的副本。目标是把最重的卡压下去：
 
 $$
-\min_{q \in \mathbb{Z}_{\ge 0}^{E \times P}} \max_r \ell_r,
-\quad \ell_r = \sum_e q_{er}
+\min_{q}\ \max_r \ell_r,\qquad \ell_r=\sum_e q_{er}
+\quad\text{s.t.}\quad
+\sum_r q_{er}=b_e,\quad
+\sum_{e:\,h(e)\ne r}\mathbf{1}[q_{er}>0]\le s
 $$
 
-约束：
+判据就一句话：水位线 $\tau=\lceil\sum_e b_e/P\rceil$，把 token block 从超过 $\tau$ 的 owner 搬到 $\tau$ 以下；搬不动就开副本，但每张卡最多 $s$ 个远程专家的副本。
 
-$$
-\sum_r q_{er} = b_e \quad \forall e
-$$
+精确解很贵，跑的是四个有界贪心。它们不是四套判据，只是两处选择：donor（往外搬 token block 的卡）先减总过载，还是先减 owner 的最大负载；fan-out 一轮开一个，还是一次开几个。搬的时候优先用已有副本，再在最空的合格 GPU 上开新副本。
 
-$$
-\sum_{e: h(e) \ne r} \mathbf{1}[q_{er} > 0] \le s \quad \forall r
-$$
+四个 warp 在 device 上并行评估，$s+2$ 轮后停，或某一轮没有 token block 移动就停。先压最大负载，再按副本数打破平局，最后剪掉冗余副本。
 
-第一条约束保证每个专家的 block 都分完；第二条限制每个 GPU 最多接 $s$ 个远程专家的副本。$q_{er}>0$ 且 $r \ne h(e)$ 就表示“在 $r$ 上开一个副本”。
+backward 多一笔账：副本算出的 partial WGrad（对权重的梯度）要回 owner，owner 等齐才能归约。所以 backward 的规划在目标里加 $\lambda n_r$，$n_r$ 是 owner 名下的专家在远程有多少副本，$\lambda=12$；否则会规划出「计算均衡、归约爆炸」的方案。
 
-这是一个 min-max 负载均衡 + 复制容量约束的问题。精确解很贵，MegaFlux 用**有界贪心搜索**。
+## 3. 执行：FC2 只等 W2，归约只等一个 tile
 
-### 2.3 四个贪心搜索
+```text
+forward    W1 ──▶ FC1 ──┐
+           W2 传输 ──────┴──▶ FC2      W1 在算时，W2 在传
+backward   W2 ──▶ DGrad ──▶ W1
+           WGrad：owner 等齐同一 tile 的所有副本 partial ──▶ 归约
+```
 
-MegaFlux 并行跑四个贪心：
+谁等谁：FC2 等 W2，不等整个副本权重；owner 归约等一个 gradient tile 的所有 partial，不等一整层；本地专家不等副本。
 
-- 起点：no-replica 分配；
-- 目标水位：$\tau = \lceil \sum_e b_e / P \rceil$；
-- 每轮把 block 从过载 owner 往 $\tau$ 搬；
-- 优先用已有副本，再在最空的合格 GPU 上开新副本；
-- donor 选择有两种优先级：减少总过载，或减少最大 home-expert 负载；
-- fan-out 有两种：每轮每个专家最多开一个新副本，或一次开多个；
-- 每轮每个过载 owner 访问一次；owner 负载降到 $\tau$ 以下或专家扫完就结束；
-- 搜索在 $s+2$ 轮后停止，或某一轮没有 block 移动时停止；
-- 先最小化最大负载，再按副本数打破平局，最后剪掉冗余副本、做不增加最大负载的微调。
+forward 把两份权重的就绪状态（readiness）拆开。W1 到就开 FC1，FC1 算的时候 W2 在传，FC1 完再等 W2 进 FC2。
 
-四个候选由四个 warp 在 device 上并行评估；选最优后，planner 协作生成 `block → GPU` 表。每个专家内部用 stable ordering 给 routed assignment 一个 block index，这个 index 直接选目标 GPU。
+副本权重传输复用通信 warp：少数 warp 从 kernel 入口就服务 replica-weight 队列，其余 input-transfer warp 排空自己的 token block 后加入同一队列。副本传输资源随 token 传输变少而变多，不需要副本级 barrier。
 
-### 2.4 backward 的 reduction-aware 变体
+backward 的依赖反过来：DGrad（对输入的梯度）先吃 W2 再吃 W1。
 
-forward 的复制只增加“权重传输”；backward 还会增加“副本梯度归约”：
+WGrad 要 token 轴上的 $D_e$ 和 $dZ_e$，MXFP8（一种 FP8 训练格式）下还要一次 requantization（RQ），RQ 被塞进通信空闲区间；每个 worker 做完自己的 DGrad 就转 WGrad，没有 device-wide barrier。
 
-- 副本算出的 partial WGrad 要送回 owner；
-- owner 要等所有参与 GPU 的 partial 到齐才能归约；
-- 这会影响 owner 的负载。
+归约那头，被复制专家的 WGrad 优先生产，owner 的归约就能尽早开始、和剩余计算重叠；累加用 FP32 固定顺序，保证结果可复现。两处是同一个手法：把「等全部」拆成「等一个 tile 或一个投影」。
 
-所以 backward 用 reduction-aware 规划，在剪枝时用：
+## 4. 几何平均 1.45×/1.28×，副本通信藏住 56%–100%
 
-$$
-\max_r (\ell_r + \lambda n_r)
-$$
-
-其中 $n_r$ 是“owner 为 $r$ 的专家在远程有多少副本”，$\lambda=12$（论文对所有报告的 backward 配置固定这个值）。这相当于给“远程副本多的 owner”加惩罚，避免规划出一个“计算均衡、归约爆炸”的方案。
-
-## 3. Executor：把复制通信塞进 megakernel
-
-这一节讲 executor：规划好的副本，怎么把权重传输和梯度归约藏进 megakernel。
-
-规划只是“放哪”，执行才是“怎么藏”。MegaFlux 的 executor 有两个关键设计。
-
-### 3.1 Forward：W1/W2 分离 readiness
-
-一个副本要算 FC1 + FC2，但两份权重的到达时间可以不同：
-
-- FC1 只需要 $W_1$ 和输入 token block；
-- FC2 需要 $W_2$ 和 FC1 的输出 activation。
-
-所以 MegaFlux 不要求“副本权重全部到齐”才开始：
-
-- $W_1$ 到 → 开始 FC1；
-- $W_1$ 计算期间，$W_2$ 传输；
-- FC1 完成 → 等 $W_2$ → 开始 FC2；
-- owned expert 的计算也能和副本传输重叠。
-
-论文 Figure 2 的 forward 时间线就是：`W1 transfer → FC1 || W2 transfer → FC2`。
-
-实现上，副本权重传输**复用通信 warp**，不单独保留一组 worker：
-
-- 一小部分 warp 从 kernel 入口就服务 replica-weight queue；
-- 其余 input-transfer warp 先排空自己负责的 token block，再加入同一个队列；
-- 这样副本传输资源随 token 传输减少而“逐渐变多”，不需要副本级 barrier。
-
-### 3.2 Backward：DGrad 与 WGrad 的流水
-
-Backward 的依赖更绕：
-
-- DGrad（对输入的梯度）先消费 $W_2$，再消费 $W_1$；
-- 所以副本权重传输按 $W_2 \to W_1$ 的顺序 readiness；
-- WGrad（对权重的梯度）需要 token 轴上的 $D_e$ 和 $dZ_e$，MXFP8（一种 FP8 训练格式）下还要做 requantization（RQ）；
-- RQ 被安排在通信空闲区间；
-- 每个 worker 完成自己的 DGrad 后独立转入 WGrad，不需要 device-wide phase barrier。
-
-最关键的是**副本梯度归约的同步**：owner 只有等所有参与 GPU 的 matching partials 都到了，才能归约一个 gradient tile。MegaFlux 的做法是：
-
-- 在所有参与者上优先准备“被复制专家”的 WGrad；
-- 优先生产这些专家的 gradient tile；
-- 让 owner 的归约尽早开始，和剩余计算重叠；
-- 用固定顺序做 FP32 累加，保证结果可复现。
-
-这和第 3.1 节的“分离 readiness”是同一个思想：**把“等全部”拆成“等一个 tile/一个投影”**。
-
-## 4. 收益：1.45×/1.28× 与 56%–100% 隐藏率
-
-这一节读结果。先给读法：forward/backward 两列分开看，“几何平均”和“峰值”也不是一回事。
-
-实验设置：
-
-- 8×B200，单 NVLink domain，EP8；
-- hidden/intermediate 7168/2048，SwiGLU，top-k 8；
-- 147 个配置/方向，覆盖不同 routing 分布和 workload 大小；
-- 基线是“同样 megakernel、固定放置”的 MegaMoE，不是朴素 PyTorch。
-
-结果：
+口径先摆清：8×B200、单 NVLink domain、EP8；hidden/intermediate 7168/2048，SwiGLU，top-k 8；147 个配置/方向，覆盖不同 routing 分布和 workload 大小；基线是同样 megakernel、固定放置的 MegaMoE，不是朴素 PyTorch。
 
 | 指标 | Forward | Backward |
 |---|---:|---:|
-| 几何平均加速 | **1.45×** | **1.28×** |
-| 峰值加速 | **2.14×** | **2.64×** |
-| 复制权重传输隐藏率 | **56%–76%** | — |
-| 权重传输 + 梯度归约隐藏率 | — | **91%–100%** |
-| vLLM DeepSeek-V4-Pro prefill e2e | **1.13×–1.26×**（中位数） | — |
+| 几何平均 | **1.45×** | **1.28×** |
+| 峰值 | **2.14×** | **2.64×** |
+| 权重传输隐藏率 | **56%–76%** | — |
+| 权重传输+梯度归约隐藏率 | — | **91%–100%** |
+| vLLM prefill e2e | **1.13×–1.26×** | — |
 
-几个读法：
+vLLM 上 DeepSeek-V4-Pro 的 prefill 端到端只有 1.13×–1.26×（中位数）：attention、KV cache、非 MoE 层把收益稀释了，和 UniEP 的 e2e 稀释是同一个规律。
 
-- **forward 的 1.45× 是几何平均，不是峰值**；峰值 2.14× 出现在 skew 很重的配置；
-- **backward 的隐藏率更高（91%–100%）**，因为 backward 本来就有更多可重叠的 DGrad/WGrad 工作；
-- **vLLM e2e 只有 1.13×–1.26×**，因为 prefill 里还有 attention、KV cache、非 MoE 层；这和 UniEP 的 e2e 稀释是同一个规律。
+两个数别混：1.45× 是几何平均，不是峰值；2.14× 出现在 skew 很重的配置。backward 隐藏率更高（91%–100%），因为 DGrad/WGrad 本来就有更多可叠的活。
 
-## 5. 边界：复制不是免费的
+论文只报了这套配置，换 routing 或换互联都不作数。
 
-这一节列五个前提；不满足的话，上面的 1.45× 不成立。
+## 5. 边界：routing 不够 skew，复制就是纯开销
 
-MegaFlux 的收益有明确前提：
+1. routing 必须够 skew。接近均匀时，多传的副本权重和显存可能超过收益；论文的 workload 是 P95-skew，不是均匀分布。最薄那档只比 balanced 高个位数百分比，副本权重传输很容易把这部分收益吃回去。
+2. 副本预算 $s$ 是硬约束。$s$ 越大越均衡，但权重流量、显存、归约参与者一起涨；论文没给最优 $s$ 的公式，只让 planner 在预算内搜。
+3. planner 自己也有成本。四个贪心各占一个 warp，在 device 上并行跑，占 SM 和寄存器；论文没单独报 planner 的延迟占比。
+4. 它不改 router。复制只改「谁算」，不改「选哪些专家」，所以和 capacity factor、drop policy 正交。
+5. 代码没公开，复现要自己写 planner 加 megakernel 集成；所有收益都在 8×B200 单 NVLink domain 上。
 
-1. **routing 必须够 skew**。如果路由接近均匀，复制带来的额外权重流量和显存占用可能超过收益；论文的 workload 是 P95-skew，不是均匀分布。
-2. **replica budget $s$ 是硬约束**。$s$ 越大，负载越均衡，但副本权重流量、显存、归约参与者都增加；论文没有给“最优 $s$”的通用公式，而是让 planner 在预算内搜。
-3. **planner 有开销**。四个贪心 + 四个 warp 并行，虽然 on-device，但仍要占 SM/寄存器；论文没有单独报 planner 的延迟占比。
-4. **它不改 router**。复制只改“谁算”，不改“选哪些专家”；所以它和 capacity factor、drop policy 是正交的，不能解决“路由本身负载不均”的问题。
-5. **代码未公开**。论文没有给仓库链接；复现需要自己实现 planner + megakernel 集成。
+## 6. 一个管顺序，一个管放置
 
-## 6. 和 UniEP 的关系：一个管“顺序”，一个管“放置”
+- UniEP 管顺序：token 按什么顺序进/出、SM 怎么切；MegaFlux 管放置：副本放哪、token block 给谁。
+- 两者正交，可以叠：一个决定同一批 token 的先后，一个决定每块 token 去哪算。
+- 叠加的接口在确定性：映射要从专家级扩到副本级，scoreboard 要能看见副本 partial，归约要固定累加顺序。
+- 两个都是 on-device 调度，SM 预算会抢；短期现实的是分开用，不是硬融成一个 megakernel。
 
-| 维度 | UniEP | MegaFlux |
-|---|---|---|
-| 优化对象 | 层内 token 顺序、SM 角色、通信/计算 overlap | 跨 GPU 的专家副本放置、token block 分配 |
-| 关键约束 | bitwise 可复现 | replica budget、负载均衡 |
-| 并行载体 | 单 stream persistent kernel + 动态任务队列 | 同 megakernel 内的复制传输/归约流水 |
-| 主要收益 | kernel 1.07×–1.87×，e2e 1.09× | fwd 1.45×、bwd 1.28×（vs 固定放置） |
-| 失败模式 | 跨节点、非 Hopper、shape 太动态 | routing 均匀、副本预算太小、显存不够 |
+## 7. 只记一件事
 
-两者可以叠：UniEP 决定“token 按什么顺序进/出”，MegaFlux 决定“token block 去哪个 GPU 算”。但叠加也有交互：
+复制专家这个点子不新，MoE 负载均衡里早有 expert replication。MegaFlux 真正做的是两件事：把复制做成 token block 粒度的放置规划，避免 partial tile；再把副本权重传输和梯度归约拆成 tile/投影级 readiness，塞进现有 megakernel。
 
-- UniEP 的确定性映射假设“目标专家固定”；MegaFlux 把 block 分给副本，会改变 token 在哪个 GPU 上被算，确定性映射要扩展到“副本级”；
-- MegaFlux 的副本梯度归约需要固定累加顺序，UniEP 的 scoreboard 需要感知“副本 partial 是否到齐”；
-- 两者都依赖 on-device 调度，SM 预算会竞争。
-
-所以短期更现实的组合是“UniEP 管单机层内，MegaFlux 管跨卡放置”，而不是把两个 megakernel 硬融成一个。
-
-## 7. 结论
-
-MegaFlux 的核心不是“复制专家”这个点子——MoE 负载均衡里早有 expert replication——而是：
-
-- 把复制做成 **block 粒度**的整数规划，避免 partial tile；
-- 把复制权重传输、副本梯度归约 **拆成 tile/投影级 readiness**，塞进现有 megakernel；
-- 用 **reduction-aware** 目标避免“计算均衡但归约爆炸”；
-- 在 8×B200 上把 forward/backward 几何平均做到 **1.45×/1.28×**，峰值 **2.14×/2.64×**。
-
-它的边界也很清楚：routing 越 skew 越有用，副本预算和显存是硬约束，planner 本身也有成本。读它的时候，重点看 **planner 的目标函数和 executor 的 readiness 拆分**，而不是只记 1.45×。
+routing 越 skew 越值；均匀路由下，它只是多传一份权重。下一篇把视角从「专家放哪」挪到「tile 什么时候能开工」：Entwine 与 mKernel（[补遗三]({{< relref "comm-overlap-15-tile-ecosystem" >}})）。
 
 ---
 
