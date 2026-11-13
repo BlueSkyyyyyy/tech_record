@@ -18,7 +18,15 @@ export DS41_API_KEY="${DS41_API_KEY:-local-no-auth}"
 # cron 的 PATH 很短，把 hugo/git/python 的位置补上。
 export PATH="/usr/local/bin:/usr/bin:/bin:${HOME}/.local/bin:${PATH}"
 
-TARGET_DATE="${FORCE_DATE:-$(date +%F)}"
+# 目标日期：显式 FORCE_DATE 优先；否则中午前当作「补昨天的」，中午后才是「写今天」。
+# （HF 的 daily 列表有时当天 21:00 还没换榜，次日早上补跑才有货；见 agent_skills/ai-daily.md）
+if [[ -n "${FORCE_DATE:-}" ]]; then
+  TARGET_DATE="${FORCE_DATE}"
+elif (( 10#$(date +%H) < 12 )); then
+  TARGET_DATE="$(date -d 'yesterday' +%F)"
+else
+  TARGET_DATE="$(date +%F)"
+fi
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="${LOG_DIR}/${TARGET_DATE}.log"
 
