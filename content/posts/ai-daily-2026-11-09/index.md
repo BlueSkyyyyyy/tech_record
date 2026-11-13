@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-09：34 篇 HF Daily Papers — agent harness 工程�
 subtitle: "HEELO 把工具做成带 LLM 的原语、EvoWorld 让世界模型推演视线外的后果、LongBanana 用 4,670 条专家检查项审图像合成"
 date: 2026-11-09
 draft: false
-weight: 5
+weight: 6
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "agent", "3DGS", "视频生成", "扩散模型", "kernel", "评测"]
 categories: ["LLM算法"]
