@@ -52,12 +52,13 @@
 
 ## 4. 建议的阅读顺序
 
-1. [01-uniep-dispatch-gemm](01-uniep-dispatch-gemm.md) → `uniep/kernels/cutedsl_dispatch_group_gemm.py`：信息密度最高，等待粒度压到「一个 expert」，通信与计算共享同一批 SM。
-2. [02-uniep-gemm-combine](02-uniep-gemm-combine.md) → 反方向：push-combine 怎么在 epilogue 里发生。
-3. [03-uniep-determinism](03-uniep-determinism.md) → 为什么 UniEP 敢说「和串行逐位一致」。
-4. [04-flux-ag-gemm](04-flux-ag-gemm.md) → 换到 Flux，看「两条 stream + chunk flag」能到什么程度。
-5. [05-flux-gemm-rs](05-flux-gemm-rs.md) → Flux 的另一半：把 RS 塞进 GEMM epilogue。
-6. [06-compare](06-compare.md) → 两套实现的对照，加一个统一的「等待粒度 vs 开销」框架。
+1. [UniEP：dispatch 与第一段 GEMM](01-uniep-dispatch-gemm.md) → `uniep/kernels/cutedsl_dispatch_group_gemm.py`：信息密度最高，等待粒度压到「一个 expert」，通信与计算共享同一批 SM。
+2. [UniEP：第二段 GEMM 与 combine](02-uniep-gemm-combine.md) → 反方向：push-combine 怎么在 epilogue 里发生。
+3. [UniEP：确定性从哪来](03-uniep-determinism.md) → 为什么它敢说「和串行逐位一致」。
+4. [Flux：AllGather 与 GEMM](04-flux-ag-gemm.md) → 换到 Flux，看「两条 stream + chunk flag」能到什么程度。
+5. [Flux：GEMM 与 ReduceScatter](05-flux-gemm-rs.md) → Flux 的另一半：把 RS 塞进 GEMM epilogue。
+6. [两套实现的对照](06-compare.md) → 一张表加一个「等待粒度 vs 开销」的框架，也是全系列的收口。
+7. [跨工程的对照：Triton 对 CuTeDSL](../comm-overlap-src-07-triton-vs-cutedsl/) → 把镜头拉到工程之间。这一篇不读源码副本，读的是两个上游仓库本身。
 
 ## 5. 注释规矩：只加整行，校验脚本守住
 

@@ -48,11 +48,11 @@ if not fuse_scatter:
 
 `dl.notify` 是对偶：只有 0 号线程做一次 release store，机内 scope 取 `gpu`、跨节点取 `sys`（`DistributedOpToLLVM.cpp:319-333`），再往外走 `nvshmemx_signal_op`（同文件 `:364`）。远端写更粗：拿 peer 指针后普通 `tl.store`（`gemm_reduce_scatter.py:505-510`），或走 descriptor 的 `atomic_add`（`:218-229`）——**后者落到哪条 PTX，未确认**。
 
-跨 stream 不靠 host 轮询，靠 `cuStreamWaitValue/WriteValue`（`common_ops.py:364-392`）。单机时 reduce-scatter 不占 SM（`reduce_scatter.py:130-136`），数据交给 copy engine：通信走 DMA，GEMM 独占 SM。
+跨 stream 不靠 host 轮询，靠 `cuStreamWaitValue/WriteValue`（`common_ops.py:364-392`）。单机时 reduce-scatter 不占 SM（`reduce_scatter.py:130-136`）：每个 peer 的整段 $M/W \times N$ 一次 `cudaMemcpyAsync` 交给 copy engine（`:570-579`），GEMM 独占 SM。
 
-swizzle 不是分区，只把 tile 顺序对齐数据到达顺序（`gemm_rs_threadblock_swizzle.py:55-65`），好压短自旋。
+swizzle 不是分区，效果是把 tile 的 rank 顺序旋转到从 `rank+1` 起（`gemm_rs_threadblock_swizzle.py:146-153`），与 scatter 循环从 `local_rank+1` 起一致（`reduce_scatter.py:566-568`），先到的段先算。
 
-等待粒度看消费端能等多细：AG-GEMM 一个 tile 等一次，可一次等多个 rank（`allgather_gemm.py:276-279`）；EP 分 tile、expert、源 rank 三档（`ep_all2all_fused.py:658-676`）；GEMM-RS 最粗，等一个 rank 段 $M/W \times N$（`reduce_scatter.py:573-579`）。
+等待粒度看消费端能等多细：AG-GEMM 一个 tile 等一次，可一次等多个 rank（`allgather_gemm.py:276-279`）；EP 分 tile、expert、源 rank 三档（`ep_all2all_fused.py:658-676`）；GEMM-RS 最粗，等一个 rank 段 $M/W \times N$（`reduce_scatter.py:566-579`）——消费端是一次整段拷贝，等待粒度不可能比段更细。
 
 **Triton 侧是不是完全没用 cluster，未确认**：`kernels/nvidia` 下 grep 不到 `cluster`，并发走 cooperative launch（`triton_dist/utils.py:828-833`），看着是单 CTA 语义；编译器内部会不会自己起，查不到。
 
@@ -75,9 +75,9 @@ CTA 内的交接全走 mbarrier：TMA 发起时把这次要搬的字节数写进
 
 只有「expert 的行齐了没」这种跨 rank 事件才退回 gmem：每个 CTA 对计数器做一次 release `atomic_add`，第 `num_blocks` 个到的人 release store 信号，GEMM 的 TMA warp 用单 lane `acquire` 自旋等（`:894-910`、`:943-963`）。
 
-粒度是 per-expert，不是 per-tile，也不是 Triton 那种整个 rank 段——dispatch 本就按 expert 分组，等齐一个就能开算那段 M。内存序全用 `scope="gpu"`，没有 `membar.sys`：机内 peer 在同一张对称堆上直连。
+粒度是 per-expert，不是 per-tile，也不是 Triton 那种整个 rank 段：dispatch 按 expert 一段段写（`cutedsl_dispatch_group_gemm.py:755-840`），信号也按 expert 发（`:894-910`）；按 per-expert 信号的用法推断，GEMM 的 TMA warp 轮到哪个 group 才等哪个（`:943-963`），等齐一个 expert 就能开算它那段 M。内存序全用 `scope="gpu"`，没有 `membar.sys`：机内 peer 在同一张对称堆上直连。
 
-它也不切 SM：`gemm_num_sm` 与 `comm_num_sm` 只影响 grid 预算（`ep_overlap_kernels.py:160-190`）。grid 是 persistent cluster，数量取 $\min(\text{hw\_max}, \lfloor \text{num\_sm}/(c_m c_n) \rfloor)$（`_ops/dispatch_group_gemm.py:108-112`）。
+它也不切 SM：`gemm_num_sm` 与 `comm_num_sm` 只影响 grid 预算（`ep_overlap_kernels.py:160-191`）。grid 是 persistent cluster，数量取 $\min(\text{hw\_max}, \lfloor \text{num\_sm}/(c_m c_n) \rfloor)$（`_ops/dispatch_group_gemm.py:108-112`）。
 
 sm100 用 `cluster=(2,2)`、tile 256×256、两 CTA 的 tcgen05；sm90 降到 `(2,1)` 与 `(128,256)`（`:87-102`）。
 
@@ -101,7 +101,7 @@ SMEM 还得手工分账：dispatch 的 buffer 先从容量里扣，剩下的才�
 | 等待粒度 | tile 级、per-expert、rank 段 | per-expert、per-token 事务 |
 | 搬运 | TMA descriptor、`tl.load`、`putmem`、DMA | TMA multicast、bulk copy、直写 peer |
 | GEMM | `tl.dot`，落点**未确认** | 手写 tcgen05 加 TMEM |
-| 代码量 | 3548 加 4969；DSL 8.6k、C++ 5.9k | 2381；目录 13757 |
+| 代码量 | dense 六文件 5417；DSL 8632；C++ 5854 | 2381；kernels 目录 13757 |
 
 **`tl.dot` 落到 wgmma 还是 tcgen05，未确认**：仓库里没有显式指定，`3rdparty/triton` 空着，只能看到 `tl.dot` 这层。
 
@@ -109,7 +109,7 @@ SMEM 还得手工分账：dispatch 的 buffer 先从容量里扣，剩下的才�
 
 CuTeDSL 把复杂度压进两个文件：1314 加 1067，合计 2381 行。读着难受，但 bug 翻得到。
 
-Triton 的 kernel 短得多，dense 六个文件 3548 行，复杂度却外溢到 DSL 层 8632 行 Python 与插件 5854 行 C++。你写十行 `tl.dot`，背后垫着两万行。
+Triton 的 kernel 短得多，dense 六个文件（`kernels/nvidia/{gemm,gemm_reduce_scatter,reduce_scatter,allgather_gemm,allgather_group_gemm,group_gemm}.py`）合计 5417 行，复杂度却外溢到 `python/triton_dist/language/` 的 8632 行 Python 与 `lib/`+`include/` 的 5854 行 C++/TableGen（均按 `wc -l`，含注释与空行）。你写十行 `tl.dot`，背后垫着近两万行。
 
 分工更是没有出口。想在 Triton 里说「这个 warp 只做 TMA」，只能靠给 codegen 打补丁的 `simt_exec_region`（`simt_ops.py:317-340`），一升级就碎。
 
@@ -126,9 +126,9 @@ CuTeDSL 反过来：分工是你的，编译代价也是你的。`cute.compile` 
 
 ## 7. 三个坑
 
-Triton 侧：TMA descriptor 要全局 allocator，`set_allocator` 忘了就崩（`gemm_reduce_scatter.py:677-681`）；32 barrier 上限超了不报错、是未定义行为；改流水深度只能调 `num_stages`，层数被编译器吃掉。
+Triton 侧：TMA descriptor 要全局 allocator，`set_allocator` 忘了就崩（`gemm_reduce_scatter.py:677-681`）；32 barrier 上限超了没有检查，注释写的是行为未定义（`DistributedOpToLLVM.cpp:193-196`）；改流水深度只能调 `num_stages`，层数被编译器吃掉。
 
-CuTeDSL 侧：named barrier 的线程数写错就死锁（`cutedsl_dispatch_group_gemm.py:99-104`）；编译慢且 cache key 敏感，variant 一变就重编；只上 Hopper 以上（同文件 `:87-104`）。
+CuTeDSL 侧：named barrier 的线程数写错就死锁（`cutedsl_dispatch_group_gemm.py:99-104`）；每次 variant 变化都要重编（AOT 缓存就是为这个存在的），cache key 还敏感；只上 Hopper 以上（同文件 `:87-104`）。
 
 ## 8. 带走三条
 

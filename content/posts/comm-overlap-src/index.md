@@ -21,7 +21,7 @@ categories: ["训练框架"]
 
 {{< ov_doc "code/comm-overlap-src/docs/00-overview.md" >}}
 
-## 六篇正文
+## 七篇正文
 
 这套副本共 12 个文件：4536 行代码（与上游逐字节一致）+ 2932 行中文注释，只插入整行注释、不动一行代码。
 
@@ -33,6 +33,7 @@ categories: ["训练框架"]
 | 四 | [Flux 的 AllGather + GEMM](../comm-overlap-src-04-flux-ag-gemm/) | `sm90_all_gather_gemm_*.hpp` |
 | 五 | [Flux 的 GEMM + ReduceScatter](../comm-overlap-src-05-flux-gemm-rs/) | `system_barrier.hpp` + `epilogue_evt_nvshmem.hpp` |
 | 六 | [对照：各自把「等」切到多细](../comm-overlap-src-06-compare/) | — |
+| 七 | [跨工程对照：Triton vs CuTeDSL](../comm-overlap-src-07-triton-vs-cutedsl/) | 无源码副本，对照的是两个上游仓库本身 |
 
 > 脚注：`tools/verify_annotations.py` 校验全部副本剥掉注释后与上游逐字节一致（12/12）；`check_links.py` 查文档链接；`sync_from_upstream.sh` 在上游换版时重拉，等于丢弃注释、回到基线。
 
