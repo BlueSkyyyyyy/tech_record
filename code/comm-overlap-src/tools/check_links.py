@@ -43,6 +43,11 @@ def main() -> int:
             target = target.split("#", 1)[0]
             if not target:
                 continue
+            # `../comm-overlap-src-07-xxx/` 这类是「兄弟 post 页」的站点路由：
+            # docs 被 ov_doc 内联到 /posts/<slug>/ 之后，它才成立；
+            # 在 docs 目录里当然找不到同名文件，跳过不报错。
+            if re.match(r"^\.\./(comm-overlap|src)[\w.-]*/?$", target):
+                continue
             resolved = os.path.normpath(os.path.join(os.path.dirname(path), target))
             if not os.path.exists(resolved):
                 rel = os.path.relpath(path, BASE)
