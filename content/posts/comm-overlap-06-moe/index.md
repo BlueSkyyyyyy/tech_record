@@ -126,7 +126,7 @@ ev2.current_stream_wait()
 
 ### 4.1 num_sms 是从 GEMM 嘴里抢 SM
 
-all-to-all 不是"网卡自己搬"，它要在 GPU 上跑 copy/notify kernel，占 SM 来发指令、轮询、做 reduction。README 写得很直白：
+all-to-all 不是"网卡自己搬"，它要在 GPU 上跑 copy/notify kernel，占 SM 来发指令、轮询、做归约。README 写得很直白：
 
 > EP dispatch and combine require GPU SMs; zero-SM RDMA EP is not supported.
 
@@ -196,7 +196,7 @@ roofline 的依据是 attention 的算术强度随序列长度按 $O(s^2)$ 涨�
 
 ### INC-MoE：把 all-to-all 卸进交换机
 
-推理 prefill、跨节点 scale-out 时，dispatch/combine 可以写成 AllGather + ReduceScatter，而交换机天生会 multicast 和 reduction。
+推理 prefill、跨节点 scale-out 时，dispatch/combine 可以写成 AllGather + ReduceScatter，而交换机天生会 multicast 和归约。
 
 INC-MoE（[2610.36339](https://arxiv.org/abs/2610.36339)）的做法是：dispatch = 交换机内 AG（multicast 给其余 $N-1$ 个 rank），combine = 交换机内 RS（交换机先把 $N-1$ 份非 root 贡献 reduce 掉，root 只做一次本地加法）。妙处是方向：AG 主要吃接收，RS 主要吃发送，同时跑就吃满全双工。
 

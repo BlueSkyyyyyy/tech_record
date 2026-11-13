@@ -20,7 +20,7 @@ dispatch 那半（[01](01-uniep-dispatch-gemm.md)）等一个 expert：行没齐
 
 ① 用 2 个 warp 做 pull，② 少掉的正是它们，不是省资源：push 塞进已持有累加器的 epilogue lane，本来就要搬 TMEM 结果，顺手写去对端，不需要第三个角色。SMEM 只花在 GEMM stages。
 
-对端 buffer 可直接写：GPU scope 的 128b store，`l1c_evict_priority` 设 `NO_ALLOCATE` 绕开 L1（只写一次，绕 L1 省带宽不省延迟），不用落 SMEM 再 S2G。
+对端 buffer 可直接写：gpu 域的 128b store，`l1c_evict_priority` 设 `NO_ALLOCATE` 绕开 L1（只写一次，绕 L1 省带宽不省延迟），不用落 SMEM 再 S2G。
 
 ## 2. 每行结果自己带着回程地址
 
@@ -85,7 +85,7 @@ if subtile_idx == subtile_cnt_const - 1:
 ## 6. 【边界】细粒度什么时候反噬
 
 - 发射开销：push 是 SIMT store，逐条发射，没有 TMA 描述符搬块的压缩，一条 store 只搬 8 个 bf16。tile 取小就摊不薄，push 一慢就反压 MMA。
-- 跨节点：对端 buffer 是当本地地址写的（`output_ptrs` 给基址，GPU scope 的 store），没有「写不过去」的第二条路径。这条路不成立，上面的时序作废。
+- 跨节点：对端 buffer 是当本地地址写的（`output_ptrs` 给基址，gpu 域的 store），没有「写不过去」的第二条路径。这条路不成立，上面的时序作废。
 - 断言：`num_epi_stage == 1` 是 assert 出来的（信息写着 `requires num_epi_stage==1`），改 stage 数不是回退，是不合法。
 
 ## 7. 小结

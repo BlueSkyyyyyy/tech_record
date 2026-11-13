@@ -189,7 +189,7 @@ Characterizing（[2507.03114](https://arxiv.org/abs/2507.03114)，4×A100/H100/M
 
 - **PP 和 DP 的账都容易看歪**：PP 的负结果是 slowdown 明显低于 FSDP（A100 上从 0 到 5.4%），因为 send/recv 不像 all-gather 那样大量占 SM——通信量小、tax 小，可藏的空间同样小。DP 则是小桶由 launch 和同步主导（曲线平）、大桶由带宽主导（曲线线性）；扫桶时只改一个变量，每次至少 20 步取中位数，hook 和计数逻辑见[数据并行那篇]({{< relref "comm-overlap-04-data-parallel" >}})。
 - **TP 要看三个时间**：$T_{\text{ar}}$、$T_{\text{gemm}}$、以及同一个 GEMM 在有并发 AR 时的 $T_{\text{gemm\_overlap}}$，第三个除第二个再减一就是 compute slowdown，必须同名同 shape 比。再用 ncu 看同一段 GEMM 的 `sm__throughput` 掉没掉——掉了说明 SM 真被抢走，不是被调度器挡住。
-- **AG 和 RS 要分开测**：Flux 发现切碎后的 GEMM 能和 all-gather 并发，和 reduce-scatter 不行（后者自带 reduction，吃更多 SM）。T-CCL 自己的实现只占 1.32 个 active SM，这个差就是能抢回来的空间。
+- **AG 和 RS 要分开测**：Flux 发现切碎后的 GEMM 能和 all-gather 并发，和 reduce-scatter 不行（后者自带归约，吃更多 SM）。T-CCL 自己的实现只占 1.32 个 active SM，这个差就是能抢回来的空间。
 - **MoE 的账在三段流水上**：单 chunk 是 $d+c+b$，多 chunk 约是 $\max(\sum c, \sum d + \sum b)$ 再加一个 startup；若 $\sum d+\sum b > \sum c$，再怎么排也藏不完。routing skew（每个 expert 分到 token 数的 max/mean）profiler 给不了，要在 router 之后自己打点——skew 大时最热 expert 就是关键路径，这时"通信被藏住"没有任何意义。最后一个 chunk 的 combine 也必然暴露，chunk 越多 tail 越小、startup 越大，Syncopate 扫到的最优在 2–3 个 chunk（三段式的推导见 [MoE 那篇]({{< relref "comm-overlap-06-moe" >}})）。
 
 一个可以借用的合并口径：Flux 不直接量藏住多少，先定义有效通信时间 $ECT = \text{OverallTime} - GEMM_{\text{non-split}}$，再算 $E_{\text{overlap}} = 1 - ECT_{\text{overlap}}/ECT_{\text{non-overlap}}$。切碎 GEMM 的变慢、没藏住的通信、launch 开销全被合并进 $ECT$ 一项，正好是"我们希望 overlap 消掉的东西"；代价是 $GEMM_{\text{non-split}}$ 必须用同一套最快的 GEMM 测，否则基线不可比。
@@ -218,7 +218,7 @@ Characterizing（[2507.03114](https://arxiv.org/abs/2507.03114)，4×A100/H100/M
 
 **overlap 好声称、难测量**：ratio 高只说明通信落在计算窗口里，不说明关键路径变短。真正要报的是两个数——`exposed` 告诉你亏在哪，$\gamma$ 告诉你赢在哪。
 
-下一篇是最后一篇：把十二篇的结论收成一张 2026 年的地图，列出五个还没解决的问题——通信能不能再便宜一个数量级、SM 分区要不要动态、overlap 的收益怎么在集群层面复现、编译器能不能自动选出粒度、以及当互联变成瓶颈时这套账本还成不成立（[总结篇]({{< relref "comm-overlap-11-summary" >}})）。
+最后一篇收口：把全系列的结论收成一张 2026 年的地图，列出五个还没解决的问题——什么时候不该 overlap、跨节点还差多远、功耗算不算第四条约束、静态分区碰上动态 routing、手写 kernel 与编译器路线什么时候合得上（[总结篇]({{< relref "comm-overlap-11-summary" >}})）。
 
 ---
 

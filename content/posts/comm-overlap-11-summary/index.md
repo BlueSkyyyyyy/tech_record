@@ -23,7 +23,7 @@ categories: ["训练框架"]
 | 层次 | 能藏住什么 | 一个代表数字 | 代价 |
 |---|---|---|---|
 | PP | stage 之间的 P2P 空等 | 气泡率 4.33% | 显存约 2× |
-| DP | 反向里梯度的 all-reduce | 暴露时间≈尾桶的 $t$，不是百分比 | 桶大小与 launch 的权衡 |
+| DP | 反向里梯度的 all-reduce | 暴露时长≈尾桶的 $t$，不是百分比 | 桶大小与 launch 的权衡 |
 | TP | 层内 all-reduce 的时延 | overlap efficiency 96% | 与 shape 强绑定 |
 | EP/MoE | dispatch/combine 的 all-to-all | overlap ratio 47.1% | routing skew 与 SM 争用 |
 | 推理 | TP all-reduce 与 KV 搬运 | 吞吐 1.19–1.91× | 小 batch 阈值 |
@@ -106,7 +106,7 @@ Characterizing 的测量很刺眼：overlap 的峰值功耗高 25%，H100 平均
 
 ---
 
-**系列导航**：[十四：补遗三 Entwine/mKernel]({{< relref "comm-overlap-15-tile-ecosystem" >}}) · [专题首页]({{< relref "comm-overlap-00-index" >}})
+**系列导航**：[补遗（三）：Entwine/mKernel]({{< relref "comm-overlap-15-tile-ecosystem" >}}) · [专题首页]({{< relref "comm-overlap-00-index" >}})
 
 > 配套代码：`code/comm-overlap/`（7 个 CPU 模型 + 自测）
 > 系列索引：[通算并行研读（专题）]({{< relref "comm-overlap-00-index" >}})

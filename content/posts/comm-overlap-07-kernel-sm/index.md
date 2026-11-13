@@ -35,7 +35,7 @@ Hopper 的一个 SM 是一笔固定资产：4 个 warp scheduler、256 KB 寄存
 | 寄存器 | 通信用量低，但按 CTA 整块分配 | wgmma 的 accumulator 吃满 | occupancy 下降，双 buffer 放不下 |
 | shared memory | 通信的 staging buffer（TMA 目标） | GEMM 的 A/B tile + epilogue | 一个 CTA 占满 smem，别的 CTA 进不来 |
 | TMA / copy 引擎 | bulk 拷贝、multicast | operand 加载 | TMA 队列排队，计算等 operand |
-| L2 / HBM 带宽 | 读写对端数据、做 reduction | operand、activation 流 | L2 hit rate 掉，HBM 拥塞 |
+| L2 / HBM 带宽 | 读写对端数据、做归约 | operand、activation 流 | L2 hit rate 掉，HBM 拥塞 |
 | 功耗 / 频率 | 与计算同时忙，抬高峰值功耗 | 同上 | 撞功耗墙降频，两边一起慢 |
 
 只有第一行是**数量**问题：分几个 SM。其余六行分不了，只能决定同一批 SM 内部的份额归谁——哪个 warp 拿 issue slot、哪个 CTA 拿寄存器、哪个 stage 拿 smem、谁排队等 TMA、带宽和功耗预算归谁。
@@ -206,7 +206,7 @@ Characterizing 补的是模型里被漏掉的那一项：overlap 时计算最高
 
 ---
 
-**系列导航**：[六：MoE 专家并行]({{< relref "comm-overlap-06-moe" >}}) · [八：编译与自动调度]({{< relref "comm-overlap-08-compiler" >}})
+**系列导航**：[六：MoE 专家并行]({{< relref "comm-overlap-06-moe" >}}) · [八：编译器]({{< relref "comm-overlap-08-compiler" >}})
 
 > 配套代码：`code/comm-overlap/sm_split_model.py`
 > 自测：`python3 sm_split_model.py --test`

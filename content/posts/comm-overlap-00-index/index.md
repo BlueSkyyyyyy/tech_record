@@ -14,7 +14,7 @@ categories: ["训练框架"]
 
 ## 车间里只有两个工人，一套工具
 
-把一张 GPU 想成一个只有两个工人的小车间。**算工**只会做矩阵乘、attention、norm，占着 SM 干活；**传工**只会搬数据，走 NVLink/IB，但发指令、做 reduction 时也得占几个 SM。
+把一张 GPU 想成一个只有两个工人的小车间。**算工**只会做矩阵乘、attention、norm，占着 SM 干活；**传工**只会搬数据，走 NVLink/IB，但发指令、做归约时也得占几个 SM。
 
 串行执行时，算工干活，传工抽烟；传工搬数据，算工抽烟。通算并行想干的事，就是让两个人同时有活干。
 
@@ -60,7 +60,7 @@ MoE 更狠：dispatch 的 all-to-all 没完成，expert GEMM 就不知道自己�
 - **算力**：这份争用的另一面是计算本身变慢。Characterizing（[2507.03114](https://arxiv.org/abs/2507.03114)）在 4×A100/H100/MI250/MI210 上实测，overlap 时计算平均慢 18.9%、最高 40.0%，而串行只比 overlap 平均慢 10.2%。
 - **显存**：藏得越深，要存的东西越多。ZB-H2 把在飞激活从 p 份抬到 $2p-1$ 份，DualPipe 要存 PP+1 份激活、每设备参数 2×。
 
-所以评价一个方案，三个数要一起看：暴露时间降了多少、显存和算力付了多少、换个 workload 还成不成立。还有一笔不写在计时器上：一个 fused kernel 往往只对某几种 shape 有效，换模型就得重调。
+所以评价一个方案，三个数要一起看：暴露时长降了多少、显存和算力付了多少、换个 workload 还成不成立。还有一笔不写在计时器上：一个 fused kernel 往往只对某几种 shape 有效，换模型就得重调。
 
 ## 第四笔最贵：它到底改没改语义
 
@@ -85,19 +85,19 @@ CO2（[2401.16265](https://arxiv.org/abs/2401.16265)）走得更远：直接做 
 **算子层：把通信塞进 kernel，或者给它划 SM**
 
 - [Kernel 与 SM：不是 stream 叠不叠，是 SM 归谁]({{< relref "comm-overlap-07-kernel-sm" >}})：为什么这更像 SM 归属问题，而不是 stream 问题
-- [编译与自动调度]({{< relref "comm-overlap-08-compiler" >}})：参数不独立所以要搜，四条路线各自自动化了什么
+- [参数之间不独立，所以要编译器]({{< relref "comm-overlap-08-compiler" >}})：四条路线各自自动化了什么
 
 **系统层：测量、判断与前沿**
 
 - [推理侧：decode 的阈值]({{< relref "comm-overlap-09-inference" >}})：为什么 decode 的通信是固定开销
-- [实测手册]({{< relref "comm-overlap-10-measurement" >}})：用 nsys/ncu 把暴露时间量出来，而不是估出来
+- [实测手册]({{< relref "comm-overlap-10-measurement" >}})：用 nsys/ncu 把暴露时长量出来，而不是估出来
 - [最新论文雷达]({{< relref "comm-overlap-12-latest" >}})：2025–2026 这批里哪几篇值得先读
 - [UniEP 深读]({{< relref "comm-overlap-13-uniep" >}})：可复现性为什么是硬约束
 - [MegaFlux 深读]({{< relref "comm-overlap-14-megaflux" >}})：routing skew 为什么要复制专家
 - [Entwine、mKernel 与生态]({{< relref "comm-overlap-15-tile-ecosystem" >}})：tile 早完成为什么不等于通信能早开始
-- [总结：地图与五个开放问题]({{< relref "comm-overlap-11-summary" >}})：全系列的位置和还没解决的坑
+- [总结：一张按粒度分层的地图]({{< relref "comm-overlap-11-summary" >}})：全系列的位置和还没解决的坑
 
-另有一个平行系列 [源码精读]({{< relref "comm-overlap-src" >}})：UniEP 与 Flux 的关键 kernel 从上游逐行复制、只插注释不改代码，配 6 篇笔记 —— [导读]({{< relref "comm-overlap-src" >}}) · [dispatch]({{< relref "comm-overlap-src-01-dispatch-gemm" >}}) · [combine]({{< relref "comm-overlap-src-02-gemm-combine" >}}) · [确定性]({{< relref "comm-overlap-src-03-determinism" >}}) · [AG+GEMM]({{< relref "comm-overlap-src-04-flux-ag-gemm" >}}) · [GEMM+RS]({{< relref "comm-overlap-src-05-flux-gemm-rs" >}}) · [两边对照]({{< relref "comm-overlap-src-06-compare" >}})
+另有一个平行系列 [源码精读]({{< relref "comm-overlap-src" >}})：UniEP 与 Flux 的关键 kernel 从上游逐行复制、只插注释不改代码，配七篇笔记 —— [导读]({{< relref "comm-overlap-src" >}}) · [dispatch]({{< relref "comm-overlap-src-01-dispatch-gemm" >}}) · [combine]({{< relref "comm-overlap-src-02-gemm-combine" >}}) · [确定性]({{< relref "comm-overlap-src-03-determinism" >}}) · [AG+GEMM]({{< relref "comm-overlap-src-04-flux-ag-gemm" >}}) · [GEMM+RS]({{< relref "comm-overlap-src-05-flux-gemm-rs" >}}) · [两边对照]({{< relref "comm-overlap-src-06-compare" >}}) · [Triton vs CuTeDSL]({{< relref "comm-overlap-src-07-triton-vs-cutedsl" >}})
 
 模型算的是账；源码精读看的是账本是怎么被写出来的——谁在等、等什么、等的时候谁在干活。
 

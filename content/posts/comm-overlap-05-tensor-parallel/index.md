@@ -142,7 +142,7 @@ Flux 是手写几千行 CUDA 换来的。TileLink（[2503.20313](https://arxiv.o
 
 前端用 tile-centric primitives 把两个设计空间解耦：计算侧按 GEMM 的最优选 tile，通信侧按链路的最优选 tile，两边形状可以不一样，依赖用细粒度的 barrier/notify 维护（`producer_tile_notify`、`peer_tile_wait`）。后端把原语 lower 成 TMA / NVSHMEM 指令，并负责 shape、rank、channel 的映射——编译期仿射变换或运行期查表（MoE 的动态路由要后者）。
 
-资源绑定于是成了编译器的参数：绑 DMA、绑 SM、或混合（GEMM+RS 用 DMA 做 scatter、SM 做 reduction）。这是"让"第一次变成可调项。论文的 MoE 例子里，一个 AllGather + MoE kernel 用 20 个 SM 做通信，其余算 expert。
+资源绑定于是成了编译器的参数：绑 DMA、绑 SM、或混合（GEMM+RS 用 DMA 做 scatter、SM 做归约）。这是"让"第一次变成可调项。论文的 MoE 例子里，一个 AllGather + MoE kernel 用 20 个 SM 做通信，其余算 expert。
 
 数字（8×H800），相对非重叠基线 1.17×–20.76×，20.76× 出现在 MoE 对 cuBLAS+NCCL 的对比上：
 

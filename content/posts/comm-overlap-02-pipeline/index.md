@@ -57,7 +57,7 @@ Megatron 里 warmup 的条数是 `p - rank - 1`，即第 $s$ 级先做 $p-s-1$ �
 
 Zero Bubble 论文在 1.5B、$p=8,m=24$ 上的实测：1F1B 气泡 **24.31%**、显存 30 GB；1F1B-I 气泡 **10.55%**、显存 40 GB。**气泡降了一半多，显存多了 33%**。
 
-> **口径**：$T_B$ 只含 dX（与 Zero Bubble 论文 Table 2 一致），整段反向记作 $T_B+T_W$，所以 $(p-1)(T_F+T_B^{\text{整段}})$ 和 $(p-1)(T_F+T_B+T_W)$ 是同一个式子。完整符号见[专题的符号表]({{< relref "comm-overlap-00-index" >}})。
+> **口径**：$T_B$ 只含 dX（与 Zero Bubble 论文 Table 2 一致），整段反向记作 $T_B+T_W$，所以 $(p-1)(T_F+T_B^{\text{整段}})$ 和 $(p-1)(T_F+T_B+T_W)$ 是同一个式子。完整符号见[第一篇]({{< relref "comm-overlap-01-performance-model" >}})。
 
 ## 3. Zero Bubble：把 W 从关键路径上摘下来
 

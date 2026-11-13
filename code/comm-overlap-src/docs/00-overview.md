@@ -26,7 +26,7 @@
 
 ## 3. 文件地图：源码怎么组织
 
-哪篇读哪份代码，见下面的「六篇正文」表；这里只讲文件怎么组织。
+哪篇读哪份代码，见下面的「七篇正文」表；这里只讲文件怎么组织。
 
 `uniep/` 只注释了 7 个文件，副本路径与上游 `FlashComm/python/flash_comm/ep_overlap/` 下完全一致：
 
@@ -44,7 +44,7 @@
 
 | 副本 | 上游路径（`bytedance/flux`） | 讲什么 |
 |---|---|---|
-| [`include/system_barrier.hpp`](../flux/include/system_barrier.hpp) | `include/flux/cuda/system_barrier.hpp` | `arrive_inc` / `wait_eq`：sys-scope 的 flag 协议 |
+| [`include/system_barrier.hpp`](../flux/include/system_barrier.hpp) | `include/flux/cuda/system_barrier.hpp` | `arrive_inc` / `wait_eq`：sys 域的 flag 协议 |
 | [`src/sm90_all_gather_gemm_tile_scheduler.hpp`](../flux/src/sm90_all_gather_gemm_tile_scheduler.hpp) | `src/all_gather/sm90_all_gather_gemm_tile_scheduler.hpp` | M tile 重映射：先算本地数据、按 node 打散 |
 | [`src/sm90_all_gather_gemm_tma_warpspecialized_cooperative.hpp`](../flux/src/sm90_all_gather_gemm_tma_warpspecialized_cooperative.hpp) | `src/all_gather/sm90_all_gather_gemm_tma_warpspecialized_cooperative.hpp` | AG+GEMM 主 kernel：按 chunk 等 flag 的 producer 循环 |
 | [`src/reduce_scatter_barrier_struct.hpp`](../flux/src/reduce_scatter_barrier_struct.hpp) | `src/reduce_scatter/reduce_scatter_barrier_struct.hpp` | GEMM-RS 的跨 rank 归约 barrier |

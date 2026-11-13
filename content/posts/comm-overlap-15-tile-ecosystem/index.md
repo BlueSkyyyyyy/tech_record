@@ -94,4 +94,4 @@ Entwine 和第五篇的 Flux/TileLink 是一条线（[为什么只能切 tile]({
 
 ---
 
-**系列导航**：[补遗·导读]({{< relref "comm-overlap-12-latest" >}}) · [补遗（二）：MegaFlux]({{< relref "comm-overlap-14-megaflux" >}}) · [总结：2026 年的地图与五个开放问题]({{< relref "comm-overlap-11-summary" >}})
+**系列导航**：[补遗·导读]({{< relref "comm-overlap-12-latest" >}}) · [补遗（二）：MegaFlux]({{< relref "comm-overlap-14-megaflux" >}}) · [总结：一张按粒度分层的地图]({{< relref "comm-overlap-11-summary" >}})

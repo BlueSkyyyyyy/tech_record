@@ -13,7 +13,7 @@ categories: ["训练框架"]
 读完你会知道：
 
 - 同一段 dispatch 加 group GEMM，两边各把并发切在哪一层；
-- 为什么一边靠 `ld.global.acquire.gpu` 自旋，另一边靠 mbarrier 的期望字节数；
+- 为什么一边靠 `ld.global.acquire.gpu` 自旋，另一边靠 mbarrier 的 `expect_tx`；
 - 选型只看一件事：你愿不愿意把 8 个 warp 的分工写死。
 
 ## 1. 并发单位不同，代码就不像在解同一道题
@@ -89,10 +89,10 @@ SMEM 还得手工分账：dispatch 的 buffer 先从容量里扣，剩下的才�
 
 | 维度 | Triton | CuTeDSL |
 |---|---|---|
-| overlap 落点 | 多 kernel 多 stream；或单 kernel 内 CTA 分区 | 单 kernel 内的 warp specialization |
+| overlap 落点 | 多 kernel 多 stream；或单 kernel 内 CTA 分区 | 单 kernel 内的 warp 角色分工 |
 | warp 角色 | 无；分工要 patch codegen | 写死：0-3 epilogue、4-5 dispatch、6 MMA、7 TMA |
 | grid | persistent，按 SM 数取；机内 RS 不占 SM | persistent cluster，按 `num_sm/cluster` |
-| 片上同步 | 交给 `num_stages` | mbarrier 加 expect-tx |
+| 片上同步 | 交给 `num_stages` | mbarrier 加 `expect_tx` |
 | 跨 rank 同步 | `acquire.gpu` 自旋；多机 `signal_op` | `gpu` 域 release/acquire |
 
 | 维度 | Triton | CuTeDSL |

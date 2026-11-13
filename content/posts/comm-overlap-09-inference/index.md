@@ -212,7 +212,7 @@ prefill 侧的通算并行仍然值得做，尤其 MoE。**INC-MoE**（[2610.363
 
 ---
 
-**系列导航**：[八：编译与自动调度]({{< relref "comm-overlap-08-compiler" >}}) · [十：实测手册]({{< relref "comm-overlap-10-measurement" >}})
+**系列导航**：[八：编译器]({{< relref "comm-overlap-08-compiler" >}}) · [十：实测手册]({{< relref "comm-overlap-10-measurement" >}})
 
 > 配套代码：`code/comm-overlap/decode_overlap.py`
 > 自测：`python3 decode_overlap.py --test && python3 decode_overlap.py --scan`

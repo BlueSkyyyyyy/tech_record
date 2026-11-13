@@ -92,7 +92,7 @@ $$
 | signal | peer / rank notify-wait | 跨 rank 同一 tile 的通知；rank 级 barrier 主要给 copy engine 用 |
 | data | tile_push / tile_pull / rank_copy | 设备侧发或拉一个 tile；host 侧触发 copy engine |
 
-信号带 release/acquire 语义，编译器做多级流水重排时不会把访存挪到 notify 之后、wait 之前。资源绑定是它的亮点：AG+GEMM 让 AllGather 走 DMA、GEMM 走 SM；GEMM+RS 让 scatter 走 DMA、reduction 走 SM。
+信号带 release/acquire 语义，编译器做多级流水重排时不会把访存挪到 notify 之后、wait 之前。资源绑定是它的亮点：AG+GEMM 让 AllGather 走 DMA、GEMM 走 SM；GEMM+RS 让 scatter 走 DMA、归约走 SM。
 
 **数字**（8×H800）：对非重叠基线 1.17×–20.76×（20.76× 是 MoE 对 cuBLAS+NCCL 的最大值）。
 
@@ -168,7 +168,7 @@ best: s_comm=16 makespan=187.5 (serial=263.3)
 - 负结果也都在前面：Lagom 的对比里 AutoCCL 掉到 0.87×，TileLink 差 Flux 5.5%，CommFuse 在 B=4、S=8192 上切分反而比 baseline 慢 43%。
 - 共同缺口：多节点与跨 NIC、动态 shape、以及"什么时候不该 overlap"的判据。
 
-如果只记一件事：先量暴露时间最大的那个 shape，再决定动哪个旋钮。
+如果只记一件事：先量暴露时长最大的那个 shape，再决定动哪个旋钮。
 
 下一篇转推理侧：decode 是 memory-bound，通信占比随 batch 变小，很多在训练里成立的结论到推理会翻转。[第十篇]({{< relref "comm-overlap-10-measurement" >}})会把数字真正测出来，[总结篇]({{< relref "comm-overlap-11-summary" >}})再收口成地图。
 
