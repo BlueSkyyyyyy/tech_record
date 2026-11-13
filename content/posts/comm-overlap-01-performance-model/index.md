@@ -112,7 +112,7 @@ $\gamma C$ 压过 $C+M$ 之后，串行反而更快——串行时 $\gamma=1$；
 - 流水线的第一个 microbatch 必须等上游、最后一个必须等下游，单步气泡至少 $(p-1)T_F$；
 - MoE 的 dispatch 没完成，expert 一个 token 都算不了，第一个 chunk 必然暴露。
 
-切块能把 $E$ 摊薄，但摊不薄上界：$M>C$ 时，切多少块都压不到 $M$ 以下。完整的 $n$ 块两级流水推导在[第五篇]({{< relref "comm-overlap-05-tensor-parallel" >}})。
+切块能把 $E$ 摊薄，但摊不薄上界：$M>C$ 时，切多少块都压不到 $M$ 以下。切成 $n$ 块之后剩下的那条上界（两级流水）在[第五篇]({{< relref "comm-overlap-05-tensor-parallel" >}})里给了完整形式。
 
 ## 5. 这个模型能算下界，算不出收益
 
