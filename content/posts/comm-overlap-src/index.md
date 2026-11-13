@@ -1,5 +1,5 @@
 ---
-title: "通算并行源码精读：UniEP 与 Flux（12 个带注释副本 + 6 篇精读 + 1 篇导读）"
+title: "通算并行源码精读：UniEP 与 Flux，同一个「等」的两种切法"
 date: 2026-11-05
 draft: false
 weight: 20
@@ -8,24 +8,22 @@ tags: ["通算并行", "系列", "源码精读", "UniEP", "Flux", "CuTe DSL", "C
 categories: ["训练框架"]
 ---
 
-[通算并行研读](../comm-overlap-00-index/) 那一套是纯 Python 的性能模型，算的是**账**；
-这一套看的是**账本是怎么被写出来的** —— 真实 kernel 用哪些原语、在哪个粒度上等、把谁和谁叠在一起。
+同一份「等」，UniEP 把它切到「一个 expert 的数据齐了」，Flux 把它切到「一个 M-chunk 落地」。
+**前者把通信塞进计算 kernel、换来更细的等待，代价是同一批 SM 要排开多组 warp；后者用另一条 stream 解耦、实现更简单，代价是多一条 stream 和一批 flag**。
 
-做法是：从上游仓库逐行复制 12 个关键文件，**只插入整行中文注释，不动一行代码**，
-再用 `tools/verify_annotations.py` 卡住这条约束（剥掉注释行后与上游逐字节 diff）。
+读完你会知道：
 
-规模：**4536 行代码（与上游逐字节一致）+ 2932 行中文注释**。
+- 同样叫 overlap，为什么 MoE 和 TP 会长成这两种完全不同的写法；
+- 每个 flag 到底覆盖多少数据，这个粒度又是被调度器怎么选出来的；
+- 一套「等待粒度 vs 开销」的判断框架，拿去读 DualPipe / Weave / MegaFlux。
 
-计数口径：**12 个带注释副本 + 6 篇正文 + 1 篇总览**。
+纯 Python 那套性能模型算的是**账**；这里看的是**账本是怎么被写出来的**——真实 kernel 用哪些原语、在哪个粒度上等、把谁和谁叠在一起。见 [通算并行研读](../comm-overlap-00-index/)。
 
-## 上游在哪
-
-| 仓库 | commit | 说明 |
-|---|---|---|
-| [Triton-distributed](https://github.com/ByteDance-Seed/Triton-distributed) | `7908e4e`（main） | **UniEP 没有独立仓库**，代码在 `FlashComm/python/flash_comm/ep_overlap/` |
-| [flux](https://github.com/bytedance/flux) | `7f98c8a`（**comet** 分支） | Comet 没有公开仓库，用同源同族的 flux comet 分支；AG-GEMM / GEMM-RS 都在里面 |
+{{< ov_doc "code/comm-overlap-src/docs/00-overview.md" >}}
 
 ## 六篇正文
+
+这套副本共 12 个文件：4536 行代码（与上游逐字节一致）+ 2932 行中文注释，只插入整行注释、不动一行代码。
 
 | # | 内容 | 源码 |
 |---|---|---|
@@ -36,19 +34,12 @@ categories: ["训练框架"]
 | 五 | [Flux 的 GEMM + ReduceScatter](../comm-overlap-src-05-flux-gemm-rs/) | `system_barrier.hpp` + `epilogue_evt_nvshmem.hpp` |
 | 六 | [对照：各自把「等」切到多细](../comm-overlap-src-06-compare/) | — |
 
-## 自带三个工具
-
-```bash
-python3 tools/verify_annotations.py   # 12/12：剥掉注释行后与上游逐字节一致
-python3 tools/check_links.py          # docs 里的相对链接是否都有效
-./tools/sync_from_upstream.sh         # 上游换版本时重拉（== 丢弃注释，回到基线）
-```
+> 脚注：`tools/verify_annotations.py` 校验全部副本剥掉注释后与上游逐字节一致（12/12）；`check_links.py` 查文档链接；`sync_from_upstream.sh` 在上游换版时重拉，等于丢弃注释、回到基线。
 
 ## 附：host 侧三个 op
 
 三篇正文讲的是 device 侧 kernel；真正把它们拼起来的 host 侧代码在这里。
-三段式结构（`_compile` 收变体键 → `_build` 编 geometry → `run` 只封送指针）三份文件完全同构，
-区别只在「输出是不是本地张量」。
+三段式结构（`_compile` 收变体键 → `_build` 编 geometry → `run` 只封送指针）三份文件完全同构，区别只在「输出是不是本地张量」。
 
 {{< ov_src "code/comm-overlap-src/uniep/_ops/dispatch_group_gemm.py" >}}
 

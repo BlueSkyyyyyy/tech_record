@@ -8,8 +8,7 @@ tags: ["通算并行", "源码精读", "UniEP", "CuTe DSL", "MegaKernel", "MoE",
 categories: ["训练框架"]
 ---
 
-> 本页正文来自 `code/comm-overlap-src/docs/01-uniep-dispatch-gemm.md`，源码在页尾（折叠）。
-> 文中「搜 `symbol`」的锚点、以及文末行号表，都对应页尾那份带注释副本。
+> 正文来自 `code/comm-overlap-src/docs/01-uniep-dispatch-gemm.md`；文中「搜 `symbol`」的锚点对应页尾那份带注释副本。
 
 {{< ov_doc "code/comm-overlap-src/docs/01-uniep-dispatch-gemm.md" >}}
 
