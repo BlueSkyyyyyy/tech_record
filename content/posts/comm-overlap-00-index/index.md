@@ -77,14 +77,14 @@ CO2（[2401.16265](https://arxiv.org/abs/2401.16265)）走得更远：直接做 
 **模型层：一步训练怎么切成能重叠的段**
 
 - [流水线气泡消灭史]({{< relref "comm-overlap-02-pipeline" >}})：GPipe 为什么必须全前向再全反向，气泡能不能归零
-- [DualPipe：双向流水]({{< relref "comm-overlap-03-dualpipe" >}})：两个方向互相填空，代价是多少显存
-- [数据并行：桶与 hook]({{< relref "comm-overlap-04-data-parallel" >}})：梯度同步暴露在哪，桶该开多大
-- [张量并行：从 all-reduce 到 AG+GEMM]({{< relref "comm-overlap-05-tensor-parallel" >}})：通信挪不走时，怎么切 tile 把它融进 GEMM
-- [MoE 专家并行：三段式]({{< relref "comm-overlap-06-moe" >}})：dispatch、expert、combine 哪一段能藏
+- [DualPipe：两个方向对开]({{< relref "comm-overlap-03-dualpipe" >}})：两个方向互相填空，代价是多少显存
+- [数据并行：算完一桶，先发一桶]({{< relref "comm-overlap-04-data-parallel" >}})：梯度同步暴露在哪，桶该开多大
+- [张量并行：通信挪不走，就把 GEMM 切开]({{< relref "comm-overlap-05-tensor-parallel" >}})：为什么只能按 tile 切、四条融合路线各付什么代价
+- [MoE：通信比计算长，只能藏住一段]({{< relref "comm-overlap-06-moe" >}})：dispatch、expert、combine 哪一段能藏
 
 **算子层：把通信塞进 kernel，或者给它划 SM**
 
-- [Kernel 与 SM 分区]({{< relref "comm-overlap-07-kernel-sm" >}})：为什么这更像 SM 归属问题，而不是 stream 问题
+- [Kernel 与 SM：不是 stream 叠不叠，是 SM 归谁]({{< relref "comm-overlap-07-kernel-sm" >}})：为什么这更像 SM 归属问题，而不是 stream 问题
 - [编译与自动调度]({{< relref "comm-overlap-08-compiler" >}})：参数不独立所以要搜，四条路线各自自动化了什么
 
 **系统层：测量、判断与前沿**
