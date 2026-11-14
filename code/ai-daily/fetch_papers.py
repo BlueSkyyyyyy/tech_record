@@ -158,6 +158,18 @@ def try_sources(date: str, timeout: int = 30) -> tuple[list, str]:
     if not merged:
         raise RuntimeError("所有数据源都失败或为空：\n  " + "\n  ".join(errors))
 
+    # 最后一道校验：只要 `submittedOnDailyAt` 等于目标日期的条目。
+    # 必须做——日期页在「当天还没换榜」时会**回吐前一天的列表**（2026-11-14 实测：
+    # /papers/date/2026-11-14 返回 34 篇，全部是 11-13 的），不校验就会把昨天的
+    # 论文当成今天的写进日报。
+    seen_dates = sorted({d for d in (_daily_date(e) for e in merged.values()) if d}, reverse=True)
+    kept = [e for e in merged.values() if _daily_date(e) == date]
+    if not kept:
+        raise RuntimeError(
+            f"{date} 的 daily 还没换榜（抓到的条目日期是 {seen_dates[:3]}）"
+        )
+    merged = {pid: e for pid, e in merged.items() if _daily_date(e) == date}
+
     note = "并集：" + "，".join(stats)
     if errors:
         note += " | 失败：" + "；".join(errors[:3])

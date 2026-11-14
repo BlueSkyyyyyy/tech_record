@@ -46,12 +46,21 @@ if [[ -d "content/posts/ai-daily-${TARGET_DATE}" ]]; then
 fi
 
 # 先抓数据，确认当天真的有论文（周末/假日可能是 0 篇）
+FETCH_ERR="${HOME}/tmp/ai-daily/.fetch-err"
 if ! python3 code/ai-daily/fetch_papers.py --date "${TARGET_DATE}" \
       --out "${HOME}/tmp/ai-daily/${TARGET_DATE}.json" \
-      --brief "${HOME}/tmp/ai-daily/${TARGET_DATE}.md" >>"${LOG}" 2>&1; then
+      --brief "${HOME}/tmp/ai-daily/${TARGET_DATE}.md" >"${FETCH_ERR}" 2>&1; then
+  cat "${FETCH_ERR}" >>"${LOG}"
+  # 「还没换榜」不是故障：日期页会回吐前一天的列表，fetch 会明确拒绝并说明。
+  # 这时按「本次跳过」处理（exit 0），等 23:30 / 次日 09:00 的补跑。
+  if grep -q "还没换榜" "${FETCH_ERR}"; then
+    log "daily 还没换榜，本次跳过（等补跑）"
+    exit 0
+  fi
   log "抓取失败，退出"
   exit 2
 fi
+cat "${FETCH_ERR}" >>"${LOG}"
 COUNT="$(python3 -c "import json;print(json.load(open('${HOME}/tmp/ai-daily/${TARGET_DATE}.json'))['count'])" 2>/dev/null || echo 0)"
 log "抓到 ${COUNT} 篇"
 if [[ "${COUNT}" -lt 5 ]]; then

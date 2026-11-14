@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-12：17 篇 HF Daily Papers — 教科书监督、GTA 
 subtitle: "TOME-Math 把 2,118 本教材压成 380K 条结构化证明记录、平均分 +16.7；Self-Learning RL 让 35B 模型自己读教材，proof accuracy 51.5%→79.5%；GTAGym 在 GTA V 上自动判定 103 个任务，最佳 70.9%"
 date: 2026-11-12
 draft: false
-weight: 4
+weight: 3
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "数学推理", "agent", "评测", "推理成本", "量化", "优化器", "权重空间"]
 categories: ["LLM算法"]
