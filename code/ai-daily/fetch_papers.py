@@ -131,7 +131,11 @@ def try_sources(date: str, timeout: int = 30) -> tuple[list, str]:
     ]
     latest_templates = {MIRROR_LATEST_API, OFFICIAL_LATEST_API}
     dead_hosts: set[str] = set()      # 一个域名连不上就跳过它剩下的接口
+    # 本机到 huggingface.co 基本不可达，镜像已经拿到条目时就不必再花 30s 试官方
+    skip_official = False
     for template, label, only_date in jobs:
+        if skip_official and template.startswith(OFFICIAL_LATEST_API.split("/api")[0]):
+            continue
         host = template.split("/")[2]
         if host in dead_hosts:
             continue
@@ -146,6 +150,8 @@ def try_sources(date: str, timeout: int = 30) -> tuple[list, str]:
             errors.append(f"{label}: {exc}")
             if "不可达" in str(exc):
                 dead_hosts.add(host)
+        if merged and label.startswith("mirror"):
+            skip_official = True
 
     if not merged:
         for url in (MIRROR_PAGE, OFFICIAL_PAGE):

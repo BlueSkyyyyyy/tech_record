@@ -35,7 +35,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 导读与索引：[AI 日报（导读）](content/posts/ai-daily-00-index/index.md)。
 
 1. [2026-11-13 · 34 篇：System One 的可靠性、双流世界模型与 32× 压缩](content/posts/ai-daily-2026-11-13/index.md)
-2. [2026-11-12 · 17 篇：教科书监督、GTA V 智能体与推理成本](content/posts/ai-daily-2026-11-12/index.md)
+2. [2026-11-12 · 21 篇：教科书监督、GTA V 智能体与推理成本](content/posts/ai-daily-2026-11-12/index.md)
 3. [2026-11-11 · 39 篇：机器人上下文学习、权重级修复与「证据链」](content/posts/ai-daily-2026-11-11/index.md)
 4. [2026-11-10 · 39 篇：触觉基础模型、世界模型基础设施与「观测对齐」](content/posts/ai-daily-2026-11-10/index.md)
 5. [2026-11-09 · 34 篇：agent harness 工程化、世界模型与「可审计的评测」](content/posts/ai-daily-2026-11-09/index.md)
