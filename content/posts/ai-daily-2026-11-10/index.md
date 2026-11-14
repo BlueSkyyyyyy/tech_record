@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-10：39 篇 HF Daily Papers — 触觉基础模型、�
 subtitle: "LingBot-Touch 用一套触觉 token 接进 π0.5 与 VLA、WorldFoundry 给 270 个世界模型建可复现评测、ReproBridge 把复现成功率从 76.4% 拉到 92.6%"
 date: 2026-11-10
 draft: false
-weight: 5
+weight: 6
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "具身智能", "世界模型", "agent", "训练系统", "扩散模型", "评测"]
 categories: ["LLM算法"]

@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-13：24 篇 HF Daily Papers — System One 的可靠�
 subtitle: "SO-Arena 用 21 个模型证明最强 System One 可靠性只排第七；G-STAR 把离散 token 压到 32×、单张 H200 2.5 秒出 1024² 图；BirdDreams 把 BEV 变成预测结果，不再依赖 HD map"
 date: 2026-11-13
 draft: false
-weight: 2
+weight: 3
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "System One", "agent", "世界模型", "视频生成", "扩散模型", "优化器", "评测"]
 categories: ["LLM算法"]
