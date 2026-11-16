@@ -63,8 +63,14 @@ fi
 cat "${FETCH_ERR}" >>"${LOG}"
 COUNT="$(python3 -c "import json;print(json.load(open('${HOME}/tmp/ai-daily/${TARGET_DATE}.json'))['count'])" 2>/dev/null || echo 0)"
 log "抓到 ${COUNT} 篇"
-if [[ "${COUNT}" -lt 5 ]]; then
-  log "论文数 ${COUNT} < 5（周末/假日 daily 可能没更新），本次跳过；下次跑会自然补上"
+# 门槛：当天晚上要求 >=8 篇（榜单没铺开时先别写，交给 23:30 / 次日 09:00 补跑，
+# 免得为 5 篇写一期、第二天再补遗 20 篇）；早上那次是「补昨天」的兜底，>=3 就写。
+MIN="${MIN_PAPERS:-8}"
+if (( 10#$(date +%H) < 12 )); then
+  MIN=3
+fi
+if [[ "${COUNT}" -lt "${MIN}" ]]; then
+  log "论文数 ${COUNT} < ${MIN}（daily 还没铺开/周末），本次跳过；下次跑会自然补上"
   exit 0
 fi
 
