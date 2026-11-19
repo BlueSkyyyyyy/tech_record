@@ -35,7 +35,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 导读与索引：[AI 日报（导读）](content/posts/ai-daily-00-index/index.md)。
 
 1. [2026-11-19 · 15 篇：评测的分辨率、像素直出与低秩预算](content/posts/ai-daily-2026-11-19/index.md)
-2. [2026-11-18 · 31 篇：Ascend 全栈、力觉闭环与 agent 的「记忆」](content/posts/ai-daily-2026-11-18/index.md)
+2. [2026-11-18 · 39 篇：Ascend 全栈、力觉闭环与 agent 的「记忆」](content/posts/ai-daily-2026-11-18/index.md)
 3. [2026-11-17 · 42 篇：科学 agent、552B VLA 与「交付率」](content/posts/ai-daily-2026-11-17/index.md)
 4. [2026-11-16 · 40 篇：机器人 harness、4D 场景生成与「读动态」的视频模型](content/posts/ai-daily-2026-11-16/index.md)
 5. [2026-11-13 · 34 篇：System One 的可靠性、双流世界模型与 32× 压缩](content/posts/ai-daily-2026-11-13/index.md)
