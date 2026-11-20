@@ -34,7 +34,7 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 每天 21:00 抓 [HF Daily Papers](https://huggingface.co/papers) 当天全部论文，按主题分组写速览：Top 10 表 + 每篇「问题 / 方法 / 数字 / 为什么值得看」+ 三个观察。
 导读与索引：[AI 日报（导读）](content/posts/ai-daily-00-index/index.md)。
 
-1. [2026-11-19 · 15 篇：评测的分辨率、像素直出与低秩预算](content/posts/ai-daily-2026-11-19/index.md)
+1. [2026-11-19 · 52 篇：System One 的一次前向、可交互世界模型与「评测的分辨率」](content/posts/ai-daily-2026-11-19/index.md)
 2. [2026-11-18 · 39 篇：Ascend 全栈、力觉闭环与 agent 的「记忆」](content/posts/ai-daily-2026-11-18/index.md)
 3. [2026-11-17 · 42 篇：科学 agent、552B VLA 与「交付率」](content/posts/ai-daily-2026-11-17/index.md)
 4. [2026-11-16 · 40 篇：机器人 harness、4D 场景生成与「读动态」的视频模型](content/posts/ai-daily-2026-11-16/index.md)
