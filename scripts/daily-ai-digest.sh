@@ -18,14 +18,18 @@ export DS41_API_KEY="${DS41_API_KEY:-local-no-auth}"
 # cron 的 PATH 很短，把 hugo/git/python 的位置补上。
 export PATH="/usr/local/bin:/usr/bin:/bin:${HOME}/.local/bin:${PATH}"
 
-# 目标日期：显式 FORCE_DATE 优先；否则中午前当作「补昨天的」，中午后才是「写今天」。
-# （HF 的 daily 列表有时当天 21:00 还没换榜，次日早上补跑才有货；见 agent_skills/ai-daily.md）
+# 目标日期：默认写「昨天」。HF 的 daily 榜在当天会持续进人（2026-11-19 实测：当晚
+# 23:30 只有 15 篇，次日 21:00 已经 52 篇），当天写必然只是快照，之后要补遗几十篇。
+# 隔一天写昨天，拿到的就是稳定终值，一次写对。FORCE_DATE=<日期> 可覆盖。
+#
+# 晚上写昨天（D-1，已有 21 小时积累）；早上那次写前天（D-2），
+# 只在前一天漏跑时才有活干（已存在会直接跳过）。
 if [[ -n "${FORCE_DATE:-}" ]]; then
   TARGET_DATE="${FORCE_DATE}"
 elif (( 10#$(date +%H) < 12 )); then
-  TARGET_DATE="$(date -d 'yesterday' +%F)"
+  TARGET_DATE="$(date -d '2 days ago' +%F)"
 else
-  TARGET_DATE="$(date +%F)"
+  TARGET_DATE="$(date -d 'yesterday' +%F)"
 fi
 STAMP="$(date +%Y%m%d-%H%M%S)"
 LOG="${LOG_DIR}/${TARGET_DATE}.log"
@@ -63,12 +67,8 @@ fi
 cat "${FETCH_ERR}" >>"${LOG}"
 COUNT="$(python3 -c "import json;print(json.load(open('${HOME}/tmp/ai-daily/${TARGET_DATE}.json'))['count'])" 2>/dev/null || echo 0)"
 log "抓到 ${COUNT} 篇"
-# 门槛：当天晚上要求 >=8 篇（榜单没铺开时先别写，交给 23:30 / 次日 09:00 补跑，
-# 免得为 5 篇写一期、第二天再补遗 20 篇）；早上那次是「补昨天」的兜底，>=3 就写。
+# 门槛：>=8 篇才写。周末/假日 daily 可能为空，直接跳过。
 MIN="${MIN_PAPERS:-8}"
-if (( 10#$(date +%H) < 12 )); then
-  MIN=3
-fi
 if [[ "${COUNT}" -lt "${MIN}" ]]; then
   log "论文数 ${COUNT} < ${MIN}（daily 还没铺开/周末），本次跳过；下次跑会自然补上"
   exit 0
@@ -88,6 +88,9 @@ TASK="$(cat <<EOF
 1. 数据已经抓好了：${HOME}/tmp/ai-daily/${TARGET_DATE}.json 与 .md。不要重复联网抓；直接读 brief。
 2. 正文写 code/ai-daily/docs/${TARGET_DATE}.md，文章壳写 content/posts/ai-daily-${TARGET_DATE}/index.md（frontmatter 的 date 写裸日期 ${TARGET_DATE}，weight 按「日期倒序」：导读恒 1，日报最新一天是 2，把比今天旧的所有篇 weight 各 +1）。
 3. 论文摘要必须自己重写并保留具体数字，禁止直接粘贴 brief 或 ai_summary；分组内按 upvotes 降序；Top 10 表放最前；结尾写「今天的三个观察」。
+3b. **必须覆盖全部论文**：篇数以 JSON 的 count 为准，一篇都不能漏（不许只写 Top 10、不许以「其余从略」收尾）。
+    写完自检：python3 -c "import json,re;d=json.load(open('${HOME}/tmp/ai-daily/${TARGET_DATE}.json'));ids={p['id'] for p in d['papers']};have=set(re.findall(r'papers/(\d{4}\.\d{4,5})',open('code/ai-daily/docs/${TARGET_DATE}.md',encoding='utf-8').read()));print('缺',sorted(ids-have))"
+    必须输出「缺 []」，否则补齐后再继续。
 4. 同步更新两处索引：content/posts/ai-daily-00-index/index.md 的「文章索引」（最新在上）、根 README.md 的「AI 日报」小节。
 5. 先修加粗：python3 code/ai-daily/fix_bold.py --fix code/ai-daily/docs/${TARGET_DATE}.md
    （**加粗** 以「」（）等 CJK 标点收尾会在 doc_include 里退化成字面星号；这个脚本会自动把标点挪到 ** 外面。必须做到它输出 bold ok。）
