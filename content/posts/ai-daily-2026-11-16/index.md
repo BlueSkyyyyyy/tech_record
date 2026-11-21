@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-16：40 篇 HF Daily Papers — 机器人 harness、4D
 subtitle: "Agentic Robotics 把 harness 与基础模型并列为决策核心；VibePrevisBench 用 242 个 Blender 任务证明 coding agent 会看渲染却不会改错；V-JEPA-LM 用反事实监督让 4B 模型在 11 个视频 benchmark 上得 72.1，超过最好开放 8B 的 64.8"
 date: 2026-11-16
 draft: false
-weight: 5
+weight: 6
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "具身智能", "agent", "评测", "视频生成", "世界模型", "推理加速", "科学计算"]
 categories: ["LLM算法"]
