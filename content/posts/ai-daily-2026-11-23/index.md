@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-23：26 篇 HF Daily Papers — 流混合的几何收�
 subtitle: "cmHC 用 Birkhoff 多面体的几何收缩治超连接的两难，Ascend 融合算子降延迟 44.8%；NoPeWorld 只读冻结 DiT 的隐状态就把穿模率从 74% 压到 16%；ReSpaceBench 里最强零样本模型 50.5%、人类 90.1%"
 date: 2026-11-23
 draft: false
-weight: 2
+weight: 3
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "模型架构", "世界模型", "多模态", "具身智能", "agent", "视频生成", "扩散模型"]
 categories: ["LLM算法"]

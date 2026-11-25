@@ -179,8 +179,19 @@ if [[ -n "${MISS}" ]]; then
   FAIL=1
 fi
 if [[ -f "public/posts/ai-daily-${TARGET_DATE}/index.html" ]]; then
-  grep -q '\*\*' "public/posts/ai-daily-${TARGET_DATE}/index.html" \
-    && { log "自检失败：渲染页面里还有裸 **"; FAIL=1; }
+  # 排除 <code>…</code>：正文里会合法地出现反引号包住的 `**`（讲加粗退化那一段），不能误判
+  if ! python3 -c '
+import re, sys
+html = open(sys.argv[1], encoding="utf-8").read()
+body = html[html.find("<article"):html.find("</article")] if "<article" in html else html
+body = re.sub(r"<code>.*?</code>", "", body, flags=re.S)
+n = body.count("**")
+print("   裸 ** 计数:", n)
+sys.exit(1 if n else 0)
+' "public/posts/ai-daily-${TARGET_DATE}/index.html" >>"${LOG}" 2>&1; then
+    log "自检失败：渲染页面里还有裸 **（已排除 <code> 内合法用法）"
+    FAIL=1
+  fi
 else
   log "自检失败：public/ 里没有产物（多为 frontmatter date 落到未来）"
   FAIL=1
