@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-20：50 篇 HF Daily Papers — 自进化取证、Mind
 subtitle: "WeVisForensics 用可自进化的取证检查员库把跨域检测做到 95.2%；Mind2Act World 量出最强 agent 在闭环组合任务上只剩 12.0%；PMD 用后验均值匹配做到 4 步生成同档最佳 FID"
 date: 2026-11-20
 draft: false
-weight: 4
+weight: 5
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "agent", "具身智能", "世界模型", "视频理解", "扩散模型", "推理加速", "可解释性"]
 categories: ["LLM算法"]

@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-24：75 篇 HF Daily Papers — harness 决定上限�
 subtitle: "Embo-Harness 只改外层配方就到 83.3%（+26.2 点），RUIBench 只换接口把 45% 拉到 81%；WorldLeague 给 13 个系统画物理能动性画像，最高 28.58/100；WeightCode 用权重程序把未见过的新指令组合从 0% 做到 99.8%"
 date: 2026-11-24
 draft: false
-weight: 2
+weight: 3
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "具身智能", "agent", "世界模型", "多模态", "LLM训练", "推理系统"]
 categories: ["LLM算法"]

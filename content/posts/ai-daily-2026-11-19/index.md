@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-19：52 篇 HF Daily Papers — System One 的一次�
 subtitle: "Jeveration 用冻结 VLM 单次前向 78 ms 出 512×512、比统一模型最多快 122×；Resolution Hypothesis 用 7 种方法 × 6 个模型、超 1,000 万次调用证明选择近随机；QDA 让 agent 设计量化配方，W3A16 平均 +2.2 点"
 date: 2026-11-19
 draft: false
-weight: 5
+weight: 6
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "生成模型", "世界模型", "agent", "评测", "量化", "具身智能", "训练系统"]
 categories: ["LLM算法"]
