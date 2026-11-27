@@ -167,7 +167,7 @@ def table_swiglu(uni):
 
 
 def table_raw(sets):
-    out = ["### 3.4 全量明细（原始口径：`kernel耗时` = CUPTI 纯 device kernel；`wall中位` / `p90` 见 §0 提示 2）", "",
+    out = ["### 3.6 全量明细（原始口径：`kernel耗时` = CUPTI 纯 device kernel；`wall中位` / `p90` 见 §0 提示 2）", "",
            "| op | dtype | shape | device | kernel耗时(µs) | wall中位(µs) | wall p90(µs) | 备注 |",
            "|---|---|---|---|---:|---:|---:|---|"]
     for name, (rows, order) in sets.items():
@@ -181,10 +181,67 @@ def table_raw(sets):
     return "\n".join(out)
 
 
+
+BWD_ROWS = [
+    ("FC1 前向（参照）", "uniep_group_gemm_fc1", "uni"),
+    ("FC1 dgrad（dY@W1）", "uniep_fc1_dgrad", "bwd"),
+    ("FC1 wgrad GEMM（dYᵀ@A）", "uniep_fc1_wgrad_gemm", "bwd"),
+    ("FC1 dW all_reduce", "uniep_fc1_allreduce", "bwd"),
+    ("FC1 fwd+bwd 合计", "uniep_fc1_fwd_bwd", "bwd"),
+    ("FC2 前向（参照）", "uniep_group_gemm_fc2", "uni"),
+    ("FC2 dgrad（dO@W2）", "uniep_fc2_dgrad", "bwd"),
+    ("FC2 wgrad GEMM（dOᵀ@A2）", "uniep_fc2_wgrad_gemm", "bwd"),
+    ("FC2 dW all_reduce", "uniep_fc2_allreduce", "bwd"),
+    ("FC2 fwd+bwd 合计", "uniep_fc2_fwd_bwd", "bwd"),
+    ("SwiGLU 反向（torch）", "uniep_swiglu_bwd", "bwd"),
+    ("转置准备（每步 2 次）", "uniep_transpose_prep", "bwd"),
+    ("一层 fwd+bwd（不含转置）", "uniep_layer_fwd_bwd", "bwd"),
+    ("一层 fwd+bwd（含转置）", "uniep_layer_fwd_bwd_full", "bwd"),
+]
+
+
+def table_bwd(bwd, uni):
+    out = ["### 3.4 uniEP 反向：没有 autograd，用 group_gemm 拼出来（µs；上=wall 中位，下=CUPTI kernel）", "",
+           "> uniEP 只提供前向 kernel（`dispatch` / `group_gemm` / `combine` / 两个 MegaKernel），"
+           "**包里没有任何 `autograd.Function`**。下表是把反向拆成同样 primitive 后逐项实测的结果，"
+           "数值正确性已对齐 torch autograd（§7.1：dW1 rel 3.3e-3、dW2 逐位相同、dA 3.8e-3）。", "",
+           "> 计时口径：dgrad/wgrad 的输入梯度用**随机张量**（与链路里真实的 `dy1` 同形状同分布，只影响计时、"
+           "不影响正确性；链路正确性由 §7.1 的 full-chain 检查覆盖）；wgrad 的 `K` 按 `max(rows_e)` 补齐到对齐边界，"
+           "补齐区间在 A 侧为零（实测），因此结果与不补齐等价。", "",
+           "| 环节 | T1024 H1024 | T1024 H3072 | T128 H1024 | T128 H3072 |",
+           "|---|---:|---:|---:|---:|"]
+    for label, op, src in BWD_ROWS:
+        cells = []
+        for T, H in configs(bwd if src == "bwd" else uni):
+            r = get(uni if src == "uni" else bwd, op, T, H)
+            cells.append(f"{w(r)}<br>{k(r)}" if r else "-")
+        out.append(f"| {label} | " + " | ".join(cells) + " |")
+    return "\n".join(out)
+
+
+def table_bwd_cmp(bwd, te):
+    out = ["### 3.5 反向对比：uniEP 手工拼装 vs TE autograd（µs；上=wall 中位，下=CUPTI kernel）", "",
+           "> 口径差异（重要）：uniEP 两列**包含**EP 权重梯度的 2 次 `all_reduce`、**不含**转置准备"
+           "（另见 §3.5 最后两行 / §4.6）；TE 是纯本地 `GroupedLinear` autograd，**不含**任何跨卡通信"
+           "（TE 侧没有 EP 通信层，与 §3.3 前向口径一致）。", "",
+           "| 配置 | FC1 fwd+bwd uniEP | FC1 fwd+bwd TE | FC2 fwd+bwd uniEP | FC2 fwd+bwd TE | 一层 fwd+bwd uniEP | 一层 fwd+bwd TE |",
+           "|---|---:|---:|---:|---:|---:|---:|"]
+    for T, H in configs(bwd, te):
+        cells = []
+        for ub, tb in (("uniep_fc1_fwd_bwd", "te_grouped_gemm_fc1_fwd_bwd"),
+                       ("uniep_fc2_fwd_bwd", "te_grouped_gemm_fc2_fwd_bwd"),
+                       ("uniep_layer_fwd_bwd", "te_grouped_gemm_layer_fwd_bwd")):
+            u, t = get(bwd, ub, T, H), get(te, tb, T, H)
+            cells += [f"{w(u)}<br>{k(u)}" if u else "-", f"{w(t)}<br>{k(t)}" if t else "-"]
+        out.append(f"| T{T}/rank H{H} | " + " | ".join(cells) + " |")
+    return "\n".join(out)
+
+
 def main():
     uni = load("moe_ep_uniep.csv")
     dee = load("moe_ep_deepep.csv")
     te = load("moe_ep_tegmm.csv")
+    bwd = load("moe_ep_uniep_bwd.csv")
 
     order_uni = {op: i for i, op in enumerate([
         "uniep_layout", "uniep_dispatch", "uniep_group_gemm_fc1", "uniep_swiglu",
@@ -196,7 +253,14 @@ def main():
         "deepep_e2e", "deepep_e2e_expanded"])}
     order_te = {op: i for i, op in enumerate([
         "te_grouped_gemm_fc1", "te_grouped_gemm_fc2", "te_grouped_gemm_layer",
-        "te_grouped_gemm_fc1_fwd_bwd", "te_grouped_gemm_fc2_fwd_bwd"])}
+        "te_grouped_gemm_fc1_fwd_bwd", "te_grouped_gemm_fc2_fwd_bwd",
+        "te_grouped_gemm_layer_fwd_bwd"])}
+    order_bwd = {op: i for i, op in enumerate([
+        "uniep_fc1_dgrad", "uniep_fc1_wgrad_gemm", "uniep_fc1_allreduce", "uniep_fc1_wgrad",
+        "uniep_fc2_dgrad", "uniep_fc2_wgrad_gemm", "uniep_fc2_allreduce", "uniep_fc2_wgrad",
+        "uniep_swiglu_bwd", "uniep_transpose_prep", "uniep_wgrad_allreduce",
+        "uniep_fc1_fwd_bwd", "uniep_fc2_fwd_bwd", "uniep_layer_fwd_bwd",
+        "uniep_layer_fwd_bwd_full"])}
 
     doc = open(TEMPLATE).read()
     doc = doc.replace("{{TABLE_GEMM}}", table_gemm(uni, te))
@@ -205,8 +269,10 @@ def main():
     doc = doc.replace("{{TABLE_E2E}}", table_e2e(uni, dee, te))
     doc = doc.replace("{{TABLE_MK}}", table_mk(uni))
     doc = doc.replace("{{TABLE_SWIGLU}}", table_swiglu(uni))
+    doc = doc.replace("{{TABLE_BWD}}", table_bwd(bwd, uni))
+    doc = doc.replace("{{TABLE_BWD_CMP}}", table_bwd_cmp(bwd, te))
     doc = doc.replace("{{TABLE_RAW}}", table_raw({
-        "uniEP": (uni, order_uni), "DeepEP": (dee, order_dee),
+        "uniEP": (uni, order_uni), "uniEP 反向": (bwd, order_bwd), "DeepEP": (dee, order_dee),
         "TE group-gemm": (te, order_te)}))
     left = re.findall(r"\{\{[A-Z_]+\}\}", doc)
     if left:

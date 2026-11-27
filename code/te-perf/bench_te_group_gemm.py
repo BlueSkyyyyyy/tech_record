@@ -171,6 +171,24 @@ def main():
                 st = measure_robust(layer, args.warmup, args.iters, barrier=sync)
                 add("te_grouped_gemm_layer", st, "FC1 + swiglu + FC2 (forward)")
 
+                def layer_step():
+                    a = fc1(x, splits)
+                    g, u = a.split(I, dim=-1)
+                    b = (F.silu(g) * u).contiguous()
+                    out = fc2(b, splits)
+                    out.backward(torch.ones_like(out))
+                    fc1.zero_grad(set_to_none=True)
+                    fc2.zero_grad(set_to_none=True)
+                    return out
+
+                try:
+                    st = measure_robust(layer_step, max(2, args.warmup // 2), args.iters, barrier=sync)
+                    add("te_grouped_gemm_layer_fwd_bwd", st,
+                        "FC1 + swiglu + FC2 fwd+bwd (autograd; weight grads 本地, 不含跨卡 reduce)")
+                except Exception as e:  # pragma: no cover
+                    if rank == 0:
+                        print(f"  layer fwd_bwd failed: {type(e).__name__}: {e}")
+
                 del x, fc1, fc2, y1, y2_in
                 torch.cuda.empty_cache()
                 sync()

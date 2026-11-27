@@ -17,11 +17,12 @@
 
 ## 0. 结论速览
 
-- **group GEMM：uniEP 的 CuTeDSL grouped GEMM 全面快于 TE 的 `GroupedLinear`**，按"每行耗时"归一（两家行数不同，见 §1）后：`T1024` 档 **1.15–1.41×**，`T128` 档 **1.39–2.02×**。折算单卡有效算力 uniEP **418–799 TFLOPS**（H100 bf16 dense 峰值 989.4 的 42%–81%）、TE **207–647 TFLOPS**（最差是 `T128/H1024` 的 FC2，只有峰值的 21%）。
+- **反向：uniEP 没有 autograd，必须自己用 `group_gemm` 拼**（包里 `grep autograd/backward` 为空）。拼出来的 dgrad/wgrad GEMM 与前向基本 1:1（0.94–1.28×），但**周边开销很大**：EP 权重梯度 2 次 `all_reduce`（H3072 合计 1186µs）、无融合 SwiGLU 反向（1260µs）、dgrad/wgrad 需要的转置准备（1683µs）。一层 fwd+bwd：**uniEP 拼装 8232µs vs TE autograd 4578µs**（T1024/H3072，均不含转置准备；uniEP 含跨卡 reduce、TE 不含）；但 **`T128/H1024` 上 wall 反超 2.9×**（447 vs 1304µs，TE 的 autograd 被 Python 主机开销拖死；kernel 仍是 TE 小：165 vs 445），`T128/H3072` 两边 wall 接近（2177 vs 1339，TE 略优）。详见 §3.4 / §3.5 / §4.5。
+- **group GEMM：uniEP 的 CuTeDSL grouped GEMM 全面快于 TE 的 `GroupedLinear`**，按"每行耗时"归一（两家行数不同，见 §1）后：`T1024` 档 **1.19–1.41×**，`T128` 档 **1.35–2.06×**。折算单卡有效算力 uniEP **418–799 TFLOPS**（H100 bf16 dense 峰值 989.4 的 42%–81%）、TE **211–629 TFLOPS**（最差是 `T128/H1024` 的 FC2，只有峰值的 21%）。
 - **通信：DeepEP 的 combine 明显更快，dispatch 同档略优**。同为 per-(token,expert) 展开语义（`T1024`）：combine **68.7µs vs 120.2µs**（H1024）、**174.3µs vs 401.3µs**（H3072），快 **1.75–2.3×**；dispatch **120.0µs vs 139.9µs**、**339.1µs vs 437.1µs**，快 **1.2–1.3×**。`T128` 档两边都被 ~60–90µs 的 launch/host 开销吃掉，wall 上打平（79.4 vs 85.2、91.2 vs 84.7）。
 - **uniEP 的 MegaKernel 只在"大 batch + 大 H"赚钱**：`T1024/H3072` 下 MK1（dispatch+FC1 融合）**1138.9µs vs 非融合 1317.9µs（快 14%）**，MK2（FC2+combine 融合）**766.6µs vs 830.6µs（快 8%）**，整层融合 e2e **2186µs vs 2851µs（快 23%）**。
 - **小 shape 上融合是负收益**：`T1024/H1024` MK1 **344.9 vs 243.9µs（慢 41%）**，整层融合与非融合打平（597.5 vs 597.6µs），但 wall 反而慢 32%（744.9 vs 565.8µs）；`T128` 档 MK1 慢 **1.5–2.4×**，整层 `T128/H1024` 慢 30%。原因见 §4.3：MK1 有 ~100µs 级固定代价、MK2 约 10µs，且融合后尾部无法提前退出（持久化 132 block、专家信号初始化、尾部 tile 不能提前退出），而小 shape 下 dispatch/GEMM 本身只有 25–130µs。
-- **最佳组合是"混搭"而非单栈**：DeepEP 通信 + uniEP GEMM，`T1024/H3072` 一层 MoE ≈ **2158µs**（分量相加），比 uniEP 全融合（2186µs）快 1.3%，比 DeepEP 通信 + TE GEMM（2330µs）快 7%；`T1024/H1024` 混搭 **448µs** 对 uniEP 非融合 597.6µs，快 **25%**。
+- **最佳组合是"混搭"而非单栈**：DeepEP 通信 + uniEP GEMM，`T1024/H3072` 一层 MoE ≈ **2158µs**（分量相加），比 uniEP 全融合（2186µs）快 1.3%，比 DeepEP 通信 + TE GEMM（2356µs）快 8%；`T1024/H1024` 混搭 **448µs** 对 uniEP 非融合 597.6µs，快 **25%**。
 - **SwiGLU 是隐藏大头**：uniEP 没提供融合 SwiGLU，`T1024/H3072` 的 `silu(gate)*up` 要 **358.3µs（占整层 16%）**、`T1024/H1024` 要 107.1µs（18%）。纯 torch 实现，换 fused SwiGLU 可直接砍掉一大半。
 - **topk=16 不是 MegaKernel 变慢的原因**：topk 降到 8（`T1024/H1024`）融合依旧慢（e2e 367.9 vs 335.4µs），所以慢在小 shape 的固定开销。
 - **"每卡 128 token"这一档（全局 1024 token）三家都不划算**：整层只有 200–460µs，其中 dispatch+combine 占 86–125µs；这一档要么增大 EP，要么别分布式。
@@ -36,6 +37,8 @@
 | T128 H3072 | 1024 | 128 | 2816 / 2432 | 3072 | 3072 | 16 | 32 | 8 |
 
 - 行数由 routing 决定：`T1024` 时每卡发出 1024×16 = 16384 个 (token, expert) 对，8 卡共 131072 个，均匀落到 32 个专家上 → 每卡 4 个专家共 ~16531 行；`T128` 时为 ~2116 行。表中行数是 **rank 0** 的值，其它 rank 因本地专家分布不同会差 ±5%（实测 uniEP 为 16384/16896/17152/17408）。
+- 反向用**同一份 routing / 同一套行切分**（`bench_uniep_bwd.py`）：`recv_expert_counts` 是**未对齐**的每专家计数，
+  实际的 dispatch 行数是把它按 256 对齐后的和（对齐填充行经实测**全为零**，所以 wgrad 的 gather-K 可以直接用对齐块）。
 - uniEP 把每个专家的行数对齐到 `cluster_tile_m = 256`，故 16531 → 17408、2116 → 2816；DeepEP expanded 对齐到 128，故 16531 → 16896、2116 → 2432。**两者差 ~3%（T1024）/ ~15%（T128）**，这是下面 GEMM 对比要注意的分母差异。
 
 ## 2. 行数语义（对比前必读）
@@ -69,7 +72,7 @@
 | `uniep_swiglu` | T1024/H3072 | 412.4 | 358.3 | +54.1 | SwiGLU 是 **3 个 kernel**（silu / mul / `.contiguous()` 拷贝），每次切换都有 launch 间隔 |
 | `deepep_dispatch_expanded` | T128/H1024 | 79.4 | 25.0 | **+54.4** | 小 shape：kernel 只 25µs，其余 54µs 是 launch + host 准备 |
 | `te_grouped_gemm_fc1` | T128/H1024 | 170.8 | 27.3 | **+143.5** | TE 走 4 次 grouped GEMM launch + Python 侧参数打包，host 成了瓶颈 |
-| `te_grouped_gemm_fc1` | T1024/H3072 | 835.7 | 965.2 | **−129.5** | 见下面"为什么 kernel 会大于 wall" |
+| `te_grouped_gemm_fc1` | T1024/H3072 | 839.5 | 992.1 | **−152.6** | 见下面"为什么 kernel 会大于 wall" |
 | `uniep_e2e_sequential` | T1024/H3072 | 2464.3 | 2850.9 | **−386.6** | 同上（5 个 kernel 的链） |
 
 **为什么 `kernel` 有时反而大于 `wall`**（−5%～−15%），两个原因，都不是测错：
@@ -87,10 +90,10 @@
 
 | 配置 | 行数 uniEP / TE | FC1 uniEP (µs) | FC1 TE (µs) | FC2 uniEP (µs) | FC2 TE (µs) |
 |---|---|---:|---:|---:|---:|
-| T1024/rank H1024 | 17408 / 16531 | 104.0 | 139.3 | 55.2 | 67.9 |
-| T1024/rank H3072 | 17408 / 16531 | 880.8 | 965.2 | 429.3 | 517.4 |
-| T128/rank H1024 | 2816 / 2116 | 26.1 | 27.3 | 14.1 | 21.4 |
-| T128/rank H3072 | 2816 / 2116 | 133.8 | 203.2 | 66.5 | 99.7 |
+| T1024/rank H1024 | 17408 / 16531 | 104.0 | 139.5 | 55.2 | 67.3 |
+| T1024/rank H3072 | 17408 / 16531 | 880.8 | 992.1 | 429.3 | 516.2 |
+| T128/rank H1024 | 2816 / 2116 | 26.1 | 26.4 | 14.1 | 21.1 |
+| T128/rank H3072 | 2816 / 2116 | 133.8 | 201.8 | 66.5 | 103.0 |
 
 ### 3.2 dispatch / combine（通信 op：上=wall 中位 µs，下=CUPTI kernel µs）
 
@@ -108,11 +111,45 @@
 | 配置 | uniEP 融合 (MK1+SwiGLU+MK2) | uniEP 非融合 (5 次 launch) | 估算: DeepEP 通信 + TE GEMM | 估算: DeepEP 通信 + uniEP GEMM | DeepEP 纯通信 (expanded) |
 |---|---:|---:|---:|---:|---:|
 | T1024/rank H1024 | 744.9<br>597.5 | 565.8<br>597.6 | 496 | 448 | 213.5<br>211.9 |
-| T1024/rank H3072 | 2396.7<br>2186.0 | 2464.3<br>2850.9 | 2330 | 2158 | 572.2<br>585.7 |
-| T128/rank H1024 | 417.7<br>260.6 | 227.8<br>199.7 | 155 | 147 | 124.6<br>53.3 |
-| T128/rank H3072 | 589.8<br>437.2 | 401.1<br>458.9 | 466 | 363 | 142.8<br>98.0 |
+| T1024/rank H3072 | 2396.7<br>2186.0 | 2464.3<br>2850.9 | 2356 | 2158 | 572.2<br>585.7 |
+| T128/rank H1024 | 417.7<br>260.6 | 227.8<br>199.7 | 154 | 147 | 124.6<br>53.3 |
+| T128/rank H3072 | 589.8<br>437.2 | 401.1<br>458.9 | 467 | 363 | 142.8<br>98.0 |
 
-### 3.4 全量明细（原始口径：`kernel耗时` = CUPTI 纯 device kernel；`wall中位` / `p90` 见 §0 提示 2）
+### 3.4 uniEP 反向：没有 autograd，用 group_gemm 拼出来（µs；上=wall 中位，下=CUPTI kernel）
+
+> uniEP 只提供前向 kernel（`dispatch` / `group_gemm` / `combine` / 两个 MegaKernel），**包里没有任何 `autograd.Function`**。下表是把反向拆成同样 primitive 后逐项实测的结果，数值正确性已对齐 torch autograd（§7.1：dW1 rel 3.3e-3、dW2 逐位相同、dA 3.8e-3）。
+
+> 计时口径：dgrad/wgrad 的输入梯度用**随机张量**（与链路里真实的 `dy1` 同形状同分布，只影响计时、不影响正确性；链路正确性由 §7.1 的 full-chain 检查覆盖）；wgrad 的 `K` 按 `max(rows_e)` 补齐到对齐边界，补齐区间在 A 侧为零（实测），因此结果与不补齐等价。
+
+| 环节 | T1024 H1024 | T1024 H3072 | T128 H1024 | T128 H3072 |
+|---|---:|---:|---:|---:|
+| FC1 前向（参照） | 114.8<br>104.0 | 854.0<br>880.8 | 41.2<br>26.1 | 140.1<br>133.8 |
+| FC1 dgrad（dY@W1） | 184.7<br>101.5 | 857.0<br>829.4 | 35.8<br>23.8 | 140.7<br>132.9 |
+| FC1 wgrad GEMM（dYᵀ@A） | 99.4<br>94.5 | 883.3<br>908.9 | 35.5<br>22.0 | 177.6<br>170.8 |
+| FC1 dW all_reduce | 126.6<br>123.3 | 798.1<br>784.8 | 126.1<br>122.1 | 779.4<br>774.2 |
+| FC1 fwd+bwd 合计 | 459.3<br>447.9 | 3483.6<br>3468.6 | 215.8<br>202.5 | 1237.5<br>1211.6 |
+| FC2 前向（参照） | 66.0<br>55.2 | 439.5<br>429.3 | 38.6<br>14.1 | 71.4<br>66.5 |
+| FC2 dgrad（dO@W2） | 66.7<br>55.7 | 445.4<br>420.8 | 33.2<br>14.0 | 74.0<br>68.7 |
+| FC2 wgrad GEMM（dOᵀ@A2） | 54.7<br>50.7 | 515.2<br>460.6 | 31.4<br>12.5 | 93.2<br>86.9 |
+| FC2 dW all_reduce | 80.9<br>75.9 | 406.1<br>400.9 | 81.0<br>75.8 | 403.4<br>401.6 |
+| FC2 fwd+bwd 合计 | 265.9<br>256.1 | 1808.6<br>1768.0 | 134.3<br>126.0 | 644.5<br>627.9 |
+| SwiGLU 反向（torch） | 440.4<br>412.1 | 1299.6<br>1260.1 | 107.0<br>61.8 | 228.5<br>187.1 |
+| 转置准备（每步 2 次） | 754.2<br>560.2 | 2188.4<br>1683.0 | 262.7<br>106.2 | 374.0<br>270.8 |
+| 一层 fwd+bwd（不含转置） | 1277.3<br>1356.9 | 6869.4<br>8232.2 | 447.1<br>445.0 | 2177.3<br>2609.5 |
+| 一层 fwd+bwd（含转置） | 1880.1<br>1807.0 | 8519.8<br>9421.9 | 608.4<br>566.5 | 2473.0<br>2836.2 |
+
+### 3.5 反向对比：uniEP 手工拼装 vs TE autograd（µs；上=wall 中位，下=CUPTI kernel）
+
+> 口径差异（重要）：uniEP 两列**包含**EP 权重梯度的 2 次 `all_reduce`、**不含**转置准备（另见 §3.5 最后两行 / §4.6）；TE 是纯本地 `GroupedLinear` autograd，**不含**任何跨卡通信（TE 侧没有 EP 通信层，与 §3.3 前向口径一致）。
+
+| 配置 | FC1 fwd+bwd uniEP | FC1 fwd+bwd TE | FC2 fwd+bwd uniEP | FC2 fwd+bwd TE | 一层 fwd+bwd uniEP | 一层 fwd+bwd TE |
+|---|---:|---:|---:|---:|---:|---:|
+| T1024/rank H1024 | 459.3<br>447.9 | 642.7<br>346.3 | 265.9<br>256.1 | 806.8<br>271.4 | 1277.3<br>1356.9 | 1340.4<br>914.8 |
+| T1024/rank H3072 | 3483.6<br>3468.6 | 1804.5<br>2086.7 | 1808.6<br>1768.0 | 1380.9<br>1711.1 | 6869.4<br>8232.2 | 3969.6<br>4577.9 |
+| T128/rank H1024 | 215.8<br>202.5 | 641.6<br>58.1 | 134.3<br>126.0 | 793.1<br>72.2 | 447.1<br>445.0 | 1303.9<br>165.0 |
+| T128/rank H3072 | 1237.5<br>1211.6 | 657.1<br>382.3 | 644.5<br>627.9 | 804.1<br>316.2 | 2177.3<br>2609.5 | 1339.4<br>810.5 |
+
+### 3.6 全量明细（原始口径：`kernel耗时` = CUPTI 纯 device kernel；`wall中位` / `p90` 见 §0 提示 2）
 
 | op | dtype | shape | device | kernel耗时(µs) | wall中位(µs) | wall p90(µs) | 备注 |
 |---|---|---|---|---:|---:|---:|---|
@@ -157,6 +194,67 @@
 | uniep_e2e_sequential | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 2850.9 | 2464.3 | 2488.4 | dispatch+FC1+swiglu+FC2+combine (5 launches) |
 | uniep_e2e_sequential | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 199.7 | 227.8 | 234.4 | dispatch+FC1+swiglu+FC2+combine (5 launches) |
 | uniep_e2e_sequential | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 458.9 | 401.1 | 404.4 | dispatch+FC1+swiglu+FC2+combine (5 launches) |
+| **uniEP 反向** | | | | | | | |
+| uniep_fc1_dgrad | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 101.5 | 184.7 | 185.6 | dY1@W1: N=H=1024, K=2I=2048, rows=17408 |
+| uniep_fc1_dgrad | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 829.4 | 857.0 | 1458.4 | dY1@W1: N=H=3072, K=2I=6144, rows=17408 |
+| uniep_fc1_dgrad | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 23.8 | 35.8 | 39.5 | dY1@W1: N=H=1024, K=2I=2048, rows=2816 |
+| uniep_fc1_dgrad | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 132.9 | 140.7 | 141.6 | dY1@W1: N=H=3072, K=2I=6144, rows=2816 |
+| uniep_fc1_wgrad_gemm | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 94.5 | 99.4 | 100.1 | 仅 dY1^T@A: M=2I=2048, N=H=1024, K=4352, E=4 |
+| uniep_fc1_wgrad_gemm | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 908.9 | 883.3 | 1539.3 | 仅 dY1^T@A: M=2I=6144, N=H=3072, K=4352, E=4 |
+| uniep_fc1_wgrad_gemm | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 22.0 | 35.5 | 40.9 | 仅 dY1^T@A: M=2I=2048, N=H=1024, K=768, E=4 |
+| uniep_fc1_wgrad_gemm | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 170.8 | 177.6 | 320.5 | 仅 dY1^T@A: M=2I=6144, N=H=3072, K=768, E=4 |
+| uniep_fc1_allreduce | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 123.3 | 126.6 | 128.2 | dW1 EP all_reduce 17MB |
+| uniep_fc1_allreduce | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 784.8 | 798.1 | 807.9 | dW1 EP all_reduce 151MB |
+| uniep_fc1_allreduce | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 122.1 | 126.1 | 128.0 | dW1 EP all_reduce 17MB |
+| uniep_fc1_allreduce | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 774.2 | 779.4 | 786.8 | dW1 EP all_reduce 151MB |
+| uniep_fc1_wgrad | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 226.2 | 233.1 | 235.8 | dY1^T@A (K padded 4352) + all_reduce 17MB |
+| uniep_fc1_wgrad | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1648.6 | 1658.7 | 1667.1 | dY1^T@A (K padded 4352) + all_reduce 151MB |
+| uniep_fc1_wgrad | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 149.4 | 149.5 | 151.2 | dY1^T@A (K padded 768) + all_reduce 17MB |
+| uniep_fc1_wgrad | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 950.8 | 959.7 | 976.2 | dY1^T@A (K padded 768) + all_reduce 151MB |
+| uniep_fc2_dgrad | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 55.7 | 66.7 | 104.1 | dOUT@W2: N=I=1024, K=H=1024, rows=17408 |
+| uniep_fc2_dgrad | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 420.8 | 445.4 | 762.6 | dOUT@W2: N=I=3072, K=H=3072, rows=17408 |
+| uniep_fc2_dgrad | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 14.0 | 33.2 | 38.2 | dOUT@W2: N=I=1024, K=H=1024, rows=2816 |
+| uniep_fc2_dgrad | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 68.7 | 74.0 | 74.8 | dOUT@W2: N=I=3072, K=H=3072, rows=2816 |
+| uniep_fc2_wgrad_gemm | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 50.7 | 54.7 | 55.9 | 仅 dOUT^T@A2: M=H=1024, N=I=1024, K=4352, E=4 |
+| uniep_fc2_wgrad_gemm | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 460.6 | 515.2 | 850.1 | 仅 dOUT^T@A2: M=H=3072, N=I=3072, K=4352, E=4 |
+| uniep_fc2_wgrad_gemm | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 12.5 | 31.4 | 34.0 | 仅 dOUT^T@A2: M=H=1024, N=I=1024, K=768, E=4 |
+| uniep_fc2_wgrad_gemm | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 86.9 | 93.2 | 159.0 | 仅 dOUT^T@A2: M=H=3072, N=I=3072, K=768, E=4 |
+| uniep_fc2_allreduce | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 75.9 | 80.9 | 82.0 | dW2 EP all_reduce 8MB |
+| uniep_fc2_allreduce | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 400.9 | 406.1 | 415.6 | dW2 EP all_reduce 75MB |
+| uniep_fc2_allreduce | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 75.8 | 81.0 | 82.4 | dW2 EP all_reduce 8MB |
+| uniep_fc2_allreduce | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 401.6 | 403.4 | 409.6 | dW2 EP all_reduce 75MB |
+| uniep_fc2_wgrad | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 133.2 | 140.0 | 141.9 | dOUT^T@A2 (K padded 4352) + all_reduce 8MB |
+| uniep_fc2_wgrad | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 856.9 | 863.7 | 874.7 | dOUT^T@A2 (K padded 4352) + all_reduce 75MB |
+| uniep_fc2_wgrad | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 90.3 | 96.6 | 98.1 | dOUT^T@A2 (K padded 768) + all_reduce 8MB |
+| uniep_fc2_wgrad | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 492.9 | 501.1 | 505.3 | dOUT^T@A2 (K padded 768) + all_reduce 75MB |
+| uniep_swiglu_bwd | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 412.1 | 440.4 | 441.7 | silu(g)*u 反向: 3 个 torch kernel (dg, du, cat) |
+| uniep_swiglu_bwd | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1260.1 | 1299.6 | 1300.4 | silu(g)*u 反向: 3 个 torch kernel (dg, du, cat) |
+| uniep_swiglu_bwd | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 61.8 | 107.0 | 115.1 | silu(g)*u 反向: 3 个 torch kernel (dg, du, cat) |
+| uniep_swiglu_bwd | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 187.1 | 228.5 | 229.8 | silu(g)*u 反向: 3 个 torch kernel (dg, du, cat) |
+| uniep_transpose_prep | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 560.2 | 754.2 | 755.7 | 4 个转置拷贝 (dY1^T, A^T ×2, dOUT^T) -> K padded 4352 |
+| uniep_transpose_prep | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1683.0 | 2188.4 | 2189.9 | 4 个转置拷贝 (dY1^T, A^T ×2, dOUT^T) -> K padded 4352 |
+| uniep_transpose_prep | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 106.2 | 262.7 | 268.5 | 4 个转置拷贝 (dY1^T, A^T ×2, dOUT^T) -> K padded 768 |
+| uniep_transpose_prep | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 270.8 | 374.0 | 375.0 | 4 个转置拷贝 (dY1^T, A^T ×2, dOUT^T) -> K padded 768 |
+| uniep_wgrad_allreduce | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 230.7 | 210.4 | 212.5 | 2 次 EP all_reduce: 25MB |
+| uniep_wgrad_allreduce | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1527.1 | 1188.1 | 1200.4 | 2 次 EP all_reduce: 226MB |
+| uniep_wgrad_allreduce | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 228.7 | 211.6 | 214.5 | 2 次 EP all_reduce: 25MB |
+| uniep_wgrad_allreduce | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1525.1 | 1187.6 | 1198.8 | 2 次 EP all_reduce: 226MB |
+| uniep_fc1_fwd_bwd | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 447.9 | 459.3 | 461.7 | FC1 fwd + dgrad + wgrad(+all_reduce) |
+| uniep_fc1_fwd_bwd | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 3468.6 | 3483.6 | 3506.7 | FC1 fwd + dgrad + wgrad(+all_reduce) |
+| uniep_fc1_fwd_bwd | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 202.5 | 215.8 | 218.9 | FC1 fwd + dgrad + wgrad(+all_reduce) |
+| uniep_fc1_fwd_bwd | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1211.6 | 1237.5 | 1244.2 | FC1 fwd + dgrad + wgrad(+all_reduce) |
+| uniep_fc2_fwd_bwd | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 256.1 | 265.9 | 268.8 | FC2 fwd + dgrad + wgrad(+all_reduce) |
+| uniep_fc2_fwd_bwd | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1768.0 | 1808.6 | 1819.5 | FC2 fwd + dgrad + wgrad(+all_reduce) |
+| uniep_fc2_fwd_bwd | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 126.0 | 134.3 | 170.1 | FC2 fwd + dgrad + wgrad(+all_reduce) |
+| uniep_fc2_fwd_bwd | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 627.9 | 644.5 | 649.4 | FC2 fwd + dgrad + wgrad(+all_reduce) |
+| uniep_layer_fwd_bwd | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 1356.9 | 1277.3 | 1280.3 | FC1 fwd+SwiGLU+FC2 fwd + FC2 bwd+SwiGLU bwd+FC1 bwd (2×EP all_reduce) |
+| uniep_layer_fwd_bwd | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 8232.2 | 6869.4 | 6889.4 | FC1 fwd+SwiGLU+FC2 fwd + FC2 bwd+SwiGLU bwd+FC1 bwd (2×EP all_reduce) |
+| uniep_layer_fwd_bwd | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 445.0 | 447.1 | 452.4 | FC1 fwd+SwiGLU+FC2 fwd + FC2 bwd+SwiGLU bwd+FC1 bwd (2×EP all_reduce) |
+| uniep_layer_fwd_bwd | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 2609.5 | 2177.3 | 2190.2 | FC1 fwd+SwiGLU+FC2 fwd + FC2 bwd+SwiGLU bwd+FC1 bwd (2×EP all_reduce) |
+| uniep_layer_fwd_bwd_full | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 1807.0 | 1880.1 | 1883.6 | 同上 + 每步 dy1^T / a2^T 转置准备（真实训练必须付这部分） |
+| uniep_layer_fwd_bwd_full | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 9421.9 | 8519.8 | 8550.3 | 同上 + 每步 dy1^T / a2^T 转置准备（真实训练必须付这部分） |
+| uniep_layer_fwd_bwd_full | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 566.5 | 608.4 | 629.1 | 同上 + 每步 dy1^T / a2^T 转置准备（真实训练必须付这部分） |
+| uniep_layer_fwd_bwd_full | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 2836.2 | 2473.0 | 2487.4 | 同上 + 每步 dy1^T / a2^T 转置准备（真实训练必须付这部分） |
 | **DeepEP** | | | | | | | |
 | deepep_dispatch | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 113.7 | 109.5 | 111.4 | recv_rows=7807 |
 | deepep_dispatch | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 315.2 | 297.1 | 301.2 | recv_rows=7807 |
@@ -191,26 +289,30 @@
 | deepep_e2e_expanded | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 53.3 | 124.6 | 135.1 | expanded dispatch + combine (matches uniEP e2e comm semantics) |
 | deepep_e2e_expanded | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 98.0 | 142.8 | 154.2 | expanded dispatch + combine (matches uniEP e2e comm semantics) |
 | **TE group-gemm** | | | | | | | |
-| te_grouped_gemm_fc1 | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 139.3 | 177.9 | 204.4 | N=2I=2048, K=1024, rows=16531 |
-| te_grouped_gemm_fc1 | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 965.2 | 835.7 | 918.0 | N=2I=6144, K=3072, rows=16531 |
-| te_grouped_gemm_fc1 | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 27.3 | 170.8 | 188.3 | N=2I=2048, K=1024, rows=2116 |
-| te_grouped_gemm_fc1 | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 203.2 | 179.6 | 207.9 | N=2I=6144, K=3072, rows=2116 |
-| te_grouped_gemm_fc2 | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 67.9 | 175.6 | 193.1 | N=H=1024, K=I=1024, rows=16531 |
-| te_grouped_gemm_fc2 | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 517.4 | 426.5 | 430.8 | N=H=3072, K=I=3072, rows=16531 |
-| te_grouped_gemm_fc2 | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 21.4 | 180.7 | 191.4 | N=H=1024, K=I=1024, rows=2116 |
-| te_grouped_gemm_fc2 | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 99.7 | 178.8 | 192.4 | N=H=3072, K=I=3072, rows=2116 |
-| te_grouped_gemm_layer | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 334.9 | 396.1 | 410.6 | FC1 + swiglu + FC2 (forward) |
-| te_grouped_gemm_layer | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1817.1 | 1620.1 | 1699.7 | FC1 + swiglu + FC2 (forward) |
-| te_grouped_gemm_layer | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 66.1 | 395.7 | 410.7 | FC1 + swiglu + FC2 (forward) |
-| te_grouped_gemm_layer | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 350.3 | 392.8 | 411.1 | FC1 + swiglu + FC2 (forward) |
-| te_grouped_gemm_fc1_fwd_bwd | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 349.0 | 547.1 | 574.0 | fwd+bwd (grad wrt input+weight), N=2I=2048 |
-| te_grouped_gemm_fc1_fwd_bwd | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 2072.2 | 1752.3 | 1965.6 | fwd+bwd (grad wrt input+weight), N=2I=6144 |
-| te_grouped_gemm_fc1_fwd_bwd | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 58.1 | 544.3 | 574.0 | fwd+bwd (grad wrt input+weight), N=2I=2048 |
-| te_grouped_gemm_fc1_fwd_bwd | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 383.7 | 557.5 | 593.6 | fwd+bwd (grad wrt input+weight), N=2I=6144 |
-| te_grouped_gemm_fc2_fwd_bwd | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 280.9 | 685.7 | 719.9 | fwd+bwd, N=H=1024, K=I=1024 |
-| te_grouped_gemm_fc2_fwd_bwd | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1712.4 | 1384.0 | 1438.1 | fwd+bwd, N=H=3072, K=I=3072 |
-| te_grouped_gemm_fc2_fwd_bwd | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 72.5 | 688.3 | 717.9 | fwd+bwd, N=H=1024, K=I=1024 |
-| te_grouped_gemm_fc2_fwd_bwd | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 322.3 | 687.0 | 722.2 | fwd+bwd, N=H=3072, K=I=3072 |
+| te_grouped_gemm_fc1 | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 139.5 | 181.6 | 204.7 | N=2I=2048, K=1024, rows=16531 |
+| te_grouped_gemm_fc1 | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 992.1 | 839.5 | 862.6 | N=2I=6144, K=3072, rows=16531 |
+| te_grouped_gemm_fc1 | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 26.4 | 172.5 | 185.9 | N=2I=2048, K=1024, rows=2116 |
+| te_grouped_gemm_fc1 | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 201.8 | 186.5 | 198.9 | N=2I=6144, K=3072, rows=2116 |
+| te_grouped_gemm_fc2 | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 67.3 | 177.4 | 201.7 | N=H=1024, K=I=1024, rows=16531 |
+| te_grouped_gemm_fc2 | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 516.2 | 425.8 | 432.7 | N=H=3072, K=I=3072, rows=16531 |
+| te_grouped_gemm_fc2 | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 21.1 | 171.9 | 183.5 | N=H=1024, K=I=1024, rows=2116 |
+| te_grouped_gemm_fc2 | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 103.0 | 172.9 | 182.4 | N=H=3072, K=I=3072, rows=2116 |
+| te_grouped_gemm_layer | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 336.7 | 390.9 | 425.6 | FC1 + swiglu + FC2 (forward) |
+| te_grouped_gemm_layer | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1815.3 | 1569.0 | 1690.8 | FC1 + swiglu + FC2 (forward) |
+| te_grouped_gemm_layer | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 65.9 | 385.0 | 420.3 | FC1 + swiglu + FC2 (forward) |
+| te_grouped_gemm_layer | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 353.8 | 390.8 | 420.0 | FC1 + swiglu + FC2 (forward) |
+| te_grouped_gemm_fc1_fwd_bwd | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 346.3 | 642.7 | 687.3 | fwd+bwd (grad wrt input+weight), N=2I=2048 |
+| te_grouped_gemm_fc1_fwd_bwd | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 2086.7 | 1804.5 | 1888.4 | fwd+bwd (grad wrt input+weight), N=2I=6144 |
+| te_grouped_gemm_fc1_fwd_bwd | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 58.1 | 641.6 | 667.2 | fwd+bwd (grad wrt input+weight), N=2I=2048 |
+| te_grouped_gemm_fc1_fwd_bwd | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 382.3 | 657.1 | 682.6 | fwd+bwd (grad wrt input+weight), N=2I=6144 |
+| te_grouped_gemm_fc2_fwd_bwd | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 271.4 | 806.8 | 839.2 | fwd+bwd, N=H=1024, K=I=1024 |
+| te_grouped_gemm_fc2_fwd_bwd | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 1711.1 | 1380.9 | 1491.4 | fwd+bwd, N=H=3072, K=I=3072 |
+| te_grouped_gemm_fc2_fwd_bwd | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 72.2 | 793.1 | 833.3 | fwd+bwd, N=H=1024, K=I=1024 |
+| te_grouped_gemm_fc2_fwd_bwd | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 316.2 | 804.1 | 861.6 | fwd+bwd, N=H=3072, K=I=3072 |
+| te_grouped_gemm_layer_fwd_bwd | torch.bfloat16 | (T1024/rank, H1024, I1024, topk16, E32, EP8) | H100 | 914.8 | 1340.4 | 1371.1 | FC1 + swiglu + FC2 fwd+bwd (autograd; weight grads 本地, 不含跨卡 reduce) |
+| te_grouped_gemm_layer_fwd_bwd | torch.bfloat16 | (T1024/rank, H3072, I3072, topk16, E32, EP8) | H100 | 4577.9 | 3969.6 | 4081.3 | FC1 + swiglu + FC2 fwd+bwd (autograd; weight grads 本地, 不含跨卡 reduce) |
+| te_grouped_gemm_layer_fwd_bwd | torch.bfloat16 | (T128/rank, H1024, I1024, topk16, E32, EP8) | H100 | 165.0 | 1303.9 | 1353.2 | FC1 + swiglu + FC2 fwd+bwd (autograd; weight grads 本地, 不含跨卡 reduce) |
+| te_grouped_gemm_layer_fwd_bwd | torch.bfloat16 | (T128/rank, H3072, I3072, topk16, E32, EP8) | H100 | 810.5 | 1339.4 | 1389.2 | FC1 + swiglu + FC2 fwd+bwd (autograd; weight grads 本地, 不含跨卡 reduce) |
 
 ## 4. 分析
 
@@ -220,16 +322,16 @@
 
 | 配置 | FC1 有效算力 uniEP | FC1 有效算力 TE | FC2 有效算力 uniEP | FC2 有效算力 TE |
 |---|---|---|---|---|
-| T1024/rank H1024 | 702 | 498 | 662 | 511 |
-| T1024/rank H3072 | 746 | 647 | 765 | 603 |
-| T128/rank H1024 | 452 | 325 | 418 | 207 |
-| T128/rank H3072 | 794 | 393 | 799 | 401 |
+| T1024/rank H1024 | 702 | 497 | 662 | 515 |
+| T1024/rank H3072 | 746 | 629 | 765 | 604 |
+| T128/rank H1024 | 452 | 336 | 418 | 211 |
+| T128/rank H3072 | 794 | 396 | 799 | 388 |
 
-- uniEP 的 grouped GEMM 是手写 CuTeDSL（tile 128×256、warp-specialized、per-expert 变长 M），**最小档（2816 行）也有 418–452 TFLOPS，最大档 799 TFLOPS（峰值的 81%）**；TE 走的 cuBLASLt grouped 路径在小 m 段掉得厉害（`T128/H1024` FC2 仅 207 TFLOPS、`T128/H3072` FC1 仅 393 TFLOPS，同样 2816/2116 行时 uniEP 是 418/794）。
-- 大 m 段（`T1024/H3072`，每专家 ~4133 行）差距收窄但仍存在：uniEP 746/765 TFLOPS vs TE 647/603 TFLOPS（领先 15–27%）；`T128` 档拉开到 1.4–2.0×。
-- **只有 TE 能直接做反向**（`GroupedLinear` 自带 autograd），本文给了 fwd+bwd 数据：`T1024/H3072` FC1 880.8 → **2072.2µs（2.4×）**、FC2 429.3 → **1712.4µs（4.0×）**；小 shape 上 kernel 只有 58–72µs，wall 却 544–688µs（autograd + 每个 gemm 的 wgrad launch），训练时这部分能被 pipeline 掩盖但不能忽略。uniEP / DeepEP 只提供前向。
+- uniEP 的 grouped GEMM 是手写 CuTeDSL（tile 128×256、warp-specialized、per-expert 变长 M），**最小档（2816 行）也有 418–452 TFLOPS，最大档 799 TFLOPS（峰值的 81%）**；TE 走的 cuBLASLt grouped 路径在小 m 段掉得厉害（`T128/H1024` FC2 仅 211 TFLOPS、`T128/H3072` FC1 仅 396 TFLOPS，同样 2816/2116 行时 uniEP 是 418/794）。
+- 大 m 段（`T1024/H3072`，每专家 ~4133 行）差距收窄但仍存在：uniEP 746/765 TFLOPS vs TE 629/604 TFLOPS（领先 19–27%）；`T128` 档拉开到 1.35–2.06×。
+- **反向：只有 TE 现成**（`GroupedLinear` 自带 autograd）。`T1024/H3072`：FC1 992.1 → **2086.7µs（2.1×）**、FC2 516.2 → **1711.1µs（3.3×）**；小 shape 上 kernel 只有 58–72µs，wall 却 **642–793µs**（autograd + 每次 gemm 的 wgrad launch），训练时能被上层 kernel 部分掩盖但不能忽略。**uniEP / DeepEP 完全没有反向**——uniEP 需要按 §4.5 用 `group_gemm` 自拼（本文已实测，见 §3.4/§3.5）。
 - TE 还有 **launch 开销**问题：`T128/H1024` FC1 的 kernel 只要 27.3µs，wall 中位却 170.8µs（4 次 grouped GEMM launch + 参数打包 + 主机抖动）。在真实训练 loop 里这部分能被上一层 kernel 掩盖，但 microbenchmark 里非常显眼；uniEP/DeepEP 的融合路径只有 1–2 次 launch。
-- 注意 TE 的 kernel 时间比 wall 中位还高一点（965.2 vs 835.7 @H3072 FC1）：CUPTI 的"每 kernel 取中位再求和"在多个 kernel 之间不相关时会略高于"整段的 wall 中位"，属于口径差异，量级（±15%）可忽略。
+- 注意 TE 的 kernel 时间比 wall 中位还高一点（992.1 vs 839.5 @H3072 FC1）：CUPTI 的"每 kernel 取中位再求和"在多个 kernel 之间不相关时会略高于"整段的 wall 中位"，属于口径差异，量级（±15%）可忽略。
 
 ### 4.2 通信：DeepEP 快的部分与不快的地方
 
@@ -266,7 +368,29 @@ MegaKernel 的收益上限 = `min(comm, gemm)`，代价 = 持久化 kernel 的�
 
 uniEP 只提供 dispatch/GEMM/combine 的融合，SwiGLU 得自己写。`T1024/H3072` 时 358.3µs 相当于 FC2 的 83%、整层的 16%；`T1024/H1024` 时 107.1µs 甚至超过了 FC1（104.0µs）。原因是 torch 的 `F.silu(g) * u` 会走 3 个 kernel（silu、mul、以及 `.contiguous()` 的一次拷贝），17408×3072 的中转张量来回搬。换成单 kernel 的 fused SwiGLU（一次读 2I 写 I）能压到 ~100µs 量级，整层再快 10%+。
 
-### 4.5 topk 与 SM 预算不是瓶颈
+### 4.5 反向：uniEP 没有 autograd，拼出来比 TE 贵 1.5–3.2×
+
+uniEP 是纯 kernel 库（`group_gemm` / `dispatch` / `combine` / 两个 MegaKernel），**package 里没有任何 `autograd.Function`**（`grep -rn "autograd\|def backward"` 为空）。所以"uniEP 的反向"在今天的代码里并不存在，只能像 §3.4 那样用同一个 `group_gemm` 拼：
+
+| 环节 | 用 uniEP 怎么算 | 成本特征（T1024/H3072 实测） |
+|---|---|---|
+| FC1 dgrad | `group_gemm(dY1, W1ᵀ)`，N=H、K=2I | **829 µs ≈ 前向 881 的 0.94×**，和 fwd 一个量级 |
+| FC1 wgrad | `group_gemm(dY1ᵀ, A)`，M=2I、N=H、K=max(rows_e) | 909 µs ≈ 1.03× 前向；K 需要 padding（4352 vs 实际 4129） |
+| FC1 dW reduce | `all_reduce`（EP 组内求和） | **785 µs**，单独一项就接近一整个 wgrad GEMM |
+| FC2 dgrad / wgrad | 同上两式 | 421 / 461 µs ≈ 1.0× / 1.07× 前向 |
+| FC2 dW reduce | `all_reduce` | **401 µs** |
+| SwiGLU bwd | 只有 torch 实现（3–8 个 elementwise kernel） | **1260 µs**，比 FC2 整个 fwd+bwd 还贵 |
+| 转置准备 | `dY1ᵀ` / `Aᵀ` / `A2ᵀ` 两次拷贝 | **1683 µs**，比最大的 wgrad GEMM 还贵 |
+
+三条结论：
+
+1. **GEMM 本身不是问题**：dgrad / wgrad 与同形状前向基本 1:1（0.94–1.28×），说明 CuTeDSL grouped GEMM 在反向复用得很干净——这一点比 TE 的 `GroupedLinear` 还好（TE 的 FC2 fwd+bwd 是 fwd 的 4.0×）。
+2. **加起来的问题在"周边"**：一层 fwd+bwd 里 2 次 `all_reduce`（1186 µs）+ SwiGLU 反向（1260 µs）+ 转置（1683 µs）合计 **4129 µs，占 9422 µs 的 44%**。这三项都不是 GEMM，而是 uniEP 目前**没有提供**的东西（缺融合反向 kernel、缺权重梯度 `reduce-scatter`、缺 strided dgrad/wgrad）。
+3. **真要用 uniEP 训练，必须先补这三块**：否则 §3.5 里 uniEP 的一层 fwd+bwd 会比 TE autograd 慢 **1.5×（T1024/H1024：1357 vs 915）/ 1.8×（T1024/H3072：8232 vs 4578）/ 3.2×（T128/H1024：2609 vs 810）**。反过来，**`T128/H1024` 上 wall 是 uniEP 赢**（447 vs 1304 µs）：TE 的 autograd 在小 shape 上被 Python 主机开销吃掉，而 uniEP 拼装是 5–6 个裸 kernel——小 batch 场景这条很关键（`T128/H3072` 例外：2177 vs 1339，TE 仍略优）。
+
+> 注意 `all_reduce` 这两个数在这台机器上偏悲观：NVLS 不可用（§5.1），151 MB 的 `all_reduce` 只能走 ring/tree，实测 ~193 GB/s/rank。满血 NVLS 机器上这两项应该能降 1/3–1/2——这也是唯一一处"残血环境确实影响本文数字"的地方，但它只影响**反向**，不影响 §3.1–§3.3 的前向结论。
+
+### 4.6 topk 与 SM 预算不是瓶颈
 
 | 探针 | 数据 | 结论 |
 |---|---|---|
@@ -276,14 +400,14 @@ uniEP 只提供 dispatch/GEMM/combine 的融合，SwiGLU 得自己写。`T1024/H
 
 > `group_gemm_combine`（MK2）没有 `comm_num_sm` 参数（只有 `gemm_num_sm`），且默认值已是最优档，故只报默认值。
 
-### 4.6 选型建议（本机、bf16、单机 8 卡）
+### 4.7 选型建议（本机、bf16、单机 8 卡）
 
 | 场景 | 建议 |
 |---|---|
 | 大 batch（≥1024 token/卡）+ 大 H（≥3072） | **uniEP 全融合**（2186µs）≈ **DeepEP 通信 + uniEP GEMM 自拼**（2158µs）；前者少 4 次 launch、无 host 依赖，推荐前者 |
 | 大 batch + 小 H（1024） | **DeepEP 通信 + uniEP GEMM**（448µs），比 uniEP 非融合（597.6µs）快 25%；MegaKernel 别开（打平但 wall 差 32%） |
 | 小 batch（128 token/卡） | 通信用 DeepEP expanded（dispatch 46.7–25.0µs / combine 40.0–29.3µs），GEMM 用 uniEP（比 TE 快 1.4–2.0×）；`T128/H3072` 可以开融合（省 launch），`T128/H1024` 别开 |
-| 需要反向 | 只有 TE 的 `GroupedLinear` 现成可用（本文给了 fwd+bwd 数据）；uniEP/DeepEP 只有前向 |
+| 需要反向 | TE 的 `GroupedLinear` 现成（autograd，本文给了 fwd+bwd）；**uniEP 没有 autograd**，需按 §4.5 用 `group_gemm` 自拼（dgrad/wgrad GEMM 与前向 1:1，但权重梯度 `all_reduce`、SwiGLU 反向、转置三块要自己补，合计占反向 44%）。T1024 上 TE 更快（4578 vs 8232µs @H3072），`T128/H1024` 上 uniEP 拼装的 **wall** 反超 2.9×（447 vs 1304µs） |
 
 ## 5. 复现与环境
 
@@ -296,6 +420,9 @@ env NCCL_NVLS_ENABLE=0 FLASH_COMM_BUFFER_BACKEND=cuda_ipc NCCL_LSA_TEAM_SIZE=8 \
 env LD_PRELOAD=/opt/nccl232/nvidia/nccl/lib/libnccl.so.2 EP_DISABLE_GIN=1 NCCL_NVLS_ENABLE=0 \
   torchrun --nproc_per_node=8 bench_deepep_ep.py --tokens 1024 --hidden 3072
 env NCCL_NVLS_ENABLE=0 torchrun --nproc_per_node=8 bench_te_group_gemm.py --tokens 1024 --hidden 3072
+# 反向（uniEP 用 group_gemm 拼 + TE autograd）
+env NCCL_NVLS_ENABLE=0 FLASH_COMM_BUFFER_BACKEND=cuda_ipc \
+  torchrun --nproc_per_node=8 bench_uniep_bwd.py --tokens 1024 --hidden 3072
 ```
 
 | 文件 | 作用 |
@@ -303,9 +430,10 @@ env NCCL_NVLS_ENABLE=0 torchrun --nproc_per_node=8 bench_te_group_gemm.py --toke
 | `moe_bench_common.py` | routing 生成（三家共用同一份 routing）、per-iteration CUDA event 统计、CUPTI 中位统计、CSV 落盘 |
 | `bench_uniep_ep.py` | uniEP 非融合 5 个 op + MK1/MK2 + 融合/非融合 e2e |
 | `bench_deepep_ep.py` | DeepEP plain/expanded/async 的 dispatch、combine、comm-only e2e |
-| `bench_te_group_gemm.py` | TE grouped GEMM FC1/FC2、fwd+bwd、FC1+SwiGLU+FC2 |
+| `bench_te_group_gemm.py` | TE grouped GEMM FC1/FC2、fwd+bwd、FC1+SwiGLU+FC2 前向与 fwd+bwd |
+| `bench_uniep_bwd.py` | uniEP 反向：dgrad/wgrad/SwiGLU bwd 用 `group_gemm` 拼装 + 对齐 torch autograd 的检查（§3.4/§7.1） |
 | `check_uniep_moe.py` | 与纯 torch MoE 参考实现对比（正确性门禁） |
-| `sweep_sm_uniep.py` | MegaKernel 的 `gemm_num_sm`/`comm_num_sm` 扫描（§4.5） |
+| `sweep_sm_uniep.py` | MegaKernel 的 `gemm_num_sm`/`comm_num_sm` 扫描（§4.6） |
 | `build_results_doc.py` | 由 CSV + `results_moe_ep.template.md` 生成本文档（表格部分全自动） |
 | `diag_deepep2.py` | DeepEP 的 `do_cpu_sync` / async 约定对比探针（§4.2 的证据） |
 
@@ -372,6 +500,23 @@ env NCCL_NVLS_ENABLE=0 torchrun --nproc_per_node=8 bench_te_group_gemm.py --toke
 - 相对误差 ~5e-3 与 bf16 累加 16 项的预期一致（`mean|ref|` 分别 0.46 / 2.64）。
 - **融合与非融合的结果完全逐位相同**（两者最大绝对误差一模一样，说明 MK1/MK2 与"dispatch+GEMM"、"GEMM+combine"是同一套数学），因此融合路径的加速不是"少算了"。
 
+### 7.1 反向正确性（`bench_uniep_bwd.py --check`）
+
+反向不是照着 `group_gemm` 猜的：`check_chain()` 在**同一份 per-expert 行切分**上跑一遍 torch autograd
+（`OUT = (silu(A@W1ᵀ)*…)@W2ᵀ`，`loss = <OUT, dOUT>`），再和"用 uniEP kernel 拼出来的 dA / dW1 / dW2"逐元素比：
+
+| 配置 | dW1 相对误差 | dW2 相对误差 | dA 相对误差 |
+|---|---|---|---|
+| T1024 H1024 | 3.45e-3 | 0（逐位相同） | 5.78e-3 |
+| T1024 H3072 | 3.32e-3 | 0（逐位相同） | 3.87e-3 |
+| T128 H1024 | 3.30e-3 | 0（逐位相同） | 4.02e-3 |
+| T128 H3072 | 3.27e-3 | 0（逐位相同） | 3.82e-3 |
+
+- 误差量级与 bf16 累加一致；`dW2` 逐位相同说明两边都是"K 方向顺序 fp32 累加、最后一次舍入"，没有 split-K 差异。
+- 检查里 dgrad/wgrad 全部走 uniEP kernel（不是 numpy/torch 复算），所以通过即代表**这条拼装路径本身**是对的。
+- 另外确认了一件影响实现的事：uniEP dispatch 的**对齐填充行是零**（8 个 rank 的 padding 块 `abs().sum()==0`），
+  因此 wgrad 可以直接把整块对齐区间（含 padding）当 K 用，不需要额外的 mask。
+
 ## 8. 附录 C：踩坑记录（本机特有）
 
 | 现象 | 原因 | 处理 |
@@ -387,4 +532,7 @@ env NCCL_NVLS_ENABLE=0 torchrun --nproc_per_node=8 bench_te_group_gemm.py --toke
 | `flash_comm.ep_overlap` 的 `group_gemm` 报 `B must be k-major with strides (K, 1, N*K)` | 对 `permute(1,2,0)` 后又做了 `.contiguous()` | 只 permute，不要 contiguous |
 | 同一进程内连跑 4 档 shape，第 3 档的 DeepEP 数字整体劣化 ~10 倍 | allocator 状态 + DeepJIT/cuBLASLt 缓存 | 每档单独 `torchrun`（`run_all.sh` 已如此） |
 | 偶发单次调用 3–7ms（p90 是中位的 3–4 倍），且**整档**数据全被污染 | 共享机器上的主机调度停顿（其它容器），与 GPU 无关 | wall 取中位；`probe_quiet()` 在每档开测前用 8 卡 all_reduce 探活并等待；`measure_robust()` 发现 wall≫kernel 时重测 |
+| uniEP "没有反向"：`group_gemm` 不是 `nn.Module`、包里没有任何 `autograd.Function` | 它是纯 kernel 库（和 DeepEP 一样只做前向） | 按 §4.5 用 `group_gemm` 拼 dgrad/wgrad，并用 torch autograd 对齐（§7.1） |
+| `group_gemm` 传 `problem_sizes_m` 用 Python `list` 报 `'list' object has no attribute 'shape'` | 它直接读 `.shape` | 传 `torch.as_tensor(counts, dtype=int32, device="cuda")` |
+| `all_reduce` 实测只有 ~193 GB/s/rank（151MB 用 785µs） | 本机 NVLS 不可用（§5.1），只能走 ring/tree | 反向的权重梯度 reduce 是**唯一**被"残血环境"影响的数字，满血机器应快 1/3–1/2 |
 | DeepEP expand 布局的 `m_splits` 重建不出来（`psum` 差值 16532 vs `exp_x` 行数 16640，rank 0 对、其它 rank 错） | 有效行位于每个对齐块的**尾部**（`EPHandle` 的 `expert_token_idx_start = psum - unaligned` 语义），不是简单的 cumsum 对齐 | 放弃"实测串行 pipeline"，改报**分量相加**（§3.3 已标注为估算） |

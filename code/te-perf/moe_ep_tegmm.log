@@ -1,0 +1,70 @@
+W1127 11:28:29.564000 627203 torch/distributed/run.py:862] 
+W1127 11:28:29.564000 627203 torch/distributed/run.py:862] *****************************************
+W1127 11:28:29.564000 627203 torch/distributed/run.py:862] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W1127 11:28:29.564000 627203 torch/distributed/run.py:862] *****************************************
+
+=== TE grouped GEMM: tokens/rank=1024 H=1024 I=1024 E_local=4 rows=16531 m_splits=[4129, 4112, 4135, 4155] ===
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+  te_grouped_gemm_fc1              kernel=   113.02 us  wall=   164.06/   180.70 us    613.5 TFLOPS  N=2I=2048, K=1024, rows=16531
+  te_grouped_gemm_fc2              kernel=    64.64 us  wall=   172.54/   185.57 us    536.3 TFLOPS  N=H=1024, K=I=1024, rows=16531
+  te_grouped_gemm_fc1_fwd_bwd      kernel=   337.63 us  wall=   529.06/   550.72 us  fwd+bwd (grad wrt input+weight), N=2I=2048
+  te_grouped_gemm_fc2_fwd_bwd      kernel=   285.28 us  wall=   678.14/   721.54 us  fwd+bwd, N=H=1024, K=I=1024
+  te_grouped_gemm_layer            kernel=   312.64 us  wall=   380.10/   398.11 us  FC1 + swiglu + FC2 (forward)
+  te_grouped_gemm_layer_fwd_bwd    kernel=   908.58 us  wall=  1159.30/  1202.34 us  FC1 + swiglu + FC2 fwd+bwd (autograd; weight grads 本地, 不含跨卡 reduce)
+
+=== TE grouped GEMM: tokens/rank=128 H=1024 I=1024 E_local=4 rows=2116 m_splits=[511, 525, 552, 528] ===
+  te_grouped_gemm_fc1              kernel=    26.88 us  wall=   167.07/   181.73 us    330.2 TFLOPS  N=2I=2048, K=1024, rows=2116
+  te_grouped_gemm_fc2              kernel=    22.46 us  wall=   169.12/   179.52 us    197.5 TFLOPS  N=H=1024, K=I=1024, rows=2116
+  te_grouped_gemm_fc1_fwd_bwd      kernel=    61.89 us  wall=   529.38/   547.81 us  fwd+bwd (grad wrt input+weight), N=2I=2048
+  te_grouped_gemm_fc2_fwd_bwd      kernel=    75.07 us  wall=   666.59/   698.34 us  fwd+bwd, N=H=1024, K=I=1024
+  te_grouped_gemm_layer            kernel=    68.93 us  wall=   377.28/   391.62 us  FC1 + swiglu + FC2 (forward)
+  [retry] wall 1152 us vs kernel 174 us -> host stall, re-measuring (1/2)  [retry] wall 1127 us vs kernel 159 us -> host stall, re-measuring (1/2)  [retry] wall 1114 us vs kernel 165 us -> host stall, re-measuring (1/2)  [retry] wall 1141 us vs kernel 168 us -> host stall, re-measuring (1/2)  [retry] wall 1120 us vs kernel 163 us -> host stall, re-measuring (1/2)  [retry] wall 1318 us vs kernel 157 us -> host stall, re-measuring (1/2)
+  [retry] wall 1314 us vs kernel 168 us -> host stall, re-measuring (1/2)  [retry] wall 1305 us vs kernel 165 us -> host stall, re-measuring (1/2)
+
+
+
+
+
+
+  [retry] wall 1120 us vs kernel 163 us -> host stall, re-measuring (2/2)  [retry] wall 1149 us vs kernel 172 us -> host stall, re-measuring (2/2)
+  [retry] wall 1133 us vs kernel 169 us -> host stall, re-measuring (2/2)  [retry] wall 1286 us vs kernel 167 us -> host stall, re-measuring (2/2)  [retry] wall 1304 us vs kernel 157 us -> host stall, re-measuring (2/2)  [retry] wall 1299 us vs kernel 167 us -> host stall, re-measuring (2/2)
+  [retry] wall 1121 us vs kernel 159 us -> host stall, re-measuring (2/2)
+  [retry] wall 1103 us vs kernel 165 us -> host stall, re-measuring (2/2)
+
+
+
+
+  te_grouped_gemm_layer_fwd_bwd    kernel=   171.68 us  wall=  1149.38/  1192.83 us  FC1 + swiglu + FC2 fwd+bwd (autograd; weight grads 本地, 不含跨卡 reduce)
+
+=== TE grouped GEMM: tokens/rank=1024 H=3072 I=3072 E_local=4 rows=16531 m_splits=[4129, 4112, 4135, 4155] ===
+  te_grouped_gemm_fc1              kernel=   976.13 us  wall=   827.68/   839.94 us    639.3 TFLOPS  N=2I=6144, K=3072, rows=16531
+  te_grouped_gemm_fc2              kernel=   423.93 us  wall=   425.82/   432.70 us    736.0 TFLOPS  N=H=3072, K=I=3072, rows=16531
+  te_grouped_gemm_fc1_fwd_bwd      kernel=  2075.43 us  wall=  1804.48/  1854.30 us  fwd+bwd (grad wrt input+weight), N=2I=6144
+  te_grouped_gemm_fc2_fwd_bwd      kernel=  1544.10 us  wall=  1352.86/  1362.24 us  fwd+bwd, N=H=3072, K=I=3072
+  te_grouped_gemm_layer            kernel=  1728.13 us  wall=  1564.19/  1570.30 us  FC1 + swiglu + FC2 (forward)
+  te_grouped_gemm_layer_fwd_bwd    kernel=  4430.94 us  wall=  3816.03/  3978.08 us  FC1 + swiglu + FC2 fwd+bwd (autograd; weight grads 本地, 不含跨卡 reduce)
+
+=== TE grouped GEMM: tokens/rank=128 H=3072 I=3072 E_local=4 rows=2116 m_splits=[511, 525, 552, 528] ===
+  te_grouped_gemm_fc1              kernel=   217.98 us  wall=   180.42/   194.50 us    366.4 TFLOPS  N=2I=6144, K=3072, rows=2116
+  te_grouped_gemm_fc2              kernel=    85.00 us  wall=   168.64/   179.65 us    469.9 TFLOPS  N=H=3072, K=I=3072, rows=2116
+  te_grouped_gemm_fc1_fwd_bwd      kernel=   411.23 us  wall=   544.54/   613.31 us  fwd+bwd (grad wrt input+weight), N=2I=6144
+  te_grouped_gemm_fc2_fwd_bwd      kernel=   294.88 us  wall=   674.11/   716.70 us  fwd+bwd, N=H=3072, K=I=3072
+  te_grouped_gemm_layer            kernel=   346.72 us  wall=   386.30/   419.97 us  FC1 + swiglu + FC2 (forward)
+  te_grouped_gemm_layer_fwd_bwd    kernel=   814.75 us  wall=  1155.94/  1182.50 us  FC1 + swiglu + FC2 fwd+bwd (autograd; weight grads 本地, 不含跨卡 reduce)
+
+wrote 24 rows -> moe_ep_tegmm.csv

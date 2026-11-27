@@ -1,0 +1,99 @@
+W1127 11:29:02.014000 627495 torch/distributed/run.py:862] 
+W1127 11:29:02.014000 627495 torch/distributed/run.py:862] *****************************************
+W1127 11:29:02.014000 627495 torch/distributed/run.py:862] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W1127 11:29:02.014000 627495 torch/distributed/run.py:862] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W1127 11:29:09.884454746 ProcessGroupNCCL.cpp:5238] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+
+=== uniEP bwd: tokens/rank=1024 H=1024 I=1024 topk=16 E=32 EP=8 ===
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+  uniep_fc1_dgrad              kernel=   114.49 us  wall=   182.78/   183.49 us  dY1@W1: N=H=1024, K=2I=2048, rows=17408
+  uniep_fc1_wgrad              kernel=   226.46 us  wall=   232.61/   235.07 us  dY1^T@A (K padded 4352) + all_reduce 17MB
+  uniep_fc2_dgrad              kernel=    61.89 us  wall=    66.24/   102.21 us  dOUT@W2: N=I=1024, K=H=1024, rows=17408
+  uniep_fc2_wgrad              kernel=   133.86 us  wall=   139.71/   141.44 us  dOUT^T@A2 (K padded 4352) + all_reduce 8MB
+  uniep_fc1_wgrad_gemm         kernel=    95.39 us  wall=    97.66/    98.66 us  仅 dY1^T@A: M=2I=2048, N=H=1024, K=4352, E=4
+  uniep_fc2_wgrad_gemm         kernel=    51.20 us  wall=    53.66/    54.78 us  仅 dOUT^T@A2: M=H=1024, N=I=1024, K=4352, E=4
+  uniep_fc1_allreduce          kernel=   124.13 us  wall=   126.59/   128.16 us  dW1 EP all_reduce 17MB
+  uniep_fc2_allreduce          kernel=    76.32 us  wall=    80.67/    81.54 us  dW2 EP all_reduce 8MB
+  uniep_wgrad_allreduce        kernel=   239.10 us  wall=   210.14/   211.87 us  2 次 EP all_reduce: 25MB
+  uniep_swiglu_bwd             kernel=   423.46 us  wall=   440.42/   441.73 us  silu(g)*u 反向: 3 个 torch kernel (dg, du, cat)
+  uniep_transpose_prep         kernel=   572.93 us  wall=   754.24/   755.74 us  4 个转置拷贝 (dY1^T, A^T ×2, dOUT^T) -> K padded 4352
+  uniep_fc1_fwd_bwd            kernel=   462.43 us  wall=   459.30/   460.86 us  FC1 fwd + dgrad + wgrad(+all_reduce)
+  uniep_fc2_fwd_bwd            kernel=   263.20 us  wall=   265.73/   267.49 us  FC2 fwd + dgrad + wgrad(+all_reduce)
+  uniep_layer_fwd_bwd          kernel=  1348.70 us  wall=  1277.18/  1279.20 us  FC1 fwd+SwiGLU+FC2 fwd + FC2 bwd+SwiGLU bwd+FC1 bwd (2×EP all_reduce)
+  uniep_layer_fwd_bwd_full     kernel=  1773.99 us  wall=  1879.71/  1882.18 us  同上 + 每步 dy1^T / a2^T 转置准备（真实训练必须付这部分）
+  [check T1024/H1024] full-chain rel err: dW1=3.45e-03 dW2=0.00e+00 dA=5.78e-03 | |dW1|=2.97e+05 |dW2|=2.46e+05 |ref dW2|=2.46e+05
+
+=== uniEP bwd: tokens/rank=128 H=1024 I=1024 topk=16 E=32 EP=8 ===
+  uniep_fc1_dgrad              kernel=    24.13 us  wall=    34.98/    37.34 us  dY1@W1: N=H=1024, K=2I=2048, rows=2816
+  uniep_fc1_wgrad              kernel=   149.47 us  wall=   149.28/   150.59 us  dY1^T@A (K padded 768) + all_reduce 17MB
+  uniep_fc2_dgrad              kernel=    14.24 us  wall=    32.86/    36.29 us  dOUT@W2: N=I=1024, K=H=1024, rows=2816
+  uniep_fc2_wgrad              kernel=    89.54 us  wall=    96.38/    97.66 us  dOUT^T@A2 (K padded 768) + all_reduce 8MB
+  uniep_fc1_wgrad_gemm         kernel=    22.08 us  wall=    34.08/    38.43 us  仅 dY1^T@A: M=2I=2048, N=H=1024, K=768, E=4
+  uniep_fc2_wgrad_gemm         kernel=    12.58 us  wall=    30.75/    32.48 us  仅 dOUT^T@A2: M=H=1024, N=I=1024, K=768, E=4
+  uniep_fc1_allreduce          kernel=   122.56 us  wall=   125.76/   128.00 us  dW1 EP all_reduce 17MB
+  uniep_fc2_allreduce          kernel=    76.13 us  wall=    80.70/    81.92 us  dW2 EP all_reduce 8MB
+  uniep_wgrad_allreduce        kernel=   234.82 us  wall=   210.85/   212.96 us  2 次 EP all_reduce: 25MB
+  uniep_swiglu_bwd             kernel=    69.09 us  wall=   103.04/   108.29 us  silu(g)*u 反向: 3 个 torch kernel (dg, du, cat)
+  uniep_transpose_prep         kernel=   118.78 us  wall=   252.58/   257.95 us  4 个转置拷贝 (dY1^T, A^T ×2, dOUT^T) -> K padded 768
+  uniep_fc1_fwd_bwd            kernel=   203.65 us  wall=   215.36/   218.78 us  FC1 fwd + dgrad + wgrad(+all_reduce)
+  uniep_fc2_fwd_bwd            kernel=   127.01 us  wall=   133.86/   136.00 us  FC2 fwd + dgrad + wgrad(+all_reduce)
+  uniep_layer_fwd_bwd          kernel=   451.01 us  wall=   446.72/   450.02 us  FC1 fwd+SwiGLU+FC2 fwd + FC2 bwd+SwiGLU bwd+FC1 bwd (2×EP all_reduce)
+  uniep_layer_fwd_bwd_full     kernel=   561.95 us  wall=   608.38/   622.82 us  同上 + 每步 dy1^T / a2^T 转置准备（真实训练必须付这部分）
+  [check T128/H1024] full-chain rel err: dW1=4.67e-03 dW2=0.00e+00 dA=5.65e-03 | |dW1|=1.1e+05 |dW2|=1.14e+05 |ref dW2|=1.14e+05
+
+=== uniEP bwd: tokens/rank=1024 H=3072 I=3072 topk=16 E=32 EP=8 ===
+  uniep_fc1_dgrad              kernel=   850.18 us  wall=   853.06/  1455.49 us  dY1@W1: N=H=3072, K=2I=6144, rows=17408
+  uniep_fc1_wgrad              kernel=  1648.64 us  wall=  1655.52/  1666.27 us  dY1^T@A (K padded 4352) + all_reduce 151MB
+  uniep_fc2_dgrad              kernel=   439.52 us  wall=   445.38/   752.16 us  dOUT@W2: N=I=3072, K=H=3072, rows=17408
+  uniep_fc2_wgrad              kernel=   856.42 us  wall=   862.91/   873.57 us  dOUT^T@A2 (K padded 4352) + all_reduce 75MB
+  uniep_fc1_wgrad_gemm         kernel=   917.57 us  wall=   872.54/  1507.04 us  仅 dY1^T@A: M=2I=6144, N=H=3072, K=4352, E=4
+  uniep_fc2_wgrad_gemm         kernel=   458.91 us  wall=   448.67/   850.11 us  仅 dOUT^T@A2: M=H=3072, N=I=3072, K=4352, E=4
+  uniep_fc1_allreduce          kernel=   786.05 us  wall=   792.93/   802.14 us  dW1 EP all_reduce 151MB
+  uniep_fc2_allreduce          kernel=   401.41 us  wall=   405.28/   415.55 us  dW2 EP all_reduce 75MB
+  uniep_wgrad_allreduce        kernel=  1528.32 us  wall=  1186.43/  1196.22 us  2 次 EP all_reduce: 226MB
+  uniep_swiglu_bwd             kernel=  1293.29 us  wall=  1299.55/  1300.42 us  silu(g)*u 反向: 3 个 torch kernel (dg, du, cat)
+  uniep_transpose_prep         kernel=  1729.02 us  wall=  2188.45/  2189.89 us  4 个转置拷贝 (dY1^T, A^T ×2, dOUT^T) -> K padded 4352
+  uniep_fc1_fwd_bwd            kernel=  3461.12 us  wall=  3481.50/  3504.86 us  FC1 fwd + dgrad + wgrad(+all_reduce)
+  uniep_fc2_fwd_bwd            kernel=  1767.20 us  wall=  1807.58/  1817.54 us  FC2 fwd + dgrad + wgrad(+all_reduce)
+  uniep_layer_fwd_bwd          kernel=  8342.60 us  wall=  6865.95/  6888.64 us  FC1 fwd+SwiGLU+FC2 fwd + FC2 bwd+SwiGLU bwd+FC1 bwd (2×EP all_reduce)
+  uniep_layer_fwd_bwd_full     kernel=  9592.89 us  wall=  8514.66/  8537.34 us  同上 + 每步 dy1^T / a2^T 转置准备（真实训练必须付这部分）
+  [check T1024/H3072] full-chain rel err: dW1=4.85e-03 dW2=0.00e+00 dA=4.24e-03 | |dW1|=8.44e+05 |dW2|=8.23e+05 |ref dW2|=8.23e+05
+
+=== uniEP bwd: tokens/rank=128 H=3072 I=3072 topk=16 E=32 EP=8 ===
+  uniep_fc1_dgrad              kernel=   138.18 us  wall=   140.70/   141.60 us  dY1@W1: N=H=3072, K=2I=6144, rows=2816
+  uniep_fc1_wgrad              kernel=   951.62 us  wall=   957.89/   971.65 us  dY1^T@A (K padded 768) + all_reduce 151MB
+  uniep_fc2_dgrad              kernel=    71.42 us  wall=    74.02/    74.85 us  dOUT@W2: N=I=3072, K=H=3072, rows=2816
+  uniep_fc2_wgrad              kernel=   492.99 us  wall=   500.06/   503.23 us  dOUT^T@A2 (K padded 768) + all_reduce 75MB
+  uniep_fc1_wgrad_gemm         kernel=   173.57 us  wall=   176.64/   177.47 us  仅 dY1^T@A: M=2I=6144, N=H=3072, K=768, E=4
+  uniep_fc2_wgrad_gemm         kernel=    87.49 us  wall=    91.30/    92.64 us  仅 dOUT^T@A2: M=H=3072, N=I=3072, K=768, E=4
+  uniep_fc1_allreduce          kernel=   777.54 us  wall=   777.86/   786.53 us  dW1 EP all_reduce 151MB
+  uniep_fc2_allreduce          kernel=   402.02 us  wall=   402.53/   407.74 us  dW2 EP all_reduce 75MB
+  uniep_wgrad_allreduce        kernel=  1530.56 us  wall=  1186.56/  1197.73 us  2 次 EP all_reduce: 226MB
+  uniep_swiglu_bwd             kernel=   211.39 us  wall=   228.51/   229.79 us  silu(g)*u 反向: 3 个 torch kernel (dg, du, cat)
+  uniep_transpose_prep         kernel=   307.71 us  wall=   373.98/   375.04 us  4 个转置拷贝 (dY1^T, A^T ×2, dOUT^T) -> K padded 768
+  uniep_fc1_fwd_bwd            kernel=  1205.09 us  wall=  1234.98/  1241.02 us  FC1 fwd + dgrad + wgrad(+all_reduce)
+  uniep_fc2_fwd_bwd            kernel=   626.53 us  wall=   643.30/   649.22 us  FC2 fwd + dgrad + wgrad(+all_reduce)
+  uniep_layer_fwd_bwd          kernel=  2634.25 us  wall=  2176.54/  2180.58 us  FC1 fwd+SwiGLU+FC2 fwd + FC2 bwd+SwiGLU bwd+FC1 bwd (2×EP all_reduce)
+  uniep_layer_fwd_bwd_full     kernel=  2885.38 us  wall=  2472.54/  2480.58 us  同上 + 每步 dy1^T / a2^T 转置准备（真实训练必须付这部分）
+  [check T128/H3072] full-chain rel err: dW1=3.27e-03 dW2=0.00e+00 dA=3.82e-03 | |dW1|=6.42e+08 |dW2|=1.04e+09 |ref dW2|=1.04e+09
+
+wrote moe_ep_uniep_bwd.csv (60 rows)

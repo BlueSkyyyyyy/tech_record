@@ -6,8 +6,9 @@
 # Stages
 #   1. uniEP    : unfused ops + MegaKernel1/2 + fused/sequential e2e
 #   2. DeepEP   : dispatch/combine (plain, expanded, async) + comm-only e2e
-#   3. TE       : grouped GEMM FC1/FC2 (+ fwd/bwd, + FC1+swiglu+FC2 layer)
-#   4. checks   : uniEP vs pure-torch MoE reference; SM-budget sweep; topk=8 probe
+#   3. TE       : grouped GEMM FC1/FC2 (+ fwd/bwd, + FC1+swiglu+FC2 layer fwd & fwd+bwd)
+#   4. uniEP bwd: dgrad/wgrad/swiglu bwd composed from group_gemm + torch-reference check
+#   5. checks   : uniEP vs pure-torch MoE reference; SM-budget sweep; topk=8 probe
 #
 # Host quirks baked in (see results_moe_ep.md §环境):
 #   NCCL_NVLS_ENABLE=0                  no NVSwitch/Fabric Manager on this box
@@ -55,30 +56,41 @@ run_deepep() {
     --tokens $1 --hidden $2 --iters $ITERS --warmup $WARMUP --csv "moe_ep_deepep_M$1_H$2.csv" \
     2>&1 | tee "moe_ep_deepep_M$1_H$2.log" | grep -E "^  |^===|buffer:"
 }
+run_unibwd() {
+  env $FLASH torchrun --nproc_per_node=$NPROC --master_port=29527 bench_uniep_bwd.py \
+    --tokens $1 --hidden $2 --iters $ITERS --warmup $WARMUP --csv "moe_ep_uniep_bwd_M$1_H$2.csv" \
+    2>&1 | tee "moe_ep_uniep_bwd_M$1_H$2.log" | grep -E "^  |^==="
+}
 run_te() {
   env NCCL_NVLS_ENABLE=0 torchrun --nproc_per_node=$NPROC --master_port=29522 bench_te_group_gemm.py \
     --tokens $1 --hidden $2 --iters $ITERS --warmup $WARMUP --csv "moe_ep_tegmm_M$1_H$2.csv" \
     2>&1 | tee "moe_ep_tegmm_M$1_H$2.log" | grep -E "^  |^==="
 }
-echo "############ stage 1/4: uniEP ############"
+echo "############ stage 1/5: uniEP ############"
 for T in $TOKENS; do for H in $HIDDEN; do
   echo "=== uniEP    T=$T/rank H=I=$H ==="; run_uni $T $H; sleep 3
 done; done
 merge "moe_ep_uniep_M*_H*.csv" moe_ep_uniep.csv
 
-echo "############ stage 2/4: DeepEP ############"
+echo "############ stage 2/5: DeepEP ############"
 for T in $TOKENS; do for H in $HIDDEN; do
   echo "=== DeepEP   T=$T/rank H=$H ==="; run_deepep $T $H; sleep 3
 done; done
 merge "moe_ep_deepep_M*_H*.csv" moe_ep_deepep.csv
 
-echo "############ stage 3/4: TE grouped GEMM ############"
+echo "############ stage 3/5: TE grouped GEMM ############"
 for T in $TOKENS; do for H in $HIDDEN; do
   echo "=== TE       T=$T/rank H=I=$H ==="; run_te $T $H; sleep 3
 done; done
 merge "moe_ep_tegmm_M*_H*.csv" moe_ep_tegmm.csv
 
-echo "############ stage 4/4: correctness + probes ############"
+echo "############ stage 4/5: uniEP backward ############"
+for T in $TOKENS; do for H in $HIDDEN; do
+  echo "=== uniEP bwd T=$T/rank H=I=$H ==="; run_unibwd $T $H; sleep 3
+done; done
+merge "moe_ep_uniep_bwd_M*_H*.csv" moe_ep_uniep_bwd.csv
+
+echo "############ stage 5/5: correctness + probes ############"
 for cfg in "1024 1024" "1024 3072"; do set -- $cfg
   env $FLASH torchrun --nproc_per_node=$NPROC --master_port=29524 check_uniep_moe.py \
     --tokens $1 --hidden $2 2>&1 | tee -a check_uniep_moe.log | grep -E "rank [01]\]"
