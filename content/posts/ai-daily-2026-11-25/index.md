@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-25：59 篇 HF Daily Papers — agent 学会何时停�
 subtitle: "RLVB 用精确后验教 agent 何时提交，九个设置平均 +17.1%；NightWatch 外挂 0.8B watcher 让 OSWorld 墙钟时间降 33%；一面镜子让五类机器人策略掉 10.8–56.7 点，最高 62.5 点；Loom Attention 只多 2% FLOPs 就匹配 3 倍算力"
 date: 2026-11-25
 draft: false
-weight: 2
+weight: 3
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "agent", "具身智能", "模型架构", "多模态", "视频生成", "评测"]
 categories: ["LLM算法"]

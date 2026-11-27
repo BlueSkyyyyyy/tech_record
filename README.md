@@ -33,21 +33,22 @@ code/<article-name>/                    # 文章配套可运行代码，目录�
 
 每天 21:00 抓 [HF Daily Papers](https://huggingface.co/papers) 当天全部论文，按主题分组写速览：Top 10 表 + 每篇「问题 / 方法 / 数字 / 为什么值得看」+ 三个观察。
 导读与索引：[AI 日报（导读）](content/posts/ai-daily-00-index/index.md)。
-1. [2026-11-25 · 59 篇：agent 学会何时停、镜子照出机器人、矩阵残差流重接电路](content/posts/ai-daily-2026-11-25/index.md)
-2. [2026-11-24 · 75 篇：harness 决定上限、可规划的 4D 世界、权重空间编程](content/posts/ai-daily-2026-11-24/index.md)
-3. [2026-11-23 · 26 篇：流混合的几何收缩、穿透率 74%→16%、空间记忆的 50.5%](content/posts/ai-daily-2026-11-23/index.md)
-4. [2026-11-20 · 50 篇：自进化取证、Mind-Act 的 12%、后验匹配蒸馏](content/posts/ai-daily-2026-11-20/index.md)
-5. [2026-11-19 · 52 篇：System One 的一次前向、可交互世界模型与「评测的分辨率」](content/posts/ai-daily-2026-11-19/index.md)
-6. [2026-11-18 · 39 篇：Ascend 全栈、力觉闭环与 agent 的「记忆」](content/posts/ai-daily-2026-11-18/index.md)
-7. [2026-11-17 · 42 篇：科学 agent、552B VLA 与「交付率」](content/posts/ai-daily-2026-11-17/index.md)
-8. [2026-11-16 · 40 篇：机器人 harness、4D 场景生成与「读动态」的视频模型](content/posts/ai-daily-2026-11-16/index.md)
-9. [2026-11-13 · 34 篇：System One 的可靠性、双流世界模型与 32× 压缩](content/posts/ai-daily-2026-11-13/index.md)
-10. [2026-11-12 · 21 篇：教科书监督、GTA V 智能体与推理成本](content/posts/ai-daily-2026-11-12/index.md)
-11. [2026-11-11 · 39 篇：机器人上下文学习、权重级修复与「证据链」](content/posts/ai-daily-2026-11-11/index.md)
-12. [2026-11-10 · 39 篇：触觉基础模型、世界模型基础设施与「观测对齐」](content/posts/ai-daily-2026-11-10/index.md)
-13. [2026-11-09 · 34 篇：agent harness 工程化、世界模型与「可审计的评测」](content/posts/ai-daily-2026-11-09/index.md)
-14. [2026-11-06 · 32 篇：决策模型、潜空间通信与「评测的可靠性」](content/posts/ai-daily-2026-11-06/index.md)
-15. [2026-11-05 · 39 篇：回合级信用、机器人数据与推理的「物理账」](content/posts/ai-daily-2026-11-05/index.md)
+1. [2026-11-26 · 60 篇：把视频编译成仿真、35B 医学模型、循环深度换参数](content/posts/ai-daily-2026-11-26/index.md)
+2. [2026-11-25 · 59 篇：agent 学会何时停、镜子照出机器人、矩阵残差流重接电路](content/posts/ai-daily-2026-11-25/index.md)
+3. [2026-11-24 · 75 篇：harness 决定上限、可规划的 4D 世界、权重空间编程](content/posts/ai-daily-2026-11-24/index.md)
+4. [2026-11-23 · 26 篇：流混合的几何收缩、穿透率 74%→16%、空间记忆的 50.5%](content/posts/ai-daily-2026-11-23/index.md)
+5. [2026-11-20 · 50 篇：自进化取证、Mind-Act 的 12%、后验匹配蒸馏](content/posts/ai-daily-2026-11-20/index.md)
+6. [2026-11-19 · 52 篇：System One 的一次前向、可交互世界模型与「评测的分辨率」](content/posts/ai-daily-2026-11-19/index.md)
+7. [2026-11-18 · 39 篇：Ascend 全栈、力觉闭环与 agent 的「记忆」](content/posts/ai-daily-2026-11-18/index.md)
+8. [2026-11-17 · 42 篇：科学 agent、552B VLA 与「交付率」](content/posts/ai-daily-2026-11-17/index.md)
+9. [2026-11-16 · 40 篇：机器人 harness、4D 场景生成与「读动态」的视频模型](content/posts/ai-daily-2026-11-16/index.md)
+10. [2026-11-13 · 34 篇：System One 的可靠性、双流世界模型与 32× 压缩](content/posts/ai-daily-2026-11-13/index.md)
+11. [2026-11-12 · 21 篇：教科书监督、GTA V 智能体与推理成本](content/posts/ai-daily-2026-11-12/index.md)
+12. [2026-11-11 · 39 篇：机器人上下文学习、权重级修复与「证据链」](content/posts/ai-daily-2026-11-11/index.md)
+13. [2026-11-10 · 39 篇：触觉基础模型、世界模型基础设施与「观测对齐」](content/posts/ai-daily-2026-11-10/index.md)
+14. [2026-11-09 · 34 篇：agent harness 工程化、世界模型与「可审计的评测」](content/posts/ai-daily-2026-11-09/index.md)
+15. [2026-11-06 · 32 篇：决策模型、潜空间通信与「评测的可靠性」](content/posts/ai-daily-2026-11-06/index.md)
+16. [2026-11-05 · 39 篇：回合级信用、机器人数据与推理的「物理账」](content/posts/ai-daily-2026-11-05/index.md)
 
 配套代码：[code/ai-daily/](code/ai-daily/README.md)（`fetch_papers.py`：HF API + 镜像 + 页面内嵌 JSON 三级兜底，`--test` 离线自测）
 
