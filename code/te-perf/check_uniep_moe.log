@@ -1,0 +1,66 @@
+W1123 04:07:33.162000 602765 torch/distributed/run.py:862] 
+W1123 04:07:33.162000 602765 torch/distributed/run.py:862] *****************************************
+W1123 04:07:33.162000 602765 torch/distributed/run.py:862] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W1123 04:07:33.162000 602765 torch/distributed/run.py:862] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W1123 04:07:40.086173744 ProcessGroupNCCL.cpp:5238] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank 6] shape: x=(1024, 1024) dispatch_rows=16384 mk1_rows=16384[rank 7] shape: x=(1024, 1024) dispatch_rows=16896 mk1_rows=16896[rank 4] shape: x=(1024, 1024) dispatch_rows=16384 mk1_rows=16384[rank 3] shape: x=(1024, 1024) dispatch_rows=17152 mk1_rows=17152[rank 5] shape: x=(1024, 1024) dispatch_rows=16896 mk1_rows=16896[rank 2] shape: x=(1024, 1024) dispatch_rows=17152 mk1_rows=17152[rank 0] shape: x=(1024, 1024) dispatch_rows=17408 mk1_rows=17408
+
+[rank 1] shape: x=(1024, 1024) dispatch_rows=16896 mk1_rows=16896
+
+
+
+
+
+[rank 2] e2e_sequential         max|diff|=1.342e-02 rel=4.461e-03 mean|ref|=0.4637
+[rank 1] e2e_sequential         max|diff|=1.400e-02 rel=4.842e-03 mean|ref|=0.4637
+[rank 3] e2e_sequential         max|diff|=1.697e-02 rel=5.907e-03 mean|ref|=0.4640
+[rank 2] e2e_fused              max|diff|=1.342e-02 rel=4.461e-03 mean|ref|=0.4637
+[rank 0] e2e_sequential         max|diff|=1.433e-02 rel=4.957e-03 mean|ref|=0.4645
+[rank 1] e2e_fused              max|diff|=1.400e-02 rel=4.842e-03 mean|ref|=0.4637
+[rank 3] e2e_fused              max|diff|=1.697e-02 rel=5.907e-03 mean|ref|=0.4640
+[rank 0] e2e_fused              max|diff|=1.433e-02 rel=4.957e-03 mean|ref|=0.4645
+[rank 7] e2e_sequential         max|diff|=1.284e-02 rel=4.271e-03 mean|ref|=0.4631
+[rank 6] e2e_sequential         max|diff|=1.483e-02 rel=4.661e-03 mean|ref|=0.4643
+[rank 5] e2e_sequential         max|diff|=1.301e-02 rel=4.442e-03 mean|ref|=0.4639
+[rank 4] e2e_sequential         max|diff|=1.334e-02 rel=4.774e-03 mean|ref|=0.4652
+[rank 7] e2e_fused              max|diff|=1.284e-02 rel=4.271e-03 mean|ref|=0.4631
+[rank 6] e2e_fused              max|diff|=1.483e-02 rel=4.661e-03 mean|ref|=0.4643
+[rank 5] e2e_fused              max|diff|=1.301e-02 rel=4.442e-03 mean|ref|=0.4639
+[rank 4] e2e_fused              max|diff|=1.334e-02 rel=4.774e-03 mean|ref|=0.4652
+W1123 04:07:57.985000 603603 torch/distributed/run.py:862] 
+W1123 04:07:57.985000 603603 torch/distributed/run.py:862] *****************************************
+W1123 04:07:57.985000 603603 torch/distributed/run.py:862] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W1123 04:07:57.985000 603603 torch/distributed/run.py:862] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W1123 04:08:05.866088689 ProcessGroupNCCL.cpp:5238] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank 6] shape: x=(1024, 3072) dispatch_rows=16384 mk1_rows=16384[rank 7] shape: x=(1024, 3072) dispatch_rows=16896 mk1_rows=16896[rank 4] shape: x=(1024, 3072) dispatch_rows=16384 mk1_rows=16384[rank 1] shape: x=(1024, 3072) dispatch_rows=16896 mk1_rows=16896[rank 2] shape: x=(1024, 3072) dispatch_rows=17152 mk1_rows=17152[rank 3] shape: x=(1024, 3072) dispatch_rows=17152 mk1_rows=17152[rank 0] shape: x=(1024, 3072) dispatch_rows=17408 mk1_rows=17408[rank 5] shape: x=(1024, 3072) dispatch_rows=16896 mk1_rows=16896
+
+
+
+
+
+
+
+[rank 2] e2e_sequential         max|diff|=8.262e-02 rel=4.597e-03 mean|ref|=2.6337[rank 1] e2e_sequential         max|diff|=7.576e-02 rel=4.459e-03 mean|ref|=2.6397
+[rank 0] e2e_sequential         max|diff|=7.974e-02 rel=4.731e-03 mean|ref|=2.6438[rank 3] e2e_sequential         max|diff|=7.832e-02 rel=4.557e-03 mean|ref|=2.6357
+
+
+[rank 1] e2e_fused              max|diff|=7.576e-02 rel=4.459e-03 mean|ref|=2.6397[rank 0] e2e_fused              max|diff|=7.974e-02 rel=4.731e-03 mean|ref|=2.6438[rank 3] e2e_fused              max|diff|=7.832e-02 rel=4.557e-03 mean|ref|=2.6357
+[rank 2] e2e_fused              max|diff|=8.262e-02 rel=4.597e-03 mean|ref|=2.6337
+
+
+[rank 5] e2e_sequential         max|diff|=9.816e-02 rel=5.963e-03 mean|ref|=2.6405[rank 4] e2e_sequential         max|diff|=8.756e-02 rel=4.932e-03 mean|ref|=2.6397
+
+[rank 6] e2e_sequential         max|diff|=9.488e-02 rel=5.610e-03 mean|ref|=2.6389
+[rank 5] e2e_fused              max|diff|=9.816e-02 rel=5.963e-03 mean|ref|=2.6405[rank 4] e2e_fused              max|diff|=8.756e-02 rel=4.932e-03 mean|ref|=2.6397
+
+[rank 7] e2e_sequential         max|diff|=7.866e-02 rel=4.479e-03 mean|ref|=2.6353
+[rank 6] e2e_fused              max|diff|=9.488e-02 rel=5.610e-03 mean|ref|=2.6389
+[rank 7] e2e_fused              max|diff|=7.866e-02 rel=4.479e-03 mean|ref|=2.6353

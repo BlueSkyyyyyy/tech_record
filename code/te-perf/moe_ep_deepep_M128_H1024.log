@@ -1,0 +1,33 @@
+W1123 04:05:04.160000 600616 torch/distributed/run.py:862] 
+W1123 04:05:04.160000 600616 torch/distributed/run.py:862] *****************************************
+W1123 04:05:04.160000 600616 torch/distributed/run.py:862] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W1123 04:05:04.160000 600616 torch/distributed/run.py:862] *****************************************
+
+=== DeepEP: tokens/rank=128 H=1024 topk=16 E=32 EP=8 ===
+  buffer: num_bytes=4 MB num_allocated_qps=129 num_sms=64
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+  deepep_dispatch              kernel=    25.79 us  wall=    64.13/    69.95 us  recv_rows=979
+  deepep_dispatch_expanded     kernel=    26.37 us  wall=    78.94/    84.96 us  expanded_rows=2432 align=128 local_m=[511, 525, 552, 528]
+  deepep_combine               kernel=    22.08 us  wall=    50.66/    55.04 us  in_rows=979, topk_weights reduction
+  deepep_combine_expanded      kernel=    30.14 us  wall=    48.48/    50.34 us  in_rows=2432, expand-mode reduce (training path)
+  deepep_dispatch_async        kernel=    84.06 us  wall=    96.83/    98.62 us  recv_rows=979 async+defer, no host sync
+  deepep_dispatch_expanded_async kernel=    59.33 us  wall=    93.47/    96.22 us  expanded_rows=2432 async+defer, no host sync
+  deepep_e2e                   kernel=    57.18 us  wall=   133.15/   141.57 us  dispatch + combine (comm only, no expert GEMM)
+  deepep_e2e_expanded          kernel=    57.02 us  wall=   124.10/   135.07 us  expanded dispatch + combine (matches uniEP e2e comm semantics)
+
+wrote 8 rows -> moe_ep_deepep_M128_H1024.csv

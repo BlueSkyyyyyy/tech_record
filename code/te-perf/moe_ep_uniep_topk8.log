@@ -1,0 +1,39 @@
+W1123 04:09:21.705000 606485 torch/distributed/run.py:862] 
+W1123 04:09:21.705000 606485 torch/distributed/run.py:862] *****************************************
+W1123 04:09:21.705000 606485 torch/distributed/run.py:862] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+W1123 04:09:21.705000 606485 torch/distributed/run.py:862] *****************************************
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+[rank0]:[W1123 04:09:29.536135341 ProcessGroupNCCL.cpp:5238] Guessing device ID based on global rank. This can cause a hang if rank to GPU mapping is heterogeneous. You can specify device_id in init_process_group()
+
+=== uniEP: tokens/rank=1024 H=1024 I=1024 topk=8 E=32 EP=8 ===
+/usr/local/lib/python3.12/dist-packages/torch/distributed/c10d_logger.py:83: UserWarning: barrier(): using the device under current context. You can specify `device_id` in `init_process_group` to mute this warning.
+  return func(*args, **kwargs)
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+/usr/local/lib/python3.12/dist-packages/torch/profiler/profiler.py:229: UserWarning: Warning: Profiler clears events at the end of each cycle.Only events from the current cycle will be reported.To keep events across cycles, set acc_events=True.
+  _warn_once(
+  uniep_layout                 kernel=    64.45 us  wall=    60.48/    69.15 us  layout only (histogram + cumsum + allgather + layout kernel)
+  uniep_dispatch               kernel=    73.09 us  wall=    83.97/    95.90 us  recv_rows=8960 (unaligned sum=8305, align=256) local_m=[2048, 2096, 2088, 2073]
+  uniep_group_gemm_fc1         kernel=    61.38 us  wall=    65.66/    66.18 us  N=2I=2048, K=1024, rows=8960
+  uniep_swiglu                 kernel=    58.72 us  wall=    63.14/    63.74 us  rows=8960, I=1024
+  uniep_group_gemm_fc2         kernel=    38.27 us  wall=    42.50/    50.14 us  N=H=1024, K=I=1024, rows=8960
+  uniep_combine                kernel=    61.60 us  wall=    68.61/    73.76 us  push_mode=tile (push + NVL barrier + topk reduce)
+  uniep_dispatch_group_gemm    kernel=   252.29 us  wall=   324.32/   394.78 us  MegaKernel 1: dispatch + FC1 overlap
+  uniep_group_gemm_combine     kernel=   116.86 us  wall=   123.33/   213.06 us  MegaKernel 2: FC2 + combine + reduce
+  uniep_e2e_fused              kernel=   355.46 us  wall=   520.35/   540.58 us  MK1 + swiglu + MK2 (2 launches)
+  uniep_e2e_sequential         kernel=   330.53 us  wall=   324.42/   327.90 us  dispatch+FC1+swiglu+FC2+combine (5 launches)
+
+wrote 10 rows -> moe_ep_uniep_topk8_M1024_H1024.csv

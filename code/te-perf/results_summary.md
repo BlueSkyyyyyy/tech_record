@@ -1,6 +1,6 @@
 # TE 算子性能测试结果汇总
 
-> `kernel耗时` 为 **CUPTI 实测的纯 device kernel 执行时间**（µs）：由 `torch.profiler` 统计一次调用所 launch 的全部 kernel（含 device memset）的 device 时长之和，对 repeat 次调用取平均，**不含 launch / 主机派发开销**。设备均为 NVIDIA H100。原始数据见 `te_perf.csv` / `perf.log`（含纯 device 时间与由此计算的 GB/s、TFLOPS）；Kimi-K3 MLA 行来自 `mla_kimi_k3.csv` / `mla_kimi_k3.log`（脚本 `bench_mla_kimi_k3.py`，详见 `results_mla_kimi_k3.md`）；Kimi-K3 AttnRes 行来自 `attnres_kimi_k3.csv` / `attnres_kimi_k3.log` / `attnres_schedule.log`（脚本 `bench_attnres_kimi_k3.py`，详见 `results_attnres_kimi_k3.md`）。
+> `kernel耗时` 为 **CUPTI 实测的纯 device kernel 执行时间**（µs）：由 `torch.profiler` 统计一次调用所 launch 的全部 kernel（含 device memset）的 device 时长之和，对 repeat 次调用取平均，**不含 launch / 主机派发开销**。设备均为 NVIDIA H100。原始数据见 `te_perf.csv` / `perf.log`（含纯 device 时间与由此计算的 GB/s、TFLOPS）；Kimi-K3 MLA 行来自 `mla_kimi_k3.csv` / `mla_kimi_k3.log`（脚本 `bench_mla_kimi_k3.py`，详见 `results_mla_kimi_k3.md`）；Kimi-K3 AttnRes 行来自 `attnres_kimi_k3.csv` / `attnres_kimi_k3.log` / `attnres_schedule.log`（脚本 `bench_attnres_kimi_k3.py`，详见 `results_attnres_kimi_k3.md`）；MoE 的 EP dispatch/combine 与 grouped GEMM 对比（uniEP / DeepEP / TE，topk=16, EP=8, E=32, H=I=1024/3072）来自 `bench_uniep_ep.py`、`bench_deepep_ep.py`、`bench_te_group_gemm.py`，详见 [`results_moe_ep.md`](results_moe_ep.md)。
 >
 > 注意：小 shape 反复调用时数据可能常驻 L2（H100 约 50MB），此时按 HBM 峰值折算的 `%BW` 会偏高、甚至超过 100%，属正常现象，不代表超过 HBM 带宽；判断 HBM 效率请看工作集大于 L2 的大 shape。
 
