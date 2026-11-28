@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-26：60 篇 HF Daily Papers — 把视频编译成仿�
 subtitle: "Real2SimLab 用 6 个基准、47 个 coding agent 统一 real2sim；Sage-Med 以 35B 总参 / 3B 激活在 31 个公开医学多模态基准拿到 58.26%，超 235B 的 Hulu-Med；MoLT 用 KV 当跨 loop 记忆换 1.7× token 效率；VibeVideoAgent 让生成器边渲染边自查，Opus 5.5 的 L3 4.03→4.43"
 date: 2026-11-26
 draft: false
-weight: 2
+weight: 3
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "具身智能", "模型架构", "视频生成", "3D", "agent", "评测"]
 categories: ["LLM算法"]

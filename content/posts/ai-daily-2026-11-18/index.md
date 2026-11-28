@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-18：39 篇 HF Daily Papers — Ascend 全栈、力觉
 subtitle: "285B 模型在 8,192 张 Ascend 910C 上预训练、AscendGYM 把 kernel 基准改成真实 shape + token 成本；ForceHarness 让冻结模型真机零样本从 3.3% 到 90.0%；SIM 给 harness 优化器建记忆，十个 source run 平均 +2.36 分"
 date: 2026-11-18
 draft: false
-weight: 8
+weight: 9
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "模型发布", "训练系统", "agent", "具身智能", "评测", "量化", "生成模型"]
 categories: ["LLM算法"]

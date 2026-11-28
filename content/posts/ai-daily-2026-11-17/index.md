@@ -3,7 +3,7 @@ title: "AI 日报 2026-11-17：42 篇 HF Daily Papers — 科学 agent、552B VL
 subtitle: "Sage 320B 科学 MoE 在 33 个 benchmark 的对照里拿了四项第一；ScaleVLA 用 552B backbone 把 LIBERO-PRO 推到 45.1%、真机插充电器 4/10→9/10；SWE-CoWork 则证明约 63% 的测试通过率只换来不到 8% 的完整交付"
 date: 2026-11-17
 draft: false
-weight: 9
+weight: 10
 series: ["ai-daily"]
 tags: ["AI 日报", "系列", "论文速览", "模型发布", "agent", "具身智能", "评测", "生成模型", "安全", "推理加速"]
 categories: ["LLM算法"]
